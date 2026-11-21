@@ -9,7 +9,7 @@ const t = (bg: string, sidebar: string, surface: string, bubble: string, text: s
   ({ bg, sidebar, surface, bubble, text, muted, line, hover, accent, accentText, ...extra })
 
 export const SCHEMES: Scheme[] = [
-  { id: 'claude', name: 'Claude', light: t('#f7f5f0', '#eeece5', '#fcfbf8', '#eae7de', '#302f2b', '#6c6a62', '#d9d6cd', '#e6e3da', '#c96442', '#fffaf5'), dark: t('#262624', '#20201e', '#30302c', '#383832', '#e9e6df', '#b1ada3', '#48473f', '#363630', '#c96442', '#fffaf5') },
+  { id: 'claude', name: 'Claude', light: t('#f7f5f0', '#eeece5', '#fcfbf8', '#eae7de', '#302f2b', '#67655d', '#d9d6cd', '#e6e3da', '#c96442', '#fffaf5'), dark: t('#262624', '#20201e', '#30302c', '#383832', '#e9e6df', '#b1ada3', '#48473f', '#363630', '#c96442', '#fffaf5') },
   { id: 'paper', name: 'Paper', light: t('#f8f8f6', '#efefec', '#ffffff', '#ebebe7', '#2b2c2e', '#616367', '#dcdcd8', '#e6e6e2', '#3b5bab', '#ffffff'), dark: t('#1f2023', '#1a1b1d', '#28292d', '#323338', '#e6e6e8', '#a9abb1', '#3e4046', '#303136', '#8aa4e8', '#101522') },
   { id: 'sage', name: 'Sage', light: t('#f4f6f1', '#e9ede5', '#fbfcf9', '#e3e8dd', '#2a3027', '#596254', '#d3dacb', '#dde3d6', '#4a7550', '#f7fbf5'), dark: t('#1e221e', '#191c19', '#272c27', '#30362f', '#e3e8df', '#a6b0a1', '#3d453b', '#2d332c', '#8fbf8c', '#132013') },
   { id: 'moss', name: 'Moss', light: t('#f5f4ec', '#ebe9dd', '#fcfbf5', '#e5e2d2', '#2d2e22', '#5c5d53', '#d8d5c4', '#e0ddcc', '#5f6d22', '#fbfbef', { attention: '#7a5c1a' }), dark: t('#1d1f17', '#181a13', '#26291f', '#2f3226', '#e6e6d6', '#aeae98', '#404334', '#2c2f23', '#b3c46a', '#1a1d0c') },

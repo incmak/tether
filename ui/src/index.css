@@ -14,7 +14,7 @@
   --surface: #fcfbf8;
   --bubble: #eae7de;
   --text: #302f2b;
-  --muted: #6c6a62;
+  --muted: #67655d;  /* muted text: 4.5:1 on each surface, also --hover and --bubble (test_contrast.cjs) */
   --line: #d9d6cd;
   --hover: #e6e3da;
   --accent: #c96442;       /* borders, focus rings, icons, marks: 3:1 */
