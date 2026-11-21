@@ -17,15 +17,32 @@ const parseCases = [
   ['soon', null], ['', null], ['call mom tomorrow', null],
 ]
 
-function loadReminders() {
-  const file = path.join(__dirname, 'src/reminders.ts')
+function loadSource(name, resolve = require) {
+  const file = path.join(__dirname, 'src', name)
   const mod = new module.constructor(file)
-  // The polling hook is not called. Load the real chrono-node package via its CJS exports.
-  mod.require = name => name === './hooks' ? {} : require(name)
+  mod.require = resolve
   mod._compile(ts.transpileModule(readFileSync(file, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText, file)
   return mod.exports
+}
+
+function loadReminders(tetherZone = 'Asia/Kolkata') {
+  const zone = loadSource('zone.ts')
+  zone.setTetherZone(tetherZone)
+  // The polling hook is not called. Load the real chrono-node package via its CJS exports.
+  return loadSource('reminders.ts', name => name === './zone' ? zone : name === './hooks' ? {} : require(name))
+}
+
+if (process.argv[2] === '--elapsed-across-device-dst') {
+  // Tether in UTC, the device in New York on its spring-forward night: elapsed times stay plain arithmetic.
+  const { parseWhen } = loadReminders('UTC')
+  for (const now of [seconds('2026-03-08T02:30:00Z'), seconds('2026-03-08T06:45:00Z')]) {
+    assert.equal(parseWhen('in 30 minutes', now), now + 1800)
+    assert.equal(parseWhen('in 2h', now), now + 7200)
+    assert.equal(parseWhen('in 1 day', now), now + 86400)
+  }
+  return
 }
 
 if (process.argv[2] === '--parse-in-zone') {
@@ -36,11 +53,39 @@ if (process.argv[2] === '--parse-in-zone') {
 }
 
 for (const [zone, offset] of [['UTC', 0], ['America/New_York', 300]]) {
-  test(`parseWhen in ${zone}`, () => {
+  test(`parseWhen uses IST with process TZ=${zone}`, () => {
     // Each process loads Chrono after its time zone is set, with its own module cache.
     execFileSync(process.execPath, [__filename, '--parse-in-zone', String(offset)], { env: { ...process.env, TZ: zone }, stdio: 'inherit' })
   })
 }
+
+test('elapsed times ignore a device DST change', () => {
+  execFileSync(process.execPath, [__filename, '--elapsed-across-device-dst'], { env: { ...process.env, TZ: 'America/New_York' }, stdio: 'inherit' })
+})
+
+test('parseWhen uses New York wall time', () => {
+  const { parseWhen } = loadReminders('America/New_York')
+  const now = seconds('2026-11-18T17:00:00Z'), tomorrow = seconds('2026-11-19T15:00:00Z')
+  const cases = [
+    ['tomorrow 10:00', tomorrow], ['tomorrow 10am', tomorrow], ['2026-11-19 10:00', tomorrow],
+    ['in 2 h', now + 7200], ['10:00', tomorrow], ['tomorrow', seconds('2026-11-19T14:00:00Z')],
+    ['tonight', seconds('2026-11-19T03:00:00Z')],
+    ['soon', null], ['', null], ['call mom tomorrow', null],
+  ]
+  for (const [input, expected] of cases) assert.equal(parseWhen(input, now), expected, JSON.stringify(input))
+})
+
+test('parseWhen resolves wall times at the target offset and keeps elapsed times and explicit offsets', () => {
+  const { parseWhen, zoneTime } = loadReminders('America/New_York')
+  const spring = seconds('2026-03-07T07:30:00Z'), fall = seconds('2026-10-31T15:00:00Z')
+  assert.equal(parseWhen('tomorrow 10:00', spring), seconds('2026-03-08T14:00:00Z'))
+  assert.equal(parseWhen('tomorrow 10:00', fall), seconds('2026-11-01T15:00:00Z'))
+  assert.equal(parseWhen('tomorrow 02:30', spring), seconds('2026-03-08T07:30:00Z'))
+  assert.equal(parseWhen('tomorrow 01:30', fall), seconds('2026-11-01T05:30:00Z'))
+  assert.equal(parseWhen('in 25 hours', spring), spring + 25 * 3600)
+  assert.equal(parseWhen('2026-03-08T10:00:45Z', spring), seconds('2026-03-08T10:00:45Z'))
+  assert.equal(zoneTime(2026, 2, 8, 10), seconds('2026-03-08T14:00:00Z'))
+})
 
 test('labels use the IST day and include the year only when needed', () => {
   const { whenLabel, fullLabel } = loadReminders()
@@ -50,7 +95,21 @@ test('labels use the IST day and include the year only when needed', () => {
     ['2027-11-25T04:30:00Z', 'Thu 25 Nov 2027 10:00'], ['2026-11-18T19:00:00Z', 'Tomorrow 00:30'],
   ]
   for (const [iso, label] of labels) assert.equal(whenLabel(seconds(iso), NOW), label)
-  assert.equal(fullLabel(TOMORROW), 'Thu 19 Nov 2026, 10:00 IST')
+  const ist = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Kolkata', timeZoneName: 'short' })
+    .formatToParts(TOMORROW * 1000).find(part => part.type === 'timeZoneName').value
+  assert.equal(fullLabel(TOMORROW), `Thu 19 Nov 2026, 10:00 ${ist}`)
+})
+
+test('labels use the New York day and the offset of the displayed time', () => {
+  const { whenLabel, fullLabel } = loadReminders('America/New_York')
+  const labels = [
+    ['2026-11-18T15:00:00Z', 'Today 10:00'], ['2026-11-19T15:00:00Z', 'Tomorrow 10:00'],
+    ['2026-11-17T23:00:00Z', 'Yesterday 18:00'], ['2026-11-25T15:00:00Z', 'Wed 25 Nov 10:00'],
+    ['2027-11-25T15:00:00Z', 'Thu 25 Nov 2027 10:00'], ['2026-11-18T19:00:00Z', 'Today 14:00'],
+  ]
+  for (const [iso, expected] of labels) assert.equal(whenLabel(seconds(iso), NOW), expected)
+  assert.equal(fullLabel(seconds('2026-11-19T15:00:00Z')), 'Thu 19 Nov 2026, 10:00 EST')
+  assert.equal(fullLabel(seconds('2026-07-01T14:00:00Z')), 'Wed 1 Jul 2026, 10:00 EDT')
 })
 
 test('repeat labels use the anchor weekday in IST', () => {
@@ -62,6 +121,10 @@ test('repeat labels use the anchor weekday in IST', () => {
   assert.equal(repeatLabel({ ...rule, every: 'weekday' }), 'Every weekday')
   assert.equal(repeatLabel({ ...rule, every: 'week' }), 'Every Thursday')
   assert.equal(repeatLabel({ ...rule, every: 'week', anchor: seconds('2026-11-23T04:30:00Z') }), 'Every Monday')
+  const york = loadReminders('America/New_York')
+  assert.equal(york.repeatLabel({ ...rule, every: 'week' }), 'Every Thursday', 'a stored series keeps its zone')
+  assert.equal(york.repeatLabel({ ...rule, every: 'week', zone: 'America/New_York' }), 'Every Wednesday')
+  assert.equal(york.repeatLabel({ ...rule, every: 'week', zone: 'Not/AZone' }), 'Every Wednesday')
 })
 
 test('repeat labels name N, the month day and the year date from the rule, not a clamped anchor', () => {

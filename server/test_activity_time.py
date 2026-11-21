@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 import activity_time
+import prefs_sync
 
 DAY0 = 1_763_164_800  # 2025-11-15 00:00 UTC = 05:30 in Asia/Kolkata
 
@@ -21,12 +22,19 @@ class Base(unittest.TestCase):
         self.tab.mkdir(parents=True)
         self.enterContext(mock.patch.dict('os.environ', {'TETHER_ACTIVITY': str(self.root / 'store')}))
         self.enterContext(mock.patch.object(activity_time.paths, 'CONFIG', self.root / 'config'))
+        self.enterContext(mock.patch.object(prefs_sync, 'FILE', self.root / 'cache' / 'prefs.json'))
         self.prefs = {'activity': True}
-        self.enterContext(mock.patch.object(activity_time.prefs_sync, 'load', side_effect=lambda: {'prefs': self.prefs}))
+        load = prefs_sync.load
+
+        def load_prefs():
+            saved = load()
+            saved['prefs'].update(self.prefs)
+            return saved
+
+        self.enterContext(mock.patch.object(prefs_sync, 'load', side_effect=load_prefs))
         self.now = [DAY0 + 3600.0]
         self.git_calls = []
         self.store = activity_time.Store(clock=lambda: self.now[0], run=self.git)
-        self.store._save_config(zone='Asia/Kolkata')
 
     def git(self, argv, **_):
         self.git_calls.append(argv)
@@ -84,17 +92,21 @@ class MarkTest(Base):
         self.assertEqual(day['projects'], {'a': 600, 'b': 600})
         self.assertEqual(day['seconds'], 600)
 
-    def test_days_follow_the_person_zone_and_empty_days_are_zero(self):
-        # 23:00 IST on 15 Nov is 17:30 UTC; 00:30 IST on 16 Nov is 19:00 UTC on 15 Nov.
-        self.store.mark('you', 'a', DAY0 + 17.5 * 3600)
-        self.store.mark('you', 'a', DAY0 + 19 * 3600)
-        self.now[0] = DAY0 + 3 * 86400
+    def test_days_follow_the_preference_zone_and_empty_days_are_zero(self):
+        prefs_sync.save({'timeZone': 'America/New_York'})
+        midnight = DAY0 + 86400 + 5 * 3600
+        self.store.mark('you', 'a', midnight - 3600)
+        self.store.mark('you', 'a', midnight + 3600)
+        self.now[0] = midnight + 2 * 86400
         days = self.store.summary()
         self.assertEqual(list(days), ['2025-11-15', '2025-11-16', '2025-11-17', '2025-11-18'])
         self.assertEqual(days['2025-11-15']['seconds'], 60)
         self.assertEqual(days['2025-11-16']['seconds'], 60)
         self.assertEqual(days['2025-11-17']['seconds'], 0)
         self.assertNotIn('2025-11-14', days)  # before the first mark: unknown, not zero
+        self.assertEqual([file.name for file in (self.root / 'store').glob('*.json')], ['2025-11-16.json'])
+        prefs_sync.save({'timeZone': 'Pacific/Auckland'})
+        self.assertEqual(self.store.export()['days']['2025-11-16']['seconds'], 120)
 
     def test_a_gap_across_midnight_counts_once_on_each_side(self):
         # 23:55 and 00:05 IST: 11 minutes in all, 5 before midnight and 6 after.
@@ -129,11 +141,15 @@ class MarkTest(Base):
         self.store.mark('you', 'b')
         self.assertEqual(self.store.config()['revision'], 2)
 
-    def test_zone_comes_from_the_page(self):
-        self.store.human(str(self.tab), 'Europe/Berlin')
-        self.assertEqual(self.store.config()['zone'], 'Europe/Berlin')
-        self.store.human(str(self.tab), 'Not/AZone')
-        self.assertEqual(self.store.config()['zone'], 'Europe/Berlin')
+    def test_browser_zone_is_ignored(self):
+        prefs_sync.save({'timeZone': 'America/New_York'})
+        self.store._save_config(zone='Europe/Berlin')  # a config from before the shared setting
+        for browser in ('Pacific/Auckland', 'Not/AZone'):
+            with self.subTest(browser=browser):
+                self.assertEqual(self.store.human(str(self.tab), browser), '')
+                self.assertEqual(self.store.status()['zone'], 'America/New_York')
+                self.assertEqual(self.store.export()['zone'], 'America/New_York')
+        self.assertNotIn('zone', json.loads(activity_time.config_file().read_text()))
 
     def test_survives_restart_and_bad_files(self):
         self.store.mark('you', 'a')

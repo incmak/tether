@@ -11,6 +11,7 @@ import { taskLabel } from './Dock'
 import { copyText } from './clipboard'
 import { profileName } from './provider'
 import './SessionDetails.css'
+import { fmtDateTime, useTetherZone } from './zone'
 
 // Same limits as server/tab_brief.py and the pane-name endpoint.
 const DESCRIPTION_LIMIT = 300
@@ -56,6 +57,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 
 // The tab's details, in the Settings style: what the tab is for, where it runs, the agent, its work and its tools.
 export function SessionDetails({ api, pane, session, stack, footer, mode, model, context, state, thread, onClose, onFiles, onModel, onUsage, onLive, onTools, onBacklog, onRenamed }: Props) {
+  useTetherZone()
   const modal = useModal(true, onClose)
   const [busy, setBusy] = useState<'' | 'write' | 'save' | 'name'>('')
   const [error, setError] = useState('')
@@ -197,7 +199,7 @@ export function SessionDetails({ api, pane, session, stack, footer, mode, model,
           {tasks.length > 0 && <Row label="Background tasks" icon={<Layers size={16} />} onClick={() => onLive('tasks')}>{tasks.map(task => taskLabel(task, footer.task_details)).join(', ')}</Row>}
           {!!footer.crons?.length && <Row label="Scheduled jobs" icon={<CalendarClock size={16} />} onClick={() => onLive('crons')}>{footer.crons.map(job => `${job.label} · ${job.every}`).join(', ')}</Row>}
           {background.map((agent, index) => <Row key={index} label="Background agent">{[agent.name, agent.task, agent.detail].filter(Boolean).join(' · ')}</Row>)}
-          {!!pane.finished && <Row label="Last reply"><time dateTime={new Date(pane.finished * 1000).toISOString()} title={new Date(pane.finished * 1000).toLocaleString()}>{ago(pane.finished)}</time></Row>}
+          {!!pane.finished && <Row label="Last reply"><time dateTime={new Date(pane.finished * 1000).toISOString()} title={fmtDateTime(pane.finished * 1000)}>{ago(pane.finished)}</time></Row>}
           {links.map(item => <Row key={item.id} label={`Backlog ${item.id} · ${item.state === 'doing' ? 'In progress' : item.state === 'done' ? 'Done' : 'Added here'}`} icon={<ListTodo size={16} />} onClick={() => onBacklog(item.id)} hint="Open in the backlog">{item.title}</Row>)}
         </ul>
       </Section>}

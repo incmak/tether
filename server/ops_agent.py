@@ -33,8 +33,9 @@ import factory
 import lesson_candidates
 import paths
 import projects
+import tether_zone
 
-HOUR = 7             # local time: the run starts at the first monitor tick after this hour
+HOUR = 7             # Tether time: the run starts at the first monitor tick at or after this hour
 MODEL = 'haiku'
 EFFORT = 'low'
 MODEL_LABEL = 'Claude Haiku, low effort'
@@ -232,8 +233,8 @@ def stamp(text):
 
 
 def day_bounds(day):
-    """(start, end) in epoch seconds of a local calendar day 'YYYY-MM-DD'."""
-    start = datetime.strptime(day, '%Y-%m-%d')
+    """(start, end) in epoch seconds of a calendar day in the Tether zone 'YYYY-MM-DD'."""
+    start = datetime.strptime(day, '%Y-%m-%d').replace(tzinfo=tether_zone.zone())
     return start.timestamp(), (start + timedelta(days=1)).timestamp()
 
 
@@ -304,7 +305,7 @@ def _rows(rows, line):
 
 
 def _clock(at):
-    return datetime.fromtimestamp(at).strftime('%H:%M')
+    return tether_zone.stamp(at, '%H:%M')
 
 
 def _why(row):
@@ -478,7 +479,7 @@ def run_day(day, entries, folder_of, run=subprocess.run, lock=None, start=delega
 class Ops:
     """Starts the daily run from the monitor loop, in its own thread."""
 
-    def __init__(self, clock=datetime.now):
+    def __init__(self, clock=tether_zone.now):
         self.clock = clock
         self.gate = threading.Lock()
         self.busy = False     # the worker looks or runs

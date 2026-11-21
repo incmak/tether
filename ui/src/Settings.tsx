@@ -31,6 +31,7 @@ import { ActivitySettings } from './ActivityTime'
 import { UiUsageSettings } from './UiUsage'
 import { AppIdentitySettings } from './AppIdentity'
 import { ActivityLog } from './ActivityLog'
+import { TimeZoneSetting } from './TimeZoneSetting'
 import './Settings.css'
 import { ASSISTANT } from './assistant'
 
@@ -85,6 +86,7 @@ export function Settings({ api, prefs, update, onReload, onClose, start }: { api
   const body = useRef<HTMLDivElement>(null)
   const item = (id: string, group: SettingsGroup, title: string, keywords: string, content: ReactNode): Setting => ({ id, group, title, keywords, content })
   const items: Setting[] = [
+    item('time-zone', 'general', 'Time zone', 'time zone timezone tz clock hours daytime reminders digest report ist utc gmt offset region city', <Field scope="All devices"><TimeZoneSetting onChange={timeZone => update(() => ({ timeZone }))} /></Field>),
     item('theme', 'appearance', 'Theme', 'light dark automatic system', <Field scope="All devices"><Choice legend="Theme" name="theme" value={prefs.theme} options={[["system", "System"], ["light", "Light"], ["dark", "Dark"]]} onChange={theme => update(() => ({ theme }))} /></Field>),
     item('colors', 'appearance', 'Colors', `color colour scheme palette ${SCHEMES.map(s => `${s.id} ${s.name}`).join(' ')}`, <Field scope="All devices"><fieldset className="choice"><legend>Colors</legend><div className="preferences-colors">{SCHEMES.map(scheme => <label key={scheme.id} title={scheme.name}><input type="radio" name="scheme" value={scheme.id} checked={schemeById(prefs.scheme).id === scheme.id} onChange={() => update(() => ({ scheme: scheme.id }))} /><span className="preferences-color" style={{ background: scheme[prefs.theme === 'light' ? 'light' : 'dark'].bg, borderColor: scheme[prefs.theme === 'light' ? 'light' : 'dark'].accent }} aria-hidden="true" /><span>{scheme.name}</span></label>)}</div></fieldset></Field>),
     item('layout', 'appearance', 'Layout', 'layout grid panels islands vs code vscode zed status column custom json my look make generate prompt import export preview', <Field scope="This device"><LayoutPicker api={api} prefs={prefs} update={update} onClose={onClose} focusMaker={start === 'layout-maker'} /></Field>),

@@ -60,6 +60,7 @@ import notification_priority
 import push
 import shortcuts
 import prefs_sync
+import tether_zone
 import tab_brief
 import backlog
 import codex_provider
@@ -2504,7 +2505,9 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/mobile/api/shortcuts':
                 self.respond(200, {'shortcuts': shortcuts.load()})
             elif path == '/mobile/api/prefs':
-                saved = prefs_sync.load()
+                with prefs_sync.LOCK:
+                    saved = prefs_sync.load()
+                    saved['zone'] = tether_zone.name()
                 saved['prefs'].setdefault('task_auto_close', False)
                 self.respond(200, saved)
             elif path == task_tree_api.PLAN:

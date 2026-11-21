@@ -6,6 +6,7 @@ import type { Api } from './api'
 import { useModal } from './hooks'
 import { saveProject, newItem } from './work'
 import type { FeedKind, FeedState, FixResult, WorkBoard, WorkFeed, WorkItem, WorkProject } from './work'
+import { fmtTime, useTetherZone } from './zone'
 
 // Project settings (Add project, Settings) and New item: small sheets over the work page. The server checks every
 // field (work_items._clean_project); these forms show its message and keep what Mak typed.
@@ -35,7 +36,7 @@ function feedNote(board: WorkBoard, project: string | undefined, row: FeedRow, s
   const start = saved && !same ? 'Changed: Tether starts again with messages that come after you save.'
     : 'Tether reads it every 2 minutes and adds new threads to Triage. It starts with messages that come after you save.'
   if (!state || state.status === 'waiting' || !state.at) return { text: saved && same ? 'Saved. Waiting for the first read.' : start }
-  const at = new Date(state.at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const at = fmtTime(state.at * 1000, { hour: '2-digit', minute: '2-digit' })
   if (state.status === 'ok') return { text: `Last read at ${at}. ${state.items} ${state.items === 1 ? 'item' : 'items'} added so far.` }
   return { text: `${state.status === 'off' ? 'Off since' : 'The last read failed at'} ${at}: ${state.error}`, failed: true }
 }
@@ -97,6 +98,7 @@ function FormSheet({ title, onClose, children }: { title: string; onClose: () =>
 export function ProjectForm({ api, board, project, onClose, onSaved }: {
   api: Api; board: WorkBoard; project?: WorkProject; onClose: () => void; onSaved: (name: string) => void
 }) {
+  useTetherZone()
   const id = useId()
   const editing = !!project
   const [form, setForm] = useState<WorkProject>(() => ({ ...BLANK, ...project }))

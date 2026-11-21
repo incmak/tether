@@ -5,6 +5,7 @@ import type { Api } from './api'
 import { usePolling } from './hooks'
 import { SkeletonRows } from './Skeleton'
 import { BoneLines } from './SettingBones'
+import { fmtDateTime, useTetherZone } from './zone'
 
 // The advisor log of a project (server: advisor_log.py). Agents at autonomy level 3 and above ask the advisor when the
 // evidence does not settle a decision; each ask is one entry. The list shows a cut question and answer; an entry
@@ -26,7 +27,7 @@ const EMPTY: Record<Filter, string> = { all: '', ask_user: 'No asks went to you.
 
 function when(seconds: number) {
   const date = new Date(seconds * 1000)
-  return <time dateTime={date.toISOString()}>{date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</time>
+  return <time dateTime={date.toISOString()}>{fmtDateTime(date, { dateStyle: 'medium', timeStyle: 'short' })}</time>
 }
 
 // A status is never color alone: an icon in a tinted disc, and the word beside it (like the agent map).
@@ -47,6 +48,7 @@ export function useAdvisorLog(api: Api, project: string | undefined) {
 }
 
 export function AdvisorLog({ log, disabled, focus, onOpen }: { log: ReturnType<typeof useAdvisorLog>; disabled?: boolean; focus?: string; onOpen: (row: AdvisorRow) => void }) {
+  useTetherZone()
   const { data, error, refresh, filter, setFilter } = log
   const list = useRef<HTMLUListElement>(null)
   // Back from an entry: focus its row again, so a keyboard user keeps their place.
@@ -118,6 +120,7 @@ function Text({ label, children }: { label: string; children: string }) {
 
 /** One ask in full. An older line has no full text: it shows the cut text from the list and says so. */
 export function AdvisorDecision({ api, project, row, onBack }: { api: Api; project: string; row: AdvisorRow; onBack: () => void }) {
+  useTetherZone()
   const [entry, setEntry] = useState<AdvisorEntry | null>(null)
   const [error, setError] = useState('')
   const [attempt, setAttempt] = useState(0)

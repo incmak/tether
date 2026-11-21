@@ -21,6 +21,7 @@ import { reportVoice } from './voiceLog'
 import { ASSISTANT } from './assistant'
 import { answered, heard, remember, type Hero, type Line, type Spoken } from './liveHistory'
 import './Live.css'
+import { zoneParts } from './zone'
 
 // Live mode: talk to the agents hands-free. The orb listens, the words go to the target pane,
 // and the reply comes back as one or two spoken sentences. Colors come from the Settings color scheme.
@@ -389,7 +390,9 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
       const folder = fridayChatFolder(live.current.panes, live.current.target, project, FRIDAY_SESSION)
       if ('error' in folder) throw new Error(folder.error)
       const { api } = live.current
-      const clean = wanted.replace(/[^A-Za-z0-9 _-]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40).replace(/[ ]+$/, '') || `${kind} ${new Date().toTimeString().slice(0, 5).replace(':', '')}`
+      const { hour, minute } = zoneParts(Date.now())
+      const stamp = `${String(hour).padStart(2, '0')}${String(minute).padStart(2, '0')}`
+      const clean = wanted.replace(/[^A-Za-z0-9 _-]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40).replace(/[ ]+$/, '') || `${kind} ${stamp}`
       if (!SESSION_NAME.test(clean)) throw new Error('Use letters, numbers, spaces or hyphens for the chat name.')
       const { pane: id } = await fridayHomePane(api, FRIDAY_SESSION, folder.dir, wait)
       await api('pane-name', { pane: id, name: clean, keep_session: true })

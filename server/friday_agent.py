@@ -22,7 +22,6 @@ from collections import deque
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
-from datetime import datetime
 import errno
 from hashlib import sha256
 from itertools import islice
@@ -40,10 +39,10 @@ import urllib.request
 from uuid import uuid4
 
 try:
-    from . import paths, reminders
+    from . import paths, tether_zone
 except ImportError:
     import paths
-    import reminders
+    import tether_zone
 
 SYSTEM_PROMPT = (
     'You are Friday, the voice assistant for Tether. You drive Claude Code and Codex coding agents in tmux. '
@@ -1039,8 +1038,8 @@ def format_call_transcript(turns, budget=CALL_TRANSCRIPT_LIMIT):
         return '', 0
 
     def heading(cut):
-        start = datetime.fromtimestamp(turns[cut][0]).strftime('%H:%M')
-        end = datetime.fromtimestamp(turns[-1][0]).strftime('%H:%M')
+        start = tether_zone.stamp(turns[cut][0], '%H:%M')
+        end = tether_zone.stamp(turns[-1][0], '%H:%M')
         count = len(turns) - cut
         unit = 'turn' if count == 1 else 'turns'
         header = f'Voice call transcript ({count} {unit}, from {start} to {end}):'
@@ -1101,7 +1100,7 @@ def with_state_time(messages):
         return messages
     end = index + (state is not None)
     state = state or {}
-    state['now'] = datetime.fromtimestamp(time.time(), reminders.ZONE).strftime('%a %d %b %Y %H:%M %Z')
+    state['now'] = tether_zone.stamp(time.time(), '%a %d %b %Y %H:%M %Z')
     current = {'role': 'user', 'content': STATE_PREFIX + json.dumps(state, separators=(',', ':'), sort_keys=True)}
     return messages[:index] + [current] + messages[end:]
 

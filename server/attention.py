@@ -7,7 +7,6 @@ when the conversation returns to a live pane. Opening the tab only marks it open
 Urgent asks get a three-minute grace period before an unopened ask can send a Teams ping.
 The state lives in one JSON file (paths.ATTENTION), written atomically, so asks survive a restart.
 """
-from datetime import datetime
 import hashlib
 import json
 import os
@@ -19,6 +18,7 @@ from pathlib import Path
 
 import needs
 import paths
+import tether_zone
 import urgent_ping
 from notification_priority import status_line
 
@@ -397,8 +397,8 @@ class Attention:
         return {'enabled': self.digest['enabled'], 'hour': self.digest['hour']}
 
     def digest_due(self, now=None):
-        """The daily summary notification, once a day at the chosen hour (local time), when something waits."""
-        now = now or datetime.now()
+        """The daily summary notification, once a day at the chosen hour (Tether time), when something waits."""
+        now = now or tether_zone.now()
         today = now.strftime('%Y-%m-%d')
         if not self.digest['enabled'] or now.hour < self.digest['hour'] or self.digest.get('sent') == today:
             return None

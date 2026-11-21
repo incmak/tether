@@ -17,7 +17,9 @@ from zoneinfo import ZoneInfo
 
 import agent_reminder_cli
 import paths
+import prefs_sync
 import reminders
+import tether_zone
 import urgent_ping
 
 NOW = datetime(2026, 11, 18, 12, 0, tzinfo=timezone.utc).timestamp()  # 17:30 IST
@@ -36,6 +38,7 @@ class Base(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.folder = Path(temp.name) / 'reminders'
+        self.enterContext(mock.patch.object(prefs_sync, 'FILE', Path(temp.name) / 'prefs.json'))
         patcher = mock.patch.dict(os.environ, {'TETHER_REMINDERS': str(self.folder)})
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -543,7 +546,7 @@ class WhenTests(unittest.TestCase):
                          datetime(2026, 11, 19, 4, 30, tzinfo=timezone.utc).timestamp())
 
     def test_forms(self):
-        ist = lambda *a: datetime(*a, tzinfo=reminders.ZONE).timestamp()
+        ist = lambda *a: datetime(*a, tzinfo=tether_zone.zone()).timestamp()
         cases = {'in 2h': NOW + 7200, 'in 90m': NOW + 5400, 'in 1 day': NOW + 86400,
                  'tomorrow 10:00': ist(2026, 11, 19, 10, 0), 'tomorrow': ist(2026, 11, 19, 9, 0),
                  '18:00': ist(2026, 11, 18, 18, 0), '09:00': ist(2026, 11, 19, 9, 0),
@@ -594,18 +597,18 @@ class HttpTests(Base):
         status, body = self.call('add', {'text': 'Call', 'due': due,
                                          'repeat': {'every': 'month', 'interval': 3}})
         self.assertEqual(status, 200)
-        rule = {'every': 'month', 'interval': 3, 'day': 31, 'anchor': due, 'zone': reminders.ZONE.key}
+        rule = {'every': 'month', 'interval': 3, 'day': 31, 'anchor': due, 'zone': tether_zone.name()}
         self.assertEqual(body['reminder']['repeat'], rule)
         status, body = self.call('edit', {'id': body['reminder']['id'],
                                           'repeat': {'every': 'month', 'last_day': True}})
         self.assertEqual(status, 200)
         self.assertEqual(body['reminder']['repeat'], {
-            'every': 'month', 'day': -1, 'anchor': due, 'zone': reminders.ZONE.key})
+            'every': 'month', 'day': -1, 'anchor': due, 'zone': tether_zone.name()})
         self.assertEqual(self.call('add', {'text': 'Call', 'due': due,
                                            'repeat': {'every': 'month', 'day': 31}})[0], 400)
 
     def test_add_accepts_spoken_time_and_preserves_explicit_due(self):
-        date = datetime(2026, 11, 24, 10, tzinfo=reminders.ZONE).timestamp()
+        date = datetime(2026, 11, 24, 10, tzinfo=tether_zone.zone()).timestamp()
         for when, expected in (('2026-11-24 10:00', date), ('2026-11-24', date), ('in 2h', NOW + 7200)):
             with self.subTest(when=when):
                 status, body = self.call('add', {'text': 'Call', 'when': when})
@@ -1039,7 +1042,7 @@ class CliTests(Base):
             ({'every': 'year', 'interval': 2, 'month': 11, 'day': 21}, '2 years (21 Nov)'),
         ):
             with self.subTest(fields=fields):
-                rule = {'zone': reminders.ZONE.key, 'anchor': anchor, **fields}
+                rule = {'zone': tether_zone.name(), 'anchor': anchor, **fields}
                 record = {'id': 'R1', 'text': 'x', 'due': anchor, 'state': 'scheduled', 'repeat': rule}
                 self.assertTrue(agent_reminder_cli.shown(record).endswith(f'  every {label}  x'))
 
@@ -1243,7 +1246,7 @@ class RepeatTests(Base):
                     item = self.following(self.complete(item, jan), jan)
                     body = {'due': mar, **({'repeat': every} if include_rule else {})}
                     edited = reminders.change(item['id'], 'edit', body, now=jan)
-                    expected = {'every': every, 'day': 12, 'anchor': mar, 'zone': reminders.ZONE.key}
+                    expected = {'every': every, 'day': 12, 'anchor': mar, 'zone': tether_zone.name()}
                     if every == 'year':
                         expected['month'] = 3
                     self.assertEqual(edited['repeat'], expected)
@@ -1346,18 +1349,29 @@ class RepeatTests(Base):
 
     def test_wall_clock_survives_dst(self):
         zone = ZoneInfo('America/New_York')
-        anchor = datetime(2026, 10, 31, 9, tzinfo=zone).timestamp()
-        expected = datetime(2026, 11, 1, 9, tzinfo=zone).timestamp()
-        with mock.patch.object(reminders, 'ZONE', zone):
-            item = reminders.add('Across DST', anchor, now=anchor - 3600, repeat='day')
-            self.assertEqual(item['repeat']['zone'], zone.key)
-            self.assertEqual(self.following(self.complete(item, anchor), anchor)['due'], expected)
+        prefs_sync.save({'timeZone': zone.key})
+        anchor = datetime(2026, 10, 31, 10, tzinfo=zone).timestamp()
+        expected = datetime(2026, 11, 1, 10, tzinfo=zone).timestamp()
+        item = reminders.add('Across DST', anchor, now=anchor - 3600, repeat='day')
+        self.assertEqual(item['repeat']['zone'], zone.key)
+        self.assertEqual(self.following(self.complete(item, anchor), anchor)['due'], expected)
+        self.assertEqual(expected - anchor, 25 * 3600)
+
+    def test_new_parses_follow_a_preference_change_without_restart(self):
+        now = datetime(2026, 11, 19, 1, tzinfo=timezone.utc).timestamp()
+        for zone, expected in (('America/New_York', datetime(2026, 11, 19, 15, tzinfo=timezone.utc)),
+                               ('Pacific/Auckland', datetime(2026, 11, 19, 21, tzinfo=timezone.utc))):
+            with self.subTest(zone=zone):
+                prefs_sync.save({'timeZone': zone})
+                due = reminders.parse_when('tomorrow 10:00', now=now)
+                self.assertEqual(due, expected.timestamp())
+                self.assertEqual(reminders.when_text(due, now=now), 'tomorrow 10:00')
 
     def test_monthly_wall_clock_survives_dst(self):
         zone = ZoneInfo('America/New_York')
         anchor = datetime(2027, 2, 14, 9, tzinfo=zone).timestamp()
         expected = datetime(2027, 3, 14, 9, tzinfo=zone).timestamp()
-        with mock.patch.object(reminders, 'ZONE', zone):
+        with mock.patch.object(tether_zone, 'name', return_value=zone.key):
             item = self.add(due=anchor, repeat='month')
         self.assertEqual(self.following(self.complete(item, anchor), anchor)['due'], expected)
 
@@ -1365,7 +1379,7 @@ class RepeatTests(Base):
         # A New York series edited while the server default is Kolkata keeps New York's day and wall time.
         zone = ZoneInfo('America/New_York')
         feb = datetime(2027, 2, 14, 15, tzinfo=zone).timestamp()
-        with mock.patch.object(reminders, 'ZONE', zone):
+        with mock.patch.object(tether_zone, 'name', return_value=zone.key):
             item = self.add(due=feb, repeat='month')
         for repeat in ({'every': 'month', 'interval': 2}, {'every': 'year'}):
             with self.subTest(repeat=repeat):
@@ -1379,19 +1393,19 @@ class RepeatTests(Base):
         # A new time is typed in the server zone (IST). Due-only and due-plus-rule edits store the same day and zone.
         zone = ZoneInfo('America/New_York')
         feb = datetime(2027, 2, 14, 15, tzinfo=zone).timestamp()
-        mar15 = datetime(2027, 3, 15, 1, 30, tzinfo=reminders.ZONE).timestamp()  # still 14 Mar in New York
+        mar15 = datetime(2027, 3, 15, 1, 30, tzinfo=tether_zone.zone()).timestamp()  # still 14 Mar in New York
         for body in ({'due': mar15}, {'due': mar15, 'repeat': {'every': 'month', 'interval': 2}}):
             with self.subTest(body=body):
-                with mock.patch.object(reminders, 'ZONE', zone):
+                with mock.patch.object(tether_zone, 'name', return_value=zone.key):
                     item = self.add(due=feb, repeat='month')
                 edited = reminders.change(item['id'], 'edit', body, now=feb - 60)
-                self.assertEqual((edited['repeat']['zone'], edited['repeat']['day']), (reminders.ZONE.key, 15))
+                self.assertEqual((edited['repeat']['zone'], edited['repeat']['day']), (tether_zone.name(), 15))
 
     def test_wall_clock_survives_a_skipped_hour(self):
         zone = ZoneInfo('America/New_York')
         at = lambda day, hour=2: datetime(2026, 3, day, hour, 30, tzinfo=zone).timestamp()
         for every, first, gap, after in (('day', 7, 8, 9), ('week', 1, 8, 15)):
-            with self.subTest(every=every), mock.patch.object(reminders, 'ZONE', zone):
+            with self.subTest(every=every), mock.patch.object(tether_zone, 'name', return_value=zone.key):
                 item = reminders.add('Across spring-forward', at(first), now=at(first) - 3600, repeat=every)
                 shifted = self.following(self.complete(item, at(first)), at(first))
                 self.assertEqual(shifted['due'], at(gap, 3))

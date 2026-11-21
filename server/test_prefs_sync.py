@@ -71,6 +71,14 @@ class PrefsSyncTests(unittest.TestCase):
     def test_empty_store_is_version_zero(self):
         self.assertEqual(prefs_sync.load(), {'prefs': {}, 'version': 0})
 
+    def test_time_zone_syncs_only_known_iana_names(self):
+        stored = prefs_sync.save({'timeZone': 'Pacific/Auckland'})
+        self.assertEqual(stored['prefs'], {'timeZone': 'Pacific/Auckland'})
+        for value in ('../etc', 'Not/AZone', '', 'a' * 65, 42):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, r'^Invalid preference: timeZone\.$'):
+                prefs_sync.save({'timeZone': value})
+        self.assertEqual(prefs_sync.load(), stored)
+
     def test_changed_keys_merge_and_bump_version(self):
         prefs_sync.save({'pinned': ['$1'], 'theme': 'dark'})
         stored = prefs_sync.save({'paneOrder': {'$1': ['%2', '%1']}})

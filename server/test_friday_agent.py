@@ -17,7 +17,6 @@ import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
-from zoneinfo import ZoneInfo
 from own_time import own_time
 
 # Read-only model fixtures live outside the home that paths isolates for unittest.
@@ -1564,7 +1563,7 @@ class FridayRulesTests(unittest.TestCase):
         original = copy.deepcopy(messages)
         for zone, expected in (('Asia/Kolkata', 'Thu 19 Nov 2026 00:31 IST'),
                                ('America/Los_Angeles', 'Wed 18 Nov 2026 11:01 PST')):
-            with self.subTest(zone=zone), patch.object(friday.reminders, 'ZONE', ZoneInfo(zone)), \
+            with self.subTest(zone=zone), patch.object(friday.tether_zone, 'name', return_value=zone), \
                     own_time(friday, time=lambda: now):
                 result = friday.with_state_time(messages)
                 state = json.loads(result[-2]['content'][len(friday.STATE_PREFIX):])
@@ -3194,7 +3193,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         create = AsyncMock()
         try:
             with patch.object(llm._client.chat.completions, 'create', create), \
-                    patch.object(friday.reminders, 'ZONE', ZoneInfo('Asia/Kolkata')):
+                    patch.object(friday.tether_zone, 'name', return_value='Asia/Kolkata'):
                 for now, expected in ((epoch, 'Wed 18 Nov 2026 23:59 IST'),
                                       (epoch + 60, 'Thu 19 Nov 2026 00:00 IST')):
                     with own_time(friday, time=lambda: now):

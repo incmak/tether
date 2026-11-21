@@ -1,4 +1,5 @@
 // The Files explorer's view of GET /mobile/api/files/* (backend files.py, contract in .work-notes/2026-11-02/explorer/API.md). Paths are "~/..." strings.
+import { fmtDate, fmtDateTime, fmtTime, sameDay, zonedTime, zoneParts } from './zone'
 
 export type GitMark = 'M' | 'A' | '?' | 'D' | 'R' | null
 export interface FileEntry {
@@ -105,15 +106,15 @@ export function formatSize(bytes: number | null | undefined) {
 /** "Today, 14:02", "Yesterday, 09:10", "3 Oct", "3 Oct 2024". */
 export function formatModified(value: number | null | undefined, now = Date.now()) {
   if (value == null) return '—'
-  const date = new Date(seconds(value) * 1000)
-  const today = new Date(now); today.setHours(0, 0, 0, 0)
-  const time = date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-  const day = 86400000
-  if (date.getTime() >= today.getTime()) return `Today, ${time}`
-  if (date.getTime() >= today.getTime() - day) return `Yesterday, ${time}`
-  return date.toLocaleDateString(undefined, date.getFullYear() === today.getFullYear() ? { day: 'numeric', month: 'short' } : { day: 'numeric', month: 'short', year: 'numeric' })
+  const at = seconds(value) * 1000
+  if (!Number.isFinite(at)) return 'Invalid Date'
+  const time = fmtTime(at, { hour: '2-digit', minute: '2-digit' })
+  if (sameDay(at, now)) return `Today, ${time}`
+  const { year, month, date } = zoneParts(now)
+  if (sameDay(at, zonedTime(year, month, date - 1, 0, 0))) return `Yesterday, ${time}`
+  return fmtDate(at, { day: 'numeric', month: 'short', year: zoneParts(at).year === year ? undefined : 'numeric' })
 }
-export const fullDate = (value: number | null | undefined) => value == null ? '—' : new Date(seconds(value) * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+export const fullDate = (value: number | null | undefined) => value == null ? '—' : fmtDateTime(seconds(value) * 1000, { dateStyle: 'medium', timeStyle: 'short' })
 
 const KINDS: Record<string, string> = {
   md: 'Markdown', ts: 'TypeScript', tsx: 'TypeScript', js: 'JavaScript', jsx: 'JavaScript', mjs: 'JavaScript', cjs: 'JavaScript', json: 'JSON', py: 'Python',

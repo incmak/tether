@@ -1,17 +1,18 @@
 """Read Tether's audit log directly, without contacting the server."""
 import argparse
-from datetime import date, datetime
+from datetime import date
 import json
 import sys
 
 import audit
+import tether_zone
 
 
 def local_day(value):
     try:
         day = date.fromisoformat(value)
         if day.isoformat() == value:
-            return datetime.combine(day, datetime.min.time()).timestamp()
+            return tether_zone.parse(value, '%Y-%m-%d')
     except (ValueError, OverflowError, OSError):
         pass
     raise argparse.ArgumentTypeError('Use a local date in YYYY-MM-DD format.')
@@ -44,7 +45,7 @@ def main(argv=None):
         print('Nothing recorded.')
     else:
         for entry in result['entries']:
-            when = datetime.fromtimestamp(entry['at']).strftime('%Y-%m-%d %H:%M:%S')
+            when = tether_zone.stamp(entry['at'], '%Y-%m-%d %H:%M:%S')
             actor = entry['actor']
             source, name = actor['source'], audit.actor_name(actor)
             label = f'{name} ({source})' if name != source else source

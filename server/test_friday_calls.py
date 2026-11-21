@@ -14,6 +14,7 @@ import unittest
 from unittest.mock import patch
 
 import friday_calls
+import prefs_sync
 
 
 def pipecat(message, caller='pipecat.workers.runner:run:74', level='DEBUG'):
@@ -190,6 +191,27 @@ class FridayCallsTest(unittest.TestCase):
         md = md_path.read_text()
         self.assertLess(md.index('→ send_to_chat('), md.index('✗ blocked send_to_chat: readback required'))
         self.assertEqual(self.cli('show', str(json_path)), (0, md, ''))
+
+    def test_call_uses_the_preference_clock_and_keeps_its_host_path_across_dst(self):
+        self.enterContext(patch.object(prefs_sync, 'FILE', Path(self.scratch) / 'prefs.json'))
+        prefs_sync.save({'timeZone': 'America/New_York'})
+        at = datetime(2026, 3, 8, 6, 59, 59, tzinfo=timezone.utc)
+        self.base = int(at.timestamp()) * 1_000_000
+        self.append(runner('started'))
+        self.append(context(message('user', 'A request')))
+        self.append(runner('finished'))
+        self.assertIn('friday-call 01:59 2s', self.scan()[0])
+        data = self.digest()
+        self.assertEqual(data['start'], '2026-03-08T01:59:59-05:00')
+        self.assertEqual(data['end'], '2026-03-08T03:00:01-04:00')
+        path, = self.digests()
+        self.assertEqual(path.parent.name, at.astimezone().strftime('%Y-%m-%d'))
+        self.assertIn('- 03:00:00 **user:** A request', path.with_suffix('.md').read_text())
+
+        prefs_sync.save({'timeZone': 'Pacific/Auckland'})
+        self.assertIn('friday-call 19:59 2s', self.scan()[0])
+        self.assertEqual(self.digests(), [path])
+        self.assertEqual(self.digest()['id'], data['id'])
 
     def test_trimmed_context_uses_longest_overlap(self):
         self.start()

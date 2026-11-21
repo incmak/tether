@@ -6,6 +6,7 @@ import { Bone } from './Skeleton'
 import { agoLabel, dueLabel, groupTasks, settings, syncNow, toBacklog } from './tasks'
 import type { ExternalTask, TaskSource, useTasks } from './tasks'
 import { announce } from './reminders'
+import { useTetherZone } from './zone'
 import './Todos.css'
 
 type Polled = ReturnType<typeof useTasks>
@@ -106,6 +107,7 @@ function SourceRow({ source, now, api, onChanged, onError }: { source: TaskSourc
 
 /** Todos: open tasks from Mak's task apps, read only, grouped like a Planned view. */
 export function TodosPanel({ api, polled, onOpenItem }: { api: Api; polled: Polled; onOpenItem?: (ref: string) => void }) {
+  const zone = useTetherZone()
   const { data, error, loading, refresh } = polled
   const [problem, setProblem] = useState('')
   const [syncing, setSyncing] = useState(false)
@@ -116,7 +118,7 @@ export function TodosPanel({ api, polled, onOpenItem }: { api: Api; polled: Poll
     const on = new Set(data.sources.filter(source => source.enabled).map(source => source.id))
     return data.tasks.filter(task => on.has(task.source))
   }, [data])
-  const groups = useMemo(() => groupTasks(shown, now), [shown, now])
+  const groups = useMemo(() => groupTasks(shown, now, zone), [shown, now, zone])
   const sources = Array.isArray(data?.sources) ? data.sources : []
   const live = sources.some(source => source.enabled && source.state !== 'off')
   // "No open tasks" is true only when every connected source has read its tasks at least once.

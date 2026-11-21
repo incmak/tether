@@ -9,6 +9,7 @@ import unicodedata
 
 from codex_level import PROJECT_ID
 import paths
+import tether_zone
 
 HEADER = '# Answers you saved for this project (Tether Settings › Project lists them)\n\n'
 LIMIT = 100
@@ -89,7 +90,7 @@ def record(pid, question, answer, now=None):
     question, answer = _one_line(question, 200), _one_line(answer, 500)
     if not question or not answer:
         raise ValueError('Enter a question and an answer.')
-    date = (datetime.now() if now is None else now).strftime('%Y-%m-%d')
+    date = (tether_zone.now() if now is None else now).strftime('%Y-%m-%d')
     entry_id = _id(date, question, answer)
     entry = dict(id=entry_id, date=date, question=question, answer=answer)
     with _LOCK:

@@ -1,3 +1,5 @@
+import { fmtDate, fmtTime, sameDay } from './zone'
+
 export type Agent = 'claude' | 'codex' | 'antigravity' | 'shell'
 /** Omit browser for the existing test browser. Approved signed tabs use mode: 'agent'. */
 export type BrowserId = 'test' | 'signed' | 'chrome'
@@ -116,11 +118,11 @@ export interface PaneCron { id: string; label: string; every: string; next?: num
 export interface FooterCron extends PaneCron { schedule: string; recurring: boolean }
 // A clock time for a Unix second: "14:05" today, "Wed 09:00" within a week, else the date.
 export const cronTime = (seconds: number, now = Date.now()) => {
-  const date = new Date(seconds * 1000), today = new Date(now)
-  const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  if (date.toDateString() === today.toDateString()) return time
-  if (seconds * 1000 - now < 6 * 86400000) return `${date.toLocaleDateString([], { weekday: 'short' })} ${time}`
-  return `${date.toLocaleDateString([], { day: 'numeric', month: 'short' })} ${time}`
+  const at = seconds * 1000
+  const time = fmtTime(at, { hour: '2-digit', minute: '2-digit' })
+  if (sameDay(at, now)) return time
+  if (at - now < 6 * 86400000) return `${fmtDate(at, { weekday: 'short' })} ${time}`
+  return `${fmtDate(at, { day: 'numeric', month: 'short' })} ${time}`
 }
 export const cronsLabel = (crons: { label: string }[]) => crons.length === 1 ? crons[0].label : `${crons.length} scheduled jobs`
 // One line per job for a tooltip or a screen reader: name, schedule, next run.

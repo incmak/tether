@@ -7,6 +7,7 @@ import type { Api, Ask, Pane } from './api'
 import { errorText } from './api'
 import type { Reminder } from './reminders'
 import { whenLabel } from './reminders'
+import { useTetherZone } from './zone'
 import { askAction, LATE, stillWait, useNow } from './attention'
 import type { AskAction, Digest, Waiting } from './attention'
 import { useModal } from './hooks'
@@ -26,6 +27,7 @@ export interface ReviewEntry { label: string; onOpen: () => void }
 export interface DueReminders { items: Reminder[]; onOpen: () => void }
 
 export function ReminderRows({ due, now, className, list = false }: { due: DueReminders; now: number; className: string; list?: boolean }) {
+  useTetherZone()
   const catchup = className.startsWith('catchup')
   return <>{due.items.map(item => {
     const when = `${item.late ? 'Late, was due' : 'Due'} ${whenLabel(item.due, now)}`

@@ -15,6 +15,7 @@ import secrets
 import time
 
 import advisor
+import tether_zone
 
 KEEP = 200
 LINE_QUESTION, LINE_ANSWER = 200, 300  # the cuts in the Markdown line
@@ -28,8 +29,9 @@ CUT_FIELDS = ('question', 'answer', 'evidence', 'error', 'advisors')
 TEXT_FIELDS = ('confidence', 'evidence', 'error')  # optional: a wrong type reads as ''
 ADVISOR_FIELDS = ('role', 'agent', 'model', 'answer', 'confidence')
 ID = re.compile(r'[0-9a-f]{12}')
-LAST_TIME = 253402300799  # 9999-12-31 23:59:59 UTC: time.localtime and strftime work up to here
-LINE = re.compile(r'- (\d{4}-\d\d-\d\d \d\d:\d\d) \[([a-z_]+)\] Q: (.*?) -> A: (.*) \((\S+) (\S+)\)')
+LAST_TIME = 253402300799  # 9999-12-31 23:59:59 UTC
+STAMP = r'\d{4}-\d\d-\d\d \d\d:\d\d'
+LINE = re.compile(rf'- ({STAMP}) \[([a-z_]+)\] Q: (.*?) -> A: (.*) \((\S+) (\S+)\)')
 
 
 def _flat(text, limit):
@@ -45,9 +47,10 @@ def _cut(text, field, cut):
     return text[:FULL - 1] + '…'
 
 
-def line(entry):
+def line(entry, *, stamp=None):
     """The Markdown line of an entry, the same for the writer and for the reader that matches lines to entries."""
-    return (f'- {time.strftime("%Y-%m-%d %H:%M", time.localtime(entry["time"]))} [{entry["status"]}] '
+    stamp = stamp or entry.get('stamp') or tether_zone.stamp(entry['time'])
+    return (f'- {stamp} [{entry["status"]}] '
             f'Q: {_flat(entry["question"], LINE_QUESTION)} -> A: {_flat(entry["answer"], LINE_ANSWER)} '
             f'({entry["agent"]} {entry["model"]})')
 
@@ -64,6 +67,8 @@ def make(question, result, agent, model, now=None):
                            'answer': _cut(item.get('answer', ''), 'advisors', cut), 'confidence': item.get('confidence', '')}
                           for item in result.get('advisors', [])]}
     entry['cut'] = cut
+    # Keep the Markdown stamp with its full record so the reader can still match them after a zone change.
+    entry['stamp'] = tether_zone.stamp(entry['time'])
     return entry
 
 
@@ -91,6 +96,10 @@ def _normal(entry):
     Optional fields of a wrong type become empty, so a damaged line never reaches the sheet as null or a number."""
     if not _valid(entry):
         return None
+    stamp = entry.get('stamp')
+    if 'stamp' in entry and (not isinstance(stamp, str) or not re.fullmatch(STAMP, stamp)):
+        entry = dict(entry)
+        entry.pop('stamp')
     advisors = entry.get('advisors')
     cut = entry.get('cut')
     return dict(entry, **{key: _text(entry.get(key)) for key in TEXT_FIELDS},
@@ -138,7 +147,7 @@ def _legacy(text):
     if not found or found[2] not in STATUSES:
         return None
     try:
-        when = int(time.mktime(time.strptime(found[1], '%Y-%m-%d %H:%M')))
+        when = int(tether_zone.parse(found[1]))
     except (ValueError, OverflowError):
         return None
     return {'id': '', 'time': when, 'status': found[2], 'question': found[3], 'answer': found[4],
@@ -148,7 +157,9 @@ def _legacy(text):
 def listing(folder):
     """Every kept ask, newest first. JSONL entries have an id and open in full; older Markdown lines have none."""
     entries = _entries(folder)
-    known = {line(entry) for entry in entries}
+    # Earlier JSONL records had no stamp and were paired with Markdown in host time.
+    known = {line(entry, stamp=entry.get('stamp') or time.strftime(tether_zone.FORMAT, time.localtime(entry['time'])))
+             for entry in entries}
     older = [item for item in map(_legacy, (text for text in _lines(folder / 'advisor-log.md') if text not in known)) if item]
     shown = [{'id': entry['id'], 'time': entry['time'], 'status': entry['status'],
               'question': _flat(entry['question'], PREVIEW_QUESTION), 'answer': _flat(entry['answer'], PREVIEW_ANSWER),

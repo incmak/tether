@@ -16,6 +16,7 @@ import { pickRowKey } from './pickKeys'
 import { rovingRows, useRovingStop } from './rovingRows'
 import type { PickKey } from './ChoiceExtras'
 import './InfoPanel.css'
+import { fmtDateTime, useTetherZone } from './zone'
 
 
 
@@ -260,6 +261,7 @@ function CronList({ crons, scheduled }: { crons: FooterCron[]; scheduled?: Recor
 
 // The goal's last check, the conversation's background tasks and their latest output, or its scheduled jobs.
 export function LiveSheet({ api, pane, show, taskDetails, crons, scheduled, onClose, onTerminal }: { api: Api; pane: Pane; show: 'goal' | 'tasks' | 'crons'; taskDetails?: FooterTask[]; crons?: FooterCron[]; scheduled?: Record<string, ScheduledRun>; onClose: () => void; onTerminal: () => void }) {
+  useTetherZone()
   const modal = useModal(true, onClose)
   const [stopping, setStopping] = useState<string | null>(null)
   const [stopError, setStopError] = useState('')
@@ -297,7 +299,7 @@ export function LiveSheet({ api, pane, show, taskDetails, crons, scheduled, onCl
     </li>)}</ul> : <p className="live-empty">No background tasks in this conversation.</p>)}
     {!hookTasks && state && show === 'tasks' && (state.tasks.length ? <ul className="live-tasks">{[...state.tasks.filter(task => task.state === 'running').reverse(), ...state.tasks.filter(task => task.state !== 'running').reverse().slice(0, 5)].map(task => <li key={task.id}>
       <p className="live-task-title">{task.kind === 'monitor' ? <Gauge size={15} /> : <Terminal size={15} />}<strong>{task.title || task.command}</strong></p>
-      <p className="live-meta">{task.kind === 'monitor' ? 'Monitor' : 'Shell'} · {task.state === 'running' ? 'Running' : 'Ended'} · {task.id}{task.started ? ` · started ${new Date(task.started * 1000).toLocaleString()}` : ''}</p>
+      <p className="live-meta">{task.kind === 'monitor' ? 'Monitor' : 'Shell'} · {task.state === 'running' ? 'Running' : 'Ended'} · {task.id}{task.started ? ` · started ${fmtDateTime(task.started * 1000)}` : ''}</p>
       {task.title && <code className="live-command">{task.command}</code>}
       {task.output ? <pre className="live-output">{task.output}</pre> : <p className="live-meta">No output yet.</p>}
       {task.kind === 'shell' && task.state === 'running' && <div className="live-actions"><button type="button" disabled={stopping !== null} onClick={() => void stop(task.id)}>{stopping === task.id ? 'Stopping…' : 'Stop'}</button></div>}

@@ -4,7 +4,7 @@ import argparse
 import ast
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 import errno
 import fcntl
 from functools import cached_property
@@ -23,6 +23,7 @@ import time
 import unicodedata
 
 import paths
+import tether_zone
 
 
 HEURISTICS = {
@@ -129,8 +130,10 @@ def decode_entry(row):
     lifecycle = row.get('MESSAGE_ID') in LIFECYCLE_IDS
     if pid == '1' and row.get('UNIT') == 'tether-friday.service':
         lifecycle |= raw.startswith((b'Starting ', b'Started ', b'Stopping ', b'Stopped '))
-    return Entry(row['__CURSOR'], datetime.fromtimestamp(int(row['__REALTIME_TIMESTAMP']) / 1e6).astimezone(),
-                 pid, raw, row.get('_LINE_BREAK'), lifecycle)
+    at = tether_zone.now(int(row['__REALTIME_TIMESTAMP']) / 1e6)
+    # Keep elapsed-time arithmetic correct across a daylight-saving change.
+    at = at.astimezone(timezone(at.utcoffset()))
+    return Entry(row['__CURSOR'], at, pid, raw, row.get('_LINE_BREAK'), lifecycle)
 
 
 def journal_entries(rows):
@@ -314,7 +317,8 @@ class Call:
 
     @property
     def id(self):
-        return f'{self.start.at.isoformat()}-{self.start.pid}-{self.runner or "peer"}'
+        # IDs and paths keep the host clock so an existing digest can be found after a preference change.
+        return f'{self.start.at.astimezone().isoformat()}-{self.start.pid}-{self.runner or "peer"}'
 
     def digest(self, end, ended):
         transcript, timeline, events = [], [], []
@@ -417,8 +421,9 @@ def markdown(data, timeline):
              f"Duration {data['duration_s']:g}s. Ended {data['ended']}. Flags {flag_text(data['flags'])}.", '']
     if data['transcript'] == 'unparsed':
         lines += [f"Transcript unparsed (Pipecat {data['pipecat_version']}).", '']
+    zone = tether_zone.zone()
     for at, item in timeline:
-        clock = datetime.fromisoformat(at).strftime('%H:%M:%S')
+        clock = datetime.fromisoformat(at).astimezone(zone).strftime('%H:%M:%S')
         if item.get('gap'):
             lines.append(f'- {clock} **Transcript gap**')
         elif 'kind' in item:
@@ -483,7 +488,7 @@ def read_digest(path):
 
 
 def digest_base(day, call):
-    stamp = call.start.at
+    stamp = call.start.at.astimezone()
     stem = re.sub(r'[^A-Za-z0-9_-]', '_',
                   f'{stamp:%H%M%S}-{stamp.microsecond // 1000:03d}-{call.start.pid}-{call.runner or "peer"}')
     base = day / stem
@@ -508,7 +513,7 @@ def digest_base(day, call):
 
 def write_digest(directory, call, end, ended):
     stamp = call.start.at
-    day = directory / stamp.strftime('%Y-%m-%d')
+    day = directory / stamp.astimezone().strftime('%Y-%m-%d')
     os.close(private_directory(day))
     base = digest_base(day, call)
     md_path = base.with_suffix('.md')

@@ -1,6 +1,7 @@
 import { ChevronRight, Lightbulb } from 'lucide-react'
 import type { AdvisorCall } from './api'
 import { stamp } from './messageTime'
+import { useTetherZone } from './zone'
 import { formatElapsed } from './paneState'
 import { toolSeconds } from './toolSummary'
 
@@ -12,6 +13,7 @@ function modelLabel(model = '') {
 }
 
 export function AdvisorRow({ id, advisor, time, live }: { id: string; advisor: AdvisorCall; time?: string; live?: boolean }) {
+  useTetherZone()
   const model = modelLabel(advisor.model)
   const when = stamp(time)
   let state

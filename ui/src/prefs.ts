@@ -3,6 +3,7 @@ import { ApiError, request } from './api'
 import type { GroupBy, SessionGroup, SortBy } from './Organize'
 import { DEFAULT_LOOK } from './layouts'
 import type { Look, SavedLook } from './layouts'
+import { DEFAULT_ZONE, setTetherZone } from './zone'
 
 // seen: when you last looked at each pane (seconds), so a turn that ended later shows as Done.
 // SYNCED choices are shared by every device through the server (/mobile/api/prefs). The rest stay in this browser:
@@ -13,6 +14,7 @@ export interface Prefs {
   autoResume: boolean
   activity: boolean  // keep activity time on this server (ActivityTime.tsx, server/activity_time.py); off until turned on
   activityAgents: boolean  // also count minutes in which an agent tab works
+  timeZone?: string
   uiUsage: boolean  // log which controls are used, on this server only (uiUsage.ts, server/ui_usage.py); on until turned off
   pinned: string[]
   sidePins: SidePin[]
@@ -121,7 +123,7 @@ function load(): Prefs {
   return { ...prefs, drafts: keptDrafts(prefs.drafts) }
 }
 
-const SYNCED = ['pinned', 'sidePins', 'order', 'paneOrder', 'sort', 'colors', 'groups', 'groupOf', 'groupBy', 'seen', 'collapsed', 'showPaths', 'tmuxWords', 'liveReplyPreview', 'voiceOff', 'fridayActs', 'voiceSound', 'theme', 'scheme', 'drafts', 'archived', 'archivedTabs', 'hideHelpers', 'shownHelpers', 'hosts', 'layout', 'autoResume', 'attention', 'waitingOrder', 'imagePromptTuned', 'mainModel', 'activity', 'activityAgents', 'uiUsage'] as const
+const SYNCED = ['pinned', 'sidePins', 'order', 'paneOrder', 'sort', 'colors', 'groups', 'groupOf', 'groupBy', 'seen', 'collapsed', 'showPaths', 'tmuxWords', 'liveReplyPreview', 'voiceOff', 'fridayActs', 'voiceSound', 'theme', 'scheme', 'drafts', 'archived', 'archivedTabs', 'hideHelpers', 'shownHelpers', 'hosts', 'layout', 'autoResume', 'attention', 'waitingOrder', 'imagePromptTuned', 'mainModel', 'activity', 'activityAgents', 'uiUsage', 'timeZone'] as const
 type Shared = Partial<Pick<Prefs, typeof SYNCED[number]>>
 const PENDING_KEY = 'tmux-chat.prefs.pending'
 
@@ -141,7 +143,7 @@ export function savePending(pending: Shared): void {
   } catch { /* private mode: keep it for this visit only */ }
 }
 
-interface Stored { prefs: Shared; version: number }
+interface Stored { prefs: Shared; version: number; zone?: string }
 const PULL_MS = 20000
 export const PREFS_PULL_EVENT = 'tether-prefs-pull'
 
@@ -168,8 +170,11 @@ export function rejectedKeep(changes: Record<string, unknown>, error: unknown): 
   return Object.fromEntries(Object.entries(changes).filter(([key]) => key !== match[1]))
 }
 
-export function usePrefs() {
+export function usePrefs({ syncZone = true } = {}) {
   const [prefs, setPrefs] = useState<Prefs>(load)
+  const [serverZone, setServerZone] = useState<string>()
+  const effectiveZone = prefs.timeZone || serverZone || DEFAULT_ZONE
+  useLayoutEffect(() => { if (syncZone) setTetherZone(effectiveZone) }, [effectiveZone, syncZone])
   const latest = useRef(prefs)
   const version = useRef(-1)  // the server copy this device has; -1 = not read yet
   const pending = useRef<Shared>(loadPending())  // changed here, not saved yet
@@ -183,6 +188,8 @@ export function usePrefs() {
   const apply = useCallback((stored: Stored) => {
     version.current = stored.version
     const incoming = Object.fromEntries(Object.entries(stored.prefs).filter(([key]) => !(key in pending.current))) as Shared
+    // The shared copy may have no override. Drop a cached override when the server uses its default.
+    if (!('timeZone' in pending.current)) incoming.timeZone = stored.prefs.timeZone
     // Drafts: keep the newer copy per pane. A local edit the server has not seen (say, a reload right after typing) goes back up.
     if (incoming.drafts) {
       const local = keptDrafts(latest.current.drafts)
@@ -228,6 +235,8 @@ export function usePrefs() {
     if (Object.keys(pending.current).length) { void flush(); return }
     try {
       const stored = await request<Stored>('prefs')
+      // A queued local write can defer the shared prefs, but the server's fallback zone is still usable.
+      if (syncZone) setServerZone(stored.zone)
       if (busy.current || Object.keys(pending.current).length) return
       // A device's first sync adds its own choices to the shared copy, so nothing set before sync is lost.
       if (!firstSyncDone()) {
@@ -239,7 +248,7 @@ export function usePrefs() {
       }
       if (stored.version !== version.current) apply(stored)
     } catch { /* offline: keep this device's copy */ }
-  }, [apply, flush, persist])
+  }, [apply, flush, persist, syncZone])
 
   useEffect(() => {
     void pull()

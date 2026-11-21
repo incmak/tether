@@ -16,6 +16,7 @@
 import type { Pane } from './api'
 import type { Item, Row } from './backlogItems'
 import { needsYou } from './paneState'
+import { fmtTime, zonedTime } from './zone'
 
 export const PHASES = ['inbox', 'spec', 'build', 'review', 'verify', 'deploy', 'done'] as const
 export type Phase = typeof PHASES[number]
@@ -112,11 +113,11 @@ export function phaseOfTools(tools: FactoryTool[]): { phase: Phase; why: string 
 }
 const short = (tool: FactoryTool) => { const text = tool.title ? `${tool.name} ${tool.title}` : tool.name; return text.length > 70 ? `${text.slice(0, 69)}…` : text }
 
-/** When a backlog item was checked off: the date on its "Done:" line, in ms (local time), or 0. */
-export function doneAt(item: Item) {
+/** When a backlog item was checked off: its "Done:" line read in the Tether zone, in ms, or 0. */
+export function doneAt(item: Item, zone?: string) {
   const found = item.status?.kind === 'done' ? item.status.text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2}))?/) : null
   if (!found) return 0
-  return new Date(+found[1], +found[2] - 1, +found[3], +(found[4] ?? 0), +(found[5] ?? 0)).getTime()
+  return zonedTime(+found[1], +found[2] - 1, +found[3], +(found[4] ?? 0), +(found[5] ?? 0), zone)
 }
 
 interface Input {
@@ -125,13 +126,14 @@ interface Input {
   data: FactoryData | null
   groupName?: (pane: Pane) => string | undefined   // the tab's stack name
   now: number                       // ms
+  zone?: string
 }
 
 interface Links { ref?: string; agents: Agent[]; reasons: string[] }
 const withLinks = (why: string, reasons: string[]) => reasons.length ? `${why} · linked: ${reasons.join('; ')}` : why
 
 /** Tasks with no item and no activity in the past 24 h count as parked while all members are idle. */
-export function buildFloor({ panes, rows, data, groupName, now }: Input): Floor {
+export function buildFloor({ panes, rows, data, groupName, now, zone }: Input): Floor {
   const byId = new Map(panes.filter(pane => pane.agent !== 'shell').map(pane => [pane.id, pane]))
   const agents = [...byId.values()]
   const toolsOf = (pane: Pane) => data?.tools[pane.id] ?? []
@@ -252,14 +254,15 @@ export function buildFloor({ panes, rows, data, groupName, now }: Input): Floor 
   const tasks: Task[] = []
   for (const { item, project, links } of items) {
     const ref = item.ref!
-    const recentDone = item.done ? Math.max(doneAt(item), ...deploysOf(ref).map(line => line.at * 1000)) : 0
+    const checkedOff = doneAt(item, zone)
+    const recentDone = item.done ? Math.max(checkedOff, ...deploysOf(ref).map(line => line.at * 1000)) : 0
     if (item.done && now - recentDone > DAY) continue
     const { agents: linked, reasons } = links
     promote(linked)
     const deploys = deploysOf(ref)
     let phase: Phase
     let why: string
-    if (item.done) { phase = 'done'; why = doneAt(item) ? `checked off ${clock(doneAt(item))}` : `checked off; DEPLOYED.md names ${ref}` }
+    if (item.done) { phase = 'done'; why = checkedOff ? `checked off ${clock(checkedOff)}` : `checked off; DEPLOYED.md names ${ref}` }
     else if (!linked.length) {
       phase = 'inbox'
       why = item.status?.kind === 'doing' ? `open item; its Doing tab ${item.status.source?.pane ?? ''} is closed` : 'open item, no tab works on it'
@@ -314,7 +317,7 @@ function finish(task: Omit<Task, 'waits' | 'stuck' | 'sweep'>, now: number): Tas
 
 const toolMs = (tools: FactoryTool[]) => Math.max(0, ...tools.map(tool => toMs(tool.at)))
 const folderName = (dir: string) => (dir || '~').split('/').filter(Boolean).pop() || '~'
-export const clock = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+export const clock = (ms: number) => fmtTime(ms, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
 
 /** Tasks that need Mak first, then the stuck ones, then the newest. */
 export function attentionOrder(a: Task, b: Task) {

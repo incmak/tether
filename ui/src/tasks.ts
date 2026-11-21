@@ -4,6 +4,7 @@
 import { useCallback } from 'react'
 import type { Api } from './api'
 import { usePolling } from './hooks'
+import { tetherZone, zoneParts } from './zone'
 
 export type SourceId = 'todo' | 'planner'
 export type SourceState = 'ok' | 'off' | 'error' | 'syncing'
@@ -29,33 +30,34 @@ export interface ExternalTask {
 export interface TaskListing { sources: TaskSource[]; tasks: ExternalTask[] }
 
 const POLL_MS = 60000
-const OFFSET = 330 * 60  // IST, seconds east of UTC
-
-/** The IST day number of an instant, and of a 'YYYY-MM-DD' date (a date names a calendar day, not an instant). */
-const dayOfInstant = (at: number) => Math.floor((at + OFFSET) / 86400)
+/** A day number names a calendar day, so it increases by one even at an offset change. */
+const dayOfParts = ({ year, month, date }: ReturnType<typeof zoneParts>) => Date.UTC(year, month, date) / 86400000
+const dayOfInstant = (at: number, zone: string) => dayOfParts(zoneParts(at * 1000, zone))
 const dayOfDate = (date: string) => {
   const [y, m, d] = date.split('-').map(Number)
   return Math.floor(Date.UTC(y, m - 1, d) / 86400000)
 }
-export const dueDay = (due: TaskDue) => due.at !== null ? dayOfInstant(due.at) : dayOfDate(due.date)
+export const dueDay = (due: TaskDue, zone = tetherZone()) => due.at !== null ? dayOfInstant(due.at, zone) : dayOfDate(due.date)
 
 export interface TaskGroups { overdue: ExternalTask[]; today: ExternalTask[]; upcoming: ExternalTask[]; someday: ExternalTask[] }
 
 /** Overdue, Today, Upcoming (soonest first) and No due date (by title), like To Do's own Planned view. */
-export function groupTasks(tasks: ExternalTask[], now: number): TaskGroups {
-  const today = dayOfInstant(now)
+export function groupTasks(tasks: ExternalTask[], now: number, zone = tetherZone()): TaskGroups {
+  const today = dayOfInstant(now, zone)
   const groups: TaskGroups = { overdue: [], today: [], upcoming: [], someday: [] }
+  const days = new Map<TaskDue, number>()
   for (const task of tasks) {
     if (!task.due) groups.someday.push(task)
     else {
-      const day = dueDay(task.due)
+      const day = dueDay(task.due, zone)
+      days.set(task.due, day)
       // A due time today that has passed is overdue; a due date of today is not, until the day ends.
       if (day < today || (day === today && task.due.at !== null && task.due.at < now)) groups.overdue.push(task)
       else if (day === today) groups.today.push(task)
       else groups.upcoming.push(task)
     }
   }
-  const byDue = (a: ExternalTask, b: ExternalTask) => (dueDay(a.due!) - dueDay(b.due!)) || ((a.due!.at ?? 0) - (b.due!.at ?? 0)) || a.title.localeCompare(b.title)
+  const byDue = (a: ExternalTask, b: ExternalTask) => (days.get(a.due!)! - days.get(b.due!)!) || ((a.due!.at ?? 0) - (b.due!.at ?? 0)) || a.title.localeCompare(b.title)
   groups.overdue.sort(byDue); groups.today.sort(byDue); groups.upcoming.sort(byDue)
   groups.someday.sort((a, b) => a.title.localeCompare(b.title))
   return groups
@@ -65,15 +67,17 @@ const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const pad = (value: number) => String(value).padStart(2, '0')
 
-/** "Today", "Tomorrow", "Yesterday", "Wed 25 Nov", with the IST time when the task has one. */
+/** "Today", "Tomorrow", "Yesterday", "Wed 25 Nov", with the time when the task has one. */
 export function dueLabel(due: TaskDue, now: number) {
-  const days = dueDay(due) - dayOfInstant(now)
-  const day = new Date(dueDay(due) * 86400000)
+  const today = zoneParts(now * 1000)
+  const time = due.at === null ? null : zoneParts(due.at * 1000)
+  const dueNumber = time ? dayOfParts(time) : dayOfDate(due.date)
+  const days = dueNumber - dayOfParts(today)
+  // This Date represents the due calendar day, including a date-only task's day.
+  const date = new Date(dueNumber * 86400000)
   const name = days === 0 ? 'Today' : days === 1 ? 'Tomorrow' : days === -1 ? 'Yesterday'
-    : `${DAYS[day.getUTCDay()]} ${day.getUTCDate()} ${MONTHS[day.getUTCMonth()]}${day.getUTCFullYear() === new Date((now + OFFSET) * 1000).getUTCFullYear() ? '' : ` ${day.getUTCFullYear()}`}`
-  if (due.at === null) return name
-  const time = new Date((due.at + OFFSET) * 1000)
-  return `${name} ${pad(time.getUTCHours())}:${pad(time.getUTCMinutes())}`
+    : `${DAYS[date.getUTCDay()]} ${date.getUTCDate()} ${MONTHS[date.getUTCMonth()]}${date.getUTCFullYear() === today.year ? '' : ` ${date.getUTCFullYear()}`}`
+  return time ? `${name} ${pad(time.hour)}:${pad(time.minute)}` : name
 }
 
 /** "just now", "4 min ago", "2 h ago", "3 days ago". */

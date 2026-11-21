@@ -19,6 +19,7 @@ import { FolderField, NameField } from './CreateFields'
 import type { MainModel } from './prefs'
 import { groupNameError } from './groups'
 import './NewTask.css'
+import { zoneParts } from './zone'
 
 type Worker = 'claude' | 'codex'
 type Starter = Worker | 'shell'
@@ -40,9 +41,9 @@ const finePointer = () => typeof matchMedia === 'function' && matchMedia('(point
 
 /** The default name of a new session: chat-MMDD-HHMM. */
 export function defaultSessionName() {
-  const now = new Date()
+  const { month, date, hour, minute } = zoneParts(Date.now())
   const two = (n: number) => String(n).padStart(2, '0')
-  return `chat-${two(now.getMonth() + 1)}${two(now.getDate())}-${two(now.getHours())}${two(now.getMinutes())}`
+  return `chat-${two(month + 1)}${two(date)}-${two(hour)}${two(minute)}`
 }
 
 // The first pane of a new session shows up in the session list a moment after tmux makes it.

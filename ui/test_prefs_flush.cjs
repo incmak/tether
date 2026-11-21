@@ -14,8 +14,9 @@ function load(name, imports = {}, globals = {}) {
   return exports
 }
 
-const api = load('api')
-const imports = { react: {}, './api': api, './layouts': { DEFAULT_LOOK: {} } }
+const zone = load('zone', { react: {} })
+const api = load('api', { './zone': zone })
+const imports = { react: {}, './api': api, './layouts': { DEFAULT_LOOK: {} }, './zone': zone }
 const pendingKey = 'tmux-chat.prefs.pending'
 function storage() {
   const items = new Map()
@@ -28,8 +29,8 @@ function storage() {
 const localStorage = storage()
 const { rejectedKeep, loadPending, savePending } = load('prefs', imports, { localStorage })
 const plain = value => JSON.parse(JSON.stringify(value))
-savePending({ order: ['a'] })
-assert.deepEqual(plain(loadPending()), { order: ['a'] })
+savePending({ order: ['a'], timeZone: 'America/New_York' })
+assert.deepEqual(plain(loadPending()), { order: ['a'], timeZone: 'America/New_York' })
 savePending({})
 assert.equal(localStorage.getItem(pendingKey), null)
 for (const value of ['{"unknown":true}', '{broken', 'null', '[]', '42', '"text"']) {

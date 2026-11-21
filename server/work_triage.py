@@ -22,6 +22,7 @@ from pathlib import Path
 
 import agents
 import paths
+import tether_zone
 import work_api
 import work_items
 from projects import _read, _write
@@ -56,11 +57,11 @@ def _sha(text):
 
 
 def stamp(at):
-    return time.strftime('%Y-%m-%d %H:%M', time.localtime(at))
+    return tether_zone.stamp(at)
 
 
 def parse_time(text):
-    return time.mktime(time.strptime(text, '%Y-%m-%d %H:%M'))
+    return tether_zone.parse(text)
 
 
 def one_line(text):

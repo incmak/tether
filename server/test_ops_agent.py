@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import time
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -17,7 +17,9 @@ import lesson_candidates
 import lessons
 import ops_agent
 import paths
+import prefs_sync
 import projects
+import tether_zone
 
 PID = 'c' * 12
 DAY = '2026-11-17'
@@ -98,10 +100,9 @@ class FactTests(Case):
             '- 2026-11-17 11:00 UTC · ddddddd No stamp line',
             'not a deploy line']))
         start, end = at(0), at(0) + 86400
-        with mock.patch.dict(os.environ, {'TZ': 'UTC'}):
-            time.tzset()
-            self.addCleanup(time.tzset)
-            found = ops_agent.deploys(str(self.repo), *ops_agent.day_bounds(DAY))
+        self.enterContext(mock.patch.object(prefs_sync, 'FILE', self.root / 'cache' / 'prefs.json'))
+        prefs_sync.save({'timeZone': 'UTC'})
+        found = ops_agent.deploys(str(self.repo), *ops_agent.day_bounds(DAY))
         self.assertEqual([(row['commit'], row['stamp']) for row in found],
                          [('bbbbbbb', 'verified'), ('ccccccc', 'none'), ('ddddddd', 'missing')])
         self.assertEqual(found[1]['text'], 'ccccccc Hotfix')
@@ -370,6 +371,22 @@ class ScheduleTests(Case):
         clock[0] = datetime(2026, 11, 19, ops_agent.HOUR, 1)
         self.assertEqual(self.observe(ops), (True, ['2026-11-18']))
         self.assertEqual(len(ops_agent.load()['runs']), 2)
+
+    def test_default_scheduler_and_report_day_use_the_preference_zone(self):
+        self.enterContext(mock.patch.object(prefs_sync, 'FILE', self.root / 'cache' / 'prefs.json'))
+        prefs_sync.save({'timeZone': 'America/New_York'})
+        ops_agent.set_enabled(True)
+        ops_agent._change(lambda state: state.update(last_day=DAY))
+        ops = ops_agent.Ops()
+        # At 02:00 UTC it is already 07:30 the next day in Kolkata, but still the 17th in New York.
+        for hour, minute, expected in ((2, 0, (False, [])), (11, 59, (False, [])), (12, 0, (True, [DAY]))):
+            with self.subTest(hour=hour), mock.patch.object(
+                    tether_zone.time, 'time', return_value=datetime(2026, 11, 18, hour, minute, tzinfo=timezone.utc).timestamp()):
+                self.assertEqual(self.observe(ops), expected)
+        start, end = ops_agent.day_bounds('2026-03-08')
+        self.assertEqual(start, datetime(2026, 3, 8, 5, tzinfo=timezone.utc).timestamp())
+        self.assertEqual(end - start, 23 * 3600)
+        self.assertEqual(ops_agent._clock(end), '00:00')
 
     def test_run_now_works_when_off_and_counts_as_the_days_run(self):
         ops, clock = self.ops(datetime(2026, 11, 18, 3, 0))

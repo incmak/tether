@@ -28,6 +28,7 @@ from pathlib import Path
 
 import audit
 import paths
+import tether_zone
 from projects import ProjectError, _read, _write, invalid
 
 # A backlog save is at most 1 MiB (projects_api.py BACKLOG_BODY_LIMIT). 200,000 characters fit in any language,
@@ -202,7 +203,7 @@ def _archive(text, everything=False):
         moved, lines, drop = _finished(text, everything)  # the list must fit: this week's finished items move too
     if not moved:
         return text
-    stamp = time.strftime('%Y-%m-%d %H:%M')
+    stamp = tether_zone.stamp()
     out, last = [], None
     for section, block in moved:
         if section != last:
@@ -862,7 +863,7 @@ def _done_line(result, who):
     """The Done line, dated, so the work board can show the item for a week (board_items)."""
     if not who and SOURCE.search(result or ''):
         who = 'unknown'  # else the result's own (codex · pane %N) would read as the who part (B303)
-    return f'  - Done: {time.strftime("%Y-%m-%d %H:%M")} · {result or "finished"}{f" ({who})" if who else ""}'
+    return f'  - Done: {tether_zone.stamp()} · {result or "finished"}{f" ({who})" if who else ""}'
 
 
 def _open_block(lines, start, end):
@@ -1055,7 +1056,7 @@ def _done_time(block):
     if not found:
         return None
     try:
-        return time.mktime(time.strptime(found[1], '%Y-%m-%d %H:%M'))
+        return tether_zone.parse(found[1])
     except ValueError:
         return None
 

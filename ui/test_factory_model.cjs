@@ -13,9 +13,11 @@ const load = (file, deps = {}) => {
 }
 const paneState = load('src/paneState.ts')
 const items = load('src/backlogItems.ts')
-const m = load('src/factoryModel.ts', { './paneState': paneState })
+const zone = load('src/zone.ts')
+const m = load('src/factoryModel.ts', { './paneState': paneState, './zone': zone })
 
-const NOW = new Date(2026, 10, 17, 12, 0).getTime()
+zone.setTetherZone('Asia/Kolkata')
+const NOW = Date.parse('2026-11-17T06:30:00Z')
 const iso = minutesAgo => new Date(NOW - minutesAgo * 60000).toISOString()
 const pane = (id, extra = {}) => ({ id, tmux_session: '$1', label: `s:${id}`, agent: 'claude', dir: '/srv/app', state: 'Idle', writable: true, thread: id, approval: null, pane_name: '', ...extra })
 const tool = (name, title, minutesAgo = 1) => ({ name, title, at: iso(minutesAgo) })
@@ -42,6 +44,21 @@ function floor(panes, tools = {}, extra = {}) {
 const byId = (result, id) => result.tasks.find(task => task.id === id)
 const members = task => task.agents.map(agent => [agent.pane.id, agent.role])
 const visiblePanes = result => result.tasks.flatMap(task => task.agents.map(agent => agent.pane.id)).sort()
+
+test('the same Done stamp and deployment clock follow Kolkata and New York independently of device TZ', () => {
+  const item = items.parseBacklog(backlog).find(row => row.ref === 'B15')
+  assert.ok(item)
+  const deployed = Date.parse('2026-11-17T03:00:00Z')
+  try {
+    assert.equal(m.doneAt(item), deployed)
+    assert.equal(m.clock(deployed), '08:30')
+    zone.setTetherZone('America/New_York')
+    assert.equal(m.doneAt(item), Date.parse('2026-11-17T13:30:00Z'))
+    assert.equal(m.clock(deployed), '22:00')
+  } finally {
+    zone.setTetherZone('Asia/Kolkata')
+  }
+})
 
 // Inbox, Done and links from the item.
 {

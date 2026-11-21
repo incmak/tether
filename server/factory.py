@@ -25,6 +25,7 @@ from pathlib import Path
 import factory_history
 import paths
 import sweep
+import tether_zone
 
 PATH = '/mobile/api/factory'
 TAIL_BYTES = 262144
@@ -98,7 +99,7 @@ def deployed(now=None, file=None):
         lines = (file or deployed_file()).read_text(encoding='utf-8', errors='replace').splitlines()
     except OSError:
         return []
-    since = datetime.fromtimestamp(now) - timedelta(days=DEPLOYED_DAYS)
+    since = tether_zone.now(now) - timedelta(days=DEPLOYED_DAYS)
     since = since.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     found = [item for item in map(parse_deployed_line, lines) if item and since <= item['at'] <= now + 86400]
     return sorted(found, key=lambda item: item['at'], reverse=True)

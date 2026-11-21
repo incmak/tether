@@ -16,6 +16,7 @@ import type { OfficeFile } from './OfficeViewer'
 import { TextViewer } from './TextViewer'
 import type { TextFile } from './TextViewer'
 import { wheelSideways } from './wheelSideways'
+import { useTetherZone } from './zone'
 
 // The phone Files screen (slice 4). Layout from ExplorerPhone.dc.html: path chips, a sort cycle, search, Select mode with
 // an action bar, a + sheet, a ⋯ sheet per row and a full-screen preview. Writes use POST /mobile/api/files/* (API.md).
@@ -100,6 +101,7 @@ interface Props {
 }
 
 export function ExplorerPhone({ api, target, onTarget, chatName, onAddToChat, onPin }: Props) {
+  useTetherZone()
   const [stored, setStored] = useState(loadStored)
   const { path: cwd, hidden } = stored
   const sort = SORTS[stored.sort]

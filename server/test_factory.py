@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import antigravity
 import factory
+import prefs_sync
 import server
 from agents import claude_consume
 
@@ -63,6 +64,18 @@ class DeployedTests(unittest.TestCase):
             found = factory.deployed(now, log)
             self.assertEqual([item['commit'] for item in found], ['ccccccc', 'bbbbbbb'])
             self.assertEqual(factory.deployed(now, Path(folder) / 'missing.md'), [])
+
+    def test_recent_deploys_use_the_preference_day_boundary(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(prefs_sync, 'FILE', root / 'prefs.json'))
+        log = root / 'DEPLOYED.md'
+        log.write_text('- 2026-11-16 04:59 UTC · aaaaaaa before\n'
+                       '- 2026-11-16 05:00 UTC · bbbbbbb boundary\n')
+        now = datetime(2026, 11, 18, 18, tzinfo=timezone.utc).timestamp()
+        prefs_sync.save({'timeZone': 'America/New_York'})
+        self.assertEqual([item['commit'] for item in factory.deployed(now, log)], ['bbbbbbb'])
+        prefs_sync.save({'timeZone': 'Pacific/Auckland'})
+        self.assertEqual(factory.deployed(now, log), [])
 
 
 class ToolTests(unittest.TestCase):

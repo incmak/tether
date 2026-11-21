@@ -1,5 +1,5 @@
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import io
 import json
@@ -10,6 +10,8 @@ from unittest import mock
 
 import attention
 import lessons
+import prefs_sync
+import tether_zone
 
 
 class Clock:
@@ -680,6 +682,21 @@ class AttentionTest(unittest.TestCase):
         self.assertIsNone(self.store.digest_due(datetime(2026, 11, 8, 15, 0)))
         with self.assertRaises(ValueError):
             self.store.set_digest(True, 24)
+
+    def test_digest_uses_the_preference_hour_and_day(self):
+        self.enterContext(mock.patch.object(prefs_sync, 'FILE', self.path.with_name('prefs.json')))
+        prefs_sync.save({'timeZone': 'America/New_York'})
+        self.world.turn('%1', 'Next: a.\nNeeds you: yes', 10)
+        self.world.observe(entry())
+        self.store.set_digest(True, 20)
+        at = datetime(2026, 11, 19, 1, tzinfo=timezone.utc).timestamp()
+        # New York reaches 20:00 on the 18th while Kolkata is at 06:30 on the 19th.
+        with mock.patch.object(tether_zone.time, 'time', return_value=at - 60):
+            self.assertIsNone(self.store.digest_due())
+        with mock.patch.object(tether_zone.time, 'time', return_value=at):
+            self.assertEqual(self.store.digest_due()['title'], 'Waiting on you')
+            self.assertEqual(self.store.digest['sent'], '2026-11-18')
+            self.assertIsNone(self.store.digest_due())
 
 
     def test_digest_includes_lesson_review_with_or_without_asks(self):

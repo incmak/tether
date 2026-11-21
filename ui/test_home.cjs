@@ -91,7 +91,7 @@ for (const kind of ['done', 'working', 'approval', 'browser']) {
 }
 console.log('Card time: formats, 60s/1h/24h boundaries, missing times and clock skew pass')
 
-const apiModule = load('api.ts')
+const apiModule = load('api.ts', { './zone': load('zone.ts') })
 const browserCalls = []
 const browserModule = {
   watchTab: (...args) => browserCalls.push(args),

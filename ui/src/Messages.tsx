@@ -14,6 +14,7 @@ import remarkGfm from 'remark-gfm'
 import type { AdvisorCall, Api, ChatMessage, ToolSummary } from './api'
 import { AdvisorRow } from './AdvisorRow'
 import { stamp } from './messageTime'
+import { useTetherZone } from './zone'
 import { ToolGroup } from './ToolGroup'
 import { SentContent, sentContent } from './SentImages'
 import { InlineCode, Link, remarkPaths } from './MediaLink'
@@ -100,6 +101,7 @@ function TerminalSnapshot({ text, shell }: { text: string; shell: boolean }) {
 export type WatchRun = { members: ChatMessage[]; watches: string[]; cycles: number; rearmed: boolean; schedule?: boolean; reported?: boolean; result?: string }
 const watchName = (label: string) => label.split(':')[0].trim() || label
 function WatchGroup({ id, run, time, api, session }: { id: string; run: WatchRun; time?: string; api: Api; session: string }) {
+  useTetherZone()
   const names = [...new Set(run.watches.map(watchName))]
   const what = run.schedule
     // A scheduled run can act, so its line shows what the run said, never a claim that nothing happened.
@@ -296,6 +298,7 @@ export function CopyButton({ text, label, className = 'icon-button', wide = fals
   </button>
 }
 function MessageActions({ id, text, time }: { id?: string; text: string; time?: string }) {
+  useTetherZone()
   const when = stamp(time)
   return <div className="message-actions">
     <CopyButton text={text} label="Copy message" />
