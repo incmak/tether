@@ -73,7 +73,7 @@ export function ActionDeck({ api, items, sessions, review, onOpen, onClose, onUp
     try { await withApproval(api, 'autonomy/decisions', 'decision-save', { pane: pane.id, question: ask.next || '', answer: text }) }
     catch (error) { return `Sent to ${name}. Tether did not save the answer: ${errorText(error)}` }
   }, remember ? `Sent to ${name}. Saved for this project.` : `Sent to ${name}.`)
-  const handled = () => void run(() => askAction(api, pane, 'handled'), `${name}: handled.`)
+  const handled = () => void run(() => askAction(api, pane, 'handled', ask), `${name}: handled.`)
 
   return <dialog {...modal} className={ask.urgent ? 'sheet action-deck urgent' : 'sheet action-deck'} aria-labelledby="deck-title">
     <div className="sheet-heading deck-head">

@@ -25,7 +25,7 @@ import type { SettingIndex, SettingsGroup } from './settingsIndex'
 import { keyLabel } from './keys'
 import { ShortcutRows } from './Shortcuts'
 import { SHORTCUT_GROUPS } from './shortcutList'
-import { DigestSettings } from './Attention'
+import { DigestSettings, StaleRuleSetting } from './Attention'
 import { LayoutPicker, StylePicker } from './LookSettings'
 import { ActivitySettings } from './ActivityTime'
 import { UiUsageSettings } from './UiUsage'
@@ -98,9 +98,10 @@ export function Settings({ api, prefs, update, onReload, onClose, start }: { api
     item('terms', 'workspace', 'tmux words', 'pane split tab terminology ctrl-b', <Toggle title="tmux words" note="Use pane, split and Ctrl-b in place of Tether’s terms." checked={prefs.tmuxWords} onChange={tmuxWords => update(() => ({ tmuxWords }))} />),
     item('header-swipe', 'workspace', 'Swipe on the tab bar scrolls it', 'trackpad two finger swipe gesture header tab bar stacks scroll back forward history mac', <Toggle title="Swipe on the tab bar scrolls it" note="On a trackpad, swipe with two fingers over a chat’s tabs or stacks, or just above them, to scroll that row. The swipe does not go Back or Forward anywhere in the chat’s header. Off: it goes Back or Forward, as on the rest of the page." scope="This device" checked={prefs.headerSwipe} onChange={headerSwipe => update(() => ({ headerSwipe }))} />),
     item('preview', 'workspace', 'Live reply preview', 'claude response stream messages', <Toggle title="Live reply preview" note="Show Claude’s reply as it arrives." checked={prefs.liveReplyPreview} onChange={liveReplyPreview => update(() => ({ liveReplyPreview }))} />),
-    item('attention', 'workspace', 'Attention mode', 'waiting on you needs you ask oldest handled snooze remind tomorrow digest daily summary', <>
+    item('attention', 'workspace', 'Attention mode', 'waiting on you needs you ask oldest handled snooze remind tomorrow digest daily summary later stale automation', <>
       <Toggle title="Attention mode" note="Keep a tab in “Waiting on you” until you answer it, mark it handled or snooze it." checked={prefs.attention} onChange={attention => update(() => ({ attention }))} />
       {prefs.attention && <DigestSettings api={api} />}
+      {prefs.attention && <StaleRuleSetting api={api} />}
     </>),
     item('auto-resume', 'workspace', 'Reopen tabs after a restart', 'auto resume restore restart tmux reboot', <Toggle title="Reopen tabs after a restart" note="Bring back open Claude and Codex chats when tmux or the machine restarts." scope="This server" checked={prefs.autoResume} onChange={autoResume => update(() => ({ autoResume }))} />),
     item('microphone', 'voice', 'Voice button', 'mic microphone dictate speech input keyboard', <Toggle title="Voice button" note="Show the microphone in the message box." checked={!prefs.voiceOff} onChange={on => update(() => ({ voiceOff: !on }))} />),

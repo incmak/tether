@@ -9,12 +9,12 @@ export interface CatchSession { id: string; name: string; panes: Pane[]; groups?
 export interface Goal { key: string; name: string; session: string; stack: boolean; panes: Pane[]; since: number }
 
 /**
- * The tab waits on you now. With Attention mode on, a pane's ask decides (a snoozed ask waits later);
+ * The tab waits on you now. With Attention mode on, a pane's ask decides (a snoozed ask waits later, an ask in Later does not wait);
  * a pane with no ask still waits while its agent asks for approval or answers. Shells never wait.
  */
 export function waitsOnYou(pane: Pane, now: number, attention: boolean): boolean {
   if (pane.agent === 'shell') return false
-  if (attention && pane.ask) return !(pane.ask.snoozed_until && pane.ask.snoozed_until > now)
+  if (attention && pane.ask) return !pane.ask.later && !(pane.ask.snoozed_until && pane.ask.snoozed_until > now)
   return needsYou(pane.state)
 }
 
