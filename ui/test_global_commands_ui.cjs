@@ -25,19 +25,31 @@ const fixture = {
   usage: { claude: null, codex: null },
 }
 const live = 'Friday Live mode: talk hands-free'
+// Each row is [label, key hint]; '' means the row shows no key hint.
+// Captured on the unmodified app on a non-Mac platform (the init script pins it).
 const globalCommands = [
-  'New session', 'Keyboard shortcuts', 'Undo history', 'Plan usage', 'Backlog', 'Backlog page',
-  'Reminders', 'Work board', 'Agents page', 'Factory view', live,
+  ['New session', 'Alt N'], ['Keyboard shortcuts', 'Ctrl /'], ['Undo history', ''], ['Plan usage', ''],
+  ['Backlog', 'Alt B'], ['Backlog page', 'Alt Shift B'], ['Reminders', ''], ['Work board', ''],
+  ['Agents page', ''], ['Factory view', ''], [live, ''],
 ]
-// Captured on the unmodified app with the selected Claude pane below.
+// On the Files page, Home gets its slot hint and New session loses its own.
+const filesCommands = [
+  ['Home', 'Alt H'], ['New session', ''], ['Keyboard shortcuts', 'Ctrl /'], ['Undo history', ''], ['Plan usage', ''],
+  ['Backlog', 'Alt B'], ['Backlog page', 'Alt Shift B'], ['Reminders', ''], ['Work board', ''],
+  ['Agents page', ''], ['Factory view', ''], [live, ''],
+]
+// Captured with the selected Claude pane below.
 const workspaceCommands = [
-  'Home', 'Split right', 'Grid of four', 'Terminal view of the focused pane',
-  'Show the terminal panel', 'Show the changes panel', 'Show the browser panel', 'Show the files panel',
-  'Side chat: fork this chat beside it', 'Show background tasks',
-  'New session', 'Hide the sidebar', 'Back', 'Keyboard shortcuts', 'Undo history', 'Make a layout',
-  'Restore the default layout', 'Plan usage', 'Backlog', 'Backlog page', 'Reminders', 'Work board',
-  'Agents page', 'Factory view', 'Message all sessions', live,
+  ['Home', 'Alt H'], ['Split right', 'Ctrl \\'], ['Grid of four', 'Ctrl Shift \\'], ['Terminal view of the focused pane', 'Alt T'],
+  ['Show the terminal panel', 'Ctrl .'], ['Show the changes panel', ''], ['Show the browser panel', ''], ['Show the files panel', ''],
+  ['Side chat: fork this chat beside it', 'Ctrl ;'], ['Show background tasks', ''],
+  ['New session', 'Alt N'], ['Hide the sidebar', 'Ctrl B'], ['Back', 'Alt ←'], ['Keyboard shortcuts', 'Ctrl /'], ['Undo history', ''],
+  ['Make a layout', 'Alt L'], ['Restore the default layout', 'Alt Shift L'], ['Plan usage', ''], ['Backlog', 'Alt B'],
+  ['Backlog page', 'Alt Shift B'], ['Reminders', ''], ['Work board', ''], ['Agents page', ''], ['Factory view', ''],
+  ['Message all sessions', ''], [live, ''],
 ]
+// The phone shows no key hints on any row.
+const phone = rows => rows.map(([name]) => [name, ''])
 
 async function main() {
   const browser = await getBrowser({ local: true })
@@ -70,6 +82,8 @@ async function main() {
           return route.fulfill({ status: 404 })
         })
         await page.addInitScript(selected => {
+          // Key hints read Ctrl and Alt on every host, also on a Mac.
+          Object.defineProperty(Navigator.prototype, 'platform', { get: () => 'Linux x86_64' })
           localStorage.setItem('tmux-chat.prefs.synced', '1')
           localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ selected, theme: 'light', voiceOff: true, voiceSound: false }))
           // Test opening Live mode without starting capture on the test machine.
@@ -80,6 +94,10 @@ async function main() {
         const command = name => menu.getByRole('option').filter({
           has: page.locator('.command-label').filter({ hasText: new RegExp('^' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$') }),
         })
+        // [label, key hint] for each row. The phone link may open search without a Back step, so a no-pane list leaves Back out.
+        const rows = async () => (await menu.locator('.command-row').evaluateAll(list => list.map(row => [
+          row.querySelector('.command-label').textContent, row.querySelector('kbd')?.textContent ?? '',
+        ]))).filter(([name]) => workspace || name !== 'Back')
         const openSearch = async () => {
           await page.keyboard.press('Alt+Space')
           await search.waitFor()
@@ -97,14 +115,12 @@ async function main() {
         // The desktop button adds a Back step when it opens search. The phone link may open without activation.
         if (workspace) await command('Back').waitFor()
         assert.equal(await search.evaluate(input => input === document.activeElement), true)
-        const labels = await menu.locator('.command-row .command-label').allTextContents()
-        assert.deepEqual(workspace ? labels.slice(0, labels.indexOf('example')) : labels.filter(name => name !== 'Back'), workspace ? workspaceCommands : globalCommands)
+        const shown = await rows()
+        if (workspace) assert.deepEqual(shown.slice(0, shown.findIndex(([name]) => name === 'example')), workspaceCommands)
+        else assert.deepEqual(shown, width < 900 ? phone(globalCommands) : globalCommands)
         if (!workspace) {
           assert.equal(await menu.locator('.command-list').evaluate(list => list.scrollWidth <= list.clientWidth), true)
           if (shots) await page.screenshot({ path: path.join(shots, `global-commands-${width}.png`) })
-          assert.equal(await command('New session').locator('kbd').count(), width < 900 ? 0 : 1)
-          // The phone shows no key hints on any row.
-          if (width < 900) assert.equal(await menu.locator('.command-row kbd').count(), 0)
           for (const [name, target, close] of [
             ['Backlog', '.backlog-sheet:not(.backlog-page)[open]'],
             ['Backlog page', '.backlog-page[open]'],
@@ -140,8 +156,7 @@ async function main() {
           await page.getByRole('button', { name: 'Files', exact: true }).click()
           await page.locator(width < 900 ? '.phone-files' : '.screen-files').waitFor()
           await openSearch()
-          assert.equal(await command('New session').locator('kbd').count(), 0)
-          assert.equal(await command('Home').locator('kbd').count(), width < 900 ? 0 : 1)
+          assert.deepEqual(await rows(), width < 900 ? phone(filesCommands) : filesCommands)
           await search.fill('Home')
           await page.keyboard.press('Enter')
           await page.locator(width < 900 ? '.phone-home' : '.screen-home').waitFor()
