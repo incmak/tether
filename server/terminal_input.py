@@ -494,10 +494,9 @@ class MenuChanged(RuntimeError):
     pass
 
 
-def menu_refusal(entry, *, helper=False, check=False):
-    agent = entry['agent']
+def _agent_version(entry):
     version = entry.get('agent_version')
-    if agent == 'codex' and not version:
+    if entry['agent'] == 'codex' and not version:
         try:
             with open(entry['transcript'], 'rb') as stream:
                 first = json.loads(stream.readline(65536))
@@ -505,9 +504,17 @@ def menu_refusal(entry, *, helper=False, check=False):
                 version = first['payload'].get('cli_version')
         except (KeyError, AttributeError, OSError, TypeError, ValueError):
             pass
+    if isinstance(version, str) and re.fullmatch(r'v?\d+\.\d+\.\d+(?:[-+][\w.-]+)?', version):
+        return version
+    return None
+
+
+def menu_refusal(entry, *, helper=False, check=False):
+    agent = entry['agent']
+    version = _agent_version(entry)
     name, captured = {'claude': ('Claude Code', '2.1.316, 2.1.318, 2.1.329 and 2.1.330'),
                       'codex': ('Codex', '0.169.0 and 0.170.0')}.get(agent, (agent, ''))
-    if isinstance(version, str) and re.fullmatch(r'v?\d+\.\d+\.\d+(?:[-+][\w.-]+)?', version):
+    if version:
         detail = f' {name} {version} may have changed the screen.'
     elif captured:
         detail = f' A newer {name} version may have changed the screen. Tether knows version {captured}.'
@@ -1434,7 +1441,42 @@ def small_pane_reason(entry, run=subprocess.run):
     return SIZE_HELP
 
 
-def prompt_draft(entry, run=subprocess.run, *, _size_retry=True):
+# Codex 0.170's footer under its input (fixtures codex_0.170.0_restart/): an optional status block that starts with the
+# model ("GPT-6.2-Sol max · ~/project ·") and wraps anywhere (a long folder path fills whole rows), then one hint row
+# ("← for agents · ? for shortcuts", with an optional "⚠ 4 warnings · f2 to view"). Every row must fit: a phrase
+# somewhere in the rows is not enough (R8). Codex indents every footer row by exactly two spaces, wrapped rows too.
+CODEX_STATUS_START = re.compile(r'^[A-Za-z][\w.-]*\d[\w.-]*(?:\s+(?:minimal|low|medium|high|xhigh|extra high|max))?'
+                                r'(?:\s+(?:fast|ultrafast))?\s+·(?:\s|$)', re.I)
+CODEX_FOOTER_INDENT = re.compile(r'^  \S')
+CODEX_HINT = r'(?:\?\s+for\s+shortcuts|←\s+for\s+agents)'
+CODEX_HINT_ROW = re.compile(rf'^{CODEX_HINT}(?:\s+·\s+{CODEX_HINT})*(?:\s{{2,}}⚠\s+\d+\s+warnings?\s+·\s+f2\s+to\s+view)?$')
+
+
+def codex_input_box(lines, end):
+    """True when the Codex input ends at a blank line and only Codex's own footer follows: an optional status block
+    that starts with the model row, and the hint row last. Every row has Codex's two-space indent: any other row is an
+    unknown screen and refuses."""
+    if end >= len(lines) or lines[end].strip():
+        return False
+    rows = [line.rstrip() for line in lines[end + 1:] if line.strip()]
+    if not all(CODEX_FOOTER_INDENT.match(row) for row in rows):
+        return False
+    rest = [row.strip() for row in rows]
+    if not 0 < len(rest) <= 6 or not CODEX_HINT_ROW.match(rest[-1]):
+        return False
+    status = rest[:-1]
+    return not status or CODEX_STATUS_START.match(status[0]) is not None
+
+
+def _unverified_restart_prompt(entry):
+    name = {'claude': 'Claude', 'codex': 'Codex', 'antigravity': 'Antigravity'}[entry['agent']]
+    version = _agent_version(entry)
+    changed = f'{name} {version}' if version else f'{"An" if name[0] in "AEIOU" else "A"} {name} update'
+    return RuntimeError(f'Tether cannot verify the {name} input box, so it did not restart the tab. '
+                        f'Open the tab to check. {changed} may have changed its screen.')
+
+
+def prompt_draft(entry, run=subprocess.run, *, read_only=False, _size_retry=True):
     # One styled snapshot binds text and attributes to the same screen redraw.
     styled = capture(entry, run, styled=True)
     screen = ANSI_SGR.sub('', styled)
@@ -1450,6 +1492,8 @@ def prompt_draft(entry, run=subprocess.run, *, _size_retry=True):
             raise PaneTooSmall(SIZE_HELP)
         reason = small_pane_reason(entry, run)
         if reason:
+            if read_only:
+                raise PaneTooSmall(reason)
             # Tether owns agent window sizes (window_size.py); a small client may have shrunk this one.
             window_size.apply(run)
             time.sleep(.1)  # Let the agent redraw its input after SIGWINCH.
@@ -1458,12 +1502,15 @@ def prompt_draft(entry, run=subprocess.run, *, _size_retry=True):
         raise RuntimeError(f'Cannot find the {name} input box on screen. '
                            'Open the pane in Terminals to see what it shows.')
     start = prompts[-1]
-    if (not (entry['agent'] == 'claude' and claude_input_box(lines, start))
+    claude_box = entry['agent'] == 'claude' and claude_input_box(lines, start)
+    if (not claude_box
             and (re.match(r'\s*\d+[.)]\s', lines[start][1:]) and menu_question(lines[start:])
                  or re.match(r'^[>❯›]\s+\S', lines[start]) and INPUT_HINT.search(joined_lines(lines[start + 1:])))):
         # Codex marks the chosen row of a menu ("› 1. Review hooks") the same way as its input line.
         name = {'claude': 'Claude', 'codex': 'Codex', 'antigravity': 'Antigravity'}[entry['agent']]
         raise RuntimeError(f'{name} is asking you to pick an option. Answer it above, then send again.')
+    if read_only and entry['agent'] == 'claude' and not claude_box:
+        raise _unverified_restart_prompt(entry)
     draft = [lines[start][1:].strip()]
     end = start + 1
     for line in lines[end:]:
@@ -1472,8 +1519,15 @@ def prompt_draft(entry, run=subprocess.run, *, _size_retry=True):
         draft.append(line.strip())
         end += 1
     colour = 109 if entry['agent'] == 'antigravity' else None
-    if any(draft) and placeholder_text(styled, marker, start=start, end=end, colour=colour) is not None:
+    has_text = any(draft)
+    if read_only and entry['agent'] == 'codex' and not codex_input_box(lines, end):
+        raise _unverified_restart_prompt(entry)
+    if has_text and placeholder_text(styled, marker, start=start, end=end, colour=colour) is not None:
         return []
+    if read_only and entry['agent'] != 'claude':
+        if not has_text:
+            raise _unverified_restart_prompt(entry)
+        return draft
     # Older unstyled captures have no attributes. Retain only their exact known hints.
     if not ANSI_SGR.search(styled) and ((entry['agent'] == 'codex' and draft == ['Ask Codex to do anything'])
                                       or (entry['agent'] == 'claude' and draft == ['Press up to edit queued messages'])):
@@ -1647,14 +1701,15 @@ def stop_turn(entry, run=subprocess.run, sleep=time.sleep):
     return {'restored': ''}
 
 
-def empty_prompt(entry, run=subprocess.run):
-    close_agy_panel(entry, run)
+def empty_prompt(entry, run=subprocess.run, *, read_only=False):
+    if not read_only:
+        close_agy_panel(entry, run)
     try:
-        draft = prompt_draft(entry, run)
+        draft = prompt_draft(entry, run, read_only=read_only)
     except PaneTooSmall:
         raise
     except RuntimeError as exc:
-        if 'input box' not in str(exc) or not close_info_panel(entry, run):
+        if read_only or 'input box' not in str(exc) or not close_info_panel(entry, run):
             raise
         draft = prompt_draft(entry, run)
     if any(draft):

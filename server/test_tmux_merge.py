@@ -110,7 +110,8 @@ class FakeTmux:
     def format(self, fmt, session, window='', pane=''):
         fields = {'session_id': session, 'session_name': self.names.get(session, ''), 'window_id': window,
                   'pane_id': pane, 'pane_current_path': '/tmp', '@chat_name': self.pane_names.get(pane, ''),
-                  '@project': self.projects.get(session, ''), '@tether_breakout': self.markers.get(pane, '')}
+                  '@project': self.projects.get(session, ''), '@tether_breakout': self.markers.get(pane, ''),
+                  '@project_rev': ''}
         fields.update({'@groups': '', '@tether_role': ''})
         return '\t'.join(fields[field[2:-1]] for field in fmt.split('\t'))
 
@@ -680,6 +681,34 @@ class TmuxMergeTests(unittest.TestCase):
         tmux_merge.merge('pane', self.panes(self.a)[0], self.b, run=self.run_tmux)
         self.assertEqual((self.project(self.a), self.project(self.b)), (alpha, beta))
         self.assertEqual(self.archived(), [])
+
+    def test_move_reports_a_restart_when_the_agent_started_in_another_project(self):
+        alpha, beta = self.with_projects()
+        projects.set_name(beta, 'Beta work')
+        pane, other = self.panes(self.a)[:2]
+        self.tmux('set-option', '-p', '-t', pane, '@project_rev', f'{alpha}:0')
+        result = tmux_merge.merge('pane', pane, self.b, run=self.run_tmux)
+        self.assertEqual(result['restart']['project'], beta)
+        self.assertEqual(result['restart']['name'], 'Beta work')
+        self.assertEqual(result['restart']['session'], 'beta')
+        # Moving back home: the agent's project is right again.
+        self.assertNotIn('restart', tmux_merge.merge('pane', pane, self.a, run=self.run_tmux))
+        # A grouped start mark ("pid:rev+gpid:grev") counts by its session part.
+        self.tmux('set-option', '-p', '-t', other, '@project_rev', f'{alpha}:3+c3c3c3c3c3c3:1')
+        self.assertEqual(tmux_merge.merge('pane', other, self.b, run=self.run_tmux)['restart']['project'], beta)
+
+    def test_move_reports_no_restart_for_a_tab_that_did_not_start_through_tether(self):
+        self.with_projects()
+        pane = self.panes(self.a)[0]  # a shell: no @project_rev
+        self.assertNotIn('restart', tmux_merge.merge('pane', pane, self.b, run=self.run_tmux))
+
+    def test_break_out_reports_a_restart_without_making_a_project(self):
+        alpha, _ = self.with_projects()
+        pane = self.panes(self.a)[0]
+        self.tmux('set-option', '-p', '-t', pane, '@project_rev', f'{alpha}:0')
+        result = tmux_merge.merge('break', pane, None, run=self.run_tmux)
+        self.assertEqual(result['restart'], {'project': '', 'name': result['name'], 'session': result['name']})
+        self.assertEqual(self.project(result['session']), '')  # read only: the agent's next start makes it
 
     def test_move_pane_keeps_its_id(self):
         pane = self.panes(self.a)[0]
