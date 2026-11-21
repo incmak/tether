@@ -156,6 +156,9 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
         trace['prompt_tokens'] += usage.get('prompt_tokens') or 0
         if not message.get('tool_calls'):
             trace['reply'] = message.get('content') or ''
+            if (declined and declined.name == 'answer_approval' and not trace['actions']
+                    and friday.declined_claim(trace['reply'])):
+                trace['reply'] = friday.APPROVAL_DECLINED_REPLY  # the runtime replaces the claim
             return
         messages.append(message)
         replay_action_result = declined_reply = False

@@ -553,6 +553,12 @@ def false_success(text):
             and not re.search(r'\bnot\b|n[’\']t|\?', text, re.I))
 
 
+def declined_claim(text):
+    """True when a reply after "no" to the approval question claims a decision Friday did not make."""
+    return (bool(re.search(r'\b(?:approv|den(?:y|ie|ial)|reject|allow|accept|declin|sent|done|handled)\w*', text, re.I))
+            and not re.search(r'\b(?:not|never|nothing)\b|n[’\']t\b', text, re.I))
+
+
 def has_plain(text):
     return any((char.isascii() and char.isdigit()) or (char.isalpha() and unicodedata.name(char, '').startswith(
         ('LATIN ', 'FULLWIDTH LATIN '))) for char in text)
@@ -594,6 +600,11 @@ def plain_yes(text):
     # "Yes, send it to docs" gets a fresh "Yes or no?" (fail-safe).
     words = f' {norm(text)} '.replace(' thank you ', ' thanks ')
     words = words.split()
+    # "Ahead" consents only in "go ahead"; "correct that" asks for a change, it does not confirm.
+    if any(word == 'ahead' and words[i - 1:i] != ['go'] for i, word in enumerate(words)):
+        return False
+    if any(word == 'correct' and words[i + 1:i + 2] in (['that'], ['this']) for i, word in enumerate(words)):
+        return False
     allowed = YES_WORDS | YES_FILLER
     return any(word in YES_WORDS for word in words) and all(word in allowed for word in words)
 
@@ -632,14 +643,14 @@ def confirms(proposal, text):
     if APPROVAL_NEGATION.search(text):
         return False
     words = re.sub(r'\bdon t\b', "don't", norm(text.replace('\u2019', "'"))).split()
-    # "Don't!" to "Should I deny docs?" withdraws the denial; "Send it" answers a send, not an approval.
-    if "don't" in words or 'send' in words:
+    # "Don't!", "Stop!" or "No, stop!" to "Should I deny docs?" can withdraw the denial: only a word
+    # without a no in it confirms. "Send it" answers a send, not an approval.
+    if set(words) & {"don't", 'no', 'nope', 'stop', 'send'}:
         return False
     if plain_yes(text):
         return True
-    # No or nope with only filler declines either question. An explicit "deny" can confirm a denial.
-    words = set(norm(text).split()) - APPROVAL_FILLER
-    return bool(words - {'no', 'nope'}) and approval_answer(text) == proposal.payload
+    # An explicit "deny" or "reject" can confirm a denial.
+    return approval_answer(text) == proposal.payload
 
 
 def declines(proposal, text):
@@ -799,8 +810,10 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
         if (live and pending.name == name and pending.follows(previous_assistant)
                 and declines(pending, last_user_text)
                 # "No, deny it" to the approve question asks for the other decision; it gets its own question.
+                # Only a question follows, never a decision; a bare "No" or "Stop" still decides nothing.
                 and not (decision in APPROVAL_READBACK_START and decision != pending.payload
-                         and confirms(replace(pending, payload=decision), last_user_text))):
+                         and approval_answer(last_user_text) == decision
+                         and set(norm(last_user_text).split()) - APPROVAL_FILLER - {'no', 'nope', 'stop'})):
             return APPROVAL_DECLINED
         bound = (live and pending.name == name and pending.heard and pending.follows(previous_assistant)
                  and str(args.get('chat') or '').strip() == pending.chat.strip()
@@ -2232,12 +2245,14 @@ def runtime_types():
                         else:
                             await self.release_text(response, held)  # only punctuation or space: say it as before
                     if response.text and response.buffered_text is not None:
-                        if (not run.succeeded_action
-                                and false_success(''.join(frame.text for frame in response.buffered_text))):
+                        spoken = ''.join(frame.text for frame in response.buffered_text)
+                        declined_approval = run.declined and run.proposal.name == 'answer_approval'
+                        if declined_approval and not run.succeeded_action and declined_claim(spoken):
+                            print('Friday corrected a decision claim after no', file=sys.stderr, flush=True)
+                            await self.push_frame(TTSSpeakFrame(APPROVAL_DECLINED_REPLY))
+                        elif run.failed_action and not run.succeeded_action and false_success(spoken):
                             print('Friday corrected false success', file=sys.stderr, flush=True)
-                            declined_approval = run.declined and run.proposal.name == 'answer_approval'
-                            await self.push_frame(TTSSpeakFrame(
-                                APPROVAL_DECLINED_REPLY if declined_approval else 'That did not go through.'))
+                            await self.push_frame(TTSSpeakFrame('That did not go through.'))
                         else:
                             for frame in response.buffered_text:
                                 await super().push_frame(frame)

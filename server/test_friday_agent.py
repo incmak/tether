@@ -657,6 +657,21 @@ class FridayRulesTests(unittest.TestCase):
                     self.assertIsNone(friday.check_tool(proposal.name, args, 'speech', answer, set(),
                                                        previous, proposal, 1))
 
+    def test_correct_that_and_bare_ahead_are_not_a_yes(self):
+        # B489 review 2: "Just correct that" asks for a change; "Ahead." alone is not "go ahead".
+        for answer in ('Just correct that', 'Correct this', 'Ahead.', 'Ahead, please'):
+            with self.subTest(answer=answer):
+                self.assertFalse(friday.plain_yes(answer))
+        for answer in ('Go ahead', "That's correct", 'Correct', 'Correct, send it'):
+            with self.subTest(answer=answer):
+                self.assertTrue(friday.plain_yes(answer))
+        for name, key, payload in (('send_to_chat', 'prompt', 'Check the logs'), ('backlog_send', 'item', 'B12')):
+            proposal = friday.SendProposal(name, 'docs', payload, 0, heard=True)
+            with self.subTest(name=name):
+                self.assertEqual(friday.check_tool(name, {'chat': 'docs', key: payload}, 'speech', 'Just correct that',
+                                                   set(), friday.send_readback(proposal), proposal, 1),
+                                 friday.READBACK_REQUIRED)
+
     def test_approval_dispatches_the_chat_the_user_heard(self):
         # B489 review: casefold("Straße") == "strasse", and the browser resolves names by its own rules.
         for heard, said in (('Straße', 'STRASSE'), ('None', None), ('Docs', 'docs')):
@@ -680,7 +695,10 @@ class FridayRulesTests(unittest.TestCase):
     def test_send_and_dont_words_never_answer_an_approval(self):
         # B489 review: "Send it" is a send answer; "Don't!" to "Should I deny docs?" withdraws the denial.
         for payload, answer in (('approve', 'Send it'), ('approve', 'Yes, send it'), ('deny', "Don't!"),
-                                ('deny', 'Don\u2019t'), ('approve', "Don't")):
+                                ('deny', 'Don\u2019t'), ('approve', "Don't"),
+                                # Review 2: a no or stop can withdraw the denial; "ahead" only in "go ahead".
+                                ('deny', 'No, stop!'), ('deny', 'Stop'), ('deny', 'Nope, deny'),
+                                ('approve', 'Ahead.')):
             proposal = friday.SendProposal('answer_approval', 'docs', payload, 0, heard=True)
             previous = friday.send_readback(proposal)
             with self.subTest(payload=payload, answer=answer):
@@ -757,7 +775,7 @@ class FridayRulesTests(unittest.TestCase):
                     reason = friday.check_tool(proposal.name, {'chat': 'docs', 'decision': decision},
                         'speech', word.upper() + '!', set(), friday.send_readback(proposal), proposal, 1)
                     # "Don't!" to "Should I deny docs?" can mean "don't deny it": it decides nothing.
-                    expected = friday.APPROVAL_DECLINED if word in ('no', 'nope', "don't") else None
+                    expected = friday.APPROVAL_DECLINED if word in ('no', 'nope', 'stop', "don't") else None
                     self.assertEqual(reason, expected)
 
     def test_approval_requires_a_whole_consent_answer(self):
@@ -2828,7 +2846,8 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         history = [{'role': 'user', 'content': 'Approve docs'},
                    {'role': 'assistant', 'content': friday.send_readback(proposal)},
                    {'role': 'user', 'content': 'No'}]
-        for reply in (['Denied.'], ['Okay, I have ', 'denied it.']):
+        for reply in (['Denied.'], ['Okay, I have ', 'denied it.'], ['Denied. Anything else?'],
+                      ['I rejected the request.']):
             with self.subTest(reply=reply), patch('sys.stderr'):
                 _, frames = await self.tool_flow(history, [(reply, 1, [])], proposal)
                 self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], [])

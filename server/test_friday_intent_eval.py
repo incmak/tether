@@ -342,6 +342,12 @@ class IntentEvalTests(unittest.TestCase):
                 self.assertIsNone(trace['proposal'])  # "No" ends the question; Friday does not ask again.
                 self.assertEqual(trace['reply'], evaluation.friday.APPROVAL_DECLINED_REPLY)
                 self.assertEqual(len(payloads), 1)  # the fixed reply; the model does not run again
+                # B489 review 2: a decision claim without a call is replaced, as in the runtime.
+                for claim in ('Denied.', 'I rejected the request. Anything else?'):
+                    trace, = self.run_script(example, assistant(claim))[0]['samples']
+                    self.assertEqual(trace['reply'], evaluation.friday.APPROVAL_DECLINED_REPLY)
+                trace, = self.run_script(example, assistant('Okay, it still waits.'))[0]['samples']
+                self.assertEqual(trace['reply'], 'Okay, it still waits.')
                 # B489 review: later calls in the same batch still run, as in the runtime.
                 batch = assistant(tool_calls=[call('answer_approval', chat=chat, decision='deny'),
                                               call('send_to_chat', chat='Other', prompt='Check the logs')])
