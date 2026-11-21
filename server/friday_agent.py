@@ -566,7 +566,10 @@ def declined_claim(text):
     # A claim has a claim shape: a sentence that opens with the decision ("Denied because it was not
     # safe.", "Okay, denied.") or a subject that did it ("I have denied it", "It's rejected").
     # "It wants the installation approved" describes the request and is kept.
-    return bool(DECISION_CLAIM.search(text.replace('\u2019', "'")))
+    # "It asks whether the request was approved" reports a question, not a decision.
+    text = text.replace('\u2019', "'")
+    return any(not re.search(r'\b(?:whether|if)\s+$', text[:match.start()].lower())
+               for match in DECISION_CLAIM.finditer(text))
 
 
 def has_plain(text):
@@ -602,19 +605,23 @@ YES_FILLER = frozenset('do it that this go right now thanks thank sounds good gr
                        'uh um and just so then all s to the chat session tab please'.split())  # "you" only in "thank you"
 
 
+CORRECTION_OBJECTS = frozenset('it that this these those them the a an my its his her their to me'.split())
+QUESTION_MARK = re.compile(r'[?\uff1f\u00bf\u2e2e]')  # "?", full-width "？", "¿", "⸮": each asks
+
+
 def plain_yes(text):
-    if '?' in text:
+    if QUESTION_MARK.search(text):
         return False  # "That's correct?" asks; it does not consent.
     # "You sure" (STT drops the "?") asks too; "you" is a yes word only in "thank you".
     # A chat title is free text ("Hold Off", "Tomorrow"): it never stands in for words of a yes, so
     # "Yes, send it to docs" gets a fresh "Yes or no?" (fail-safe).
     words = f' {norm(text)} '.replace(' thank you ', ' thanks ')
     words = words.split()
-    # "Ahead" consents only in "go ahead". "Correct" consents only as an answer ("That's correct",
-    # "Correct, send it"); with an object ("correct it", "correct the chat") it asks for a change.
-    if any(word == 'ahead' and words[i - 1:i] != ['go'] for i, word in enumerate(words)):
+    # "Ahead" consents only after "go" ("Go ahead", "Go right ahead"). "Correct" consents as an answer
+    # ("That's correct, go ahead"); with an object ("correct it", "correct the chat") it asks for a change.
+    if any(word == 'ahead' and 'go' not in words[max(0, i - 2):i] for i, word in enumerate(words)):
         return False
-    if any(word == 'correct' and words[i + 1:i + 2] and words[i + 1] not in YES_WORDS
+    if any(word == 'correct' and words[i + 1:i + 2] and words[i + 1] in CORRECTION_OBJECTS
            for i, word in enumerate(words)):
         return False
     allowed = YES_WORDS | YES_FILLER
@@ -633,7 +640,7 @@ def approval_answer(text):
     such as "Hold off" or "A minute" could hide words that withdraw or delay the decision. "Yes, approve
     docs." is refused, and Friday asks again (fail-safe).
     """
-    if '?' in text:
+    if QUESTION_MARK.search(text):
         return None
     words = re.sub(r'\bdon t\b', "don't", norm(text.replace('\u2019', "'")))
     if "don't" in words.split():
@@ -665,7 +672,7 @@ APPROVAL_NO_WORDS = frozenset({'no', 'nope', 'stop', "don't"})
 def confirms(proposal, text):
     if proposal.name != 'answer_approval':
         return plain_yes(text)
-    if '?' in text or APPROVAL_NEGATION.search(text) or proposal.payload not in APPROVAL_CONFIRM_WORDS:
+    if QUESTION_MARK.search(text) or APPROVAL_NEGATION.search(text) or proposal.payload not in APPROVAL_CONFIRM_WORDS:
         return False
     words = re.sub(r'\bgo ahead\b', 'yes', ' '.join(answer_words(text))).split()
     allowed = APPROVAL_CONFIRM_WORDS[proposal.payload]
@@ -681,7 +688,7 @@ def declines(proposal, text):
 def bare_decline(proposal, text):
     """A whole "No", "Nope, thanks" or "Don't" to the approval question: Friday answers without the model."""
     words = answer_words(text)
-    return (proposal.name == 'answer_approval' and '?' not in text and bool(set(words) & APPROVAL_NO_WORDS)
+    return (proposal.name == 'answer_approval' and not QUESTION_MARK.search(text) and bool(set(words) & APPROVAL_NO_WORDS)
             and all(word in APPROVAL_NO_WORDS | APPROVAL_FILLER for word in words))
 
 
