@@ -153,6 +153,7 @@ sys.exit(main(sys.argv[2:]))
             'project': None, 'mode': 'observe', 'verdict': 'would_block', 'reason': 'no-line',
             'count': 1, 'folder': str(self.repo), 'head': None,
             'tree': self.git('rev-parse', 'HEAD^{tree}').stdout.strip(),
+            'author_date': self.git('log', '-1', '--date=raw', '--format=%ad').stdout.strip(),
             'messages': [digest],
         })
         self.assertNotIn('private test message', self.log.read_text())
@@ -787,8 +788,11 @@ time.sleep(20)
         (self.repo / 'file').write_text('amend only this file\n')
         (self.repo / 'other').write_text('keep this file staged\n')
         self.git('add', 'other')
-        for args in ('--amend --only -m amended -- file', '--allow-empty -m empty', '--amend --allow-empty -m new'):
+        cases = ('--amend --only -m amended -- file', '--allow-empty -m empty', '--amend --allow-empty -m new',
+                 '--amend --no-edit --allow-empty')
+        for day, args in enumerate(cases, start=1):
             with self.subTest(args=args):
+                self.env['GIT_COMMITTER_DATE'] = f'2001-01-0{day}T00:00:00+00:00'
                 if args.startswith('--allow-empty'):
                     self.git('restore', '--staged', 'other')
                 command = f'git commit {args}'
@@ -803,6 +807,202 @@ time.sleep(20)
                                  ('commit-msg', head, self.git('rev-parse', 'HEAD^{tree}').stdout.strip()))
                 self.assertEqual((landed['event'], landed['count']), ('landed', 1))
                 self.assertEqual(self.git('ls-tree', '--name-only', 'HEAD').stdout.strip(), 'file')
+
+    def assert_hook_silent(self, command, verdict='would_block'):
+        self.pre(command, 'PostToolUse')
+        fallback, = [row for row in self.rows() if row.get('reason') == 'hook-silent']
+        self.assertEqual((fallback['commit'], fallback['verdict']),
+                         (self.git('rev-parse', 'HEAD').stdout.strip(), verdict))
+
+    def test_claude_logs_a_silent_author_date_only_amend(self):
+        self.install()
+        self.write_file('tracked content')
+        self.env.update(GIT_AUTHOR_DATE='2001-01-01T00:00:00+05:30',
+                        GIT_COMMITTER_DATE='2001-01-01T00:00:00+00:00')
+        command = 'git commit --allow-empty -m same'
+        self.pre(command)
+        self.assertEqual(self.rows(), [])
+        self.commit('-m', 'same')
+        self.git('commit', '--amend', '--no-edit', '--no-verify', '--date=2001-01-02T00:00:00+05:30')
+        self.assert_hook_silent(command)
+
+    def test_claude_logs_a_silent_no_edit_amend_after_the_hook_time(self):
+        self.install()
+        self.write_file('tracked content')
+        command = 'git commit --allow-empty -m same'
+        self.pre(command)
+        self.assertEqual(self.rows(), [])
+        self.commit('-m', 'same')
+        check, = self.rows()
+        self.env['GIT_COMMITTER_DATE'] = f'@{int(check["at"]) + 2} +0000'
+        self.git('commit', '--amend', '--no-edit', '--no-verify')
+        self.assert_hook_silent(command)
+
+    def test_claude_logs_a_silent_commit_after_a_failed_signed_commit(self):
+        self.commit('-m', 'base')
+        self.install()
+        self.env.update(GIT_AUTHOR_DATE='2001-01-01T00:00:00+00:00',
+                        GIT_COMMITTER_DATE='2001-01-01T00:00:00+00:00')
+        self.git('config', 'gpg.program', 'false')
+        command = 'git commit -S --allow-empty -m same'
+        self.pre(command)
+        self.assertEqual(self.rows(), [])
+        head = self.git('rev-parse', 'HEAD').stdout
+        failed = self.git('commit', '-S', '--allow-empty', '-m', 'same', check=False)
+        self.assertIn('failed to sign', failed.stderr)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(self.git('rev-parse', 'HEAD').stdout, head)
+        check, = self.rows()
+        self.assertEqual(check['via'], 'commit-msg')
+        self.env['GIT_AUTHOR_DATE'] = '2001-01-02T00:00:00+00:00'
+        self.commit('--no-verify', '-m', 'same')
+        self.assert_hook_silent(command)
+
+    def test_claude_logs_a_silent_no_edit_retry_after_a_failed_amend(self):
+        self.env['GIT_COMMITTER_DATE'] = '2001-01-01T00:00:00+00:00'
+        self.write_file('tracked content')
+        self.commit('-m', 'same')
+        self.install()
+        self.git('config', 'gpg.program', 'false')
+        command = 'git commit -S --amend --no-edit'
+        self.pre(command)
+        self.assertEqual(self.rows(), [])
+        head = self.git('rev-parse', 'HEAD').stdout
+        failed = self.git('commit', '-S', '--amend', '--no-edit', check=False)
+        self.assertIn('failed to sign', failed.stderr)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(self.git('rev-parse', 'HEAD').stdout, head)
+        check, = self.rows()
+        self.assertEqual(check['via'], 'commit-msg')
+        self.env['GIT_COMMITTER_DATE'] = f'@{int(check["at"]) + 2} +0000'
+        self.git('commit', '--amend', '--no-edit', '--no-verify')
+        self.assert_hook_silent(command)
+
+    def test_claude_does_not_claim_an_old_row_without_an_author_date(self):
+        self.install()
+        command = 'git commit --allow-empty -m same'
+        self.pre(command)
+        self.assertEqual(self.rows(), [])
+        self.commit('-m', 'same')
+        check, = self.rows()
+        check.pop('author_date', None)
+        self.log.write_text(json.dumps(check) + '\n')
+        self.assert_hook_silent(command)
+
+    def prepare_merge(self):
+        self.commit('-m', 'base')
+        self.git('checkout', '-qb', 'side')
+        self.write_file('side')
+        self.commit('-m', 'side')
+        self.git('checkout', '-q', 'main')
+        self.install()
+
+    def test_claude_covers_a_direct_merge_and_excludes_it_from_unstamped_stats(self):
+        self.prepare_merge()
+        command = 'git commit --no-edit'
+        # A deferred call can see a merge made in the same worktree.
+        self.pre(command)
+        self.assertEqual(self.rows(), [])
+        env = {name: value for name, value in self.env.items() if not name.startswith('GIT_AUTHOR_')}
+        self.git('config', 'user.name', 'Tester')
+        self.git('config', 'user.email', 'test@example.com')
+        with mock.patch.object(self, 'env', env):
+            self.git('merge', '--no-ff', '-m', 'merge side', 'side')
+        self.pre(command, 'PostToolUse')
+        check, landed = self.rows()
+        self.assertEqual((check['via'], check['verdict'], check['reason']), ('commit-msg', 'skip', 'merge'))
+        self.assertNotIn('author_date', check)
+        self.assertEqual((landed['event'], landed['count']), ('landed', 1))
+        with mock.patch.object(paths, 'COMMIT_GATE_LOG', self.log), mock.patch.object(paths, 'CACHE', self.cache):
+            stats = commit_gate.stats()
+        self.assertEqual((stats['commits'], stats['would_block'], stats['unstamped']), (0, 0, 0))
+
+    def test_claude_covers_a_commit_on_a_pending_merge(self):
+        self.prepare_merge()
+        self.git('merge', '--no-ff', '--no-commit', 'side')
+        command = 'git commit --no-edit'
+        self.pre(command)
+        self.assertEqual(self.rows(), [])
+        self.git('commit', '--no-edit')
+        self.pre(command, 'PostToolUse')
+        check, landed = self.rows()
+        self.assertEqual((check['via'], check['verdict'], check['reason']), ('commit-msg', 'skip', 'merge'))
+        self.assertEqual(check['author_date'], self.git('log', '-1', '--date=raw', '--format=%ad').stdout.strip())
+        self.assertEqual((landed['event'], landed['count']), ('landed', 1))
+
+    def test_claude_covers_conflicted_cherry_pick_and_revert_continuations(self):
+        self.write_file('base')
+        self.commit('-m', 'base')
+        self.git('checkout', '-qb', 'side')
+        self.write_file('side')
+        self.commit('-m', 'side')
+        self.git('checkout', '-q', 'main')
+        self.write_file('main')
+        self.commit('-m', 'main')
+        self.git('branch', 'revert-start')
+        self.install()
+        self.env['GIT_EDITOR'] = 'true'
+        for action, target in (('cherry-pick', 'side'), ('revert', 'HEAD^')):
+            with self.subTest(action=action):
+                if action == 'revert':
+                    self.git('checkout', '-q', 'revert-start')
+                failed = self.git(action, target, check=False)
+                self.assertNotEqual(failed.returncode, 0)
+                self.assertIn('CONFLICT', failed.stdout)
+                self.write_file('resolution')
+                command = 'git commit --no-edit'
+                before = len(self.rows())
+                self.pre(command, tool=action)
+                self.assertEqual(len(self.rows()), before)
+                self.git(action, '--continue')
+                self.pre(command, 'PostToolUse', tool=action)
+                check, landed = self.rows()[before:]
+                self.assertEqual((check['via'], check['verdict'], check['reason']), ('commit-msg', 'skip', 'replay'))
+                self.assertEqual((landed['event'], landed['count']), ('landed', 1))
+
+    def test_claude_covers_an_amend_at_a_rebase_edit_stop(self):
+        self.commit('-m', 'base')
+        self.write_file('edit')
+        self.commit('-m', 'edit')
+        self.install()
+        self.env['GIT_SEQUENCE_EDITOR'] = self.script(
+            self.root / 'sequence-editor', 'sed "1s/^pick/edit/" "$1" > "$1.new" && mv "$1.new" "$1"')
+        self.git('rebase', '-i', 'HEAD^')
+        head = self.git('rev-parse', 'HEAD').stdout.strip()
+        command = 'git commit --amend -m amended'
+        self.pre(command)
+        self.assertEqual(self.rows(), [])
+        self.git('commit', '--amend', '-m', 'amended')
+        self.pre(command, 'PostToolUse')
+        check, landed = self.rows()
+        self.assertEqual((check['via'], check['verdict'], check['reason'], check['head']),
+                         ('commit-msg', 'skip', 'replay', head))
+        self.assertNotEqual(check['head'], self.git('rev-parse', 'HEAD^').stdout.strip())
+        self.assertEqual((landed['event'], landed['count']), ('landed', 1))
+
+    def test_claude_logs_a_silent_merge_as_skip(self):
+        self.prepare_merge()
+        command = 'git commit --no-edit'
+        self.pre(command)
+        self.assertEqual(self.rows(), [])
+        self.git('merge', '--no-ff', '--no-verify', '-m', 'merge side', 'side')
+        self.assertEqual(self.rows(), [])
+        self.assert_hook_silent(command, 'skip')
+
+    def test_claude_does_not_claim_a_merge_skip_row_for_a_different_message(self):
+        self.prepare_merge()
+        self.git('merge', '--no-ff', '--no-commit', 'side')
+        self.env['GIT_COMMITTER_DATE'] = '2001-01-01T00:00:00+00:00'
+        command = 'git commit --no-edit'
+        self.pre(command)
+        self.assertEqual(self.rows(), [])
+        self.git('commit', '--no-edit')
+        check, = self.rows()
+        self.assertTrue(check.get('messages'))
+        self.git('commit', '--amend', '--no-verify', '-m', 'different message')
+        self.assertEqual(check['tree'], self.git('rev-parse', 'HEAD^{tree}').stdout.strip())
+        self.assertEqual(check['head'], self.git('rev-parse', 'HEAD^').stdout.strip())
+        self.assert_hook_silent(command, 'skip')
 
     def test_claude_logs_a_silent_message_only_amend(self):
         self.install()

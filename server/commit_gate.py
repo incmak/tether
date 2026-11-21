@@ -14,8 +14,9 @@ The person sets the mode in Settings. Nothing else changes it.
 
 The installed Git commit-msg hook checks the final message file for Claude, Codex and terminal commits.
 It logs one verdict and skips merges, replays that invoke the hook, and fixup, squash and amend! commits.
-Ordinary amendments are checked. Claude's PreToolUse check can defer to the installed hook. PostToolUse matches
-each hook row to one landed commit by worktree, tree, parent and a message HMAC. It checks uncovered commits.
+The hook checks ordinary amendments. Claude's PreToolUse check can defer to the hook.
+PostToolUse matches each hook row to one landed commit by worktree, tree, parent, message HMAC and dates.
+A merge skip row can lack the author date. PostToolUse checks uncovered commits and skips merges.
 
 Otherwise claude_hooks.py calls hook() for Bash commit commands and their PostToolUse results.
 The gate reads the command, never the screen. It denies only when it read the whole message from the command, that
@@ -1022,20 +1023,24 @@ class _LandedCommit(NamedTuple):
     oid: str
     tree: str
     parent: str | None
+    parents: int
+    author_date: str
+    committed: int
     status: str
     body: str | None
 
 
 def _landed(folder, head):
     """Commits made since `head`, newest first. [] when none landed, None when Git cannot tell."""
-    shown = _git(folder, 'log', '--first-parent', '-n', '20', '-z', '--format=%H%x00%T%x00%P%x00%B',
+    shown = _git(folder, 'log', '--first-parent', '-n', '20', '-z', '--date=raw',
+                 '--format=%H%x00%T%x00%P%x00%ad%x00%ct%x00%B',
                  f'{head}..HEAD' if head else 'HEAD', text=False)
     if shown is None or shown.returncode != 0:
         return [] if head == '' else None
     fields = shown.stdout.split(b'\0')[:-1]
     commits = []
-    for index in range(0, len(fields), 4):
-        oid, tree, parents, raw = fields[index:index + 4]
+    for index in range(0, len(fields), 6):
+        oid, tree, parents, author_date, committed, raw = fields[index:index + 6]
         try:
             body = raw.decode('utf-8')
         except UnicodeDecodeError:
@@ -1043,7 +1048,8 @@ def _landed(folder, head):
         else:
             status = stamp.message_status(body.replace('\r\n', '\n').replace('\r', '\n'))
         parent = parents.partition(b' ')[0].decode('ascii') or None
-        commits.append(_LandedCommit(oid.decode('ascii'), tree.decode('ascii'), parent, status, body))
+        commits.append(_LandedCommit(oid.decode('ascii'), tree.decode('ascii'), parent, len(parents.split()),
+                                     author_date.decode('ascii'), int(committed), status, body))
     return commits
 
 
@@ -1322,16 +1328,22 @@ def _claim_covering_rows(waiting, commits, worktree, rows, key, claims):
     trees = {commit.tree for commit in commits}
     rows_by_tree = {}
     for row in rows:
-        if row.get('via') != 'commit-msg' or row.get('verdict') == 'block' or not since <= row['at'] < math.inf:
+        at = row.get('at')
+        if (row.get('via') != 'commit-msg' or row.get('verdict') == 'block'
+                or type(at) not in (float, int) or not since <= at <= sys.float_info.max):
             continue
         tree, folder, messages = row.get('tree'), row.get('folder'), row.get('messages')
         if not isinstance(tree, str) or tree not in trees or not isinstance(folder, str):
             continue
         if not isinstance(messages, list) or not messages or 'head' not in row or os.path.realpath(folder) != worktree:
             continue
+        merge = row.get('verdict') == 'skip' and row.get('reason') == 'merge'
+        author_date = row.get('author_date')
+        if not isinstance(author_date, str) and ('author_date' in row or not merge):
+            continue
         head = row['head']
         if head is None or (isinstance(head, str) and GIT_OID.fullmatch(head)):
-            rows_by_tree.setdefault(tree, []).append((row['at'], f"{row['at']}:{folder}", head, messages))
+            rows_by_tree.setdefault(tree, []).append((at, f'{at}:{folder}', head, messages, author_date, merge))
     for candidates in rows_by_tree.values():
         candidates.sort(key=lambda row: row[0])
 
@@ -1343,7 +1355,10 @@ def _claim_covering_rows(waiting, commits, worktree, rows, key, claims):
             continue
         digest = _message_digest(key, _normalize_message(commit.body.split('\n')))
         match = None
-        for _, row_key, head, messages in candidates:
+        for at, row_key, head, messages, author_date, merge in candidates:
+            if (merge != (commit.parents >= 2) or commit.committed > at + LOG_TIME_TOLERANCE
+                    or (author_date is not None and author_date != commit.author_date)):
+                continue
             claimed = claims.get(row_key)
             if claimed not in (None, commit.oid) or digest not in messages:
                 continue
@@ -1382,7 +1397,8 @@ def _log_deferred_checks(commits, waiting, session, tool, now):
     for commit in uncovered:
         if commit.oid in logged:
             continue
-        verdict = {'missing': 'would_block', 'unknown': 'unknown'}.get(commit.status, 'pass')
+        verdict = ('skip' if commit.parents >= 2
+                   else {'missing': 'would_block', 'unknown': 'unknown'}.get(commit.status, 'pass'))
         _log({'at': round(now, 3), 'event': 'check', 'via': 'landed', 'id': tool, 'session': session,
               'project': waiting.get('project'), 'mode': waiting['mode'], 'folder': worktree,
               'commit': commit.oid, 'reason': 'hook-silent', 'count': 1,
@@ -1528,22 +1544,30 @@ def _final_verdict(path, cwd):
     git_dir = _git_path(cwd, '--git-dir')
     if git_dir is None:
         raise GateError(400, 'Git could not find the repository for the commit message.')
+    skip = None
     if (git_dir / 'MERGE_HEAD').exists():
-        return 'skip', 'merge', ()
-    if any((git_dir / name).exists() for name in ('CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply')):
-        return 'skip', 'replay', ()
-    with open(Path(cwd) / path, 'rb', opener=lambda path, flags: os.open(path, flags | os.O_NONBLOCK)) as stream:
-        if not stat_module.S_ISREG(os.fstat(stream.fileno()).st_mode):
-            raise ValueError('Git commit message is not a regular file')
-        message = stream.read(HOOK_MESSAGE_BYTES + 1)
+        skip = ('skip', 'merge')
+    elif any((git_dir / name).exists() for name in ('CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply')):
+        skip = ('skip', 'replay')
+    try:
+        with open(Path(cwd) / path, 'rb', opener=lambda path, flags: os.open(path, flags | os.O_NONBLOCK)) as stream:
+            if not stat_module.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError('Git commit message is not a regular file')
+            message = stream.read(HOOK_MESSAGE_BYTES + 1)
+    except (OSError, ValueError):
+        if skip:
+            return *skip, ()
+        raise
     if len(message) > HOOK_MESSAGE_BYTES:
-        return 'unknown', 'size', ()
+        return *(skip or ('unknown', 'size')), ()
     try:
         lines = message.decode('utf-8').split('\n')
     except UnicodeDecodeError:
-        return 'unknown', 'encoding', ()
+        return *(skip or ('unknown', 'encoding')), ()
     config = _git(cwd, 'config', '--null', '--get-regexp', r'^core\.comment(char|string)$', text=False)
     if config is None or config.returncode not in (0, 1):
+        if skip:
+            return *skip, ()
         raise GateError(400, 'Git could not read the commit comment configuration.')
     comments = {item.partition(b'\n')[2].decode('utf-8', errors='replace')
                 for item in config.stdout.split(b'\0') if item}
@@ -1561,6 +1585,8 @@ def _final_verdict(path, cwd):
             truncated = lines[:cuts[char]]
             readings.extend((truncated, [line for line in truncated if not line.startswith(char)]))
 
+    if skip:
+        return *skip, readings
     verdict = _message_verdict(lines)
     # Git reads cleanup and comment settings before prepare-commit-msg can change them. Use a verdict only
     # when every reading agrees. An unknown verdict never counts as stamped or unstamped.
@@ -1610,6 +1636,8 @@ def commit_msg(path, env=os.environ, cwd=None, now=None):
         source, session = _source_session(ancestors, env)
         record.update(source=source, session=session)
         record.update(_hook_identity(cwd))
+        if author_date := re.fullmatch(r'@(\d+ [+-]\d{4})', env.get('GIT_AUTHOR_DATE', '')):
+            record['author_date'] = author_date[1]
         verdict, reason, readings = _final_verdict(path, cwd)
         if 'tree' in record and readings and (key := _message_key(create=True)) is not None:
             normalized = {_normalize_message(reading) for reading in readings}
