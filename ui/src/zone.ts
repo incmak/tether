@@ -3,21 +3,27 @@ import { useSyncExternalStore } from 'react'
 export const DEFAULT_ZONE = 'Asia/Kolkata'
 let current = DEFAULT_ZONE
 const listeners = new Set<() => void>()
-const formatters = new Map<string, Intl.DateTimeFormat>()
+const formatters = new Map<string, Intl.DateTimeFormat | null>()
 
 function formatter(zone: string, options: Intl.DateTimeFormatOptions, locale?: string) {
   const key = JSON.stringify([zone, locale, Object.entries(options).filter(([, value]) => value !== undefined).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)])
   let cached = formatters.get(key)
-  if (!cached) {
-    cached = new Intl.DateTimeFormat(locale, { ...options, timeZone: zone })
+  if (cached === undefined) {
+    try {
+      cached = new Intl.DateTimeFormat(locale, { ...options, timeZone: zone })
+    } catch (error) {
+      if (!(error instanceof RangeError)) throw error
+      cached = null
+    }
     formatters.set(key, cached)
   }
   return cached
 }
 
 export const tetherZone = () => current
-export function setTetherZone(name: string) {
-  if (!name || name === current || !acceptsZone(name)) return
+/** confirmed: the server answered with this zone; an old name applies when its renamed copy formats. */
+export function setTetherZone(name: string, confirmed = false) {
+  if (!name || name === current || !(confirmed ? canFormat(name) : acceptsZone(name))) return
   current = name
   for (const listener of listeners) listener()
 }
@@ -39,8 +45,11 @@ const RENAMED: Record<string, string> = {
 }
 
 function acceptsZone(name: string) {
-  try { formatter(name, {}, 'en'); return true } catch { return false }
+  return formatter(name, {}, 'en') !== null
 }
+
+/** This browser can show times in the zone, itself or by its renamed copy. */
+export const canFormat = (name: string) => (!!RENAMED[name] && acceptsZone(RENAMED[name])) || acceptsZone(name)
 
 export function pickZone(...names: (string | undefined)[]) {
   for (const name of names) {
@@ -67,22 +76,39 @@ const DATE: Intl.DateTimeFormatOptions = { year: 'numeric', month: 'numeric', da
 const TIME: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: 'numeric', second: 'numeric' }
 const DATE_TIME = { ...DATE, ...TIME }
 
+export const validDateMs = (ms: number) => !Number.isNaN(new Date(ms).getTime())
+
+function zoneFormatter(zone: string, options: Intl.DateTimeFormatOptions, locale?: string) {
+  const renamed = RENAMED[zone]
+  return (renamed ? formatter(renamed, options, locale) : null) ?? formatter(zone, options, locale)
+}
+
 function format(at: Date | number, options: Intl.DateTimeFormatOptions, zone = current) {
   const ms = typeof at === 'number' ? at : at.getTime()
-  return Number.isFinite(ms) ? formatter(zone, options).format(ms) : 'Invalid Date'
+  return (validDateMs(ms) ? zoneFormatter(zone, options)?.format(ms) : undefined) ?? 'Invalid Date'
 }
 
 export const fmtTime = (at: Date | number, options = TIME) => format(at, options)
 export const fmtDate = (at: Date | number, options = DATE) => format(at, options)
 export const fmtDateTime = (at: Date | number, options = DATE_TIME) => format(at, options)
 
-export function fmtDay(day: string, options = DATE) {
+export function dayParts(day: string | undefined) {
+  if (typeof day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return
   const [year, month, date] = day.split('-').map(Number)
-  return format(utcTime(year, month - 1, date, 0, 0), options, 'UTC')
+  const value = new Date(utcTime(year, month - 1, date, 0, 0))
+  if (value.getUTCFullYear() === year && value.getUTCMonth() === month - 1 && value.getUTCDate() === date) {
+    return { year, month: month - 1, date }
+  }
+}
+
+export function fmtDay(day: string | undefined, options = DATE) {
+  const parts = dayParts(day)
+  return parts ? format(utcTime(parts.year, parts.month, parts.date, 0, 0), options, 'UTC') : 'Invalid Date'
 }
 
 function zoneName(zone: string, at: number, timeZoneName: 'short' | 'shortOffset') {
-  return formatter(zone, { timeZoneName }, 'en-US').formatToParts(at).find(part => part.type === 'timeZoneName')?.value ?? zone
+  if (!validDateMs(at)) return zone
+  return zoneFormatter(zone, { timeZoneName }, 'en-US')?.formatToParts(at).find(part => part.type === 'timeZoneName')?.value ?? zone
 }
 
 export const offsetLabel = (zone: string, at = Date.now()) => zoneName(zone, at, 'shortOffset')
@@ -95,15 +121,17 @@ const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
 function fieldsAt(ms: number, zone: string): Record<string, string> {
   // A bad timestamp gives NaN parts, as Date math did, instead of a RangeError that stops the whole page.
-  if (!Number.isFinite(ms)) return {}
-  return Object.fromEntries(formatter(zone, PARTS, 'en-US').formatToParts(ms).map(({ type, value }) => [type, value]))
+  if (!validDateMs(ms)) return {}
+  const parts = zoneFormatter(zone, PARTS, 'en-US')?.formatToParts(ms) ?? []
+  return Object.fromEntries(parts.map(({ type, value }) => [type, value]))
 }
 
 export function zoneParts(ms: number, zone = current) {
   const fields = fieldsAt(ms, zone)
   return {
     year: Number(fields.year), month: Number(fields.month) - 1, date: Number(fields.day),
-    weekday: WEEKDAYS.indexOf(fields.weekday), hour: Number(fields.hour), minute: Number(fields.minute),
+    weekday: fields.weekday === undefined ? NaN : WEEKDAYS.indexOf(fields.weekday),
+    hour: Number(fields.hour), minute: Number(fields.minute),
   }
 }
 
@@ -157,6 +185,11 @@ export function zonedTimes(year: number, month: number, date: number, hour: numb
 
 export function zonedTime(year: number, month: number, date: number, hour: number, minute: number, zone = current) {
   return zonedTimes(year, month, date, hour, minute, zone)[0]
+}
+
+export function zonedTimeLatest(year: number, month: number, date: number, hour: number, minute: number, zone = current) {
+  const times = zonedTimes(year, month, date, hour, minute, zone)
+  return times[times.length - 1]
 }
 
 export function startOfDay(ms: number, zone = current) {

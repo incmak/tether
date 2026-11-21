@@ -5,7 +5,7 @@ import { parse as parseDate } from 'chrono-node'
 import type { Api } from './api'
 import type { MenuOption } from './SelectMenu'
 import { usePolling } from './hooks'
-import { offsetMinutes, tetherZone, zoneLabel, zoneParts, zonedTime, zonedTimes } from './zone'
+import { offsetMinutes, pickZone, tetherZone, zoneLabel, zoneParts, zonedTime, zonedTimes } from './zone'
 
 export type ReminderState = 'scheduled' | 'due' | 'done'
 export type Repeat = 'day' | 'weekday' | 'week' | 'month' | 'year'
@@ -40,10 +40,7 @@ const EVENT = 'tether-reminders-changed'
 
 /** Keep the zone on stored rules. An unknown stored zone uses Tether's current zone. */
 function parts(at: number, zone = tetherZone()) {
-  try { return zoneParts(at * 1000, zone) } catch (error) {
-    if (!(error instanceof RangeError) || zone === tetherZone()) throw error
-    return zoneParts(at * 1000)
-  }
+  return zoneParts(at * 1000, zone === tetherZone() ? zone : pickZone(zone, tetherZone()))
 }
 /** Epoch seconds of a wall time in Tether's zone. Day overflow rolls into the next month. */
 export const zoneTime = (year: number, month: number, date: number, hour: number, minute = 0) => zonedTime(year, month, date, hour, minute) / 1000

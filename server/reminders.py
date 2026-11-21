@@ -718,16 +718,17 @@ def parse_when(text, now=None):
         return now + amount * {'m': 60, 'h': 3600, 'd': 86400}[unit]
     try:
         lower = text.lower()
-        if lower == 'tomorrow' or lower.startswith('tomorrow '):
-            clock = CLOCK.fullmatch(text[8:].strip() or '09:00')
-            if clock is None:
-                raise ValueError
-            day = base + timedelta(days=1)
-            return day.replace(hour=int(clock[1]), minute=int(clock[2]), second=0, microsecond=0).timestamp()
-        clock = CLOCK.fullmatch(text)
+        tomorrow = lower == 'tomorrow' or lower.startswith('tomorrow ')
+        clock = CLOCK.fullmatch((text[8:].strip() or '09:00') if tomorrow else text)
+        if tomorrow and not clock:
+            raise ValueError
         if clock:
-            at = base.replace(hour=int(clock[1]), minute=int(clock[2]), second=0, microsecond=0)
-            return (at if at.timestamp() > now else at + timedelta(days=1)).timestamp()
+            wall = base.replace(tzinfo=None, hour=int(clock[1]), minute=int(clock[2]), second=0, microsecond=0)
+            if not tomorrow:
+                for at in tether_zone.wall_times(wall, base.tzinfo):
+                    if at > now:
+                        return at
+            return tether_zone.wall_times(wall + timedelta(days=1), base.tzinfo)[0]
         at = datetime.fromisoformat(text.replace(' ', 'T', 1) if 'T' not in text else text)
         if DATE.fullmatch(text):
             at = at.replace(hour=10)

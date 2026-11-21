@@ -8,9 +8,9 @@ import type { Row } from './backlogItems'
 import { BACKLOG_PATH } from './backlogNews'
 import { useBackStep } from './backNav'
 import { formatElapsed } from './paneState'
-import { PHASES, PHASE_NAMES, STATE_NAMES, SWEEP_NAMES, attentionOrder, buildFloor, clock, groupsOf, historyMoves, nearest, phaseSince, toMs } from './factoryModel'
+import { PHASES, PHASE_NAMES, STATE_NAMES, SWEEP_NAMES, attentionOrder, buildFloor, clock, deployLabel, groupsOf, historyMoves, nearest, phaseSince, toMs } from './factoryModel'
 import type { Agent, Direction, FactoryData, History, Phase, Sweep, SweepKind, SweepLine, Task } from './factoryModel'
-import { fmtDate, fmtDay, sameDay, useTetherZone } from './zone'
+import { fmtDate, sameDay, useTetherZone } from './zone'
 import './Factory.css'
 
 /* The Factory view: every agent tab and backlog item as work moving through phases, on one canvas with four zoom
@@ -498,7 +498,7 @@ function TaskLevel({ task, history, now, zoom }: { task: Task; history: History[
     </section>
     <section aria-labelledby="factory-proof"><h3 id="factory-proof">Proof</h3>
       <ul className="factory-list">
-        {task.deploys.map(line => <li key={line.at + line.text}><b>DEPLOYED.md</b> {line.timed ? clock(line.at * 1000) : fmtDay(line.day)}: {line.text}</li>)}
+        {task.deploys.map(line => <li key={line.at + line.text}><b>DEPLOYED.md</b> {deployLabel(line)}: {line.text}</li>)}
         {proof.map(({ agent, tool }, index) => <li key={index}><b>{agent}</b> {tool.error ? 'failed: ' : ''}{tool.name}: {tool.title} {tool.at ? <span>{clock(toMs(tool.at))}</span> : null}</li>)}
         {task.item?.status?.kind === 'done' && <li><b>Backlog</b> Done: {task.item.status.text}</li>}
         {task.item?.details.filter(detail => /screenshot|shots|test|proof|verified/i.test(detail.text)).map(detail => <li key={detail.line}><b>Backlog note</b> {detail.text}</li>)}

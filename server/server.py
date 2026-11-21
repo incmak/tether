@@ -3166,6 +3166,7 @@ class Handler(BaseHTTPRequestHandler):
                     with prefs_sync.LOCK:  # the read before, the save and the record are one step for an undo (undo.run)
                         before = prefs_sync.load()['prefs']
                         saved = prefs_sync.save(body.get('changes'))
+                        saved['zone'] = tether_zone.name()
                         for key in ('order', 'paneOrder'):  # a drag that reorders sessions or tabs
                             if isinstance(body.get('changes'), dict) and key in body['changes']:
                                 undo.record_order(key, before.get(key), saved['prefs'].get(key))

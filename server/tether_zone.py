@@ -1,7 +1,6 @@
 """Use the synced time zone, then the legacy TETHER_REMINDER_ZONE, then Asia/Kolkata. Offset-less stamps are
 read in the current zone; after a zone change an old stamp shifts by the zone difference.
-A stamp in a repeated hour (DST end) reads back as the first occurrence, so it can be one hour early, which was also
-a limit of the old host-time parse and only affects day-scale archive cut-offs and sort order where readers use it.
+A stamp in a repeated hour reads back as the later occurrence. A stamp in a gap shifts forward by the gap.
 """
 from datetime import datetime
 from functools import lru_cache
@@ -58,5 +57,13 @@ def stamp(at=None, fmt=FORMAT):
     return now(at).strftime(fmt)
 
 
+def wall_times(wall, tz):
+    """Unix seconds for a naive wall time, earliest first. In a gap, shift the time forward."""
+    candidates = {wall.replace(tzinfo=tz, fold=fold).timestamp() for fold in (0, 1)}
+    matches = sorted(at for at in candidates if datetime.fromtimestamp(at, tz).replace(tzinfo=None) == wall)
+    return matches or [max(candidates)]
+
+
 def parse(text, fmt=FORMAT):
-    return datetime.strptime(text, fmt).replace(tzinfo=zone()).timestamp()
+    wall = datetime.strptime(text, fmt).replace(tzinfo=None)
+    return wall_times(wall, zone())[-1]

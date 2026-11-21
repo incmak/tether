@@ -1,0 +1,20 @@
+[
+  {"zone": "America/New_York", "now": "2026-11-01T05:45:00Z", "typed": "01:30", "expect": "2026-11-01T06:30:00Z"},
+  {"zone": "America/New_York", "now": "2026-11-01T04:55:00Z", "typed": "01:30", "expect": "2026-11-01T05:30:00Z"},
+  {"zone": "America/New_York", "now": "2026-11-01T06:10:00Z", "typed": "01:30", "expect": "2026-11-01T06:30:00Z"},
+  {"zone": "America/New_York", "now": "2026-11-01T06:30:00Z", "typed": "01:30", "expect": "2026-11-02T06:30:00Z"},
+  {"zone": "America/New_York", "now": "2026-11-01T07:10:00Z", "typed": "01:30", "expect": "2026-11-02T06:30:00Z"},
+  {"zone": "America/New_York", "now": "2026-03-08T06:00:00Z", "typed": "02:30", "expect": "2026-03-08T07:30:00Z"},
+  {"zone": "America/New_York", "now": "2026-03-08T07:05:00Z", "typed": "02:30", "expect": "2026-03-08T07:30:00Z"},
+  {"zone": "America/New_York", "now": "2026-03-08T07:45:00Z", "typed": "02:30", "expect": "2026-03-09T06:30:00Z"},
+  {"zone": "America/New_York", "now": "2026-03-08T07:45:00Z", "typed": "04:00", "expect": "2026-03-08T08:00:00Z"},
+  {"zone": "Australia/Lord_Howe", "now": "2026-04-04T14:30:00Z", "typed": "01:45", "expect": "2026-04-04T14:45:00Z"},
+  {"zone": "Australia/Lord_Howe", "now": "2026-04-04T14:50:00Z", "typed": "01:45", "expect": "2026-04-04T15:15:00Z"},
+  {"zone": "Australia/Lord_Howe", "now": "2026-04-04T15:05:00Z", "typed": "01:45", "expect": "2026-04-04T15:15:00Z"},
+  {"zone": "Australia/Lord_Howe", "now": "2026-04-04T15:45:00Z", "typed": "01:45", "expect": "2026-04-05T15:15:00Z"},
+  {"zone": "Australia/Lord_Howe", "now": "2026-10-03T15:20:00Z", "typed": "02:15", "expect": "2026-10-03T15:45:00Z"},
+  {"zone": "Australia/Lord_Howe", "now": "2026-10-03T15:36:00Z", "typed": "02:15", "expect": "2026-10-03T15:45:00Z"},
+  {"zone": "Australia/Lord_Howe", "now": "2026-10-03T15:50:00Z", "typed": "02:15", "expect": "2026-10-04T15:15:00Z"},
+  {"zone": "Asia/Kolkata", "now": "2026-11-18T06:30:00Z", "typed": "18:00", "expect": "2026-11-18T12:30:00Z"},
+  {"zone": "Asia/Kolkata", "now": "2026-11-18T12:30:00Z", "typed": "18:00", "expect": "2026-11-19T12:30:00Z"}
+]

@@ -70,6 +70,15 @@ class Case(unittest.TestCase):
 
 
 class FactTests(Case):
+    def test_deploy_lines_with_numeric_offsets_cross_utc_midnight(self):
+        (self.repo / 'DEPLOYED.md').write_text(
+            '- 2026-11-16 23:00 -0200 · aaaaaaa Hotfix · Verified: tests(ok)\n'
+            '- 2026-11-17 01:00 +05:30 · bbbbbbb Earlier · Verified: none\n')
+        start = datetime.fromisoformat('2026-11-17T00:00:00+00:00').timestamp()
+        found = ops_agent.deploys(str(self.repo), start, start + 86400)
+        self.assertEqual([(row['at'], row['text'], row['stamp']) for row in found],
+                         [(start + 3600, 'aaaaaaa Hotfix', 'verified')])
+
     def test_stamp_follows_the_verification_rule(self):
         self.assertEqual(ops_agent.stamp('Fix\n\nVerified: tests(server 412 ok) review(codex APPROVED)'),
                          ('verified', 'tests(server 412 ok) review(codex APPROVED)'))

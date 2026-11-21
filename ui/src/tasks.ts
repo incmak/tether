@@ -4,7 +4,7 @@
 import { useCallback } from 'react'
 import type { Api } from './api'
 import { usePolling } from './hooks'
-import { tetherZone, zoneParts } from './zone'
+import { tetherZone, validDateMs, zoneParts } from './zone'
 
 export type SourceId = 'todo' | 'planner'
 export type SourceState = 'ok' | 'off' | 'error' | 'syncing'
@@ -19,7 +19,7 @@ export interface TaskSource {
 export interface TaskDue { date: string; at: number | null }
 export interface ExternalTask {
   key: string; source: SourceId; list: string; title: string
-  due: TaskDue | null; reminderAt: number | null; importance?: string; link: string; modified?: number
+  due: TaskDue | null; reminderAt: number | null; importance?: string; link: string; modified?: number | null
   /** The app gave a time zone Tether could not read, so the time may be off. */
   timeUncertain?: boolean
   /** The backlog item this task was copied to. */
@@ -96,7 +96,7 @@ export const syncNow = (api: Api) => api<TaskListing>('tasks/sync', {})
 export const toBacklog = (api: Api, key: string) => api<{ id: string; created: boolean }>('tasks/backlog', { key })
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
-const isTime = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
+const isTime = (value: unknown): value is number => typeof value === 'number' && validDateMs(value * 1000)
 const isDue = (value: unknown): value is TaskDue => isObject(value) && typeof value.date === 'string' && /^\d{4}-\d\d-\d\d$/.test(value.date) && (value.at === null || isTime(value.at))
 const isRef = (value: unknown) => value === null || value === undefined || typeof value === 'string'
 const isSourceId = (value: unknown): value is SourceId => value === 'todo' || value === 'planner'
@@ -106,11 +106,13 @@ export function cleanListing(body: unknown): TaskListing {
   if (!isObject(body) || !Array.isArray(body.sources) || !Array.isArray(body.tasks)) throw new Error('Tether returned an unreadable todo list.')
   const sources = body.sources.filter((source): source is TaskSource => isObject(source) && isSourceId(source.id) && typeof source.label === 'string'
     && typeof source.enabled === 'boolean' && typeof source.alerts === 'boolean' && typeof source.state === 'string'
-    && (source.syncedAt === null || isTime(source.syncedAt)) && typeof source.complete === 'boolean' && isTime(source.count)
+    && (source.syncedAt === null || isTime(source.syncedAt)) && typeof source.complete === 'boolean'
+    && typeof source.count === 'number' && Number.isFinite(source.count)
     && (source.why === undefined || typeof source.why === 'string') && (source.command === undefined || source.command === null || typeof source.command === 'string'))
   const tasks = body.tasks.filter((task): task is ExternalTask => isObject(task) && typeof task.key === 'string' && isSourceId(task.source)
     && typeof task.title === 'string' && typeof task.list === 'string' && typeof task.link === 'string'
     && (task.due === null || isDue(task.due)) && (task.reminderAt === null || isTime(task.reminderAt))
+    && (task.modified == null || isTime(task.modified))
     && isRef(task.backlog) && isRef(task.reminder))
   return { sources, tasks }
 }

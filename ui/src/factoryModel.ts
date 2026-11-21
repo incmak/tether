@@ -16,14 +16,14 @@
 import type { Pane } from './api'
 import type { Item, Row } from './backlogItems'
 import { needsYou } from './paneState'
-import { fmtTime, zonedTime } from './zone'
+import { dayParts, fmtDate, fmtDay, fmtTime, zonedTime, zonedTimeLatest } from './zone'
 
 export const PHASES = ['inbox', 'spec', 'build', 'review', 'verify', 'deploy', 'done'] as const
 export type Phase = typeof PHASES[number]
 export const PHASE_NAMES: Record<Phase, string> = { inbox: 'Inbox', spec: 'Spec', build: 'Build', review: 'Review', verify: 'Verify', deploy: 'Deploy', done: 'Done' }
 
 export interface FactoryTool { name: string; title: string; at?: string | number | null; error?: boolean; done?: boolean }
-export interface Deploy { at: number; day: string; timed: boolean; commit: string | null; text: string; refs: string[] }
+export interface Deploy { at: number; day?: string; timed: boolean; commit: string | null; text: string; refs: string[] }
 export interface Commit { hash: string; at: number; subject: string; refs: string[]; repo: string }
 /** One finding of the 30-minute worktree sweep (server/sweep.py): the tab's branch is behind main, its checks fail, or the tab is idle. */
 export type SweepKind = 'behind' | 'checks' | 'idle'
@@ -117,7 +117,18 @@ const short = (tool: FactoryTool) => { const text = tool.title ? `${tool.name} $
 export function doneAt(item: Item, zone?: string) {
   const found = item.status?.kind === 'done' ? item.status.text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2}))?/) : null
   if (!found) return 0
-  return zonedTime(+found[1], +found[2] - 1, +found[3], +(found[4] ?? 0), +(found[5] ?? 0), zone)
+  return zonedTimeLatest(+found[1], +found[2] - 1, +found[3], +(found[4] ?? 0), +(found[5] ?? 0), zone)
+}
+
+function deployAt(line: Deploy, zone?: string) {
+  const day = line.timed ? undefined : dayParts(line.day)
+  if (!day) return line.at * 1000
+  return zonedTime(day.year, day.month, day.date + 1, 0, 0, zone) - 1
+}
+
+export function deployLabel(line: Deploy) {
+  if (line.timed) return clock(line.at * 1000)
+  return line.day ? fmtDay(line.day) : fmtDate(line.at * 1000)
 }
 
 interface Input {
@@ -254,21 +265,24 @@ export function buildFloor({ panes, rows, data, groupName, now, zone }: Input): 
   const tasks: Task[] = []
   for (const { item, project, links } of items) {
     const ref = item.ref!
+    const deploys = deploysOf(ref)
     const checkedOff = doneAt(item, zone)
-    const recentDone = item.done ? Math.max(checkedOff, ...deploysOf(ref).map(line => line.at * 1000)) : 0
+    const recentDone = item.done ? Math.max(checkedOff, ...deploys.map(line => deployAt(line, zone))) : 0
     if (item.done && now - recentDone > DAY) continue
     const { agents: linked, reasons } = links
     promote(linked)
-    const deploys = deploysOf(ref)
     let phase: Phase
     let why: string
     if (item.done) { phase = 'done'; why = checkedOff ? `checked off ${clock(checkedOff)}` : `checked off; DEPLOYED.md names ${ref}` }
     else if (!linked.length) {
       phase = 'inbox'
       why = item.status?.kind === 'doing' ? `open item; its Doing tab ${item.status.source?.pane ?? ''} is closed` : 'open item, no tab works on it'
-    } else if (deploys.some(line => now - line.at * 1000 <= DAY)) {
-      phase = 'deploy'; why = `DEPLOYED.md line ${clock(deploys[0].at * 1000)} names ${ref}; the item is still open`
-    } else ({ phase, why } = phaseOfLinked(linked))
+    } else {
+      const recent = deploys.find(line => now - deployAt(line, zone) <= DAY)
+      if (recent) {
+        phase = 'deploy'; why = `DEPLOYED.md line ${deployLabel(recent)} names ${ref}; the item is still open`
+      } else ({ phase, why } = phaseOfLinked(linked))
+    }
     const last = Math.max(0, ...linked.map(entry => entry.last), recentDone)
     tasks.push(finish({ id: ref, ref, title: item.text, group: project || 'Inbox', phase, why: withLinks(why, reasons), agents: linked, item, last, deploys, commits: commitsOf(ref) }, now))
   }

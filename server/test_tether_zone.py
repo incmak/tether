@@ -1,5 +1,6 @@
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from datetime import datetime, timezone
+import io
 import json
 import os
 from pathlib import Path
@@ -92,14 +93,41 @@ class TetherZoneTests(unittest.TestCase):
         prefs_sync.save({'timeZone': 'Pacific/Auckland'})
         self.assertEqual(tether_zone.parse(shown), datetime(2026, 3, 7, 21, tzinfo=timezone.utc).timestamp())
 
-    def test_repeated_hour_stamp_reads_as_the_first_occurrence(self):
+    def test_post_prefs_returns_effective_zone(self):
+        handler = object.__new__(server.Handler)
+        handler.command, handler.path = 'POST', '/mobile/api/prefs'
+        handler.deny = mock.Mock(return_value=False)
+        handler.respond = mock.Mock()
+        for version, chosen in enumerate(('America/New_York', 'Asia/Calcutta'), 1):
+            with self.subTest(chosen=chosen):
+                handler.respond.reset_mock()
+                body = json.dumps({'changes': {'timeZone': chosen}}).encode()
+                handler.rfile = io.BytesIO(body)
+                handler.headers = {'Host': 'local', 'Origin': 'http://local', 'Content-Length': str(len(body)),
+                                   'X-Codex-Mobile': '1'}
+                handler.do_POST()
+                handler.respond.assert_called_once_with(
+                    200, {'prefs': {'task_auto_close': False, 'timeZone': chosen}, 'version': version, 'zone': chosen})
+
+    def test_repeated_hour_stamp_reads_as_the_later_occurrence(self):
         prefs_sync.save({'timeZone': 'America/New_York'})
         at = datetime(2026, 11, 1, 6, 30, tzinfo=timezone.utc).timestamp()
         first = datetime(2026, 11, 1, 5, 30, tzinfo=timezone.utc).timestamp()
         shown = tether_zone.stamp(at)
         self.assertEqual(shown, '2026-11-01 01:30')
         self.assertEqual(tether_zone.stamp(first), shown)
-        self.assertEqual(tether_zone.parse(shown), first)
+        self.assertEqual(tether_zone.parse(shown), at)
+
+    def test_stamp_parsing_handles_half_hour_folds_gaps_and_unambiguous_times(self):
+        for zone, stamp, expected in (
+            ('Australia/Lord_Howe', '2026-04-05 01:45', '2026-04-04T15:15:00Z'),
+            ('Australia/Lord_Howe', '2026-10-04 02:15', '2026-10-03T15:45:00Z'),
+            ('America/New_York', '2026-03-08 02:30', '2026-03-08T07:30:00Z'),
+            ('America/New_York', '2026-11-01 02:30', '2026-11-01T07:30:00Z'),
+        ):
+            with self.subTest(zone=zone, stamp=stamp):
+                prefs_sync.save({'timeZone': zone})
+                self.assertEqual(tether_zone.parse(stamp), datetime.fromisoformat(expected).timestamp())
 
     def test_offset_less_backlog_advisor_and_triage_stamps_round_trip(self):
         at = datetime(2026, 11, 19, 1, 42, 38, tzinfo=timezone.utc).timestamp()

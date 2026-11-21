@@ -1,5 +1,6 @@
 const { strict: assert } = require('node:assert')
 const { readFileSync } = require('node:fs')
+const { test } = require('node:test')
 const { runInNewContext } = require('node:vm')
 const ts = require('typescript')
 
@@ -100,9 +101,10 @@ async function testFlush(error, newer, expected, retries, warns) {
       persist()
       assert.deepEqual(plain(loadPending()), plain({ ...changes, ...newer }))
       if (error) throw error
-      return { prefs: { ...changes }, version: 1 }
+      return { prefs: { ...changes }, version: 1, zone: 'Asia/Kolkata' }
     },
     apply: stored => { assert.equal(error, null); assert.equal(stored.version, 1) },
+    rememberZone: stored => { assert.equal(error, null); assert.equal(stored.zone, 'Asia/Kolkata') },
     console: { warn: (...args) => warnings.push(args) },
     window: { setTimeout: (callback, delay) => { timers.push({ callback, delay }); return 1 } },
   }
@@ -120,6 +122,107 @@ async function testFlush(error, newer, expected, retries, warns) {
   assert.equal(warnings.length, warns)
   if (warns) assert.deepEqual(warnings[0].slice(1), [error.status, error.message])
 }
+
+function zonePrefs(initial, get, post) {
+  const localStorage = storage()
+  localStorage.setItem('tmux-chat.prefs.synced', '1')
+  localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ timeZone: initial }))
+  const slots = []
+  let slot = 0
+  let pull
+  let flush
+  const layouts = []
+  const react = {
+    useState: init => {
+      const i = slot++
+      if (!(i in slots)) slots[i] = typeof init === 'function' ? init() : init
+      return [slots[i], update => { slots[i] = typeof update === 'function' ? update(slots[i]) : update }]
+    },
+    useRef: current => (slots[slot++] ??= { current }),
+    useCallback: callback => callback,
+    useEffect: effect => { pull ??= effect },
+    useLayoutEffect: effect => { layouts.push(effect) },
+  }
+  const { usePrefs } = load('prefs', { ...imports, react, './api': {
+    ...api, request: async (path, body) => {
+      assert.equal(path, 'prefs')
+      return body ? post(plain(body.changes)) : typeof get === 'function' ? get() : get
+    },
+  } }, {
+    localStorage, document: { addEventListener() {} },
+    window: { setInterval() {}, addEventListener() {}, clearTimeout() {}, setTimeout: callback => { flush = callback } },
+  })
+  const render = () => {
+    slot = 0
+    const result = usePrefs()
+    for (const effect of layouts.splice(0)) effect()
+    return result
+  }
+  return {
+    render,
+    pull: async () => {
+      render()
+      pull()
+      await new Promise(setImmediate)
+      return render()
+    },
+    flush: () => flush(),
+  }
+}
+
+test('prefs shows the server zone for a confirmed fixed-offset preference', async () => {
+  const prefs = zonePrefs('+05:30', { prefs: { timeZone: '+05:30' }, version: 1, zone: 'Pacific/Auckland' })
+  await prefs.pull()
+  assert.equal(zone.tetherZone(), 'Pacific/Auckland')
+})
+
+test('prefs follows a server alias, previews a local change, and confirms it from POST', async () => {
+  const prefs = zonePrefs(undefined, { prefs: {}, version: 1, zone: 'Asia/Calcutta' }, changes => {
+    assert.deepEqual(changes, { timeZone: '+05:30' })
+    return { prefs: changes, version: 2, zone: 'Pacific/Auckland' }
+  })
+  const [, update] = await prefs.pull()
+  assert.match(zone.tetherZone(), /^Asia\/(?:Calcutta|Kolkata)$/)
+  update(() => ({ timeZone: '+05:30' }))
+  prefs.render()
+  assert.equal(zone.tetherZone(), zone.pickZone('+05:30', 'Asia/Calcutta'))
+  await prefs.flush()
+  prefs.render()
+  assert.equal(zone.tetherZone(), 'Pacific/Auckland')
+})
+
+test('prefs keeps a formattable zone when the server confirms one this browser cannot format', async () => {
+  const prefs = zonePrefs('America/New_York', { prefs: { timeZone: 'America/New_York' }, version: 1, zone: 'Not/AZone' })
+  await prefs.pull()
+  assert.equal(zone.tetherZone(), 'America/New_York')
+  assert.notEqual(zone.fmtTime(Date.UTC(2026, 10, 22, 12, 0)), 'Invalid Date')
+})
+
+test('prefs still uses the saved choice when an older backend omits zone', async () => {
+  const prefs = zonePrefs(undefined, { prefs: { timeZone: 'America/New_York' }, version: 1 })
+  await prefs.pull()
+  assert.equal(zone.tetherZone(), 'America/New_York')
+})
+
+test('prefs keeps POST confirmation when an older GET arrives late', async () => {
+  const old = { prefs: { timeZone: 'Asia/Calcutta' }, version: 1, zone: 'Asia/Calcutta' }
+  let finishPull
+  const delayed = new Promise(resolve => { finishPull = resolve })
+  let pulls = 0
+  const prefs = zonePrefs(undefined, () => pulls++ ? delayed : old, changes => (
+    { prefs: changes, version: 2, zone: 'Pacific/Auckland' }
+  ))
+  const [, update] = await prefs.pull()
+  await prefs.pull()
+  update(() => ({ timeZone: 'Pacific/Auckland' }))
+  prefs.render()
+  await prefs.flush()
+  finishPull(old)
+  await new Promise(setImmediate)
+  prefs.render()
+  assert.equal(zone.tetherZone(), 'Pacific/Auckland')
+})
+
 Promise.all([
   testFlush(null, {}, {}, 0, 0),
   testFlush(new api.ApiError(400, 'Invalid preference: waitingOrder.'), {}, { theme: 'dark' }, 1, 1),

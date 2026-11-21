@@ -3,7 +3,7 @@ import { ApiError, request } from './api'
 import type { GroupBy, SessionGroup, SortBy } from './Organize'
 import { DEFAULT_LOOK } from './layouts'
 import type { Look, SavedLook } from './layouts'
-import { pickZone, setTetherZone } from './zone'
+import { canFormat, pickZone, setTetherZone } from './zone'
 
 // seen: when you last looked at each pane (seconds), so a turn that ended later shows as Done.
 // SYNCED choices are shared by every device through the server (/mobile/api/prefs). The rest stay in this browser:
@@ -172,9 +172,16 @@ export function rejectedKeep(changes: Record<string, unknown>, error: unknown): 
 
 export function usePrefs({ syncZone = true } = {}) {
   const [prefs, setPrefs] = useState<Prefs>(load)
-  const [serverZone, setServerZone] = useState<string>()
-  const effectiveZone = pickZone(prefs.timeZone, serverZone)
-  useLayoutEffect(() => { if (syncZone) setTetherZone(effectiveZone) }, [effectiveZone, syncZone])
+  const [serverZone, setServerZone] = useState<{ name?: string; preference?: string }>()
+  // The server decides the zone once it answered for this choice. A name this browser cannot format falls back below.
+  const confirmedZone = prefs.timeZone === serverZone?.preference && serverZone?.name && canFormat(serverZone.name) ? serverZone.name : undefined
+  const effectiveZone = confirmedZone ?? pickZone(prefs.timeZone, serverZone?.name)
+  useLayoutEffect(() => { if (syncZone) setTetherZone(effectiveZone, !!confirmedZone) }, [confirmedZone, effectiveZone, syncZone])
+  const rememberZone = useCallback((stored: Stored) => {
+    if (!syncZone) return
+    setServerZone(current => current?.name === stored.zone && current?.preference === stored.prefs.timeZone
+      ? current : { name: stored.zone, preference: stored.prefs.timeZone })
+  }, [syncZone])
   const latest = useRef(prefs)
   const version = useRef(-1)  // the server copy this device has; -1 = not read yet
   const pending = useRef<Shared>(loadPending())  // changed here, not saved yet
@@ -217,7 +224,13 @@ export function usePrefs({ syncZone = true } = {}) {
     pending.current = {}
     sending.current = changes
     if (changes.drafts) changes.drafts = keptDrafts(changes.drafts)
-    try { apply(await request<Stored>('prefs', { changes })); sending.current = {}; persist() } catch (error) {
+    try {
+      const stored = await request<Stored>('prefs', { changes })
+      rememberZone(stored)
+      apply(stored)
+      sending.current = {}
+      persist()
+    } catch (error) {
       sending.current = {}
       const rejected = rejectedKeep(changes, error)
       const kept = rejected ?? changes
@@ -227,16 +240,18 @@ export function usePrefs({ syncZone = true } = {}) {
     }
     busy.current = false
     if (Object.keys(pending.current).length) timer.current = window.setTimeout(flush, 2000)
-  }, [apply, persist])
+  }, [apply, persist, rememberZone])
   useLayoutEffect(() => { flushRef.current = flush }, [flush])
 
   const pull = useCallback(async () => {
     if (busy.current) return
     if (Object.keys(pending.current).length) { void flush(); return }
+    const requestedAtVersion = version.current
     try {
       const stored = await request<Stored>('prefs')
+      if (version.current !== requestedAtVersion) return
       // A queued local write can defer the shared prefs, but the server's fallback zone is still usable.
-      if (syncZone) setServerZone(stored.zone)
+      rememberZone(stored)
       if (busy.current || Object.keys(pending.current).length) return
       // A device's first sync adds its own choices to the shared copy, so nothing set before sync is lost.
       if (!firstSyncDone()) {
@@ -248,7 +263,7 @@ export function usePrefs({ syncZone = true } = {}) {
       }
       if (stored.version !== version.current) apply(stored)
     } catch { /* offline: keep this device's copy */ }
-  }, [apply, flush, persist, syncZone])
+  }, [apply, flush, persist, rememberZone])
 
   useEffect(() => {
     void pull()

@@ -19,11 +19,23 @@ function load(zoneName) {
   zone.setTetherZone(zoneName)
   return loadSource('tasks.ts', name => name === './zone' ? zone : name === './hooks' ? {} : require(name))
 }
-const { groupTasks, dueLabel, agoLabel } = load('Asia/Kolkata')
+const { groupTasks, dueLabel, agoLabel, cleanListing } = load('Asia/Kolkata')
 const seconds = iso => Date.parse(iso) / 1000
 // 19 Nov 2026 23:00 IST (17:30Z): late in the IST day.
 const NOW = seconds('2026-11-19T17:30:00Z')
 const task = (key, due, title = key) => ({ key, source: 'todo', list: 'Tasks', title, due, reminderAt: null, link: '', backlog: null, reminder: null })
+
+test('Todos rejects out-of-range epoch seconds in task and source timestamps', () => {
+  const source = { id: 'todo', label: 'To Do', enabled: true, alerts: false, state: 'ok', complete: true, count: 1 }
+  const listing = cleanListing({
+    sources: [{ ...source, syncedAt: 1e20 }, { ...source, syncedAt: NOW }],
+    tasks: [task('bad due', { date: '2026-11-19', at: 1e20 }),
+      { ...task('bad reminder', null), reminderAt: -1e20 }, { ...task('bad modified', null), modified: 1e20 },
+      { ...task('valid', { date: '2026-11-19', at: NOW }), modified: null }],
+  })
+  assert.deepEqual(listing.sources.map(row => row.syncedAt), [NOW])
+  assert.deepEqual(listing.tasks.map(row => row.key), ['valid'])
+})
 
 test('groups by IST day: a date-only task due today is not overdue until the day ends', () => {
   const tasks = [

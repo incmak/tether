@@ -3,12 +3,16 @@
 const { strict: assert } = require('node:assert')
 const { readFileSync } = require('node:fs')
 const { test } = require('node:test')
+const React = require('react')
+const { renderToStaticMarkup } = require('react-dom/server')
 const ts = require('typescript')
 
-const load = (file, deps = {}) => {
+const load = (file, deps = {}, extra = '') => {
   const mod = new module.constructor(file)
   mod.require = name => deps[name] ?? require(name)
-  mod._compile(ts.transpileModule(readFileSync(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, file)
+  mod._compile(ts.transpileModule(readFileSync(file, 'utf8') + extra, { compilerOptions: {
+    module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
+  } }).outputText, file)
   return mod.exports
 }
 const paneState = load('src/paneState.ts')
@@ -54,6 +58,59 @@ function floor(panes, tools = {}, extra = {}) {
   return m.buildFloor({ panes, rows: items.parseBacklog(backlog), data: { now: NOW / 1000, tools, deployed: [], commits: [], ...extra }, now: NOW })
 }
 const byId = (result, id) => result.tasks.find(task => task.id === id)
+
+test('Factory retains a repeated-hour Done stamp for 24 hours from its later instant', () => {
+  const rows = items.parseBacklog('## tether\n- [x] Shipped #B15\n  - Done: 2026-11-01 01:30 · shipped')
+  const taskAt = iso => byId(m.buildFloor({ panes: [], rows, data: null, now: Date.parse(iso), zone: 'America/New_York' }), 'B15')
+  assert.equal(taskAt('2026-11-02T06:00:00Z')?.phase, 'done')
+  assert.equal(taskAt('2026-11-02T06:30:01Z'), undefined)
+})
+
+test('Factory retains an unambiguous Done stamp for 24 hours from its only instant', () => {
+  const rows = items.parseBacklog('## tether\n- [x] Shipped #B15\n  - Done: 2026-11-01 02:30 · shipped')
+  const taskAt = iso => byId(m.buildFloor({ panes: [], rows, data: null, now: Date.parse(iso), zone: 'America/New_York' }), 'B15')
+  assert.equal(taskAt('2026-11-02T07:30:00Z')?.phase, 'done')
+  assert.equal(taskAt('2026-11-02T07:30:01Z'), undefined)
+})
+
+test('Factory counts an untimed deploy through the end of its written day', () => {
+  const rows = items.parseBacklog('## tether\n- [x] Shipped #B15')
+  const line = { day: '2026-11-21', at: Date.parse('2026-11-20T18:30Z') / 1000, timed: false, text: 'deploy', refs: ['B15'] }
+  const taskAt = iso => {
+    const now = Date.parse(iso)
+    return byId(m.buildFloor({ panes: [], rows, data: { now: now / 1000, tools: {}, deployed: [line], commits: [] }, now, zone: 'America/New_York' }), 'B15')
+  }
+  assert.equal(taskAt('2026-11-22T23:00:00Z')?.phase, 'done')
+  assert.equal(taskAt('2026-11-23T05:00:00Z'), undefined)
+})
+
+test('Factory uses the end of a 25-hour deploy day for an open item', () => {
+  const rows = items.parseBacklog('## tether\n- [ ] Shipping #B15\n  - Doing: claude · pane %1')
+  const line = { day: '2026-11-01', at: Date.parse('2026-10-31T18:30Z') / 1000, timed: false, text: 'deploy', refs: ['B15'] }
+  const taskAt = iso => {
+    const now = Date.parse(iso)
+    return byId(m.buildFloor({ panes: [pane('%1')], rows, data: { now: now / 1000, tools: {}, deployed: [line], commits: [] },
+      now, zone: 'America/New_York' }), 'B15')
+  }
+  assert.equal(taskAt('2026-11-03T04:30:00Z')?.phase, 'deploy')
+  assert.equal(taskAt('2026-11-03T05:00:00Z')?.phase, 'build')
+})
+
+test('Factory proof renders an untimed deploy from an older backend without day', () => {
+  const { TaskLevel } = load('src/Factory.tsx', {
+    './backlogItems': items, './backlogNews': {}, './backNav': {}, './paneState': paneState,
+    './factoryModel': m, './zone': zone, './Factory.css': {},
+  }, '\nexport { TaskLevel }')
+  const line = { at: Date.parse('2026-11-20T18:30Z') / 1000, timed: false, text: 'old backend deploy', refs: ['B15'] }
+  const task = byId(floor([], {}, { deployed: [line] }), 'B15')
+  assert.ok(task)
+  const html = renderToStaticMarkup(React.createElement(TaskLevel, { task, history: [], now: NOW }))
+  assert.ok(html.includes(`<b>DEPLOYED.md</b> ${zone.fmtDate(line.at * 1000)}: old backend deploy`))
+  const modern = { ...line, day: '2026-11-21', text: 'date-only deploy' }
+  const dated = renderToStaticMarkup(React.createElement(TaskLevel, { task: { ...task, deploys: [modern] }, history: [], now: NOW }))
+  assert.ok(dated.includes(`<b>DEPLOYED.md</b> ${zone.fmtDay(modern.day)}: date-only deploy`))
+})
+
 const members = task => task.agents.map(agent => [agent.pane.id, agent.role])
 const visiblePanes = result => result.tasks.flatMap(task => task.agents.map(agent => agent.pane.id)).sort()
 

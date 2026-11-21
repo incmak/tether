@@ -2,6 +2,7 @@
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import subprocess
+import sys
 import time
 from unittest import mock
 import os
@@ -10,6 +11,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import antigravity
 import factory
@@ -32,6 +34,44 @@ def agy_step(position, **fields):
 
 
 class DeployedTests(unittest.TestCase):
+    def test_date_only_deploys_use_the_written_day_at_the_window_boundary(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(prefs_sync, 'FILE', root / 'prefs.json'))
+        self.addCleanup(time.tzset)
+        self.enterContext(mock.patch.dict(os.environ, {'TZ': 'Asia/Kolkata'}))
+        time.tzset()
+        prefs_sync.save({'timeZone': 'America/New_York'})
+        log = root / 'DEPLOYED.md'
+        log.write_text('- 2026-11-20 · ddddddd earlier\n'
+                       '- 2026-11-21 · aaaaaaa deploy\n'
+                       '- 2026-11-22 · bbbbbbb another deploy\n'
+                       '- 2026-11-24 · ccccccc future\n')
+        now = datetime(2026, 11, 23, 18, tzinfo=timezone.utc).timestamp()
+        self.assertEqual([item['commit'] for item in factory.deployed(now, log)], ['bbbbbbb', 'aaaaaaa'])
+
+    def test_writer_and_reader_preserve_the_later_new_york_instant(self):
+        self.enterContext(mock.patch.object(sys, 'path', [str(Path(__file__).resolve().parents[1] / 'scripts'), *sys.path]))
+        import verification
+
+        at = datetime(2026, 11, 1, 6, 30, tzinfo=timezone.utc)
+        written = verification.line('deploy', 'none', now=at.astimezone(ZoneInfo('America/New_York')))
+        parsed = factory.parse_deployed_line(written)
+        self.assertEqual((parsed['at'], parsed['text']), (at.timestamp(), 'deploy · Verified: none'))
+        self.assertIn('01:30 -0500 ·', written)
+
+    def test_reads_numeric_and_legacy_deploy_offsets_and_preserves_unknown_names(self):
+        for stamp, expected, text in (
+            ('2026-11-22 02:10 +0530', '2026-11-21T20:40:00Z', 'deploy'),
+            ('2026-11-22 02:10 +05:30', '2026-11-21T20:40:00Z', 'deploy'),
+            ('2026-11-22 02:10 IST', '2026-11-21T20:40:00Z', 'deploy'),
+            ('2026-11-22 02:10 GMT', '2026-11-22T02:10:00Z', 'deploy'),
+            ('2026-11-22 02:10 EST', None, 'EST · deploy'),
+        ):
+            with self.subTest(stamp=stamp):
+                row = factory.parse_deployed_line(f'- {stamp} · deploy')
+                instant = datetime.fromisoformat(expected or stamp[:16]).timestamp()
+                self.assertEqual((row['at'], row['text']), (instant, text))
+
     def test_reads_each_date_format_of_the_log(self):
         iso = factory.parse_deployed_line('- 2026-11-17 08:35 IST · 5d59421 B188 new Claude tabs no longer stop (B12 too)')
         self.assertEqual(iso['commit'], '5d59421')

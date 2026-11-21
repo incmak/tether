@@ -541,6 +541,24 @@ class TickTests(Base):
 
 
 class WhenTests(unittest.TestCase):
+    def test_bare_times_match_shared_zone_cases(self):
+        cases = Path(__file__).with_name('fixtures') / 'zone_bare_times.json'
+        for row in json.loads(cases.read_text()):
+            with self.subTest(**row), mock.patch.object(tether_zone, 'name', return_value=row['zone']):
+                now = datetime.fromisoformat(row['now']).timestamp()
+                expected = datetime.fromisoformat(row['expect']).timestamp()
+                self.assertEqual(reminders.parse_when(row['typed'], now), expected)
+
+    def test_tomorrow_clock_uses_the_first_fold_instant_or_shifts_through_the_gap(self):
+        for zone, now, typed, expected in (
+            ('America/New_York', '2026-10-31T15:00:00Z', '01:30', '2026-11-01T05:30:00Z'),
+            ('America/New_York', '2026-03-07T07:30:00Z', '02:30', '2026-03-08T07:30:00Z'),
+            ('Australia/Lord_Howe', '2026-10-02T16:00:00Z', '02:15', '2026-10-03T15:45:00Z'),
+        ):
+            with self.subTest(zone=zone, now=now), mock.patch.object(tether_zone, 'name', return_value=zone):
+                self.assertEqual(reminders.parse_when(f'tomorrow {typed}', datetime.fromisoformat(now).timestamp()),
+                                 datetime.fromisoformat(expected).timestamp())
+
     def test_first_reminder_time(self):
         self.assertEqual(reminders.parse_when('2026-11-19 10:00', now=NOW),
                          datetime(2026, 11, 19, 4, 30, tzinfo=timezone.utc).timestamp())

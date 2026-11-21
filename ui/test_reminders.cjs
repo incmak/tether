@@ -88,19 +88,23 @@ test('parseWhen resolves wall times at the target offset and keeps elapsed times
 test('parseWhen matches server wall times through offset transitions', () => {
   const newYork = loadReminders('America/New_York').parseWhen
   const lordHowe = loadReminders('Australia/Lord_Howe').parseWhen
-  // Expected instants for the HH:MM inputs come from server/reminders.py parse_when with each zone and now below.
   for (const [parseWhen, text, now, expected] of [
-    [newYork, '01:30', '2026-11-01T06:10Z', '2026-11-01T06:30Z'],
-    [newYork, '02:30', '2026-03-08T07:05Z', '2026-03-08T07:30Z'],
-    [lordHowe, '01:45', '2026-04-04T15:05Z', '2026-04-04T15:15Z'],
     [newYork, 'tomorrow 02:30', '2026-03-07T07:30Z', '2026-03-08T07:30Z'],
     [newYork, 'tomorrow 01:30', '2026-10-31T15:00Z', '2026-11-01T05:30Z'],
-    [newYork, '01:30', '2026-11-01T04:55Z', '2026-11-01T05:30Z'],
+    [lordHowe, 'tomorrow 02:15', '2026-10-02T16:00Z', '2026-10-03T15:45Z'],
     [newYork, '10am', '2026-11-01T06:10Z', '2026-11-01T15:00Z'],
     [newYork, '6pm', '2026-11-01T06:10Z', '2026-11-01T23:00Z'],
     [newYork, '18:00', '2026-11-01T23:00Z', '2026-11-02T23:00Z'],
   ]) assert.equal(parseWhen(text, seconds(now)), seconds(expected), `${text} at ${now}`)
 })
+
+const bareTimes = require('../server/fixtures/zone_bare_times.json')
+const parsers = new Map([...new Set(bareTimes.map(row => row.zone))].map(zone => [zone, loadReminders(zone).parseWhen]))
+for (const { zone, now, typed, expect } of bareTimes) {
+  test(`shared bare time: ${zone} ${typed} at ${now}`, () => {
+    assert.equal(parsers.get(zone)(typed, seconds(now)), seconds(expect))
+  })
+}
 
 test('labels use the IST day and include the year only when needed', () => {
   const { whenLabel, fullLabel } = loadReminders()

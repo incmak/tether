@@ -9,8 +9,8 @@ mod._compile(ts.transpileModule(readFileSync('src/zone.ts', 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText, 'src/zone.ts')
 const {
-  DEFAULT_ZONE, dayKey, fmtDate, fmtDateTime, fmtTime, offsetLabel, pickZone,
-  sameDay, setTetherZone, startOfDay, tetherZone, zonedTime, zoneList, zoneParts,
+  DEFAULT_ZONE, dayKey, fmtDate, fmtDateTime, fmtDay, fmtTime, offsetLabel, pickZone,
+  sameDay, setTetherZone, startOfDay, tetherZone, zonedTime, zoneLabel, zoneList, zoneParts,
 } = mod.exports
 
 test('New York wall times round trip across both DST transitions', () => {
@@ -79,6 +79,21 @@ test('invalid settings leave the active zone in place and the list includes UTC'
   assert.ok(zoneList().includes('UTC'))
 })
 
+test('a server-confirmed zone this browser cannot format leaves the active zone in place', () => {
+  setTetherZone('America/New_York')
+  // The server's tzdata can know a name this browser's ICU does not. Times must keep a zone, not read "Invalid Date".
+  setTetherZone('Not/AZone', true)
+  assert.equal(tetherZone(), 'America/New_York')
+  assert.notEqual(fmtTime(Date.UTC(2026, 10, 22, 12, 0)), 'Invalid Date')
+  setTetherZone('Etc/Not_A_Zone', true)
+  assert.equal(tetherZone(), 'America/New_York')
+  // A confirmed old name that has a renamed copy still applies and formats.
+  setTetherZone('Asia/Calcutta', true)
+  assert.equal(tetherZone(), 'Asia/Calcutta')
+  assert.equal(fmtTime(Date.UTC(2026, 10, 22, 12, 0), { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }), '17:30')
+  setTetherZone('America/New_York')
+})
+
 test('zone selection skips invalid preferences and preserves renamed zones', () => {
   assert.equal(pickZone('../etc', 'Pacific/Auckland'), 'Pacific/Auckland')
   assert.equal(pickZone('Not/AZone', 'Bad/Too'), DEFAULT_ZONE)
@@ -86,12 +101,22 @@ test('zone selection skips invalid preferences and preserves renamed zones', () 
   assert.equal(pickZone('America/New_York', 'UTC'), 'America/New_York')
 })
 
-test('a bad timestamp gives NaN parts and "Invalid Date", not a thrown RangeError', () => {
-  setTetherZone('America/New_York')
-  for (const bad of [NaN, Infinity, -Infinity]) {
-    const parts = zoneParts(bad)
-    assert.ok(Number.isNaN(parts.year) && Number.isNaN(parts.hour) && parts.weekday === -1)
-    assert.equal(dayKey(bad).includes('NaN'), true)
-    assert.equal(fmtDate(bad), 'Invalid Date')
-  }
-})
+for (const bad of [NaN, Infinity, -Infinity, 1e20, -1e20]) {
+  test(`date formatters handle invalid epoch ${bad}`, () => {
+    const zone = 'America/New_York'
+    setTetherZone(zone)
+    assert.ok(Object.values(zoneParts(bad)).every(Number.isNaN))
+    assert.ok(dayKey(bad).includes('NaN'))
+    for (const format of [fmtTime, fmtDate, fmtDateTime]) {
+      assert.equal(format(bad), 'Invalid Date')
+      assert.equal(format(new Date(bad)), 'Invalid Date')
+    }
+    for (const label of [offsetLabel, zoneLabel]) assert.match(label(zone, bad), /^(?:Invalid Date|America\/New_York)$/)
+  })
+}
+
+for (const day of [undefined, '', 'garbage', '2026-13-45', '2026-02-29']) {
+  test(`fmtDay handles invalid calendar day ${JSON.stringify(day)}`, () => {
+    assert.match(fmtDay(day), /^(?:Invalid Date)?$/)
+  })
+}
