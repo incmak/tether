@@ -198,7 +198,7 @@ ASSIGNMENT = re.compile(r'[A-Za-z_][A-Za-z0-9_]*=.*', re.S)
 ASSIGNMENT_LIKE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)(?:\[.*\])?\+?=.*', re.S)
 REDIRECTION_VARIABLE = re.compile(r'\{[A-Za-z_][A-Za-z0-9_]*\}')
 WRAPPERS = {'command', 'env', 'time', 'nohup'}
-COMMAND_WRAPPERS = {'command', 'builtin', 'time', 'noglob', 'nocorrect', 'exec', 'nohup'}
+COMMAND_WRAPPERS = {'command', 'builtin', 'time', 'noglob', 'nocorrect', 'exec', 'nohup', 'repeat', '-'}  # - and repeat: zsh
 KEYWORDS = set('if then else elif fi for while until do done case esac function select time coproc ! [[ ]]'.split())
 KEYWORD_PREFIXES = {'if', 'then', 'else', 'elif', 'while', 'until', 'do', 'time', '!', '{'}
 MOVING_WORDS = {'cd', 'pushd', 'popd', 'source', '.', 'eval', 'builtin'}
@@ -730,21 +730,24 @@ def _cd_guard(segment):
 
 def _command_word(words):
     """Return the index of a command after known prefixes, or None if it cannot be identified."""
-    wrapper_options = False
+    wrapper, count = None, False
     for index, word in enumerate(words):
         text = word.text
-        if word.plain and text in COMMAND_WRAPPERS:
-            wrapper_options = True
+        if count:
+            count = False  # the count after zsh `repeat`
+        elif word.plain and text in COMMAND_WRAPPERS:
+            wrapper, count = text, text == 'repeat'
         elif word.bare and (text in KEYWORD_PREFIXES or REDIRECTION_VARIABLE.fullmatch(text)):
-            wrapper_options = False
+            wrapper = None
         elif not word.plain:
             return None
         elif text == '--':
-            wrapper_options = False
-        elif wrapper_options and text.startswith('-'):
-            continue
+            wrapper = None
+        elif wrapper and text.startswith('-'):
+            if wrapper == 'command' and ('v' in text or 'V' in text):
+                return index  # `command -v cd` only looks the name up
         elif ASSIGNMENT_LIKE.fullmatch(text):
-            wrapper_options = False
+            wrapper = None
         else:
             return index if text and not any(char in text for char in '[]=${}') else None
     return None
@@ -828,15 +831,15 @@ def evaluate(command, cwd=None):
                     verdict, reason = 'unknown', 'folder'
                 verdicts.append((verdict, reason))
                 where = here if len(verdicts) == 1 or where == here else None
-        # An unrecognised prefix can hide the command word, so consider every word in that case.
-        possible_commands = {word.text for word in words} if position is None else {name}
+        # An unrecognised prefix, or shell syntax the parser does not follow (uncertain), can hide the command word.
+        possible_commands = {word.text for word in words} if position is None or uncertain else {name}
         if MOVING_WORDS.intersection(possible_commands):
             folder = logical = None
         if possible_commands.intersection(('set', 'setopt', 'unsetopt')):
             steady = False  # later cd and glob behavior can depend on shell options
         if commit is None and not git_context_changed:
             # These commands can explicitly change the Git worktree or hooks. Keep the folder unknown for probes.
-            if position is None:
+            if position is None or uncertain:
                 assignments, env_names = words, words
             else:
                 env_names = words[position + 1:] if name in ('export', 'unset', 'declare', 'typeset') else []

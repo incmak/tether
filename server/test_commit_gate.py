@@ -391,13 +391,21 @@ class Evaluate(unittest.TestCase):
                 'X=1 command -p cd ./sub', 'X=1 command -- cd ./sub', 'time -p cd ./sub',
                 '{fd}</dev/null cd ./sub', '&>/dev/null cd ./sub', '&>>/dev/null cd ./sub',
                 'command -p -- . ./script', '{fd}</dev/null . ./script',
-                'X=${UNSET:-one two} . ./script', 'X[1 + 0]=v . ./script')
-        zsh = ('noglob cd ./sub', 'nocorrect cd ./sub', 'nocorrect noglob . ./script')
+                'X=${UNSET:-one two} . ./script', 'X[1 + 0]=v . ./script',
+                'X=$(printf value)suffix cd ./sub', 'X=$(printf value)suffix . ./script')
+        zsh = ('noglob cd ./sub', 'nocorrect cd ./sub', 'nocorrect noglob . ./script',
+               'repeat 1 cd ./sub', '- cd ./sub', 'X=1 repeat 2 - . ./script')
         for shell, prefixes in (('bash', bash), ('zsh', zsh)):
             for prefix in prefixes:
                 with self.subTest(shell=shell, prefix=prefix):
                     found = commit_gate.evaluate(f'{prefix}; git commit -m Title', str(self.cwd))
                     self.assertEqual((found['folder'], found['verdict']), (None, 'unknown'))
+
+    def test_command_lookup_does_not_move_the_shell(self):
+        for prefix in ('command -v cd', 'command -pV pushd', 'X=1 command -v . '):
+            with self.subTest(prefix=prefix):
+                found = commit_gate.evaluate(f'{prefix}; git commit -m Title', str(self.cwd))
+                self.assertEqual((found['folder'], found['verdict']), (str(self.cwd), 'missing'))
 
     def test_prefixed_shell_options_make_following_cd_unknown(self):
         deep = self.cwd / 'real/deep'
@@ -415,7 +423,8 @@ class Evaluate(unittest.TestCase):
                        'command -p declare -x GIT_DIR=./sub/.git', 'noglob typeset -x GIT_DIR=./sub/.git',
                        'declare -x GIT_CONFIG_GLOBAL=other.config',
                        'GIT_DIR=./sub/.git', 'export X=1 GIT_DIR=./sub/.git', 'unset GIT_DIR',
-                       'X[1 + 0]=v export GIT_DIR=./sub/.git', 'X[1 + 0]=v unset GIT_DIR'):
+                       'X[1 + 0]=v export GIT_DIR=./sub/.git', 'X[1 + 0]=v unset GIT_DIR',
+                       'X=$(printf value)suffix export GIT_DIR=./sub/.git'):
             with self.subTest(prefix=prefix):
                 found = commit_gate.evaluate(f'{prefix}; git commit -m Title', str(self.cwd))
                 self.assertEqual((found['folder'], found['verdict']), (None, 'unknown'))
