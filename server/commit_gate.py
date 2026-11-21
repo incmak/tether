@@ -1056,9 +1056,9 @@ def _head_reflog(folder, start):
             length = found.st_size - offset
             if not 0 <= length <= REFLOG_BYTES:
                 return None
+            if not missing and (found.st_ino, found.st_dev) != (ino, dev):
+                return None  # The file was replaced, even if it was empty.
             if offset:
-                if (found.st_ino, found.st_dev) != (ino, dev):
-                    return None
                 source.seek(offset - 1)
                 if source.read(1) != b'\n':
                     return None

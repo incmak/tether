@@ -1279,11 +1279,20 @@ time.sleep(20)
         self.assert_hook_silent(command, 'skip')
 
     def test_claude_skips_a_silent_merge_amendment_after_a_reflog_rewrite(self):
+        self.assert_reflog_rewrite(empty=False)
+
+    def test_claude_skips_a_silent_merge_amendment_after_an_empty_reflog_rewrite(self):
+        self.assert_reflog_rewrite(empty=True)
+
+    def assert_reflog_rewrite(self, *, empty):
         self.prepare_merge()
         self.git('merge', '--no-ff', '--no-verify', '-m', 'merge side', 'side')
+        reflog = self.repo / '.git' / 'logs' / 'HEAD'
+        if empty:
+            self.git('reflog', 'expire', '--expire=all', 'HEAD')
+            self.assertEqual(reflog.stat().st_size, 0)
         command = 'git commit --amend -m amended'
         self.pre(command)
-        reflog = self.repo / '.git' / 'logs' / 'HEAD'
         original = reflog.stat()
         rewritten = reflog.with_name('HEAD.rewritten')
         rewritten.write_bytes(reflog.read_bytes())
