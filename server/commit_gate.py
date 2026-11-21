@@ -185,7 +185,6 @@ REDIRECTION = re.compile(rf'(?P<fd>(?:[0-9]{LINE_JOIN})*)'
                          rf'|&{LINE_JOIN}>{LINE_JOIN}>?')
 COMPOUND_OPERATOR = re.compile(rf'&{LINE_JOIN}&|\|{LINE_JOIN}[|&]|;{LINE_JOIN}[;&]')
 FOLDER_SEPARATORS = {None, '&&', ';', '\n'}
-COMMAND_STARTS = FOLDER_SEPARATORS | {'||', '|', '|&'}  # a segment after ( or ) can start inside a word
 HEREDOC_MARK = '@@TETHER-HEREDOC-{}@@'
 HEREDOC_FOUND = re.compile(r'@@TETHER-HEREDOC-(\d+)@@')
 # "$(cat <<'EOF' ... EOF)": the form Claude Code uses for a commit message.
@@ -832,9 +831,10 @@ def evaluate(command, cwd=None):
                     verdict, reason = 'unknown', 'folder'
                 verdicts.append((verdict, reason))
                 where = here if len(verdicts) == 1 or where == here else None
-        # An unrecognised prefix, or a segment that starts after ( or ) (as in X=$(...)suffix cd), can hide the
-        # command word. Then every word counts.
-        exact = position is not None and preceding in COMMAND_STARTS
+        # An unrecognised prefix, or a segment glued to ( or ) (as in X=$(...)suffix cd), can hide the command word.
+        # Then every word counts.
+        start = next(index for index, token in enumerate(tokens) if token is words[0])
+        exact = position is not None and not (start and tokens[start - 1] in ('(', ')'))
         possible_commands = {name} if exact else {word.text for word in words}
         if MOVING_WORDS.intersection(possible_commands):
             folder = logical = None
