@@ -347,33 +347,22 @@ FOOTER_ACTIONS = FOCUS_ACTIONS | ROW_ACTIONS | ARTIFACT_ACTIONS | {
 }
 
 
-def clipped_since(tail):
-    if not tail.endswith('…'):
-        return False
-    prefix = tail[:-1]
-    return bool(prefix and ('since '.startswith(prefix) or re.fullmatch(
-        r'since (?:[01]?\d|2[0-3])(?::(?:[0-5](?:\d(?: [AP]M?)?)?)?)?', prefix)))
-
-
 def waiting_row(text):
-    """Read the full waiting identity, or a name with Claude's explicit truncation mark."""
+    """Read the whole description or keep the clipped text, including any visible since suffix."""
     action, separator, name = text.partition(' · ')
     if not separator or not re.fullmatch(rf'waiting on {WAITING_COUNT}(?:, {WAITING_COUNT})*', action):
         return None, None, False
-    label, divider, tail = name.rpartition(' · ')
-    since_clipped = bool(divider) and clipped_since(tail)
-    has_since = since_clipped or (divider and tail.startswith('since ') and tail[6:].strip()
-                                  and not tail.endswith('…'))
-    if has_since:
-        name = label
-    if not name or (not has_since and not name.endswith('…')):
-        return None, None, False
+    clipped = name.endswith('…')
+    if not clipped:
+        name, divider, tail = name.rpartition(' · ')
+        if not (name and divider and tail.startswith('since ') and tail[6:].strip()):
+            return None, None, False
     waiting = {'shell': 0, 'monitor': 0}
     for count, kind in re.findall(WAITING_COUNT, action):
         if waiting[kind]:
             return None, None, False
         waiting[kind] = int(count)
-    return name, waiting, name.endswith('…') and not since_clipped
+    return name, waiting, clipped
 
 
 def agent_bar(screen):
@@ -432,6 +421,8 @@ def agent_bar(screen):
         elif any(last_action.startswith(known + ' ') for known in FOCUS_ACTIONS):
             return None
         if TASKS_PILL_ACTION in actions:
+            if actions & PROMPT_ACTIONS:
+                return None
             focus = 'pill'
         elif actions & PROMPT_ACTIONS:
             focus = 'prompt'
@@ -443,7 +434,11 @@ def agent_bar(screen):
 
 
 def matches_bar_name(description, row):
-    return matches(description, row['name']) if row['name_clipped'] else description == row['name']
+    if not row['name_clipped']:
+        return description == row['name']
+    shown_prefix = row['name'][:-1]
+    rendered_prefix = description + ' · since '
+    return rendered_prefix.startswith(shown_prefix) or shown_prefix.startswith(rendered_prefix)
 
 
 def bar_target(bar, target, waiting):
@@ -491,6 +486,7 @@ def stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar=N
     bar = read()
     if bar is None:
         raise StopError(BAR_READ_ERROR)
+    sent_bar_key = False
     try:
         for step in range(9):
             position = identify(bar)
@@ -500,6 +496,7 @@ def stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar=N
             if (selected is not None and selected > position) or step == 8:
                 raise StopError('Could not reach that agent in the agent bar. Stop it in the terminal.')
             press(entry, 'Down', run=run)
+            sent_bar_key = True
             sleep(0.18)
             bar = read()
 
@@ -520,16 +517,18 @@ def stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar=N
             raise StopError(BAR_ID_ERROR)
         pressed['x'] = True
         press(entry, 'x', run=run)
+        sent_bar_key = True
         sleep(0.18)
     finally:
-        for step in range(4):
-            bar = read()
-            if bar is None or step == 3 or bar['focus'] == 'prompt':
-                break
-            press(entry, 'Escape', run=run)
-            sleep(0.35)
-        if bar is None or bar['focus'] != 'prompt':
-            raise StopError(BAR_CLOSE_ERROR)
+        if sent_bar_key:
+            for step in range(4):
+                bar = read()
+                if bar is None or step == 3 or bar['focus'] == 'prompt':
+                    break
+                press(entry, 'Escape', run=run)
+                sleep(0.35)
+            if bar is None or bar['focus'] != 'prompt':
+                raise StopError(BAR_CLOSE_ERROR)
 
 
 # The newest Claude Code version whose /tasks screens the stop tests and a live run were checked on.

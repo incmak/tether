@@ -653,22 +653,19 @@ def _waiting_children(config, tasks, finished, since):
         parent, kind = task['parent'], task['kind']
         if parent not in finished or task['state'] != 'running':
             continue
-        if (output := task['_output']) is not None:
-            # An output file without an exit marker can outlive the process that wrote it.
+        if kind == 'shell' or task['_output'] is not None:
+            # An unfinished task record can outlive the Claude process that started it.
             stamp = _stamp(task['started'])
             if since is None or stamp is None or stamp < since - 5:
                 continue
-            if pids is None:
-                try:
-                    pids = task_process.children(config['owner_pid'])
-                except (OSError, ValueError):
-                    pids = []
-            if kind == 'shell':
-                alive = task_process.find(config['owner_pid'], task, output, stamp, pids=pids) is not None
-            else:
-                alive = task_process.running(config['owner_pid'], task, stamp, pids=pids)
-            if not alive:
-                continue
+            if kind == 'monitor':
+                if pids is None:
+                    try:
+                        pids = task_process.children(config['owner_pid'])
+                    except (OSError, ValueError):
+                        pids = []
+                if not task_process.running(config['owner_pid'], task, stamp, pids=pids):
+                    continue
         # _monitors already checked liveness for monitors without output.
         waiting[parent][kind] += 1
     return waiting

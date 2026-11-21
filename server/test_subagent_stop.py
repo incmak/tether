@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -1094,6 +1095,10 @@ class AgentBarTests(unittest.TestCase):
         self.assertEqual(self.drive(frames), {'ok': True, 'state': 'stopped'})
         self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
 
+    def test_stop_from_an_already_selected_row_closes_the_bar_after_x(self):
+        self.assertEqual(self.drive(self.wide_frames()[3:]), {'ok': True, 'state': 'stopped'})
+        self.assertEqual(self.keys, ['x', 'Escape'])
+
     def test_closes_a_recognized_tasks_panel_before_navigating_the_bar(self):
         for name in ('list_subagent_shell', 'list', 'detail_agent', 'shell_detail'):
             with self.subTest(name=name):
@@ -1119,29 +1124,54 @@ class AgentBarTests(unittest.TestCase):
         self.assertEqual(self.drive(frames), {'ok': True, 'state': 'stopped'})
         self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
 
-    def test_since_field_truncation_keeps_the_whole_name(self):
-        for tail in ('sin…', 's…', 'since 8:5…'):
-            with self.subTest(tail=tail):
+    def test_unique_match_at_and_after_the_since_separator(self):
+        for suffix in (' ·…', ' · s…', ' · sin…', ' · since 8:5…', ' · since lunch…'):
+            with self.subTest(suffix=suffix):
                 frames = self.wide_frames()
-                frames[3] = (frames[3][0].replace('since 8:54 AM', tail), 'x')
+                frames[3] = (frames[3][0].replace(' · since 8:54 AM', suffix), 'x')
                 self.siblings = [dict(self.agent, id='beta', description=self.NAME + ' extra')]
                 self.assertEqual(self.drive(frames), {'ok': True, 'state': 'stopped'})
                 self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
 
-    def test_name_preclipped_by_claude_can_still_have_a_full_since_field(self):
+    def test_complete_since_field_requires_the_exact_description(self):
         frames = self.wide_frames()
         self.agent['description'] = 'a' * 200 + ' suffix'
-        frames = [(screen.replace(self.NAME, 'a' * 199 + '…'), key) for screen, key in frames]
+        literal_name = 'a' * 199 + '…'
+        frames = [(screen.replace(self.NAME, literal_name), key) for screen, key in frames]
+        with self.assertRaisesRegex(stop.StopError, 'Could not identify'):
+            self.drive([(frames[0][0], None)])
+        self.assertEqual(self.keys, [])
+        self.agent['description'] = literal_name
         self.assertEqual(self.drive(frames), {'ok': True, 'state': 'stopped'})
         self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
 
-    def test_clipped_non_time_suffix_does_not_establish_the_whole_name(self):
+    def test_clipped_prefix_must_match_including_whitespace(self):
         frames = self.wide_frames()
-        for tail in ('since lunch…', 'sibling…'):
-            with self.subTest(tail=tail), self.assertRaisesRegex(stop.StopError, 'Could not identify'):
-                changed = frames[3][0].replace('since 8:54 AM', tail)
+        for value in ('Stop can …', self.NAME + ' · sibling…'):
+            with self.subTest(value=value), self.assertRaisesRegex(stop.StopError, 'Could not identify'):
+                changed = frames[3][0].replace(self.NAME + ' · since 8:54 AM', value)
                 self.drive([*frames[:3], (changed, 'Escape'), frames[-1]])
             self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+
+    def test_working_prompt_with_tasks_indicator_and_draft_refuses_without_keys(self):
+        screen = self.screen('prompt_waiting_working').replace(
+            'esc to interrupt', 'cohort · enter to view tasks · esc to interrupt').replace(
+            '\n❯\n', '\n❯ Unsent draft\n')
+        with self.assertRaisesRegex(stop.StopError, 'Could not read'):
+            self.drive([(screen, None)])
+        self.assertEqual(self.keys, [])
+
+    def test_prompt_and_tasks_pill_actions_together_refuse(self):
+        pill = self.screen('pill_focus')
+        for action in ('enter to view tasks', 'enter to view tas…'):
+            with self.subTest(action=action):
+                self.assertIsNone(stop.agent_bar(pill.replace('enter to view tasks', '↓ to manage · ' + action)))
+
+    def test_refusal_leaves_existing_pill_focus_alone(self):
+        screen = self.screen('pill_focus').replace('\n❯\n', '\n❯ Unsent draft\n')
+        with self.assertRaisesRegex(stop.StopError, 'unsent draft'):
+            self.drive([(screen, None)])
+        self.assertEqual(self.keys, [])
 
     def test_artifact_and_ambiguous_footers_refuse_navigation_and_cleanup(self):
         frames = self.wide_frames()
@@ -1189,6 +1219,16 @@ class AgentBarTests(unittest.TestCase):
         self.siblings = [dict(self.agent, id='beta', description='Probe two')]
         frames[3:] = [(frames[3][0], 'Escape'), (frames[0][0], None)]
         with self.assertRaisesRegex(stop.StopError, 'share this name.*Claude Code 2.1.330'):
+            self.drive(frames)
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+
+    def test_clipped_since_can_be_part_of_a_second_listed_agents_name(self):
+        frames = self.wide_frames()
+        self.siblings = [dict(self.agent, id='beta', description=self.NAME + ' · single run')]
+        # Only the longer-named agent is visible. The shorter-named target also fits its row.
+        frames = [(re.sub(r' · since 8:5[34] AM', ' · sin…', screen), key) for screen, key in frames]
+        frames[3:] = [(frames[3][0], 'Escape'), frames[-1]]
+        with self.assertRaisesRegex(stop.StopError, 'share this name'):
             self.drive(frames)
         self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
 
