@@ -669,16 +669,26 @@ class FridayRulesTests(unittest.TestCase):
                                    ('Ahead', confirm_required), ('Okay, send it', confirm_required),
                                    ("Don\u2019t, please", friday.APPROVAL_DECLINED),
                                    ("Don\u2019t!", friday.APPROVAL_DECLINED), ('Dont', friday.APPROVAL_DECLINED),
-                                   ('Yes', None), ('Sure, go ahead.', None)):
+                                   ('Yes', None), ('Sure, go ahead.', None),
+                                   # Review 5: a past decision named is not an answer.
+                                   ('The approved one.', 'not None'), ('The denied one.', 'not None')):
                 with self.subTest(decision=decision, text=text):
-                    self.assertEqual(friday.check_tool('answer_approval', {'chat': 'Docs', 'decision': decision},
-                                                       'speech', text, set(), question, proposal, 1), expected)
+                    reason = friday.check_tool('answer_approval', {'chat': 'Docs', 'decision': decision},
+                                               'speech', text, set(), question, proposal, 1)
+                    if expected == 'not None':
+                        self.assertIsNotNone(reason)
+                    else:
+                        self.assertEqual(reason, expected)
             for bad in ([], {}, None, 1):
                 with self.subTest(decision=decision, bad=bad):
                     self.assertEqual(friday.check_tool('answer_approval', {'chat': 'Docs', 'decision': bad},
                                                        'speech', 'No', set(), question, proposal, 1),
                                      friday.APPROVAL_DECLINED)
-                    self.assertIsNotNone(friday.check_tool('answer_approval', {'chat': 'Docs', 'decision': bad},
+                    # Review 5: confirmed_args never turns a malformed decision into the heard one.
+                    args = friday.confirmed_args('answer_approval', {'chat': 'Docs', 'decision': bad}, 'Yes',
+                                                 question, proposal, 1)
+                    self.assertEqual(args['decision'], bad)
+                    self.assertIsNotNone(friday.check_tool('answer_approval', args,
                                                            'speech', 'Yes', set(), question, proposal, 1))
             self.assertTrue(friday.bare_decline(proposal, 'Nope, thanks.'))
             self.assertFalse(friday.bare_decline(proposal, 'No, what does it want?'))
@@ -803,7 +813,9 @@ class FridayRulesTests(unittest.TestCase):
                     reason = friday.check_tool(proposal.name, {'chat': 'docs', 'decision': decision},
                         'speech', word.upper() + '!', set(), friday.send_readback(proposal), proposal, 1)
                     # "Don't!" to "Should I deny docs?" can mean "don't deny it": it decides nothing.
-                    expected = friday.APPROVAL_DECLINED if word in ('no', 'nope', 'stop', "don't") else None
+                    # B489 review 5: a past tense ("Approved!", "Denied!") is not an answer; it decides nothing.
+                    expected = (friday.APPROVAL_DECLINED if word in ('no', 'nope', 'stop', "don't", 'denied')
+                                else friday.APPROVAL_CONFIRM_REQUIRED if word == 'approved' else None)
                     self.assertEqual(reason, expected)
 
     def test_approval_requires_a_whole_consent_answer(self):
@@ -2883,10 +2895,11 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], [])
                 self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)],
                                  [friday.APPROVAL_DECLINED_REPLY])
-        with patch('sys.stderr'):
-            _, frames = await self.tool_flow(history, [(['Okay, I will leave it waiting.'], 1, [])], proposal)
-        self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)],
-                         ['Okay, I will leave it waiting.'])
+        # Review 5: an answer that describes the request is not a claim and is kept.
+        for reply in ('Okay, I will leave it waiting.', 'It wants the installation approved before it can continue.'):
+            with self.subTest(reply=reply), patch('sys.stderr'):
+                _, frames = await self.tool_flow(history, [([reply], 1, [])], proposal)
+                self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], [reply])
 
     async def test_false_success_replaces_complete_reply_after_failed_or_blocked_action(self):
         cases = (

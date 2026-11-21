@@ -348,8 +348,9 @@ class IntentEvalTests(unittest.TestCase):
                               'Denied because it was not safe.'):
                     trace, = self.run_script(example, assistant(claim))[0]['samples']
                     self.assertEqual(trace['reply'], evaluation.friday.APPROVAL_DECLINED_REPLY)
-                trace, = self.run_script(example, assistant('Okay, it still waits.'))[0]['samples']
-                self.assertEqual(trace['reply'], 'Okay, it still waits.')
+                for kept in ('Okay, it still waits.', 'It wants the installation approved before it can continue.'):
+                    trace, = self.run_script(example, assistant(kept))[0]['samples']
+                    self.assertEqual(trace['reply'], kept)
                 # B489 review: later calls in the same batch still run, as in the runtime.
                 batch = assistant(tool_calls=[call('answer_approval', chat=chat, decision='deny'),
                                               call('send_to_chat', chat='Other', prompt='Check the logs')])

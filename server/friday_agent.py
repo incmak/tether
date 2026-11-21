@@ -553,11 +553,20 @@ def false_success(text):
             and not re.search(r'\bnot\b|n[’\']t|\?', text, re.I))
 
 
+DECISION_WORD = r'(?:approved|denied|rejected|allowed|accepted|declined|sent|done|handled)\b'
+DECISION_CLAIM = re.compile(
+    r"(?:^|[.!?;]\s*)(?:(?:okay|ok|alright|sure|right|got it|no problem|all set)[,.!]?\s+)*" + DECISION_WORD
+    + r"|\b(?:i|i've|i have|i just|it's|it is|it was|it has|that's|that is|that was|that has|"
+      r"the request(?: is| was| has)?|request(?: is| was| has))\s+(?:been\s+|now\s+|just\s+|already\s+)*" + DECISION_WORD,
+    re.I)
+
+
 def declined_claim(text):
     """True when a reply after "no" to the approval question claims a decision Friday did not make."""
-    # No negation exemption: "Denied because it was not safe." still claims a denial. The fixed reply
-    # says the same as a correct "Nothing was approved or denied", so replacing that loses nothing.
-    return bool(re.search(r'\b(?:approved|denied|rejected|allowed|accepted|declined|sent|done|handled)\b', text, re.I))
+    # A claim has a claim shape: a sentence that opens with the decision ("Denied because it was not
+    # safe.", "Okay, denied.") or a subject that did it ("I have denied it", "It's rejected").
+    # "It wants the installation approved" describes the request and is kept.
+    return bool(DECISION_CLAIM.search(text.replace('\u2019', "'")))
 
 
 def has_plain(text):
@@ -647,8 +656,9 @@ def answer_words(text):
 
 APPROVAL_YES_WORDS = frozenset('yes yeah yep yup ok okay sure alright absolutely'.split())
 # A closed list: only these words, plus filler, answer "Should I approve docs?" or "Should I deny docs?".
-APPROVAL_CONFIRM_WORDS = {'approve': APPROVAL_YES_WORDS | {'approve', 'approved', 'allow'},
-                          'deny': APPROVAL_YES_WORDS | {'deny', 'denied', 'reject'}}
+# Only the imperative: "The approved one." names a past decision; it does not answer the question.
+APPROVAL_CONFIRM_WORDS = {'approve': APPROVAL_YES_WORDS | {'approve', 'allow'},
+                          'deny': APPROVAL_YES_WORDS | {'deny', 'reject'}}
 APPROVAL_NO_WORDS = frozenset({'no', 'nope', 'stop', "don't"})
 
 
@@ -692,7 +702,9 @@ def confirmed_args(name, args, last_user_text, previous_assistant, pending=None,
     # The browser resolves a chat by its own rules ("STRASSE" is not "Straße"): send the name the user heard.
     args = dict(args, chat=pending.chat)
     if name == 'answer_approval':
-        return dict(args, decision=pending.payload)
+        # Only a valid decision is rewritten; a malformed call stays malformed and check_tool refuses it.
+        decision = args.get('decision')
+        return dict(args, decision=pending.payload) if isinstance(decision, str) and decision in APPROVAL_READBACK_START else args
     if name == 'send_to_chat':
         # Keep a changed attachment visible to check_tool so either mismatch fails consent.
         if bool(args.get('attach_call')) != pending.attach:
