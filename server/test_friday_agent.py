@@ -566,6 +566,12 @@ class FridayRulesTests(unittest.TestCase):
             ('docs', 'Go', 'approve', False),
             ('docs', 'Dont', 'deny', False),
             ('docs', 'Do not', 'deny', False),
+            # A chat title never stands in for words of the answer.
+            ('Hold off', 'Okay, hold off', 'approve', False),
+            ('No thanks', 'Okay, no thanks', 'approve', False),
+            ('Hold off', 'Okay, hold off.', 'deny', False),
+            ('Hold off', 'Approve Hold off.', 'approve', True),
+            ('No thanks', 'Yes, approve it in No thanks.', 'approve', True),
         )
         for chat, text, decision, allowed in cases:
             with self.subTest(chat=chat, text=text, decision=decision):
@@ -2189,6 +2195,38 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         finally:
             await llm._client.close()
 
+    async def test_late_tool_result_uses_the_read_back_state_of_its_own_run(self):
+        from pipecat.frames.frames import FunctionCallFromLLM
+        from pipecat.processors.frame_processor import FrameProcessor
+
+        llm = self.rt.FridayLLM(SimpleNamespace(), friday.brain_config({}))
+        name = 'list_chats'
+
+        async def batch(run, ident):
+            llm.tool_run = run
+            await llm.push_frame(self.rt.FunctionCallsStartedFrame([FunctionCallFromLLM(name, ident, {}, None)]))
+
+        def result(ident):
+            return self.rt.FunctionCallResultFrame(name, ident, {}, {'chats': []})
+
+        spoke, plain = SimpleNamespace(readback_spoken=True, pending={}), SimpleNamespace(readback_spoken=False, pending={})
+        try:
+            with patch.object(FrameProcessor, 'push_frame', AsyncMock()):
+                # A late result of a turn that spoke its read-back stays silent in the next turn.
+                await batch(spoke, 'old-readback')
+                llm.tool_run = SimpleNamespace(readback_spoken=False, pending={})
+                late = result('old-readback')
+                await llm.push_frame(late)
+                # A read-back in the new turn does not silence a late result of an ordinary turn.
+                await batch(plain, 'old-plain')
+                llm.tool_run = SimpleNamespace(readback_spoken=True, pending={})
+                ordinary = result('old-plain')
+                await llm.push_frame(ordinary)
+                self.assertEqual((late.run_llm, ordinary.run_llm), (False, None))
+                self.assertEqual((llm.tool_batches, llm.tool_batch_runs), ({}, {}))
+        finally:
+            await llm._client.close()
+
     async def test_single_successful_action_uses_one_spoken_ack(self):
         for name, args, result, text in (
                 ('send_to_chat', {'prompt': 'Check the docs'}, {'ok': True, 'chat': 'Docs'}, 'Sent to Docs.'),
@@ -2368,7 +2406,8 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(any(isinstance(f, self.rt.TTSSpeakFrame) for f in frames))
 
     async def test_mixed_script_reply_preserves_chunk_order(self):
-        for chunks in (['東京', ' is idle.'], ['The idle chat is ', '東京', '.'], ['서울', ' is idle.']):
+        for chunks in (['東京', ' is idle.'], ['The idle chat is ', '東京', '.'], ['서울', ' is idle.'],
+                       ['“', '東京', '” is idle.'], ['...'], ['“', '”']):
             with self.subTest(chunks=chunks), patch('sys.stderr') as stderr:
                 _, frames = await self.tool_flow('Check it', [(chunks, 1, [])])
                 self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], chunks)
@@ -2383,7 +2422,8 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], chunks)
 
     async def test_stray_only_reply_logs_total_and_uses_fallback(self):
-        for chunks in (['사'], ['사', ' ', '東京', '.']):
+        # The decision is per reply: punctuation around a stray name does not change it.
+        for chunks in (['사'], ['사', ' ', '東京', '.'], ['“東京”'], ['“', '東京', '”'], ['—', '서울'], ['- ', '東京']):
             with self.subTest(chunks=chunks), patch('sys.stderr') as stderr:
                 _, frames = await self.tool_flow('Check it', [(chunks, 1, [])])
                 self.assertFalse(any(isinstance(f, self.rt.LLMTextFrame) for f in frames))

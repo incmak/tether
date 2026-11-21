@@ -567,7 +567,7 @@ def plain_yes(text, chat=''):
 
 APPROVAL_ANSWERS = frozenset('approve approved yes yeah yep yup ok okay sure allow alright'.split())
 DENIAL_ANSWERS = frozenset('deny denied no nope reject stop'.split())
-APPROVAL_FILLER = frozenset('it that this please the request one right now thanks thank you just uh um and'.split())
+APPROVAL_FILLER = frozenset('it that this please the request one right now thanks thank you just uh um and in for'.split())
 
 
 def approval_answer(text, chat=''):
@@ -576,9 +576,10 @@ def approval_answer(text, chat=''):
         return None
     words = norm(re.sub(r"\bdon't\b", 'deny', text, flags=re.I))
     name = norm(chat)
-    if name and name not in APPROVAL_ANSWERS | DENIAL_ANSWERS and name != 'go ahead':
-        # Keep a separator so removing a chat name cannot create "go ahead".
-        words = re.sub(rf'\b{re.escape(name)}\b', ' it ', words)
+    if name:
+        # The chat name counts only as one whole phrase right after a decision word or "in"/"for"
+        # ("approve docs", "deny it in docs"): a title such as "Hold off" never turns other words into consent.
+        words = re.sub(rf'\b(approve|approved|deny|denied|in|for) {re.escape(name)}(?= |$)', r'\1 it', words)
     words = set(re.sub(r'\bgo ahead\b', 'approve', words).split())
     if words - (APPROVAL_ANSWERS | DENIAL_ANSWERS | APPROVAL_FILLER):
         return None
@@ -1470,6 +1471,7 @@ def runtime_types():
             self._last_reply = (None, ())
             self.tools_in_flight = set()
             self.tool_batches = {}
+            self.tool_batch_runs = {}
             # An aggregated result awaiting inference, or the context frame that runs it.
             self.tool_followup = None
             self.replay_marker = None
@@ -1546,14 +1548,17 @@ def runtime_types():
                 frame.properties = FridaySpokenToolResult(run_llm=False, text=ack)
 
         async def push_response_text(self, response, frame):
+            # Until the reply shows a Latin letter or a digit, hold every chunk: the decision is per reply,
+            # never per chunk boundary ("“", "東京", "”" is the same reply as "“東京”").
             if not response.plain_text:
-                if has_plain(frame.text):
-                    response.plain_text = True
-                elif response.held_text or stray_text(frame.text):
+                if not has_plain(frame.text):
                     response.held_text.append(frame)
                     return
-            frames = [*response.held_text, frame] if response.held_text else (frame,)
+                response.plain_text = True
+            await self.release_text(response, [*response.held_text, frame])
             response.held_text.clear()
+
+        async def release_text(self, response, frames):
             for chunk in frames:
                 response.text |= bool(chunk.text.strip())
                 if response.buffered_text is not None:
@@ -1567,15 +1572,19 @@ def runtime_types():
             result = isinstance(frame, FunctionCallResultFrame)
             properties = frame.properties if result else None
             final = properties is None or properties.is_final
+            run = self.tool_batch_runs.get(ident)
             if final and batch is not None:
                 del self.tool_batches[ident]
                 batch.remove(ident)
+            if final:
+                self.tool_batch_runs.pop(ident, None)
             if not result or frame.run_llm is not None or (properties and properties.run_llm is not None):
                 return
             # Pipecat's group check overlooks siblings that have started but
             # have yet to send their in-progress frame.
             siblings_pending = batch and len(batch) > (0 if final else 1)
-            if siblings_pending or (self.tool_run and self.tool_run.readback_spoken):
+            # The run that started the batch decides: a late result never reads a newer turn's read-back.
+            if siblings_pending or (run is not None and run.readback_spoken):
                 frame.run_llm = False
 
         async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
@@ -1586,6 +1595,7 @@ def runtime_types():
                     batch = {call.tool_call_id for call in frame.function_calls}
                     self.tools_in_flight.update(batch)
                     self.tool_batches.update(dict.fromkeys(batch, batch))
+                    self.tool_batch_runs.update(dict.fromkeys(batch, self.tool_run))
                 elif isinstance(frame, (FunctionCallResultFrame, FunctionCallCancelFrame)):
                     self.finish_browser_tool(frame)
                     self.gate_tool_followup(frame)
@@ -1987,9 +1997,12 @@ def runtime_types():
                     response.completed = True
                     self.record_llm_ttft(response)
                     if response.held_text:
-                        chars = sum(len(frame.text) for frame in response.held_text)
-                        print(f'Friday dropped stray text: {chars} chars', file=sys.stderr, flush=True)
-                        response.held_text.clear()
+                        held, response.held_text = response.held_text, []
+                        if stray_text(''.join(frame.text for frame in held)):
+                            chars = sum(len(frame.text) for frame in held)
+                            print(f'Friday dropped stray text: {chars} chars', file=sys.stderr, flush=True)
+                        else:
+                            await self.release_text(response, held)  # only punctuation or space: say it as before
                     if response.text and response.buffered_text is not None:
                         if (not run.succeeded_action
                                 and false_success(''.join(frame.text for frame in response.buffered_text))):
