@@ -343,7 +343,7 @@ class IntentEvalTests(unittest.TestCase):
                 self.assertEqual(trace['reply'], evaluation.friday.APPROVAL_DECLINED_REPLY)
                 self.assertEqual(len(payloads), 1)  # the fixed reply; the model does not run again
                 # B489 review 2: a decision claim without a call is replaced, as in the runtime.
-                for claim in ('Denied.', 'I rejected the request. Anything else?'):
+                for claim in ('Denied.', 'I rejected the request. Anything else?', 'Denied. I did not send anything.'):
                     trace, = self.run_script(example, assistant(claim))[0]['samples']
                     self.assertEqual(trace['reply'], evaluation.friday.APPROVAL_DECLINED_REPLY)
                 trace, = self.run_script(example, assistant('Okay, it still waits.'))[0]['samples']

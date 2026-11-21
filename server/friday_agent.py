@@ -555,8 +555,10 @@ def false_success(text):
 
 def declined_claim(text):
     """True when a reply after "no" to the approval question claims a decision Friday did not make."""
-    return (bool(re.search(r'\b(?:approv|den(?:y|ie|ial)|reject|allow|accept|declin|sent|done|handled)\w*', text, re.I))
-            and not re.search(r'\b(?:not|never|nothing)\b|n[’\']t\b', text, re.I))
+    # Each clause on its own: "Denied. I did not send anything." still claims a denial.
+    return any(re.search(r'\b(?:approv|den(?:y|ie|ial)|reject|allow|accept|declin|sent|done|handled)\w*', clause, re.I)
+               and not re.search(r'\b(?:not|never|nothing|neither|nor)\b|n[’\']t\b', clause, re.I)
+               for clause in re.split(r'[.!?;:,\n]|\b(?:and|but|so)\b', text))
 
 
 def has_plain(text):
@@ -600,10 +602,12 @@ def plain_yes(text):
     # "Yes, send it to docs" gets a fresh "Yes or no?" (fail-safe).
     words = f' {norm(text)} '.replace(' thank you ', ' thanks ')
     words = words.split()
-    # "Ahead" consents only in "go ahead"; "correct that" asks for a change, it does not confirm.
+    # "Ahead" consents only in "go ahead". "Correct" consents only as an answer ("That's correct",
+    # "Correct, send it"); with an object ("correct it", "correct the chat") it asks for a change.
     if any(word == 'ahead' and words[i - 1:i] != ['go'] for i, word in enumerate(words)):
         return False
-    if any(word == 'correct' and words[i + 1:i + 2] in (['that'], ['this']) for i, word in enumerate(words)):
+    if any(word == 'correct' and words[i + 1:i + 2] and words[i + 1] not in YES_WORDS
+           for i, word in enumerate(words)):
         return False
     allowed = YES_WORDS | YES_FILLER
     return any(word in YES_WORDS for word in words) and all(word in allowed for word in words)
@@ -637,12 +641,16 @@ def approval_answer(text):
     return None
 
 
+def answer_words(text):
+    return re.sub(r'\bdon t\b', "don't", norm(text.replace('\u2019', "'"))).split()
+
+
 def confirms(proposal, text):
     if proposal.name != 'answer_approval':
         return plain_yes(text)
     if APPROVAL_NEGATION.search(text):
         return False
-    words = re.sub(r'\bdon t\b', "don't", norm(text.replace('\u2019', "'"))).split()
+    words = answer_words(text)
     # "Don't!", "Stop!" or "No, stop!" to "Should I deny docs?" can withdraw the denial: only a word
     # without a no in it confirms. "Send it" answers a send, not an approval.
     if set(words) & {"don't", 'no', 'nope', 'stop', 'send'}:
@@ -813,7 +821,7 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                 # Only a question follows, never a decision; a bare "No" or "Stop" still decides nothing.
                 and not (decision in APPROVAL_READBACK_START and decision != pending.payload
                          and approval_answer(last_user_text) == decision
-                         and set(norm(last_user_text).split()) - APPROVAL_FILLER - {'no', 'nope', 'stop'})):
+                         and set(answer_words(last_user_text)) - APPROVAL_FILLER - {'no', 'nope', 'stop', "don't"})):
             return APPROVAL_DECLINED
         bound = (live and pending.name == name and pending.heard and pending.follows(previous_assistant)
                  and str(args.get('chat') or '').strip() == pending.chat.strip()

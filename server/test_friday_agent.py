@@ -621,6 +621,8 @@ class FridayRulesTests(unittest.TestCase):
                 ('approve', 'No', 'deny', declined), ('approve', 'Nope', 'approve', declined),
                 ('approve', 'No, not now', 'deny', declined), ('deny', 'No', 'deny', declined),
                 ('deny', 'No', 'approve', declined),
+                # Review 3: "Don't!" withdraws consent; it never opens the other question.
+                ('approve', "Don't!", 'deny', declined), ('approve', 'Stop', 'deny', declined),
                 # An explicit word for the other decision gets that decision's own question.
                 ('approve', 'No, deny it', 'deny', required),
                 # "No, approve it" mixes a no word and an approve word: it decides nothing (fail-safe).
@@ -659,10 +661,12 @@ class FridayRulesTests(unittest.TestCase):
 
     def test_correct_that_and_bare_ahead_are_not_a_yes(self):
         # B489 review 2: "Just correct that" asks for a change; "Ahead." alone is not "go ahead".
-        for answer in ('Just correct that', 'Correct this', 'Ahead.', 'Ahead, please'):
+        for answer in ('Just correct that', 'Correct this', 'Ahead.', 'Ahead, please',
+                       # Review 3: any object makes "correct" a request for a change.
+                       'Correct it, please', 'Just correct it right now', 'Correct it', 'Correct the chat'):
             with self.subTest(answer=answer):
                 self.assertFalse(friday.plain_yes(answer))
-        for answer in ('Go ahead', "That's correct", 'Correct', 'Correct, send it'):
+        for answer in ('Go ahead', "That's correct", 'Correct', 'Correct, send it', 'Yes, correct'):
             with self.subTest(answer=answer):
                 self.assertTrue(friday.plain_yes(answer))
         for name, key, payload in (('send_to_chat', 'prompt', 'Check the logs'), ('backlog_send', 'item', 'B12')):
@@ -2847,7 +2851,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                    {'role': 'assistant', 'content': friday.send_readback(proposal)},
                    {'role': 'user', 'content': 'No'}]
         for reply in (['Denied.'], ['Okay, I have ', 'denied it.'], ['Denied. Anything else?'],
-                      ['I rejected the request.']):
+                      ['I rejected the request.'], ['Denied. I did not send anything.']):
             with self.subTest(reply=reply), patch('sys.stderr'):
                 _, frames = await self.tool_flow(history, [(reply, 1, [])], proposal)
                 self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], [])
