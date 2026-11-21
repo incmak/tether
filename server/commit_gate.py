@@ -763,8 +763,14 @@ def evaluate(command, cwd=None):
         first = words[0]
         uncertain = uncertain or (first.bare and first.text in KEYWORDS)
         all_plain = redirects_plain and all(word.plain for word in words)
+        command_words = words
+        while command_words:
+            word = command_words[0]
+            if not (ASSIGNMENT.fullmatch(word.text) or (word.bare and word.text in KEYWORD_PREFIXES)):
+                break
+            command_words = command_words[1:]
         cd = first.text == 'cd' or (first.text == 'builtin' and len(words) > 1 and words[1].text == 'cd')
-        if cd:
+        if cd and command_words is words:
             following = segments[number + 1][0] if number + 1 < len(segments) else None
             if following == '||' and _cd_guard(segments[number + 1]):
                 after_guard = segments[number + 2][0] if number + 2 < len(segments) else None
@@ -799,7 +805,9 @@ def evaluate(command, cwd=None):
                 where = here if len(verdicts) == 1 or where == here else None
         # A simple command cannot move the shell, except these. Any command can write a message file.
         moving = ('cd', 'pushd', 'popd', 'source', '.', 'eval', 'builtin')  # these can move the shell; not followed
-        if first.text in moving or (first.text == 'command' and len(words) > 1 and words[1].text in moving):
+        if command_words and (command_words[0].text in moving
+                              or (command_words[0].text == 'command' and len(command_words) > 1
+                                  and command_words[1].text in moving)):
             folder = logical = None
         if first.text in ('set', 'setopt', 'unsetopt'):
             steady = False  # later cd and glob behavior can depend on shell options

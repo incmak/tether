@@ -370,6 +370,21 @@ class Evaluate(unittest.TestCase):
                 found = commit_gate.evaluate(prefix + 'git commit -m Title', str(self.cwd))
                 self.assertEqual((found['verdict'], found['folder']), ('missing', str(self.cwd)))
 
+    def test_folder_is_unknown_after_a_prefixed_moving_command(self):
+        cwd = str(self.cwd)
+        commit = 'git commit -m Title'
+        for prefix in ('X=1 cd sub; ', 'CDPATH=/alt cd sub && ', 'A=1 B=2 pushd sub; ',
+                       'X=1 command cd sub; ', 'X=1 builtin cd sub; ', 'X=1 source f; ', 'X=1 . f; ',
+                       'X=1 eval "cd sub"; ', "X='one two' popd; ", 'time X=1 cd sub; '):
+            with self.subTest(prefix=prefix):
+                found = commit_gate.evaluate(prefix + commit, cwd)
+                self.assertIsNone(found['folder'])
+                self.assertNotEqual(found['verdict'], 'missing')
+        for prefix in ('X=1 true; ', 'X=1 '):
+            with self.subTest(prefix=prefix):
+                found = commit_gate.evaluate(prefix + commit, cwd)
+                self.assertEqual((found['folder'], found['verdict']), (cwd, 'missing'))
+
     def test_an_earlier_command_stops_the_message_file_read(self):
         (self.cwd / 'msg.txt').write_text('Old draft\n')
         self.assertEqual(commit_gate.evaluate('git commit -F msg.txt', str(self.cwd))['verdict'], 'missing')
@@ -521,6 +536,14 @@ class Evaluate(unittest.TestCase):
 
 
 class Check(Base):
+    def test_hook_deferral_refuses_an_assignment_before_literal_cd(self):
+        commit_gate.install_hook(self.repo)
+        sub = self.repo / 'sub'
+        sub.mkdir()
+        command = f'cd {shlex.quote(str(sub))} && git commit -m Title'
+        self.assertTrue(commit_gate._defer_to_hook(str(self.repo), command))
+        self.assertFalse(commit_gate._defer_to_hook(str(self.repo), 'X=1 ' + command))
+
     def test_cleanup_is_unknown_after_commands_that_can_change_config(self):
         commit = 'git commit -q --allow-empty -m "Msg\n\nVerified: none (x)"'
         write = r"printf '\n[commit]\n\tcleanup = strip\n[core]\n\tcommentChar = V\n' >> .git/config"
