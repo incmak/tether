@@ -158,6 +158,18 @@ class TaskTreeSortTests(unittest.TestCase):
                 self.assertEqual(rows[pane]['new'], rows[pane]['old'])
         self.assertEqual(rows['%8']['reason'], 'Placement owner cannot be confirmed')
 
+    def test_plan_keeps_a_coordinator_out_of_every_task(self):
+        self.tmux.pane(4, 'B446 Coordinator', 1)
+        self.tmux.pane(5, 'Coordinator review', 1, role='reviewer')
+        self.tmux.entries['%4']['coordinator'] = 'all'
+        self.tmux.entries['%5']['coordinator'] = 'needs'
+        self.tmux.entries['%2']['coordinator'] = 'off'
+        rows = self.run_plan()
+        for pane in ('%2', '%4', '%5'):
+            with self.subTest(pane=pane):
+                self.assertEqual(rows[pane]['new'], rows[pane]['old'])
+                self.assertEqual(rows[pane]['reason'], 'Coordinator stays its own task')
+
     def test_plan_rejects_a_legacy_two_tab_loop(self):
         self.tmux.pane(4, 'B5 One')
         self.tmux.pane(5, 'B5 Two', 4)

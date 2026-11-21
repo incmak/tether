@@ -214,6 +214,17 @@ class Routes(unittest.TestCase):
         self.assertEqual(self.move(self.separate, self.root)[0], 400)
         self.assertEqual(self.run.writes, [])
 
+    def test_move_refuses_a_coordinator_in_every_mode(self):
+        for mode in ('all', 'needs', 'off'):
+            with self.subTest(mode=mode):
+                self.separate['coordinator'] = mode
+                result = self.move(self.separate, self.root)
+                self.assertEqual(result[0], 400)
+                self.assertIn('coordinator', result[1]['error'])
+        self.assertEqual(self.run.writes, [])
+        del self.separate['coordinator']
+        self.assertEqual(self.move(self.separate, self.root)[0], 200)
+
     def test_existing_loop_cannot_take_another_child(self):
         self.run.set_record('%1', owner(self.worker, kind='helper'))
         self.assertEqual(self.move(self.separate, self.root)[0], 400)

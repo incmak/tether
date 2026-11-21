@@ -7,6 +7,7 @@ import subprocess
 
 import agents
 import auto_resume
+import coordinator
 import helper_tabs
 import paths
 import projects
@@ -30,6 +31,8 @@ def _proposal(pane, options, panes, entries):
         return old, None, 'No opener record'
     if old.get('moved_by') == 'user' or options.group_by == 'user':
         return old, None, 'Placed by Mak'
+    if (entries.get(pane) or {}).get('coordinator') in coordinator.MODES:
+        return old, None, 'Coordinator stays its own task'
     if not helper_tabs.verified_thread(entries.get(pane)):
         return old, None, 'Conversation cannot be confirmed'
 

@@ -8,6 +8,7 @@ import time
 
 import audit
 import auto_resume
+import coordinator
 import groups
 import helper_close
 import helper_tabs
@@ -122,6 +123,9 @@ def move(body, tree):
     if into is not None:
         if pane_id(into) == pane:
             raise ValueError('A tab cannot move into itself.')
+        if entry.get('coordinator') in coordinator.MODES:
+            # A helper cannot be the coordinator (coordinator.browser_role), so the move would silently end the role.
+            raise ValueError('This tab is the coordinator. Release the coordinator role before you move it into a task.')
         home = tree.bound(into, body.get('into_thread'))
         if tree.options[pane].session != tree.options[into].session:
             raise ValueError('Choose a task in the same tmux session.')

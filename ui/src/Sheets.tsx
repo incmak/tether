@@ -282,7 +282,7 @@ export function PaneActions({ api, session, tabCount, archived, pane, panes, at,
           <CopyNames pane={pane} disabled={pending} onCopied={onClose} />
           <button disabled={pending} onClick={() => setMode('icon')}><Shapes size={18} />Change icon</button>
           {pane.task && <button disabled={pending} onClick={() => moveTask(null)}><ArrowRightLeft size={18} />Move out of task</button>}
-          {pane.agent !== 'shell' && !taskChildren(pane, panes).length && <button disabled={pending} onClick={() => setMode('task-move')}><FolderInput size={18} />Move into task…</button>}
+          {pane.agent !== 'shell' && !taskChildren(pane, panes).length && !pane.coordinator && <button disabled={pending} onClick={() => setMode('task-move')}><FolderInput size={18} />Move into task…</button>}
           {!pane.task && pane.agent !== 'shell' && <button disabled={pending || !initialPane.thread} onClick={() => void run(async () => {
             await api('task-tree/done', { pane: initialPane.id, thread: initialPane.thread, done: !(initialPane.done || initialPane.done_mark) })
             return undefined
