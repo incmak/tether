@@ -118,7 +118,7 @@ async function main() {
     state.messages = [user(1, 'Please fix the login page.'), user(12, 'A status update.', { source: 'tether', prompt: 'status' })]
     state.busy = true
     await page.goto(`${origin}/mobile/chat/?session=%2521`)
-    await settle(page, () => !document.getElementById('working').hidden)
+    await settle(page, () => document.getElementById('working')?.hidden === false)   // #working attaches on the first chat render
     assert.match(await page.evaluate(() => document.getElementById('working').previousElementSibling.textContent), /Tether status update/,
       'the working row sits under the newest prompt, a Tether row')
     // A folded Tether prompt whose text renders HTML with row classes never pulls Stop inside its closed disclosure.
@@ -126,7 +126,7 @@ async function main() {
       state.messages = [user(1, 'Please fix the login page.'),
         user(13, `Review: an example.\n\n<div class="${example}">example row</div>`, { source: 'tether', prompt: 'review' })]
       await page.goto(`${origin}/mobile/chat/?session=%2521`)
-      await settle(page, () => !document.getElementById('working').hidden)
+      await settle(page, () => document.getElementById('working')?.hidden === false)   // #working attaches on the first chat render
       const place = await page.evaluate(() => { const node = document.getElementById('working'); return { row: node.parentElement.id, after: node.previousElementSibling?.textContent } })
       assert.equal(place.row, 'chat', `"${example}" in a message: the working row stays a chat row`)
       assert.match(place.after, /Review message from Tether/, `"${example}" in a message: the working row sits under that prompt`)
