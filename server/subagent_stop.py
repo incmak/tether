@@ -42,15 +42,14 @@ def dialog_open(screen):
 
 
 def close(entry, run, sleep, *, is_open=dialog_open):
-    """Esc is safe only while the tasks dialog's hint remains visible. Return whether it was sent."""
-    for step in range(3):
+    """Esc is safe only while the tasks dialog's hint remains visible."""
+    for _ in range(3):
         if not is_open(visible(entry, run)):
-            return step > 0
+            return
         press(entry, 'Escape', run=run)
         sleep(0.35)
     if is_open(visible(entry, run)):
         raise StopError('The tasks dialog did not close. Check the terminal view.')
-    return True
 
 
 def matches(description, shown):
@@ -500,7 +499,7 @@ def tasks_panel_open(screen):
     )
 
 
-def stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar=None, *, escape_sent=False):
+def stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar=None):
     """Navigate with Down, then stop only the freshly verified waiting agent."""
     def parse(screen):
         bar = agent_bar(screen)
@@ -524,7 +523,6 @@ def stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar=N
     if bar is None:
         raise StopError(BAR_READ_ERROR)
     sent_bar_key = False
-    pill_down = False
     try:
         for step in range(9):
             position = identify(bar)
@@ -533,24 +531,23 @@ def stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar=N
                 break
             if (selected is not None and selected > position) or step == 8:
                 raise StopError('Could not reach that agent in the agent bar. Stop it in the terminal.')
-            from_prompt = bar['focus'] == 'prompt'
-            pill_down = False
             press(entry, 'Down', run=run)
             sent_bar_key = True
             sleep(0.18)
             bar = parse(visible(entry, run))
-            # Record the Down transition during navigation. A later footer
-            # that looks like a pill cannot authorize cleanup by itself.
-            pill_down = from_prompt and bar is not None and bar['focus'] == 'pill'
 
         if bar['action'] != 'stop':
             raise StopError(BAR_ID_ERROR)
         selected_text = bar['selected_text']
         row = bar['rows'][position]
         visible_prefix = row['value'].removesuffix('…')
+        listed = subagents.listing(entry, limit=False)['agents']
+        try:
+            pool = subagents.bar_candidates(entry)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise StopError(BAR_ID_ERROR) from exc
         fitting = []
-        for item in subagents.listing(entry, limit=False)['agents']:
-            # The listing can misclassify an agent whose row is still visible.
+        for item in pool:
             if (item.get('type') or 'general-purpose') != row['kind']:
                 continue
             name = rendered_description(item.get('description') or '')
@@ -564,11 +561,12 @@ def stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar=N
             raise StopError(BAR_ID_ERROR)
         if len(fitting) > 1:
             raise StopError('Multiple agents share this name. Stop it in the terminal.')
-        if (not fitting or fitting[0]['id'] != agent['id'] or fitting[0]['state'] != 'running'
-                or fitting[0].get('waiting') != agent['waiting']):
+        current = next((item for item in listed if item['id'] == agent['id']), None)
+        if (not fitting or fitting[0]['id'] != agent['id']
+                or sum(item['id'] == agent['id'] for item in pool) != 1 or current is None
+                or current['state'] != 'running' or current.get('waiting') != agent['waiting']):
             raise StopError(BAR_ID_ERROR)
         pressed['x'] = True
-        pill_down = False
         press(entry, 'x', run=run)
         sent_bar_key = True
         sleep(0.18)
@@ -580,14 +578,11 @@ def stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar=N
                 bar = parse(screen)
                 parts = agent_bar_parts(screen)
                 rows = bar_rows(parts[2]) if parts is not None else None
-                if rows is not None and rows[1] is not None and row_escapes < 3:
-                    row_escapes += 1
-                elif not (pill_down and not escape_sent and bar is not None and bar['focus'] == 'pill'):
+                if rows is None or rows[1] is None or row_escapes == 3:
                     break
-                # Collapse can preserve the row cursor. Read it again before
-                # another Escape, even if the footer looks like pill focus.
+                row_escapes += 1
+                # Collapse can preserve the row cursor. Verify it after each Escape.
                 press(entry, 'Escape', run=run)
-                escape_sent = True
                 sleep(0.35)
             if bar is None or bar['focus'] != 'prompt':
                 raise StopError(BAR_CLOSE_ERROR)
@@ -709,7 +704,7 @@ def stop(entry, agent_id, run=subprocess.run, sleep=time.sleep, clock=time.time,
             terminal_input.verify(entry, run)
             # Do not drive an unverified pane, including a pane for another agent.
             if waiting:
-                escape_sent = close(entry, run, sleep, is_open=tasks_panel_open)
+                close(entry, run, sleep, is_open=tasks_panel_open)
             else:
                 close(entry, run, sleep)
             try:
@@ -717,7 +712,7 @@ def stop(entry, agent_id, run=subprocess.run, sleep=time.sleep, clock=time.time,
                     raise StopError(f'Claude is waiting for you. Answer its prompt before stopping a {noun}.')
                 if waiting:
                     # The bar parser reads the prompt draft and also refuses the subagent input view.
-                    stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar, escape_sent=escape_sent)
+                    stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar)
                 else:
                     if any(terminal_input.prompt_draft(entry, run)):
                         raise StopError(f'There is an unsent draft in the {noun} input. Clear it, then try again.')

@@ -867,6 +867,31 @@ class ProcessTasksTests(unittest.TestCase):
                 self.output(identifier, '[exited with code 0]')
                 self.assertEqual(subagents.listing(self.config)['agents'], [])
 
+    def test_bar_candidates_keep_metadata_only_agents_across_clears(self):
+        middle = self.project / '33333333-3333-3333-3333-333333333333' / 'subagents'
+        foreign = self.project / '44444444-4444-4444-4444-444444444444' / 'subagents'
+        middle.mkdir(parents=True)
+        foreign.mkdir(parents=True)
+        for folder, identifier, name in (
+                (self.old_folder, 'old', 'First chat'),
+                (middle, 'middle', 'Middle chat'),
+                (self.folder, 'middle', 'Middle chat'),
+                (self.folder, 'new', 'Current chat'),
+                (foreign, 'foreign', 'Another process')):
+            (folder / f'agent-{identifier}.meta.json').write_text(json.dumps({
+                'description': name, 'agentType': 'Explore', 'finished': True, 'stoppedByUser': True,
+            }))
+        (self.tasks / 'middle.output').symlink_to(self.folder / 'agent-middle.jsonl')
+        self.assertEqual(subagents.listing(self.config, limit=False)['agents'], [])
+        with patch.object(subagents, '_tasks') as tasks:
+            records = subagents.bar_candidates(self.config)
+        tasks.assert_not_called()
+        self.assertCountEqual(records, [
+            {'id': 'old', 'type': 'Explore', 'description': 'First chat'},
+            {'id': 'middle', 'type': 'Explore', 'description': 'Middle chat'},
+            {'id': 'new', 'type': 'Explore', 'description': 'Current chat'},
+        ])
+
     def test_monitor_in_old_running_agent_has_parent_and_kind(self):
         old = self.old_agent()
         with old.open('a') as stream:

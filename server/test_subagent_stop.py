@@ -714,6 +714,47 @@ class ProcessStopTests(unittest.TestCase):
         self.pane.on_stop = None
         self.assertEqual(self.stop(), {'ok': True, 'state': 'stopped'})
 
+    def test_shell_output_that_looks_like_an_exit_hides_the_selected_parent_after_clear(self):
+        self.make_tasks()
+        old = self.tasks.parent.name
+        new = '22222222-2222-2222-2222-222222222222'
+        project = self.meta.parent.parent.parent / 'projects' / 'project'
+        old_folder = project / old / 'subagents'
+        current_folder = project / new / 'subagents'
+        old_folder.mkdir(parents=True)
+        current_folder.mkdir(parents=True)
+        meta = json.dumps({'description': AgentBarTests.NAME, 'agentType': 'general-purpose',
+                           'requestShape': 'background', 'finished': True})
+        records = Path(self.entry['transcript']).read_text()
+        for folder, identifier, transcript in (
+                (old_folder, 'beta', records.replace('shell02', 'shell01').replace('bash-start', 'other-start')),
+                (current_folder, 'alpha', records)):
+            path = folder / f'agent-{identifier}.jsonl'
+            path.write_text(transcript)
+            path.with_suffix('.meta.json').write_text(meta)
+            # After /clear Claude can repoint the link before the old agent writes again.
+            (self.tasks / f'{identifier}.output').symlink_to(current_folder / path.name)
+        (self.tasks / 'shell01.output').write_text('ordinary output\n[exited with code 0]\n')
+        main = project / f'{new}.jsonl'
+        main.write_text('')
+        self.entry.update(transcript=str(main), thread=new)
+        self.enterContext(patch.object(subagents, 'PROJECTS', project.parent))
+        self.enterContext(patch.object(terminal, 'live_status', return_value={'state': 'Working'}))
+        listed = subagents.listing(self.entry, limit=False)['agents']
+        self.assertEqual([(item['id'], item['waiting']) for item in listed],
+                         [('alpha', {'shell': 1, 'monitor': 0})])
+
+        # The single visible row belongs to beta. The same-name target is hidden.
+        selected = (AgentBarTests.FOLDER / 'agent_selected.txt').read_text().replace(
+            'waiting on 1 shell, 1 monitor', 'waiting on 1 shell')
+
+        def run(args, **kwargs):
+            self.assertEqual(args[1], 'capture-pane')
+            return subprocess.CompletedProcess(args, 0, selected, '')
+
+        with self.assertRaisesRegex(stop.StopError, 'share this name'):
+            stop.stop(self.entry, 'alpha', run=run, sleep=lambda _: None)
+
 
 class StopRouteTests(unittest.TestCase):
     def setUp(self):
@@ -1068,7 +1109,8 @@ class AgentBarTests(unittest.TestCase):
             return {'agents': [dict(self.agent, state=state), *self.siblings], 'tasks': []}
 
         entry = {'id': '%fake-bar', 'agent': 'claude'}
-        with patch.object(subagents, 'listing', side_effect=listing):
+        with patch.object(subagents, 'listing', side_effect=listing), \
+                patch.object(subagents, 'bar_candidates', side_effect=lambda _: [self.agent, *self.siblings]):
             return stop.stop(entry, 'alpha', run=run, sleep=lambda _: None)
 
     def wide_frames(self):
@@ -1203,12 +1245,15 @@ class AgentBarTests(unittest.TestCase):
             self.drive([(screen, None)])
         self.assertEqual(self.keys, [])
 
-    def test_refusal_after_down_to_the_pill_sends_one_escape(self):
-        frames = self.wide_frames()
-        pill = frames[1][0].replace(self.NAME, 'Different agent')
-        with self.assertRaisesRegex(stop.StopError, 'Could not identify'):
-            self.drive([frames[0], (pill, 'Escape'), (frames[0][0], None)])
-        self.assertEqual(self.keys, ['Down', 'Escape'])
+    def test_refusal_after_down_to_the_pill_leaves_it_focused(self):
+        prompt, (pill, _), *_ = self.wide_frames()
+        self.agent['description'] = 'Different agent'
+        prompt = (prompt[0].replace(self.NAME, self.agent['description']), 'Down')
+        self.assertEqual(stop.agent_bar(pill)['focus'], 'pill')
+        with self.assertRaisesRegex(stop.StopError, 'agent bar did not close') as raised:
+            self.drive([prompt, (pill, None)])
+        self.assertEqual(self.keys, ['Down'])
+        self.assertEqual(str(raised.exception.__cause__.__context__), stop.BAR_ID_ERROR)
 
     def test_pill_cleanup_checks_fresh_focus_after_refusal(self):
         prompt, pill, *_ = self.wide_frames()
@@ -1221,13 +1266,24 @@ class AgentBarTests(unittest.TestCase):
                     self.drive([prompt, (lambda: next(screens), None)])
                 self.assertEqual(self.keys, ['Down'])
 
-    def test_pill_escape_is_refused_if_this_stop_already_closed_a_tasks_panel(self):
-        frames = self.wide_frames()
-        tasks = (RealScreenTests.FOLDER_330 / 'list.txt').read_text()
-        pill = frames[1][0].replace(self.NAME, 'Different agent')
+    def test_refusal_after_first_down_never_sends_escape_to_a_prompt_indicator(self):
+        prompt, pill, *_ = self.wide_frames()
+        refused = pill[0].replace(self.NAME, 'Different agent')
+        returned = self.screen('prompt_waiting_working').replace(
+            'esc to interrupt · ← for agents · ↓ to manage', 'cohort · enter to view tasks')
+        self.assertEqual(stop.agent_bar(returned)['focus'], 'pill')
+        screens = iter((refused, returned))
         with self.assertRaisesRegex(stop.StopError, 'agent bar did not close'):
-            self.drive([(tasks, 'Escape'), frames[0], (pill, None)])
-        self.assertEqual(self.keys, ['Escape', 'Down'])
+            self.drive([prompt, (lambda: next(screens), None)])
+        self.assertEqual(self.keys, ['Down'])
+
+    def test_second_down_with_a_rowless_redraw_cannot_authorize_escape(self):
+        prompt, pill, *_ = self.wide_frames()
+        refused = pill[0].replace('waiting on 1 shell, 1 monitor', 'waiting on 2 shells')
+        with self.assertRaisesRegex(stop.StopError, 'agent bar did not close') as raised:
+            self.drive([prompt, pill, (refused, None)])
+        self.assertEqual(self.keys, ['Down', 'Down'])
+        self.assertEqual(str(raised.exception.__cause__.__context__), stop.BAR_ID_ERROR)
 
     def test_prompt_footer_that_mimics_the_pill_never_gets_a_second_escape(self):
         frames = self.wide_frames()
@@ -1322,6 +1378,7 @@ class AgentBarTests(unittest.TestCase):
             values = [name + ' · since 8:54 AM' for name in (target_render, other_render)]
             with patch.object(stop, 'press', new=press_key), \
                     patch.object(stop, 'visible', new=lambda *_: screen), \
+                    patch.object(subagents, 'bar_candidates', return_value=[agent, sibling]), \
                     patch.object(subagents, 'listing', new=lambda _, *, limit: {'agents': [agent, sibling]}):
                 for shown, selected in ((False, 1), (True, 1), (True, 0)):
                     first = 0 if shown else 1
@@ -1341,7 +1398,7 @@ class AgentBarTests(unittest.TestCase):
                             successes += 1
         self.assertGreater(successes, 0)
 
-    def test_clipped_since_can_be_part_of_a_second_listed_agents_name(self):
+    def test_clipped_since_can_be_part_of_a_second_bar_candidates_name(self):
         frames = self.wide_frames()
         self.siblings = [dict(self.agent, id='beta', description=self.NAME + ' · single run')]
         # Only the longer-named agent is visible. The shorter-named target also fits its row.
@@ -1417,7 +1474,7 @@ class AgentBarTests(unittest.TestCase):
                     self.drive(frames, fresh=replace_selected)
                 self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
 
-    def test_same_name_agent_appears_in_final_listing(self):
+    def test_same_name_agent_appears_in_final_pool(self):
         frames = self.wide_frames()
         frames[3:] = [(frames[3][0], 'Escape'), frames[-1]]
 
@@ -1427,6 +1484,13 @@ class AgentBarTests(unittest.TestCase):
         with self.assertRaisesRegex(stop.StopError, 'share this name'):
             self.drive(frames, fresh=add_agent)
         self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+
+    def test_conflicting_metadata_for_the_target_refuses_even_with_one_fitting_name(self):
+        selected = self.wide_frames()[3][0]
+        self.siblings = [dict(self.agent, description='Earlier name')]
+        with self.assertRaisesRegex(stop.StopError, 'Could not identify'):
+            self.drive([(selected, None)])
+        self.assertEqual(self.keys, [])
 
     def test_waiting_counts_change_in_final_listing(self):
         frames = self.wide_frames()

@@ -304,33 +304,44 @@ def _tasks_source(config, *, since=_MISSING):
     return found, by_fd
 
 
-def _agent_files(config, tasks_dir):
+def _agent_files(config, tasks_dir, *, metadata=False):
     """Return authorized files by id and the ids present in the current chat."""
     files, current = {}, set()
     folder = _folder(config)
     if folder is None:
         return files, current
-    for path in folder.glob('agent-*.jsonl'):
-        identifier = path.stem[len('agent-'):]
-        if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', identifier):
-            continue
-        try:
-            resolved = path.resolve()
-            if resolved.is_relative_to(folder) and resolved.is_file():
-                files[identifier] = {resolved}
-                current.add(identifier)
-        except (OSError, ValueError, RuntimeError):
-            continue
-    if tasks_dir is not None:
-        # Current-chat agents can also span /clear without an output symlink.
-        for identifier in current:
-            earlier = folder.parent.parent / tasks_dir.parent.name / 'subagents' / f'agent-{identifier}.jsonl'
+    suffix = '.meta.json' if metadata else '.jsonl'
+    earlier_folder = (folder.parent.parent / tasks_dir.parent.name / 'subagents'
+                      if tasks_dir is not None else None)
+    folders = [folder]
+    if metadata and earlier_folder is not None and earlier_folder != folder:
+        folders.append(earlier_folder)
+    for directory in folders:
+        for path in directory.glob(f'agent-*{suffix}'):
+            identifier = path.name.removeprefix('agent-').removesuffix(suffix)
+            if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', identifier):
+                continue
             try:
-                resolved = earlier.resolve()
-                if resolved.parent == earlier.parent and resolved.is_file():
-                    files[identifier].add(resolved)
+                resolved = path.resolve()
+                in_directory = resolved.parent == directory if metadata else resolved.is_relative_to(directory)
+                if not in_directory or not resolved.is_file():
+                    continue
+                files.setdefault(identifier, set()).add(resolved)
+                if directory == folder:
+                    current.add(identifier)
             except (OSError, ValueError, RuntimeError):
                 continue
+    if tasks_dir is not None:
+        # Current-chat agents can also span /clear without an output symlink.
+        if not metadata:
+            for identifier in current:
+                earlier = earlier_folder / f'agent-{identifier}.jsonl'
+                try:
+                    resolved = earlier.resolve()
+                    if resolved.parent == earlier.parent and resolved.is_file():
+                        files[identifier].add(resolved)
+                except (OSError, ValueError, RuntimeError):
+                    continue
         projects = PROJECTS.resolve()
         for link in tasks_dir.glob('*.output'):
             if not link.is_symlink():
@@ -347,7 +358,7 @@ def _agent_files(config, tasks_dir):
                 # /clear points the link at the new session at once, before the agent writes there, and an
                 # agent can span several /clears. Its lines are in any session folder of this project.
                 group = set()
-                for extra in (projects / relative.parts[0]).glob(f'*/subagents/{target.name}'):
+                for extra in (projects / relative.parts[0]).glob(f'*/subagents/agent-{identifier}{suffix}'):
                     resolved = extra.resolve()
                     if _uuid(extra.parent.parent.name) and resolved.parent == extra.parent and resolved.is_file():
                         group.add(resolved)
@@ -356,6 +367,26 @@ def _agent_files(config, tasks_dir):
             except (OSError, ValueError, RuntimeError):
                 continue
     return {identifier: list(group) for identifier, group in files.items()}, current
+
+
+def bar_candidates(config):
+    """Read agent names before any listing filters, including agents carried across /clear."""
+    # Claude Code 2.1.330 jbe -> sg -> Ndo reads the process's tasks. IQs keeps
+    # eligible tasks across /clear, and n1e links local agents to the owner's tasks folder.
+    files, _ = _agent_files(config, _tasks_dir(config), metadata=True)
+    records = []
+    for identifier, group in files.items():
+        names = set()
+        for path in group:
+            meta, _ = _cached(path, _meta)
+            kind, description = meta.get('agentType'), meta.get('description')
+            if any(value is not None and not isinstance(value, str) for value in (kind, description)):
+                raise ValueError(_UNAVAILABLE)
+            names.add((kind, description))
+        # /clear can copy the same sidecar. Count that name once and retain any distinct names.
+        records.extend({'id': identifier, 'type': kind, 'description': description}
+                       for kind, description in names)
+    return records
 
 
 def _agent_data(files):
