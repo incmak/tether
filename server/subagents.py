@@ -377,15 +377,15 @@ def bar_candidates(config):
     files, _ = _agent_files(config, tasks_dir, metadata=True)
     # Claude keeps an agent in memory when its metadata write fails. A known
     # transcript without metadata could have any name, so the pool is unknown.
-    # Claude also links an agent's task output before its transcript exists.
+    # Claude makes an agent's task output (a link, or a regular file when the
+    # link fails) before its transcript exists. Claude 2.1.330 task ids start
+    # with a kind letter, and "a" is local_agent, so any a-prefixed entry is an agent.
     known = set(_agent_files(config, tasks_dir, metadata=False)[0])
     if tasks_dir is not None:
-        for link in tasks_dir.glob('*.output'):
-            try:
-                if link.is_symlink() and os.path.basename(os.readlink(link)) == f'agent-{link.stem}.jsonl':
-                    known.add(link.stem)
-            except OSError as exc:
-                raise ValueError(_UNAVAILABLE) from exc
+        try:
+            known.update(entry.stem for entry in tasks_dir.glob('a*.output'))
+        except OSError as exc:
+            raise ValueError(_UNAVAILABLE) from exc
     if known - set(files):
         raise ValueError(_UNAVAILABLE)
     records = []

@@ -904,8 +904,17 @@ class ProcessTasksTests(unittest.TestCase):
             'description': 'Same name', 'agentType': 'general-purpose', 'finished': True}))
         self.assertCountEqual([record['id'] for record in subagents.bar_candidates(self.config)],
                               ['target', 'other'])
-        # Claude links the task output before the transcript or metadata exists.
-        (self.tasks / 'early.output').symlink_to(self.folder / 'agent-early.jsonl')
+        # A shell's output file is not an agent.
+        (self.tasks / 'b41ojwqa8.output').write_text('')
+        self.assertEqual(len(subagents.bar_candidates(self.config)), 2)
+        # Claude makes the agent's task output (a link, or a regular file when
+        # the link fails) before the transcript or metadata exists.
+        early = self.tasks / 'ae2e85248a8f6c453.output'
+        early.symlink_to(self.folder / 'agent-ae2e85248a8f6c453.jsonl')
+        with self.assertRaises(ValueError):
+            subagents.bar_candidates(self.config)
+        early.unlink()
+        early.write_text('')
         with self.assertRaises(ValueError):
             subagents.bar_candidates(self.config)
 
