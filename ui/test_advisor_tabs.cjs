@@ -85,8 +85,8 @@ async function main() {
       check(`${where}: other chips have no advisor icon`, await chip('%1').locator('.lucide-lightbulb').count() === 0 && await chip('%4').locator('.lucide-lightbulb').count() === 0)
       const style = tab => tab.evaluate(node => { const s = getComputedStyle(node); return { glow: node.classList.contains('advising'), animation: s.animationName, shadow: s.boxShadow } })
       const working = await style(chip('%2')), idle = await style(chip('%3')), plain = await style(chip('%4'))
-      check(`${where}: the working advisor glows`, working.glow && working.shadow !== 'none', JSON.stringify(working))
-      check(`${where}: glow ${motion === 'reduce' ? 'is static' : 'pulses'}`, motion === 'reduce' ? working.animation === 'none' : working.animation === 'advise-glow', working.animation)
+      // B474, concept D: the glow was decoration. The working advisor chip keeps its state class and dot, with no shadow or pulse.
+      check(`${where}: the working advisor chip has no glow`, working.glow && working.shadow === 'none' && working.animation === 'none', JSON.stringify(working))
       check(`${where}: an idle advisor and a working helper do not glow`, !idle.glow && idle.shadow === 'none' && !plain.glow && plain.shadow === 'none', JSON.stringify([idle, plain]))
       check(`${where}: the working dot says Advising`, await chip('%2').locator('.task-dot[aria-label="Advising"]').count() === 1 && await chip('%4').locator('.task-dot[aria-label="Working"]').count() === 1)
       check(`${where}: the advisor chip name includes its role and status`, await chips.getByRole('tab', { name: 'Advisor: Deploy fix, Advisor, Advising', exact: true }).count() === 1)
