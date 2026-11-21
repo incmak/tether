@@ -67,6 +67,8 @@ def restart(body, *, sessions, forget_sessions, run=subprocess.run, sleep=time.s
         raise Refused(409, 'Only Claude and Codex tabs can restart.')
     if entry.get('thread') != thread or entry.get('pending_conversation'):
         raise Refused(409, 'That tab now holds another chat. Reload and try again.')
+    if entry.get('friday_draft'):
+        raise Refused(409, 'Ask Friday to make the prompt again.')
     info = tmux_merge.restart_info(run, pane, entry['tmux_session'])
     if info is None:
         raise Refused(409, "This tab already uses its session's project.")

@@ -2,7 +2,7 @@
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import copy
 import asyncio
-from contextlib import redirect_stderr
+from contextlib import nullcontext, redirect_stderr
 from dataclasses import replace
 from datetime import datetime, timezone
 import importlib.util
@@ -17,7 +17,8 @@ from tempfile import TemporaryDirectory
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
+from urllib.error import HTTPError, URLError
 from zoneinfo import ZoneInfo
 from own_time import own_time
 
@@ -266,7 +267,8 @@ class AudioPrerollTests(unittest.TestCase):
 
 class CallLogTests(unittest.TestCase):
     def test_records_each_spoken_message_once_even_when_text_repeats(self):
-        log = friday.CallLog(clock=lambda: 500)
+        sink = Mock()
+        log = friday.CallLog(clock=lambda: 500, sink=sink)
         user = {'role': 'user', 'content': '  Check docs. '}
         reply = {'role': 'assistant', 'content': 'Okay.'}
         messages = [
@@ -283,9 +285,11 @@ class CallLogTests(unittest.TestCase):
         log.record_messages(messages)
         log.record_messages(messages + [dict(user), dict(reply)])
         self.assertEqual(log.turns, [(500, 'user', 'Check docs.'), (500, 'friday', 'Okay.')] * 2)
+        self.assertEqual(sink.call_args_list, [call('user', 'Check docs.'), call('friday', 'Okay.')] * 2)
 
     def test_records_the_heard_readback_cue_before_its_reply_for_the_current_peer_only(self):
-        log = friday.CallLog(clock=lambda: 500)
+        sink = Mock()
+        log = friday.CallLog(clock=lambda: 500, sink=sink)
         log.start_session()
         old = log.generation
         reply = {'role': 'assistant', 'content': 'Not sent yet. Yes or no?'}
@@ -300,6 +304,16 @@ class CallLogTests(unittest.TestCase):
         log.record_messages([reply, user])
         self.assertEqual(log.turns, [(500, 'friday', friday.READBACK_CUE),
                                      (500, 'friday', reply['content']), (500, 'user', user['content'])])
+        self.assertEqual(sink.call_args_list, [call('friday', reply['content']), call('user', user['content'])])
+
+    def test_raising_sink_does_not_interrupt_recording(self):
+        sink = Mock(side_effect=RuntimeError('History unavailable'))
+        log = friday.CallLog(clock=lambda: 500, sink=sink)
+        messages = [{'role': 'user', 'content': 'Look into it.'}, {'role': 'assistant', 'content': 'I will.'}]
+        log.record_messages(messages)
+        log.record_messages(messages)
+        self.assertEqual(log.turns, [(500, 'user', 'Look into it.'), (500, 'friday', 'I will.')])
+        self.assertEqual(sink.call_count, 2)
 
     def test_transcript_cuts_oldest_turns_to_fit_escaped_json(self):
         turns = [(0, 'user', 'Earlier request'), (60, 'friday', '😀' * 4000),
@@ -318,6 +332,168 @@ class CallLogTests(unittest.TestCase):
         self.assertTrue(transcript.endswith(' [turn cut]'))
         self.assertLessEqual(len(json.dumps(transcript)), 40000)
         self.assertGreater(len(json.dumps(transcript)) + 12, 40000)
+
+
+class HistoryPosterTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.object(friday.command_history, 'friday_token', return_value='history-token'))
+        self.clock = Mock(return_value=500)
+        self.open = Mock(side_effect=lambda request, timeout: nullcontext(SimpleNamespace(status=200)))
+        self.poster = friday.HistoryPoster(lambda: self.log.call_id, opener=self.open)
+        self.log = friday.CallLog(clock=self.clock, sink=self.poster.put)
+        self.log.start_session()
+
+    def record(self, role, content):
+        self.log.record_messages([{'role': role, 'content': content}])
+
+    def post_next(self):
+        self.poster._post(self.poster._queue.get_nowait())
+
+    def test_turn_payloads_keep_call_id_across_reconnect_and_reset_after_a_gap(self):
+        call_id = self.log.call_id
+        self.record('user', 'First question')
+        self.record('assistant', 'First answer')
+        self.log.start_session()
+        self.record('user', 'Second question')
+        self.clock.return_value += friday.CALL_GAP_SECONDS
+        self.log.start_session()
+        self.record('user', 'New call')
+        new_call_id = self.log.call_id
+        self.assertNotEqual(call_id, new_call_id)
+        for _ in range(4):
+            self.post_next()
+        ids = set()
+        payloads = []
+        for request_call in self.open.call_args_list:
+            request, = request_call.args
+            self.assertEqual(request.get_method(), 'POST')
+            self.assertEqual(request.get_header('X-tether-friday'), 'history-token')
+            self.assertEqual(request_call.kwargs, {'timeout': 3})
+            payload = json.loads(request.data)
+            entry_id = payload.pop('id')
+            self.assertRegex(entry_id, r'^[0-9a-f]{32}$')
+            ids.add(entry_id)
+            payloads.append(payload)
+        self.assertEqual(len(ids), 4)
+        self.assertEqual(payloads, [
+            {'text': 'First question', 'call': call_id, 'turn': 1},
+            {'answer': 'First answer', 'result': {'status': 'answered'}, 'call': call_id, 'turn': 1},
+            {'text': 'Second question', 'call': call_id, 'turn': 2},
+            {'text': 'New call', 'call': new_call_id, 'turn': 1},
+        ])
+
+    def test_url_uses_explicit_server_url_then_server_port_then_default(self):
+        for env, base in (
+            ({'TETHER_SERVER_URL': 'http://localhost:9000/', 'MOBILE_TMUX_PORT': '9040'}, 'http://localhost:9000'),
+            ({'MOBILE_TMUX_PORT': '9040'}, 'http://127.0.0.1:9040'),
+            ({}, 'http://127.0.0.1:7683'),
+        ):
+            with self.subTest(env=env), patch.dict(os.environ, env, clear=True):
+                poster = friday.HistoryPoster(lambda: 'call', opener=self.open)
+                poster.put('user', 'Check the server.')
+                poster._post(poster._queue.get_nowait())
+                self.assertEqual(self.open.call_args.args[0].full_url, base + friday.command_history.FRIDAY_PATH)
+
+    def test_retries_503_404_and_connection_errors_with_the_same_id_in_order(self):
+        url = self.poster._url
+        self.open.side_effect = [HTTPError(url, 503, 'Unavailable', None, None),
+                                 HTTPError(url, 404, 'Old server', None, None),
+                                 URLError('No connection'), nullcontext(SimpleNamespace(status=200)),
+                                 nullcontext(SimpleNamespace(status=200))]
+        self.record('user', 'First')
+        self.record('assistant', 'Second')
+        with patch.object(self.poster._stop, 'wait', return_value=False) as wait:
+            self.post_next()
+            self.post_next()
+        self.assertEqual(wait.call_args_list, [call(1), call(2), call(4)])
+        posts = [json.loads(args.args[0].data) for args in self.open.call_args_list]
+        self.assertEqual(posts[:4], [posts[0]] * 4)
+        self.assertEqual(posts[0]['text'], 'First')
+        self.assertEqual(posts[4]['answer'], 'Second')
+        self.assertNotEqual(posts[0]['id'], posts[4]['id'])
+
+    def test_http_client_errors_retry_and_the_thread_keeps_posting(self):
+        import http.client
+        self.open.side_effect = [http.client.BadStatusLine('junk'), http.client.LineTooLong('header'),
+                                 nullcontext(SimpleNamespace(status=200)), nullcontext(SimpleNamespace(status=200))]
+        self.record('user', 'First')
+        self.record('assistant', 'Second')
+        with patch.object(self.poster._stop, 'wait', return_value=False):
+            self.post_next()
+            self.post_next()
+        posts = [json.loads(args.args[0].data) for args in self.open.call_args_list]
+        self.assertEqual([p.get('text') or p.get('answer') for p in posts], ['First', 'First', 'First', 'Second'])
+
+    def test_long_turns_are_cut_to_the_store_limit_not_lost(self):
+        self.record('user', 'u' * 5000)
+        self.record('assistant', 'a' * 5000)
+        self.post_next()
+        self.post_next()
+        posts = [json.loads(args.args[0].data) for args in self.open.call_args_list]
+        self.assertEqual(len(posts[0]['text']), friday.HISTORY_TEXT_LIMIT)
+        self.assertEqual(len(posts[1]['answer']), friday.HISTORY_TEXT_LIMIT)
+        self.assertEqual(friday.HISTORY_TEXT_LIMIT, 4000)
+
+    def test_drops_after_five_retryable_failures_and_drops_other_4xx_immediately(self):
+        for error, attempts, delays in (
+            (URLError('Network'), 5, [1, 2, 4, 8, 16]),
+            (HTTPError(self.poster._url, 400, 'Bad request', None, None), 1, []),
+        ):
+            with self.subTest(attempts=attempts):
+                self.open.reset_mock()
+                self.open.side_effect = error
+                self.record('user', 'Private turn text')
+                with (patch.object(self.poster._stop, 'wait', return_value=False) as wait,
+                      redirect_stderr(io.StringIO()) as log):
+                    self.post_next()
+                self.assertEqual(self.open.call_count, attempts)
+                self.assertEqual(wait.call_args_list, [call(delay) for delay in delays])
+                self.assertEqual(log.getvalue(), 'Friday history dropped 1\n')
+
+    def test_queue_overflow_drops_oldest_while_put_proceeds_during_a_request(self):
+        started, release, drained, enqueued = (threading.Event() for _ in range(4))
+        posted = []
+        self.poster._call_id = lambda: 'call'
+
+        def open_turn(request, timeout):
+            text = json.loads(request.data)['text']
+            posted.append(text)
+            if text == 'pending':
+                started.set()
+                release.wait(2)
+            if text == '200':
+                drained.set()
+            return nullcontext(SimpleNamespace(status=200))
+
+        def fill():
+            for n in range(201):
+                self.poster.put('user', str(n))
+            enqueued.set()
+
+        self.open.side_effect = open_turn
+        self.poster.put('user', 'pending')
+        producer = threading.Thread(target=fill, daemon=True)
+        with redirect_stderr(io.StringIO()) as log:
+            self.poster.start()
+            try:
+                self.assertTrue(self.poster._thread.daemon)
+                self.assertTrue(started.wait(2))
+                producer.start()
+                self.assertTrue(enqueued.wait(2))
+                self.assertEqual(posted, ['pending'])
+                self.assertEqual(self.poster._queue.qsize(), 200)
+                release.set()
+                self.assertTrue(drained.wait(2))
+            finally:
+                release.set()
+                self.poster.stop()
+                self.poster._thread.join(2)
+                if producer.ident is not None:
+                    producer.join(2)
+        self.assertFalse(self.poster._thread.is_alive())
+        self.assertFalse(producer.is_alive())
+        self.assertEqual(posted, ['pending', *(str(n) for n in range(1, 201))])
+        self.assertEqual(log.getvalue(), 'Friday history dropped 1\n')
 
 
 class FridayRulesTests(unittest.TestCase):
@@ -1579,6 +1755,14 @@ class FridayRulesTests(unittest.TestCase):
                 ('Which chat?', ' Which chat?'),
                 ('x' * 300, ' ' + 'x' * 300 + '.'),
                 ('x' * 301, ''),
+                # Instructions to the model are not spoken (ui/src/Live.tsx, fridayNames.ts, fridaySessions.ts).
+                ('Multiple chats are waiting for approval: Docs, API. Ask which one.',
+                 ' Multiple chats are waiting for approval: Docs, API.'),
+                ('Several items match: B1, B2. Ask which one.', ' Several items match: B1, B2.'),
+                ('Backend is a tmux session with 2 chats: Docs, API. ask the user which one?',
+                 ' Backend is a tmux session with 2 chats: Docs, API.'),
+                ('Ask which one.', ''),
+                ('Tasks are open.', ' Tasks are open.'),
                 (' \n\t ', ''),
                 (None, ''),
                 (404, '')):
@@ -3257,6 +3441,19 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                     ('', 1, [*prior_actions, switch]), ('Switched to Docs.', 1, [])])
                 self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)],
                                  ['That did not go through. No chat called Docs.'])
+                self.assertFalse(any(isinstance(f, self.rt.LLMTextFrame) for f in frames))
+
+    async def test_false_success_drops_the_instruction_to_the_model(self):
+        cases = (('show_session', {'session': 'Back'}, 'Several sessions match: Backend, Backup. Ask which one.',
+                  'Several sessions match: Backend, Backup.'),
+                 ('switch_chat', {'chat': 'Doc'}, 'No chat called Doc. Closest chats: Docs, Docker. Ask which one.',
+                  'No chat called Doc. Closest chats: Docs, Docker.'))
+        for name, args, error, spoken in cases:
+            with self.subTest(name=name), patch('sys.stderr'):
+                _, frames = await self.tool_flow('Show it', [
+                    ('', 1, [(name, args, {'error': error})]), ('Showing it.', 1, [])])
+                self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)],
+                                 ['That did not go through. ' + spoken])
                 self.assertFalse(any(isinstance(f, self.rt.LLMTextFrame) for f in frames))
 
     async def test_unspeakable_last_failure_clears_the_previous_reason(self):
@@ -6219,3 +6416,25 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class HistoryPortTest(unittest.TestCase):
+    def test_port_from_env_then_install_state_then_default(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            state = os.path.join(tmp, 'install.json')
+            with open(state, 'w') as f:
+                json.dump({'options': {'port': 9123}}, f)
+            with patch.dict(os.environ, {'TETHER_INSTALL_STATE': state}, clear=False):
+                os.environ.pop('MOBILE_TMUX_PORT', None)
+                self.assertEqual(friday.history_port(), 9123)
+                with patch.dict(os.environ, {'MOBILE_TMUX_PORT': '8001'}):
+                    self.assertEqual(friday.history_port(), 8001)
+            with patch.dict(os.environ, {'TETHER_INSTALL_STATE': os.path.join(tmp, 'missing.json')}):
+                os.environ.pop('MOBILE_TMUX_PORT', None)
+                self.assertEqual(friday.history_port(), 7683)
+            with open(state, 'w') as f:
+                json.dump({'options': {'port': 'x'}}, f)
+            with patch.dict(os.environ, {'TETHER_INSTALL_STATE': state}):
+                os.environ.pop('MOBILE_TMUX_PORT', None)
+                self.assertEqual(friday.history_port(), 7683)
