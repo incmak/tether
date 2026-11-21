@@ -238,9 +238,9 @@ label.broadcast-row:hover { background: var(--hover); }
 .pane-children .pane-stack-head { flex: 1; min-width: 0; gap: 8px; min-height: 28px; font-size: 12px; font-weight: 600; color: var(--muted); }
 .pane-children .pane-stack-head.current { color: var(--text); }
 .pane-children .pane-stack-head .group-count { margin-left: auto; font-weight: 400; font-variant-numeric: tabular-nums; }
-.pane-children .pane-stack-fold { flex: none; display: grid; place-items: center; width: var(--control-sm); height: var(--control-sm); min-height: 0; padding: 0; border-radius: var(--radius-sm, 6px); color: var(--muted); }
-.pane-children .pane-stack-fold:hover { background: var(--hover); }
-.pane-children .pane-stack-fold:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.pane-children :is(.pane-stack-fold, .pane-stack-actions) { flex: none; display: grid; place-items: center; width: var(--control-sm); height: var(--control-sm); min-height: 0; padding: 0; border-radius: var(--radius-sm, 6px); color: var(--muted); }
+.pane-children :is(.pane-stack-fold, .pane-stack-actions):hover { background: var(--hover); }
+.pane-children :is(.pane-stack-fold, .pane-stack-actions):focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .pane-children .pane-stack-fold[aria-disabled="true"] { opacity: .45; cursor: default; }
 .pane-children .pane-stack-fold[aria-disabled="true"]:hover { background: transparent; }
 @media (prefers-reduced-motion: reduce) { .pane-stack-fold > .chevron { transition: none; } }
@@ -322,8 +322,8 @@ label.broadcast-row:hover { background: var(--hover); }
 .pane-tabs:not(.has-pill) .pane-tab-pill { display: none; }
 .pane-tabs.has-pill button.active { background: transparent; border-color: transparent; }
 /* Agent session names can be long (reviewer-esef-phase-1-3-…): one line, cut with an ellipsis. */
-/* Advisor tabs (server delegate.ROLES): a lightbulb after the agent icon, and a soft glow while the advisor works. */
-.pane-tabs .tab-advisor { flex-shrink: 0; margin-left: -3px; color: var(--advisor); }
+/* Advisor tabs and helper chips carry the same icon and working glow. */
+:is(.pane-tabs, .task-chips) button > .tab-advisor { flex-shrink: 0; color: var(--advisor); }
 .pane-tabs .tab-coordinator { flex-shrink: 0; color: var(--muted); }
 .coordinator-choice { flex: 1 1 auto; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; text-align: left; }
 [aria-labelledby="pane-title"] .coordinator-picker .action-list button .coordinator-choice small { flex: none; margin-left: 0; text-align: left; white-space: normal; }
@@ -331,10 +331,11 @@ label.broadcast-row:hover { background: var(--hover); }
 .coordinator-picker .coordinator-name { overflow-wrap: anywhere; }
 .coordinator-picker .action-list button[aria-disabled="true"]:not([aria-checked="true"]) { opacity: .55; cursor: default; }
 .pane-tabs button.advisor-tab .pane-tab-name { max-width: 22ch; }
-.pane-tabs button.advising { color: var(--text); border-color: color-mix(in srgb, var(--advisor) 70%, transparent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--advisor) 35%, transparent), 0 0 12px color-mix(in srgb, var(--advisor) 45%, transparent); animation: advise-glow 1.8s ease-in-out infinite alternate; }
-.pane-tabs button.advising .state-dot.working { border-color: color-mix(in srgb, var(--advisor) 25%, transparent); border-top-color: var(--advisor); }
+.pane-tabs button.advising { border-color: color-mix(in srgb, var(--advisor) 70%, transparent); }
+:is(.pane-tabs, .task-chips) button.advising { color: var(--text); box-shadow: 0 0 0 1px color-mix(in srgb, var(--advisor) 35%, transparent), 0 0 12px color-mix(in srgb, var(--advisor) 45%, transparent); animation: advise-glow 1.8s ease-in-out infinite alternate; }
+:is(.pane-tabs, .task-chips) button.advising .task-dot.working { border-color: var(--advisor); background: var(--advisor); }
 @keyframes advise-glow { from { box-shadow: 0 0 0 1px color-mix(in srgb, var(--advisor) 25%, transparent), 0 0 4px color-mix(in srgb, var(--advisor) 25%, transparent); } to { box-shadow: 0 0 0 1px color-mix(in srgb, var(--advisor) 55%, transparent), 0 0 14px color-mix(in srgb, var(--advisor) 55%, transparent); } }
-@media (prefers-reduced-motion: reduce) { .pane-tabs button.advising { animation: none; } }
+@media (prefers-reduced-motion: reduce) { :is(.pane-tabs, .task-chips) button.advising { animation: none; } }
 .pane-tab-name { max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Composer + menu and stop button */
 .attach-container { position: relative; }
@@ -1535,7 +1536,8 @@ button.live-chip:active { background: var(--line); }
 .sheet.popover::backdrop { background: transparent; }
 .sheet.popover:focus-visible { outline: none; }
 .sheet.popover .sheet-heading { padding: 6px 8px 0; }
-.sheet.popover h2 { font-family: inherit; font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sheet:is(.popover, .task-close-sheet) h2 { font-family: inherit; font-size: 13.5px; font-weight: 600; }
+.sheet.popover h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sheet.popover .sheet-sub { margin: 2px 8px 6px; font-size: 12px; }
 .sheet.popover .action-label { margin: 4px 8px 2px; font-size: 11.5px; }
 .sheet.popover .action-list button { min-height: var(--control); gap: 10px; padding: 0 8px; border-radius: var(--radius-sm); font-size: 13.5px; }
@@ -1543,7 +1545,12 @@ button.live-chip:active { background: var(--line); }
 .sheet.popover .action-list button svg { width: 16px; height: 16px; flex: none; }
 .sheet.popover .action-list button:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; background: var(--hover); }
 .sheet.popover .action-list hr { margin: 4px 0; }
-.sheet.popover :is(.rename-form, .confirm-box) { padding: 2px 8px 8px; font-size: 13.5px; }
+.sheet.popover :is(.rename-form, .confirm-box) { padding: 2px 8px 8px; }
+.sheet.popover :is(.rename-form, .confirm-box), .sheet.task-close-sheet { font-size: 13.5px; }
+.sheet.task-close-sheet { padding: 16px; font-family: var(--font-sans, system-ui); overflow-wrap: anywhere; }
+.sheet.task-close-sheet:not(.popover) { padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+.sheet.task-close-sheet .confirm-box, .sheet.task-close-sheet .sheet-heading { padding: 0; }
+.sheet.task-close-sheet h2 { white-space: normal; }
 .sheet.popover .error { margin: 6px 8px; font-size: 13px; }
 /* Codex provider: Azure Foundry spends Azure credit, so it shows in the accent color wherever it applies. */
 .codex-provider { width: 100%; margin: 4px 0 14px; }

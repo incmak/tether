@@ -1,0 +1,40 @@
+❯ Start exactly three background tasks for a local Stop test. Use Agent with description "Stop canary agent",
+  subagent_type general-purpose, model haiku, and run_in_background true. Its prompt must be: "Run Bash sleep 601 with
+  run_in_background true and timeout 600000. Wait for that shell to finish before you reply. Then reply done.". Use
+  that quoted text verbatim as the Agent prompt. The subagent must not start any other tools. Use Bash with command
+  "sleep 600", run_in_background true and timeout 600000. Use Monitor with description "Stop canary monitor", command
+  "sleep 599" and timeout_ms 600000. Do not substitute tools or commands. After starting the three tasks, reply without
+  waiting.
+
+● Agent(Stop canary agent)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+  Ran 1 shell command
+
+● Monitor(Stop canary monitor)
+  ⎿  Monitor started · task bpyafabzz · timeout 10m
+
+● I started the three background tasks for the Stop test. They are running, and I have not waited on any of them.
+
+  - Agent "Stop canary agent" (general-purpose, haiku, background): runs sleep 601 in its own background shell, waits
+    for it, then replies "done".
+  - Bash background task (sleep 600, timeout 600000 ms): running in the background.
+  - Monitor "Stop canary monitor" (sleep 599, timeout_ms 600000): running. It expires in about 10 minutes, and I'll get
+    one notice at expiry.
+
+  The mcp__easel__chart tool also became available while these were starting. I didn't use it because nothing here
+  needed a chart.
+
+✻ Waiting for 1 background agent to finish
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+  Stop canary agent
+  general-purpose · 2s · 11k tokens · 1 tool · Haiku 5.5
+
+  Progress
+  › Bash(sleep 601)
+
+  Prompt
+  Run Bash `sleep 601` with run_in_background true and timeout 600000. Wait for that shell to finish before you reply.
+  Then reply done.
+
+  ← to go back · x to stop · f to foreground · Enter/Space to close · Esc to close

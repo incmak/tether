@@ -73,10 +73,9 @@ def watch(entry, run, status, *, sessions, lock, fresh, sleep=time.sleep, now=ti
                 name = current.get('pane_name') or current.get('agent_name') or current.get('label') or ''
                 with undo_store.acting('agent', name):  # the tab asked to close itself: Cmd+Z brings it back
                     closed = undo.capture_safe(pane, run, [current])
-                    helper_close.close_pane(pane, run)
+                    undo.close_tab(pane, run, closed, name or pane)
                     audit.record('tab.close', f"Closed tab {(closed or {}).get('name') or name or pane}",
                                  actor=actor, pane=pane)
-                    undo.record_tab_close(closed, run)
                 return 'closed'
             finally:
                 lock.release()

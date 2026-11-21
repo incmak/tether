@@ -29,7 +29,8 @@ export function QuickReply({ api, pane, id, focus, onOpen, onSuccess }: Props) {
   const agent = agentNames[pane.agent]
   const approval = (data?.approval as Approval | null) ?? null
   const attention = data?.attention ?? null
-  const ownAnswer = !approval && attention?.reason === 'menu' ? attention.options?.find(option => option.free) : undefined
+  const menuRevision = attention?.menu_verified || undefined
+  const ownAnswer = !approval && attention?.reason === 'menu' && attention.menu_verified !== false && !attention.ask_current?.multi ? attention.options?.find(option => option.free) : undefined
   const reply = !!data && !data.plan && ((!approval && !attention) || !!ownAnswer)
   const disabled = busy || pane.writable === false || data?.writable === false
 
@@ -99,11 +100,11 @@ export function QuickReply({ api, pane, id, focus, onOpen, onSuccess }: Props) {
   }
   async function choose(kind: 'approval' | 'menu', option: Choice, approval: Approval | null, feedback?: string) {
     if (kind === 'approval' && approval?.id) await write('approval', { approval: approval.id, choice: option.id, feedback }, true)
-    else await write('menu', { choice: option.id, label: option.text }, true)
+    else await write('menu', { choice: option.id, label: option.text, revision: menuRevision }, true)
   }
   const send = () => {
     if (!text.trim()) return
-    if (ownAnswer) void write('menu', { choice: ownAnswer.id, answer: text }, true)
+    if (ownAnswer) void write('menu', { choice: ownAnswer.id, answer: text, revision: menuRevision }, true)
     else void write('message', { message: text }, false)
   }
   const transcript = chatMessages(data)

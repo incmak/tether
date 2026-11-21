@@ -1,0 +1,13 @@
+Which data for the live screenshots?
+
+❯ 1. Mask the real org
+     Codex masks names and numbers in
+     every PNG.
+  2. New test org on UAT
+  3. Local seeded stack
+  4. Type something.
+────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc
+to cancel

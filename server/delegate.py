@@ -261,7 +261,7 @@ def start(entry, body, folder, run=subprocess.run, recent=lambda: [], *, cwd=Non
     if owner is not None:
         if owner.get('kind') == 'own':
             owner = dict(owner, root_pane=pane)
-        helper_tabs.save(pane, owner, run)
+        helper_tabs.write_record(pane, None, owner, run)
     recent_text = brief(recent()) if context else ''
     prompt = (reviewer_prompt(entry, body['message'], recent_text) if review == 'new' else
               prompt_text(entry, body['message'], agent, context=context, review=review == 'source', recent=recent_text))

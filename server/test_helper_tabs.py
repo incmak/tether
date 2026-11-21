@@ -1,5 +1,6 @@
 """Helper commands use fake pane options, terminal delivery, clocks, and HTTP."""
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
+import ast
 import contextlib
 import http.client
 import io
@@ -9,6 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import MagicMock, Mock, patch
 from urllib.error import HTTPError, URLError
@@ -62,6 +64,32 @@ class Tmux:
 
     def saves(self):
         return [args for args, _ in self.calls if args[1] == 'set-option']
+
+
+class CoordinatorPlacementTests(unittest.TestCase):
+    def test_write_record_never_places_a_coordinator_in_a_task(self):
+        own = {'owner_pane': '%1', 'sent_at': 1, 'kind': 'own', 'moved_by': 'user'}
+        home = dict(own, kind='helper')
+        for mark in helpers.COORDINATOR_MARKS + ('reviewer', ''):
+            options, writes = {'@tether_helper': json.dumps(own), '@tether_role': mark}, []
+
+            def run(args, **_):
+                if args[1] == 'display-message':
+                    return subprocess.CompletedProcess(args, 0, stdout='%2\t' + options[args[5].split('\t')[1][2:-1]] + '\n')
+                writes.append(args)
+                return subprocess.CompletedProcess(args, 0)
+            with self.subTest(mark=mark):
+                if mark in helpers.COORDINATOR_MARKS:
+                    with self.assertRaisesRegex(helpers.Stale, 'is the coordinator'):
+                        helpers.write_record('%2', own, home, run)
+                    self.assertEqual(writes, [])
+                else:
+                    helpers.write_record('%2', own, home, run)
+                    self.assertEqual(len(writes), 1)
+        # A record that already places the tab can still change its other fields (no new placement).
+        options, writes = {'@tether_helper': json.dumps(home), '@tether_role': 'coordinator'}, []
+        helpers.write_record('%2', home, dict(home, sent_at=2), run)
+        self.assertEqual(len(writes), 1)
 
 
 class HelperTests(unittest.TestCase):
@@ -295,7 +323,7 @@ class HelperTests(unittest.TestCase):
         # send keeps it: the upgrade pause then holds for at most AGENT_PROMPT_TTL.
         with patch.object(review_links, 'mark_parent_send') as stamp, \
                 patch.object(review_links, 'agent_prompt') as mark:
-            def delivered(*args):
+            def delivered(*args, **kwargs):
                 stamp.assert_called_once_with('%13', worker_thread=HELPER)
                 mark.assert_not_called()
                 return 'submitted'
@@ -417,14 +445,16 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(self.poll(1022)['status'], 'gone')
         self.assertNotIn('%13', helpers._missing)
 
-    def test_send_and_poll_do_not_hold_server_send_lock(self):
+    def test_send_holds_global_send_lock_and_wait_status_does_not(self):
+        held = True
+
         def status(entry):
-            self.assertFalse(server.SEND_LOCK.locked())
+            self.assertEqual(server.SEND_LOCK.locked(), held)
             return {'state': 'Idle'}
 
-        def send(entry, message, state):
-            self.assertFalse(server.SEND_LOCK.locked())
-            self.assertTrue(helpers.SEND_LOCK.locked())
+        def send(entry, message, state, *, held):
+            self.assertTrue(server.SEND_LOCK.locked())
+            self.assertTrue(held)
             self.assertEqual(self.run.record()['before'], helpers.digest('Old reply'))
             self.assertEqual(self.run.record()['sent_at'], 1234)
             return 'queued'
@@ -433,8 +463,89 @@ class HelperTests(unittest.TestCase):
         for agent in ('claude', 'codex'):
             self.entries[1]['agent'] = agent
             with self.subTest(agent=agent), own_time(helpers, time=Mock(return_value=1234)):
+                held = True
                 self.assertEqual(self.request('send'), (200, {'sent': True, 'pane': '%13', 'delivery': 'queued'}))
+                held = False
                 self.assertEqual(self.request('wait')[0], 200)
+
+    def test_delivery_and_helper_cleanup_finish_in_send_lock_order(self):
+        delivery_reading = threading.Event()
+        cleanup_ready = threading.Event()
+        mutex = threading.Lock()
+
+        class SendLock:
+            def acquire(self, *, timeout):
+                if threading.current_thread().name == 'cleanup':
+                    acquired = mutex.acquire(blocking=False)
+                    cleanup_ready.set()
+                    return acquired or mutex.acquire(timeout=timeout)
+                return mutex.acquire(timeout=timeout)
+
+            def release(self):
+                mutex.release()
+
+            def __enter__(self):
+                if not self.acquire(timeout=1):
+                    raise AssertionError('Delivery waited for the send lock while cleanup waited for the record lock')
+
+            def __exit__(self, *_):
+                self.release()
+
+        run = server.subprocess.run.side_effect
+
+        def held_read(args, **kwargs):
+            if args[1] == 'display-message' and threading.current_thread().name == 'delivery':
+                delivery_reading.set()
+                if not cleanup_ready.wait(2):
+                    raise AssertionError('Cleanup did not request the send lock')
+            return run(args, **kwargs)
+
+        results = {}
+        failures = []
+
+        def task(key, action):
+            try:
+                results[key] = action()
+            except BaseException as exc:
+                failures.append(exc)
+
+        lock = SendLock()
+        entry = self.entries[1]
+        cleaner = server.helper_close.Closer()
+        placement = ('record', 'advisor', '')
+        with patch.object(server, 'SEND_LOCK', lock), patch.object(server.subprocess.run, 'side_effect', held_read), \
+                patch.object(server, 'stash_quiet_draft', return_value=None), patch.object(server, 'submit_locked'), \
+                patch.object(server.shell_log, 'folder_note', return_value=''), \
+                patch.object(server.helper_close, '_panes', return_value={'%13': placement}), \
+                patch.object(server.helper_close, 'close_pane') as close, \
+                patch.object(server.undo, 'capture_safe', return_value=None):
+            self.send.side_effect = REVIEW_SEND
+            delivery = threading.Thread(name='delivery', target=task, args=('send', lambda: self.request('send')), daemon=True)
+            cleanup = threading.Thread(name='cleanup', target=task, args=(
+                'close', lambda: cleaner._still_quiet('%13', placement, entry, self.status, lambda _: False,
+                                                      self.run, lock)), daemon=True)
+            delivery.start()
+            self.assertTrue(delivery_reading.wait(2))
+            cleanup.start()
+            for lane in (delivery, cleanup):
+                lane.join(3)
+                self.assertFalse(lane.is_alive(), lane.name)
+            self.assertEqual(failures, [])
+            self.assertEqual(results['send'][0], 200)
+            self.assertIs(results['close'], True)
+            close.assert_called_once()
+
+    def test_helper_record_has_one_tmux_writer(self):
+        server_folder = Path(helpers.__file__).parent
+        for path in server_folder.glob('*.py'):
+            if path.name == 'helper_tabs.py' or path.name.startswith('test_'):
+                continue
+            for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
+                if isinstance(node, (ast.List, ast.Tuple, ast.Call)):
+                    args = node.args if isinstance(node, ast.Call) else node.elts
+                    words = {ast.unparse(arg) for arg in args}
+                    self.assertFalse("'set-option'" in words and words.intersection(
+                        {"'@tether_helper'", 'helper_tabs.OPTION'}), f'{path.name}:{node.lineno}')
 
     def test_failed_save_never_sends_and_failed_delivery_restores_record(self):
         original = self.run.record()
@@ -443,11 +554,11 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(self.run.record(), original)
         self.assertEqual(len(self.run.saves()), 2)
         self.send.reset_mock(side_effect=True)
-        with patch.object(helpers, 'save', side_effect=OSError('Cannot save')):
+        with patch.object(helpers, 'write_record', side_effect=OSError('Cannot save')):
             self.assertEqual(self.request('send')[0], 503)
         self.send.assert_not_called()
         self.send.side_effect = RuntimeError('Delivery failed')
-        with patch.object(helpers, 'save', side_effect=[None, OSError('Cannot restore')]):
+        with patch.object(helpers, 'write_record', side_effect=[None, OSError('Cannot restore')]):
             self.assertEqual(self.request('send'), (503, {'error': 'Delivery failed', 'draft': False}))
 
     def test_draft_guards_and_quiet_claude_stash_restore_order(self):
@@ -633,20 +744,20 @@ class HelperTests(unittest.TestCase):
         owner = helpers.new_record(self.entries[0])
         body = dict(session='%12', thread=OWNER, agent='claude', message='Task')
         for record in (owner, None):
-            launch = Mock()
+            launch = Mock(return_value=subprocess.CompletedProcess([], 0, stdout='%13\t\n'))
             with patch.object(delegate, 'new_window_after', return_value='%13'), \
                     patch.object(delegate, 'write_prompt', return_value=self.root / 'prompt.md'):
                 delegate.start(self.entries[0], body, '/Users/test', run=launch, owner=record)
             calls = [call.args[0] for call in launch.call_args_list]
             self.assertEqual(calls[0][5], '@chat_name')
             if record is not None:
-                self.assertEqual(calls[1][5], helpers.OPTION)
-                self.assertEqual(json.loads(calls[1][6]), owner)
-                self.assertEqual(calls[2][1], 'send-keys')
+                self.assertEqual(calls[2][5], helpers.OPTION)
+                self.assertEqual(json.loads(calls[2][6]), owner)
+                self.assertEqual(calls[3][1], 'send-keys')
             else:
                 self.assertEqual(calls[1][1], 'send-keys')
         with patch.object(delegate, 'new_window_after', return_value='%13'), \
-                patch.object(helpers, 'save', side_effect=OSError('Cannot save')), \
+                patch.object(helpers, 'write_record', side_effect=OSError('Cannot save')), \
                 patch.object(delegate, 'write_prompt') as prompt:
             launch = Mock()
             with self.assertRaises(OSError):

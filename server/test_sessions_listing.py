@@ -44,7 +44,7 @@ class ListingParentsTests(unittest.TestCase):
     def tmux_rows(self, rows, returncode=0, *, roles=None, grouping=None):
         roles, grouping = roles or {}, grouping or {}
         self.run.return_value = subprocess.CompletedProcess(
-            [], returncode, stdout=''.join(f'{pane}\t{grouping.get(pane, "")}\t{roles.get(pane, "")}\t{raw}\n'
+            [], returncode, stdout=''.join(f'{pane}\t{grouping.get(pane, "")}\t{roles.get(pane, "")}\t{raw}\t$1\t\t\t\n'
                                           for pane, raw in rows))
 
     def test_valid_parent_records_use_one_tmux_call(self):
@@ -55,7 +55,7 @@ class ListingParentsTests(unittest.TestCase):
         self.assertEqual(rows['%1']['reviewers'], ['%5'])
         self.assertNotIn('parent', rows['%1'])
         self.run.assert_called_once_with(
-            [paths.TMUX, 'list-panes', '-a', '-F', '#{pane_id}\t#{@group_by}\t#{@tether_role}\t#{@tether_helper}'],
+            [paths.TMUX, 'list-panes', '-a', '-F', '#{pane_id}\t#{@group_by}\t#{@tether_role}\t#{@tether_helper}\t#{session_id}\t#{@tether_done}\t#{@tether_reopened}\t#{@tether_done_at}'],
             capture_output=True, text=True, timeout=5)
 
     def test_invalid_parent_records_are_ignored(self):
@@ -90,6 +90,7 @@ class ListingParentsTests(unittest.TestCase):
         self.tmux_rows([('%2', json.dumps(record))])
         row = self.listing()['%2']
         self.assertEqual(row, {'id': '%2', 'parent': '%1', 'owner': '%5', 'helper': True, 'reviewers_paused': [],
+                               'task': '%5', 'task_depth': 1, 'task_role': 'Worker',
                                'opened_by': {'pane': '%1', 'name': 'Current opener', 'live': True}})
         self.entries[0]['thread'] = home_thread
         for opener_present in (True, False):

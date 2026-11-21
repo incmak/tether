@@ -599,8 +599,9 @@ def codex_recheck(entry, run):
     return fresh if fresh and (fresh['owner_pid'], fresh['process_start']) == (entry['owner_pid'], entry['process_start']) else None
 
 
-def discover(config, run):
-    pane_view.zoom_repair_all()
+def discover(config, run, *, repair_zoom=True):
+    if repair_zoom:
+        pane_view.zoom_repair_all()
     result = run([paths.TMUX, 'list-panes', '-a', '-F',
                   '#{pane_id}\t#{session_id}\t#{session_name}\t#{window_index}.#{pane_index}\t#{pane_pid}\t#{pane_current_path}\t#{@chat_name_at}\t#{@chat_name}\t#{@chat_icon}\t#{@worktree}\t#{@group}\t#{@zoom_for}\t#{@tether_role}\t#{pane_dead}'],
                  capture_output=True, text=True, timeout=5)
@@ -670,7 +671,7 @@ def discover(config, run):
                 transcript = claude_transcript(live['cwd'], live['sessionId'])
                 entry.update(agent='claude', thread=live['sessionId'], transcript=str(transcript),
                              registry=live['registry'], writable=True, owner_pid=owner, process_start=started,
-                             busy=live.get('status') == 'busy')
+                             busy=live.get('status') == 'busy', agent_version=live.get('version'))
                 # A name the user gave (/rename or claude --name). Claude's own derived names ("projects-40") are not shown.
                 if live.get('nameSource') == 'user' and isinstance(live.get('name'), str) and live['name'].strip():
                     entry['agent_name'] = ' '.join(live['name'].split())
@@ -1071,7 +1072,31 @@ def ask_questions(part):
                    for option in (item.get('options') or [])[:8] if isinstance(option, dict) and text(option.get('label'), 300)]
         questions.append({'question': text(item.get('question'), 2000), 'header': text(item.get('header'), 60),
                           'multi': bool(item.get('multiSelect')), 'options': options})
-    return {'id': part.get('id'), 'questions': questions} if questions and part.get('id') else None
+    identifier = part.get('id')
+    return {'id': identifier, 'questions': questions} if questions and isinstance(identifier, str) and identifier else None
+
+
+def _update_claude_ask(state, part, role):
+    if part.get('type') == 'tool_use' and part.get('name') == 'AskUserQuestion' and role == 'assistant':
+        state['ask'] = None  # A newer call supersedes the previous one even if its input cannot be read.
+        state['ask'] = ask_questions(part)
+    elif part.get('type') == 'tool_result' and part.get('tool_use_id') == (state.get('ask') or {}).get('id'):
+        state['ask'] = None
+
+
+def open_claude_ask(entry):
+    """Read the outstanding native question without loading the conversation's messages."""
+    def consume(state, _, record):
+        if record.get('isSidechain') or record.get('isMeta') or record.get('type') not in ('assistant', 'user'):
+            return
+        content = (record.get('message') or {}).get('content')
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    _update_claude_ask(state, part, record['type'])
+
+    return history.read(entry.get('transcript'), lambda: {'ask': None}, consume, trim=False,
+                        namespace='claude-ask')['ask']
 
 
 def claude_model(thread):
@@ -1104,10 +1129,7 @@ def claude_snapshot(entry, clean):
                 state['plan'] = {'id': part.get('id') or str(index), 'text': text} if isinstance(text, str) and text.strip() else None
             elif part.get('type') == 'tool_result' and part.get('tool_use_id') == (state.get('plan') or {}).get('id'):
                 state['plan'] = None  # A finished request must not pair with a later menu.
-            if part.get('type') == 'tool_use' and part.get('name') == 'AskUserQuestion' and record['type'] == 'assistant':
-                state['ask'] = ask_questions(part)
-            elif part.get('type') == 'tool_result' and part.get('tool_use_id') == (state.get('ask') or {}).get('id'):
-                state['ask'] = None
+            _update_claude_ask(state, part, record['type'])
     state = history.read(entry['transcript'], lambda: {'messages': [], 'dropped': 0, 'plan': None, 'ask': None}, consume)
     messages = activity.group_actions(activity.merge(list(state['messages'])))
     metrics = {}

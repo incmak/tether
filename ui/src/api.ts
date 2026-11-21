@@ -100,6 +100,14 @@ export interface Pane {
   opened_by?: { pane: string; name: string | null; live: boolean }  // the tab that ran `start` for this one (B400)
   owner?: string  // the live tab that owns this tab's work; the tab nests under it (B400)
   helper?: boolean  // an agent opened it for its own work; "Hide agent helper tabs" may hide it (helperTabs.ts)
+  task?: string
+  task_role?: string
+  task_depth?: 1 | 2
+  answer_digest?: string
+  from?: { pane: string; name: string; live: boolean }
+  done?: true
+  done_mark?: true
+  moved_by?: 'user'
   escalated?: boolean  // its owner sent a paused review to you (agent_tab_cli.py escalate)
   brief?: TabBrief | null  // the AI name and description of this conversation (server/tab_brief.py)
 }
@@ -322,6 +330,7 @@ export interface DialogHint { keys: { key: string; label: string }[]; effect: st
 export interface ClaudeDialog { title: string; note?: string; tabs?: string[]; tab?: string; tab_focus?: boolean; blocks: DialogBlock[]; hints: DialogHint[]; focus: 'list' | 'search' | 'none'; mode: string; text: string }
 export type DialogAction = { action: 'key'; key: string } | { action: 'row'; row: number; label: string; then?: 'Up' | 'Down' } | { action: 'tab'; tab: string } | { action: 'scale'; value: string } | { action: 'filter'; text: string } | { action: 'subtab'; tab: string } | { action: 'option'; value: string }
 export interface Attention { id: string; text: string; reason: 'menu' | 'prompt' | 'no-input-box' | 'panel' | 'picker' | 'info' | 'permissions' | 'side' | 'dialog'; permissions?: PermissionsDialog; dialog?: ClaudeDialog;
+  menu_verified?: false | string;
   /** reason 'side' (Claude's /btw): pending = no answer yet, markdown = text is the raw Markdown answer, fork = the fork key is offered. */
   pending?: boolean; markdown?: boolean; fork?: boolean;
   promptId?: string; revision?: string; requiresResponse?: boolean; body?: string; hints?: string[]; actions?: PromptAction[]; title?: string; subtitle?: string; items?: PickerItem[]; more_above?: number; more_below?: number; hint?: string; question?: string; options?: Choice[]; choice?: ChoiceState; ask?: { id: string; questions: AskQuestion[] }; askBridge?: AskBridge; ask_current?: AskCurrent; login?: { url: string; code: boolean; user_code?: string; message?: string } }
@@ -376,8 +385,8 @@ export async function request<T>(path: string, body?: unknown, signal?: AbortSig
     if (response.ok && path.split('?')[0] === 'footer') throw error
     return {}
   })
-  if (!response.ok) throw new ApiError(response.status, data.error || `Request failed (${response.status}). Please try again.`, data.draft === true, data.approval === 'required')
   if (init.method !== 'GET') announceUndo(response)
+  if (!response.ok) throw new ApiError(response.status, data.error || `Request failed (${response.status}). Please try again.`, data.draft === true, data.approval === 'required')
   return data as T
 }
 

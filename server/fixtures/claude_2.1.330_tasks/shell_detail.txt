@@ -1,0 +1,12 @@
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+  Background sleep 600 for Stop test
+  shell
+
+  Status:   running
+  Runtime:  4s
+  Command:  sleep 600
+
+  Output
+  No output yet
+
+  ← to go back · x to stop · Enter/Space to close · Esc to close

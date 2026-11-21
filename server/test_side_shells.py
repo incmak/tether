@@ -1,6 +1,5 @@
 """side_shells against a real tmux server in its own socket folder (TMUX_TMPDIR), never the user's tmux."""
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
-import functools
 import os
 import shutil
 import subprocess
@@ -11,6 +10,7 @@ from unittest.mock import Mock
 
 import paths
 import side_shells
+from test_tmux_isolation import private_tmux
 
 
 class ShellListTests(unittest.TestCase):
@@ -104,24 +104,16 @@ class ShellListTests(unittest.TestCase):
 @unittest.skipUnless(shutil.which(paths.TMUX) or os.path.exists(paths.TMUX), 'tmux is not installed')
 class SideShellTests(unittest.TestCase):
     def setUp(self):
-        self.socket_dir = tempfile.mkdtemp(prefix='tss', dir='/tmp')  # short: long socket paths fail
-        env = {key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE')}
-        env['TMUX_TMPDIR'] = self.socket_dir
-        self.run_tmux = functools.partial(subprocess.run, env=env)
         self.folder = tempfile.mkdtemp(prefix='folder')
+        self.addCleanup(shutil.rmtree, self.folder, ignore_errors=True)
         self.other = tempfile.mkdtemp(prefix='other')
+        self.addCleanup(shutil.rmtree, self.other, ignore_errors=True)
+        self.private = private_tmux(self, 'tss')
+        self.run_tmux = self.private.run
+        self.tmux = self.private.tmux
         # A user session that must stay untouched.
         self.tmux('new-session', '-d', '-s', 'work', '-c', self.other)
         self.user_pane = self.tmux('display-message', '-p', '-t', '=work:', '#{pane_id}').stdout.strip()
-
-    def tearDown(self):
-        self.tmux('kill-server')
-        shutil.rmtree(self.socket_dir, ignore_errors=True)
-        shutil.rmtree(self.folder, ignore_errors=True)
-        shutil.rmtree(self.other, ignore_errors=True)
-
-    def tmux(self, *args):
-        return self.run_tmux([paths.TMUX, *args], capture_output=True, text=True, timeout=5)
 
     def sessions(self):
         return sorted(self.tmux('list-sessions', '-F', '#{session_name}').stdout.split())

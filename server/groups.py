@@ -303,10 +303,34 @@ def move(session_id, pane, group_id, run=subprocess.run, by_user=False, dissolve
             (drop_if_alone if dissolve else drop_if_empty)(session_id, old, run)
 
 
-def _labelled(session_id, group_id, run):
+def _labels(session_id, run):
     shown = _tmux(run, 'list-panes', '-s', '-t', session_id + ':', '-F', '#{pane_id}\t#{@group}')
     _check(shown, GONE_SESSION)
-    return [pane for pane, _, label in (line.partition('\t') for line in shown.stdout.splitlines()) if label == group_id]
+    return {pane: label for pane, _, label in (line.partition('\t') for line in shown.stdout.splitlines())}
+
+
+def _labelled(session_id, group_id, run):
+    return [pane for pane, label in _labels(session_id, run).items() if label == group_id]
+
+
+def stack_members(session_id, group_id, entries, run):
+    """Effective stack membership for close and remove. A child follows its task."""
+    import helper_tabs
+    import task_tree
+
+    labels = _labels(session_id, run)
+    options = helper_tabs.read_panes(run)
+    live = {entry['id']: entry for entry in entries if entry['id'] in labels}
+    fields = task_tree.placements(options, live)
+    members = {}
+    for pane in labels:
+        field = fields.get(pane, {})
+        if labels.get(field.get('task', pane)) == group_id:
+            members[pane] = field.get('task_depth', 0)
+    pending = task_tree.pending_roots(options, live, fields)
+    if any(labels.get(root) == group_id for root in pending) or starting(session_id, group_id, run):
+        raise GroupError(409, 'A tab is still starting in this stack. Wait for it to appear and try again.')
+    return members
 
 
 def panes_in(session_id, group_id, run=subprocess.run):
@@ -455,15 +479,25 @@ def closing(pane, run=subprocess.run):
             pass  # the 30 s sweep (auto_stacks.watch) tries again
 
 
-def remove(session_id, group_id, run=subprocess.run):
-    """Drop an empty group. Its context bundle goes to the archive."""
+def remove(session_id, group_id, run=subprocess.run, *, entries=None, after_close=False):
+    """Drop an empty group. after_close requires a complete preflight under LOCK before any kills."""
     with LOCK():
-        groups = read(session_id, run)
-        group = _find(groups, group_id)
-        if _labelled(session_id, group_id, run):
-            raise GroupError(409, 'The stack still has tabs. Move or close them first.')
+        try:
+            groups = read(session_id, run)
+            group = _find(groups, group_id)
+        except GroupError as exc:
+            if after_close and exc.status == 404:  # the last pane or the auto stack may be gone
+                return None
+            raise
+        if not after_close:
+            members = (_labelled(session_id, group_id, run) if entries is None
+                       else stack_members(session_id, group_id, entries, run))
+            if members:
+                raise GroupError(409, 'The stack still has tabs. Move or close them first.')
+        index = groups.index(group)
         write(session_id, [g for g in groups if g['id'] != group_id], run)
     _archive(group)
+    return group, index
 
 
 def reorder(session_id, ids, run=subprocess.run):

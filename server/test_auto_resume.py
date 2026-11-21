@@ -853,6 +853,7 @@ class AutoResumeTests(unittest.TestCase):
         original = (self.cache / 'open-tabs.json').read_bytes()
         for response in (subprocess.TimeoutExpired('tmux', 5), OSError('unavailable'),
                          subprocess.CompletedProcess([], 1, '', 'permission denied'),
+                         subprocess.CompletedProcess([], 1, '', 'error connecting to tmux (Permission denied)'),
                          subprocess.CompletedProcess([], 0, 'not-an-id', '')):
             with self.subTest(response=response), patch.object(auto_resume, '_entries') as entries:
                 run = Mock(side_effect=response) if isinstance(response, Exception) else Mock(return_value=response)

@@ -4,6 +4,7 @@ B205: a review is bound to a commit. The request names HEAD of the worker's fold
 reply is forwarded as approval only when it names that commit, the worker is idle and the folder is still at that
 commit. A clean approved commit stays on the link as 'approved_commit' (see approved_commits).
 """
+from copy import deepcopy
 import hashlib
 import json
 import math
@@ -665,14 +666,117 @@ def remove(worker, reviewer=None):
         return True
 
 
+def _without_pane(rows, pane):
+    stopped = [row for row in rows if _is_link(row) and row['reviewer'] == pane]
+    remaining = [row for row in rows if row not in stopped and
+                 not (isinstance(row, dict) and row.get('worker') == pane)]
+    return remaining, {_cap_key(row) for row in stopped}
+
+
+def capture_close(pane):
+    """Save links and the caps that closing this pane can remove or update, with their peer links."""
+    with _lock:
+        rows = _read()
+        keys = {_cap_key(row) for row in rows if _is_link(row) and row['reviewer'] == pane}
+        return [row for row in rows if (_is_cap(row) or _is_link(row))
+                and (row['worker'] == pane or _cap_key(row) in keys)]
+
+
+def _remap_counts(counts, reopened):
+    merged = {}
+    for key, values in counts.items():
+        old, sep, thread = key.partition(':')
+        new = reopened.get(old)
+        if new and sep and thread in ('', new[1]):
+            key = f'{new[0]}:{thread}'
+        merged = _merge_counts(merged, {key: values})
+    return merged
+
+
+def restore_close(snapshots, reopened, live_threads):
+    """Restore review state with new pane IDs. Keep any newer review decision on a surviving worker."""
+    def key(row):
+        return _cap_key(row), row.get('reviewer')
+
+    def participant(pane, thread):
+        if pane in reopened:
+            new, bound = reopened[pane]
+            return new if thread in (None, bound) else None
+        return pane if thread and live_threads.get(pane) == thread else None
+
+    before = {}
+    for snapshot in snapshots:
+        for row in snapshot:
+            before.setdefault(key(row), row)
+    if not before:
+        return True
+
+    def decision(row):
+        return {field: value for field, value in row.items() if field != 'saved_at'}
+
+    complete = True
+    with _lock:
+        rows = _read()
+        # Closing a reviewer can move its counts to a surviving reviewer. Recreate that change
+        # so undo can put the counts back without overwriting review activity since the close.
+        after = deepcopy(list(before.values()))
+        for pane in reopened:
+            after, adopt = _without_pane(after, pane)
+            for cap in after:
+                if _is_cap(cap) and (_cap_key(cap) in adopt or cap.get('pending_adoption')):
+                    _adopt_orphaned_counts(cap, [row for row in after
+                                                 if _is_link(row) and _cap_key(row) == _cap_key(cap)])
+        added, blocked = [], set()
+        for saved in before.values():
+            if not _is_cap(saved):
+                continue
+            old, thread = _cap_key(saved)
+            worker = participant(old, thread)
+            if old in reopened and _saved(saved):
+                worker = reopened[old][0]  # saved caps can belong to a worker's earlier conversation
+            if worker is None:
+                blocked.add(_cap_key(saved))
+                complete = False
+                continue
+            current = _cap_for(rows, (worker, thread))
+            expected = _cap_for(after, (worker, thread)) if old not in reopened else None
+            if ((worker, thread) in _feedback_in_flight
+                    or current and (expected is None or decision(current) != decision(expected))):
+                blocked.add(_cap_key(saved))
+                complete = False
+                continue
+            cap = dict(saved, worker=worker)
+            if 'counts' in cap:
+                cap['counts'] = _remap_counts(cap['counts'], reopened)
+            if 'restart' in cap and 'counts' in cap['restart']:
+                cap['restart'] = dict(cap['restart'], counts=_remap_counts(cap['restart']['counts'], reopened))
+            if (stage := cap.get('parent_stage')) and stage['pane'] in reopened:
+                if parent := participant(stage['pane'], stage['thread']):
+                    cap['parent_stage'] = dict(stage, pane=parent)
+            if current is not None:
+                rows.remove(current)
+            added.append(cap)
+        for link in before.values():
+            if not _is_link(link) or not ({link['worker'], link['reviewer']} & reopened.keys()):
+                continue
+            worker = participant(link['worker'], link.get('worker_thread'))
+            reviewer = participant(link['reviewer'], link.get('reviewer_thread'))
+            if (worker is None or reviewer is None or _cap_key(link) in blocked
+                    or any(_is_link(row) and (row['worker'], row['reviewer']) == (worker, reviewer) for row in rows)):
+                complete = False
+                continue
+            added.append(dict(link, worker=worker, reviewer=reviewer))
+        if added:
+            _write(rows + added)
+    return complete
+
+
 def close(pane):
     with _lock:
         rows = _read()
-        stopped = [row for row in rows if _is_link(row) and row['reviewer'] == pane]
-        remaining = [row for row in rows if row not in stopped and
-                     not (isinstance(row, dict) and row.get('worker') == pane)]
+        remaining, adopt = _without_pane(rows, pane)
         if remaining != rows:
-            _write(remaining, adopt={_cap_key(row) for row in stopped})
+            _write(remaining, adopt=adopt)
 
 
 def _from_parent(stage, pane, thread):

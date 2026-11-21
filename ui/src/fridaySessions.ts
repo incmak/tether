@@ -25,15 +25,17 @@ export function distance(left: string, right: string): number {
 /** Match spoken session names and fall back to chat titles. No terminal access. */
 export function fridayChatList(chats: Chat[], sessions: Session[], target: string, wanted?: string):
   AgentChatList | { session: string; chats: string[]; note?: string } | { error: string } {
-  const names = new Map(sessions.map(session => [session.id, session.name || session.id]))
-  for (const chat of chats) if (!names.has(chat.session)) names.set(chat.session, chat.session)
+  const names = new Map(sessions.map(session => [session.id, session.name]))
+  for (const chat of chats) if (!names.has(chat.session)) names.set(chat.session, '')
+  const nameOf = (id: string) => names.get(id) || id
   const entries = [...names].map(([id, name]) => ({ id, name, normalized: normalize(name) }))
-  const line = (chat: Chat) => `${chat.chat}, ${chat.agent}, ${chat.state}, in ${names.get(chat.session)}`
+  const line = (chat: Chat) => `${chat.chat}, ${chat.agent}, ${chat.state}, in ${nameOf(chat.session)}`
   if (wanted !== undefined) {
+    const named = entries.filter(entry => entry.name)
     const name = wanted.trim().replace(/^the\s+/i, '').replace(/\s+(session|chat|tab)$/i, '')
     const query = normalize(name)
-    const exact = entries.find(entry => entry.name.toLowerCase() === name.toLowerCase())
-    const ranked = query ? entries.filter(entry => entry.normalized).map(entry => ({
+    const exact = named.find(entry => entry.name.toLowerCase() === name.toLowerCase())
+    const ranked = query ? named.filter(entry => entry.normalized).map(entry => ({
       ...entry,
       rank: entry.normalized.startsWith(query) || query.startsWith(entry.normalized) ? 0
         : entry.normalized.includes(query) || query.includes(entry.normalized) ? 1 : 2,
@@ -43,7 +45,7 @@ export function fridayChatList(chats: Chat[], sessions: Session[], target: strin
     let match = exact ?? (closest && (closest.rank < 2 || closest.distance <= Math.max(query.length, closest.normalized.length) * 0.4) ? closest : undefined)
     const key = soundKey(query)
     if (!match && key) {
-      const phonetic = entries.filter(entry => soundKey(entry.name) === key)
+      const phonetic = named.filter(entry => soundKey(entry.name) === key)
       if (phonetic.length === 1) match = phonetic[0]
     }
     // A chat title prefix can be more specific than a session name inside the query.
@@ -65,23 +67,23 @@ export function fridayChatList(chats: Chat[], sessions: Session[], target: strin
         const tied = candidates.filter(candidate => candidate.rank === best.rank && candidate.edits === best.edits)
         const missing = `No session called ${wanted}.`
         if (tied.length > 1) {
-          const choices = tied.slice(0, 3).map(({ chat }) => `${chat.chat} (in ${names.get(chat.session)})`)
+          const choices = tied.slice(0, 3).map(({ chat }) => `${chat.chat} (in ${nameOf(chat.session)})`)
           return { error: `${missing} Closest chats: ${choices.join(', ')}. Ask which one.` }
         }
         const { chat } = best
-        const session = names.get(chat.session)!
+        const session = nameOf(chat.session)
         return { session, chats: [line(chat)], note: `${missing} Closest match: the chat ${chat.chat} in session ${session}. Say this name back to the user.` }
       }
     }
     if (match) return { session: match.name, chats: chats.filter(chat => chat.session === match.id).map(line) }
-    return { error: `No session called ${wanted}. Sessions: ${entries.map(entry => entry.name).join(', ')}` }
+    return { error: `No session called ${wanted}. Sessions: ${named.map(entry => entry.name).join(', ')}` }
   }
   return {
     target,
     chats: chats.map(line),
     sessions: entries.map(entry => {
       const members = chats.filter(chat => chat.session === entry.id)
-      return `${entry.name}: ${members.length} chats, ${members.filter(chat => chat.busy).length} busy`
+      return `${nameOf(entry.id)}: ${members.length} chats, ${members.filter(chat => chat.busy).length} busy`
     }),
   }
 }

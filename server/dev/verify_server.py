@@ -3,8 +3,9 @@
 
     python3 server/dev/verify_server.py --dist BUILD_DIR
 
-The launcher owns the fixture root and the private tmux. The child serves the real
-handler behind the route and program allowlists and the private tmux wrapper.
+The launcher usually owns the fixture root and private tmux. With --root, the test
+watcher owns them. The child serves the real handler behind the route and program
+allowlists and the private tmux wrapper.
 The audit hook is a safety net for Tether's own code. It provides no sandbox for
 hostile code in the server process (https://docs.python.org/3.12/library/sys.html#sys.addaudithook).
 Production workers do not start.
@@ -95,6 +96,7 @@ REFUSED = {
         'claude-advisor', 'codex-level', 'codex-provider', 'commit-gate', 'groups/context',
         'history', 'history/hidden', 'live', 'projects/advisor-entry', 'projects/advisor-log',
         'projects/note', 'search', 'side-shells', 'stream', 'subagent', 'subagent-task', 'subagent-tool', 'tool',
+        'task-tree/close-plan',
     },
     # These can close a pane or session.
     'DELETE': {'session', 'tmux-sessions'},
@@ -104,12 +106,14 @@ REFUSED = {
         # These can type into, start, stop, or reconfigure a terminal or agent.
         'approval', 'ask-answer', 'ask-engage', 'attention/digest', 'attention/handled',
         'attention/opened', 'attention/snooze', 'auto-resume', 'broadcast', 'clear-draft',
-        'continue', 'continue-preview', 'coordinator-role', 'delegate', 'dialog', 'fork', 'key', 'live/summary',
+        'continue', 'continue-preview', 'coordinator-role', 'delegate', 'dialog', 'fork', 'groups/close', 'key',
+        'live/summary',
         'menu', 'merge', 'message', 'mode', 'model', 'model-options', 'pane-icon', 'pane-icon/draw',
         'pane-name', 'pick', 'projects/backlog-start', 'prompt-action', 'quick-tab/move',
         'quick-tab/route', 'quick-tab/start', 'rename', 'resume', 'review-link', 'review-stop',
         'side-shell', 'side-shell/end', 'split', 'start', 'stop-task', 'subagent-stop',
         'suggest-groups', 'suggest-name', 'tab-brief', 'task-models', 'tmux-sessions', 'type', 'unqueue',
+        'task-tree/answer', 'task-tree/close', 'task-tree/done', 'task-tree/move',
         # These access live browsers, host services, login flows, or external workers.
         'accounts/refresh', 'accounts/switch', 'browser/ack', 'browser/agents', 'browser/agents/setup',
         'browser/ask/dismiss', 'browser/close', 'browser/device', 'browser/extension/pair',
@@ -217,15 +221,40 @@ def inside(path, root):
     return path == root or root in path.parents
 
 
-def check_root(root, marker):
-    root = Path(root).resolve()
+def check_root_location(root, option):
     if (root == REAL_HOME or root in REAL_HOME.parents or root.parent != TEMP
             or not root.name.startswith('tv-') or len(str(root)) > 60):
-        raise SystemExit("verify_server: --serve needs the launcher's private temporary root.")
+        raise SystemExit(f"verify_server: {option} needs the launcher's private temporary root.")
+
+
+def check_root(root, marker):
+    root = Path(root).resolve()
+    check_root_location(root, '--serve')
     saved = root / MARKER
     if not marker or saved.is_symlink() or not saved.is_file() or not compare_digest(saved.read_bytes(), marker.encode()):
         raise SystemExit("verify_server: --serve needs the launcher's matching root marker.")
     return root
+
+
+def check_supplied_root(root):
+    root = Path(root)
+    check_root_location(root, '--root')
+    try:
+        info = root.lstat()
+        if (stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700
+                and info.st_uid == os.getuid()):
+            # The watcher's foreground server binds its socket before the launcher starts.
+            entries = {entry.name for entry in root.iterdir()}
+            if not entries:
+                return root
+            if entries == {'tmux.sock'}:
+                socket_info = (root / 'tmux.sock').lstat()
+                if stat.S_ISSOCK(socket_info.st_mode) and socket_info.st_uid == info.st_uid:
+                    return root
+    except OSError:
+        pass
+    raise SystemExit('verify_server: --root needs a private 0700 directory owned by this user, '
+                     'empty except for the prestarted tmux socket.')
 
 
 def isolation_errors(root, env=None):
@@ -300,16 +329,16 @@ if not allowed(args):
     with open(LOG, 'a') as log:
         log.write(f'tmux {command}\n')
     sys.exit(f'verify_server: tmux wrapper refused {command}; only fixture reads and named metadata writes are allowed')
-os.execv(REAL_TMUX, [REAL_TMUX, '-S', SOCKET, '-f', '/dev/null', *args])
+os.execv(REAL_TMUX, [REAL_TMUX, *CLIENT_OPTIONS, '-S', SOCKET, '-f', '/dev/null', *args])
 """
 
 
-def write_wrapper(root, tmux):
+def write_wrapper(root, tmux, *, client_options=()):
     wrapper = root / 'bin/tmux'
     wrapper.parent.mkdir()
     # A shell trampoline also works when the Python install path has spaces (including on macOS).
     import shlex
-    source = (f'REAL_TMUX = {tmux!r}\nSOCKET = {str(root / "tmux.sock")!r}\n'
+    source = (f'REAL_TMUX = {tmux!r}\nCLIENT_OPTIONS = {client_options!r}\nSOCKET = {str(root / "tmux.sock")!r}\n'
               f'LOG = {str(root / "blocked.log")!r}\n' + TMUX_WRAPPER)
     wrapper.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -I -B -c {shlex.quote(source)} "$@"\n')
     wrapper.chmod(0o700)
@@ -613,8 +642,8 @@ def serve(root, dist):
         http.serve_forever()
 
 
-def tmux_command(tmux, root, env, *args):
-    return subprocess.run([tmux, '-S', str(root / 'tmux.sock'), '-f', '/dev/null', *args],
+def tmux_command(tmux, root, env, *args, client_options=()):
+    return subprocess.run([tmux, *client_options, '-S', str(root / 'tmux.sock'), '-f', '/dev/null', *args],
                           env=env, capture_output=True, text=True, timeout=5, start_new_session=True)
 
 
@@ -662,6 +691,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--dist', help='the built UI to serve at /chat/ (npm run build -- --outDir DIR)')
     parser.add_argument('--until-stdin-closes', action='store_true', help='stop when stdin closes')
+    parser.add_argument('--root', type=Path, help='use a private fixture root and tmux server owned by the test watcher')
     parser.add_argument('--serve', metavar='ROOT', help=argparse.SUPPRESS)
     args = parser.parse_args()
     dist = Path(args.dist or SERVER.parent / 'ui/dist')
@@ -690,26 +720,28 @@ def main():
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     root = child = env = None
+    owns_root = args.root is None
     tmux_started = False
     try:
-        root = Path(tempfile.mkdtemp(prefix='tv-', dir=TEMP))
+        root = Path(tempfile.mkdtemp(prefix='tv-', dir=TEMP)) if owns_root else check_supplied_root(args.root)
+        client_options = () if owns_root else ('-N',)
         marker = secrets.token_hex(32)
         (root / MARKER).write_text(marker)
         check_root(root, marker)
         env = clean_env(root, dist)
-        write_wrapper(root, tmux)
+        write_wrapper(root, tmux, client_options=client_options)
         for folder in ('work', 'tmp', 'home/.config/tether'):
             (root / folder).mkdir(parents=True)
         # The normal GET update route may schedule an external release check.
         (root / 'home/.config/tether/install.json').write_text('{"updates":"off"}\n')
         if cancelled:
             return 0
-        tmux_started = True  # the command may create the socket even if startup fails
+        tmux_started = owns_root  # Only the standalone launcher can start a server.
         started = tmux_command(tmux, root, env, 'new-session', '-d', '-s', 'Fixture', '-x', '120', '-y', '40',
                                '-c', str(root / 'work'), 'exec sleep 86400', ';',
                                'set-option', '-w', 'window-size', 'manual', ';',
                                'set-option', '-w', '@tether_window_size', '1', ';',
-                               'resize-window', '-x', '120', '-y', '40')
+                               'resize-window', '-x', '120', '-y', '40', client_options=client_options)
         if started.returncode:
             raise SystemExit('verify_server: tmux did not start: ' + started.stderr.strip())
         if cancelled:
@@ -743,7 +775,7 @@ def main():
             errors.append(f'could not stop server child: {exc}')
         if tmux_started:
             errors.extend(stop_tmux(tmux, root, env))
-        if root is not None:
+        if root is not None and owns_root:
             try:
                 shutil.rmtree(root)
             except OSError as exc:

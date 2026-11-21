@@ -91,7 +91,7 @@ class WatchTests(unittest.TestCase):
         clock, jobs = Clock(), []
         current = dict(self.entry, pane_name='Audit Log')
         with tempfile.TemporaryDirectory() as folder, patch.object(audit.paths, 'CONFIG', Path(folder)), \
-                patch.object(audit, '_tab_name', side_effect=['Audit Log', None]) as tab_name, \
+                patch.object(audit, '_tab_name', return_value=('Audit Log', 'codex')) as tab_name, \
                 patch.object(self_close.helper_close, 'close_pane') as close:
             with audit.acting('agent-cli', pane='%12'):
                 for _ in range(2):
@@ -106,7 +106,7 @@ class WatchTests(unittest.TestCase):
             tab_name.assert_called_once_with('%12')
             entry, = audit.query()['entries']
             self.assertEqual((entry['kind'], entry['summary']), ('tab.close', 'Closed tab Audit Log'))
-            self.assertEqual(entry['actor'], {'source': 'agent-cli', 'pane': '%12', 'tab': 'Audit Log'})
+            self.assertEqual(entry['actor'], {'source': 'agent-cli', 'pane': '%12', 'tab': 'Audit Log', 'agent': 'codex'})
 
 
 class CliTests(unittest.TestCase):

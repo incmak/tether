@@ -69,6 +69,39 @@ class StatusParallelTests(unittest.TestCase):
             self.assertEqual([future.result(timeout=2) for future in futures], [status, status])
         live_status.assert_called_once_with(self.entries[0])
 
+    def test_fresh_status_does_not_use_a_cache_entry_written_while_it_waits(self):
+        entry = self.entries[0]
+        reading, waiting, release = threading.Event(), threading.Event(), threading.Event()
+        underlying = threading.Lock()
+
+        class ObserveLock:
+            def __enter__(self):
+                if underlying.locked():
+                    waiting.set()
+                underlying.acquire()
+
+            def __exit__(self, *_):
+                underlying.release()
+
+        def read_status(_):
+            if reading.is_set():
+                return {'state': 'Working'}
+            reading.set()
+            self.assertTrue(release.wait(timeout=2))
+            return {'state': 'Idle'}
+
+        with patch.object(server, 'STATUS_PANE_LOCKS', {entry['id']: ObserveLock()}), \
+                patch.object(server, 'live_status', side_effect=read_status), ThreadPoolExecutor(max_workers=2) as pool:
+            cached = pool.submit(server.shared_status, entry)
+            try:
+                self.assertTrue(reading.wait(timeout=2))
+                fresh = pool.submit(server.fresh_status, entry)
+                self.assertTrue(waiting.wait(timeout=2))
+            finally:
+                release.set()
+            self.assertEqual(cached.result(timeout=2)['state'], 'Idle')
+            self.assertEqual(fresh.result(timeout=2)['state'], 'Working')
+
     def test_live_status_error_leaves_other_rows_available(self):
         def status(entry):
             if entry is self.entries[1]:

@@ -60,9 +60,9 @@ async function main() {
     })
     await page.goto(`${origin}/chat/?session=%251`, { waitUntil: 'domcontentloaded', timeout: 45000 })
     await page.locator('.slot').nth(1).waitFor()
-    const labels = () => page.locator('.slot .chat-title h1').allTextContents()
+    const labels = () => page.locator('.slot .chat-title h1').allInnerTexts()
     const tab = (slot, name) => page.locator(`.slot[data-slot="${slot}"] .pane-tabs [role="tab"]`).filter({ hasText: name })
-    const settle = want => page.waitForFunction(want => [...document.querySelectorAll('.slot .chat-title h1')].map(el => el.textContent).join('|') === want.join('|'), want)
+    const settle = want => page.waitForFunction(want => [...document.querySelectorAll('.slot .chat-title h1')].map(el => el.innerText).join('|') === want.join('|'), want)
     assert.deepEqual(await labels(), ['Alpha', 'Gamma'])
 
     // The guest slot: a sibling tab of another session opens in that slot, not as its own full-width layout.

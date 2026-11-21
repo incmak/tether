@@ -131,6 +131,31 @@ class BacklogTests(unittest.TestCase):
         backlog.add('New')
         self.assertIn('- [ ] New #B5', self.text())
 
+    def test_done_ids_reads_the_archive_with_the_bounded_reader(self):
+        backlog.save('- [x] Now #B2\n- [ ] Open #B3\n', backlog.read()['version'])
+        archive = backlog.folder() / 'DONE.md'
+        archive.write_text('## Inbox\n- [x] Archived #B1\n')
+        self.assertEqual(backlog.done_ids(), {'B1', 'B2'})
+        with mock.patch.object(backlog, 'ARCHIVE_READ', 10):  # over the limit: refused, as the B303 snapshot does
+            with self.assertRaises(backlog.ProjectError):
+                backlog.done_ids()
+        archive.unlink()
+        os.mkfifo(archive)  # a pipe with no writer: the read must not wait
+        with self.assertRaises(OSError):
+            backlog.done_ids()
+
+    def test_done_ids_never_waits_on_the_list_or_last_id(self):
+        backlog.save('- [x] Now #B2\n', backlog.read()['version'])
+        last = backlog.folder() / 'last-id'
+        last.unlink(missing_ok=True)
+        os.mkfifo(last)  # the done check does not need the next ID: a pipe here must not block it
+        self.assertEqual(backlog.done_ids(), {'B2'})
+        listing = backlog.folder() / 'BACKLOG.md'
+        listing.unlink()
+        os.mkfifo(listing)  # a pipe in place of the list is refused at once
+        with self.assertRaises(OSError):
+            backlog.done_ids()
+
     def test_a_save_over_the_limit_is_kept_when_its_finished_items_can_move(self):
         done = ''.join(f'- [x] Done {n} ' + 'x' * 900 + f' #B{n}\n' for n in range(1, 41))
         open_part = '- [ ] Open ' + 'y' * (backlog.LIMIT - 1000) + ' #B41\n'
@@ -449,7 +474,7 @@ class BacklogAuditTests(unittest.TestCase):
     def test_add_caps_the_title(self):
         title = 'Add the checklist ' * 6
         backlog.add(title, project='Docs')
-        self.assert_entry('backlog.add', f'B58 added: {title[:80].rstrip()}', 'Docs')
+        self.assert_entry('backlog.add', 'B58 added: ' + 'Add the checklist ' * 4 + 'Add…', 'Docs')
 
     def test_start_uses_the_item_project_and_ignores_a_repeat(self):
         backlog.start('B56', 'claude', project='Build')
@@ -460,6 +485,14 @@ class BacklogAuditTests(unittest.TestCase):
         backlog.mark_done('B57')
         backlog.archive_done()
         self.assert_entry('backlog.done', 'B57 done: Fix warnings', 'Build')
+
+    def test_done_clips_a_long_title_at_a_word_break(self):
+        state = backlog.read()
+        prefix = 'Check that the backlog shows the full item title before reporting the'
+        title = prefix + ' verification results'
+        backlog.save(state['text'].replace('Fix warnings', title), state['version'])
+        backlog.mark_done('B57')
+        self.assert_entry('backlog.done', f'B57 done: {prefix}…', 'Build')
 
     def test_move_uses_the_actual_source_and_destination(self):
         backlog.move('B56', 'Build')

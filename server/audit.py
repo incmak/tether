@@ -41,6 +41,8 @@ MISSING = object()
 _SECRET_KEYS = ('token', 'secret', 'password', 'credential', 'assertion', 'approval',
                 'signature', 'public_key', 'cookie', 'key_material')
 _SOURCES = ('ui', 'agent-cli', 'cli', 'hook', 'server', 'unknown')
+_AGENT_COMMANDS = {'claude': 'claude', 'codex': 'codex', 'agy': 'antigravity'}
+_AGENT_LABELS = {'claude': 'Claude tab', 'codex': 'Codex tab', 'antigravity': 'Antigravity tab'}
 _PANE = re.compile(r'%[0-9]+')
 _ID = re.compile(r'[0-9]{16}-[0-9a-f]{6}')
 _DAY = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}\.jsonl')
@@ -95,17 +97,22 @@ def actor_from_request(headers):
 def _tab_name(pane):
     with _TAB_LOCK:
         now = time.monotonic()
-        expires, name = _TABS.get(pane, (0, None))
+        expires, metadata = _TABS.get(pane, (0, (None, None)))
         if now < expires:
-            return name
+            return metadata
+        metadata = (None, None)
         try:
-            result = subprocess.run([paths.TMUX, 'display-message', '-p', '-t', pane, '#{@chat_name}'],
+            result = subprocess.run([paths.TMUX, 'display-message', '-p', '-t', pane,
+                                     '#{@chat_name}\t#{pane_current_command}'],
                                     capture_output=True, text=True, timeout=1)
-            name = result.stdout.strip() if result.returncode == 0 else None
+            if result.returncode == 0:
+                name, separator, command = result.stdout.rstrip('\r\n').rpartition('\t')
+                if separator:
+                    metadata = (name.strip() or None, _AGENT_COMMANDS.get(command.strip()))
         except (OSError, subprocess.SubprocessError, UnicodeError):
-            name = None
-        _TABS[pane] = (now + 60, name)
-        return name
+            pass
+        _TABS[pane] = (now + 60, metadata)
+        return metadata
 
 
 def _resolve_actor(actor):
@@ -120,11 +127,18 @@ def _resolve_actor(actor):
         value = actor.get(key)
         if isinstance(value, str) and value:
             result[key] = value
+    agent = actor.get('agent')
+    if isinstance(agent, str) and agent in _AGENT_LABELS:
+        result['agent'] = agent
     pane = actor.get('pane')
     if isinstance(pane, str) and _PANE.fullmatch(pane):
         result['pane'] = pane
-        if 'tab' not in result and (name := _tab_name(pane)):
-            result['tab'] = name
+        if 'tab' not in result or 'agent' not in result:
+            name, agent = _tab_name(pane)
+            if name:
+                result.setdefault('tab', name)
+            if agent:
+                result.setdefault('agent', agent)
     return result
 
 
@@ -137,7 +151,12 @@ def capture_actor():
 
 
 def actor_name(actor):
-    return actor.get('tab') or actor.get('device') or actor.get('pane') or actor['source']
+    name = actor.get('tab') or actor.get('device')
+    if name:
+        return name
+    if actor['source'] in ('agent-cli', 'hook') or actor.get('pane'):
+        return _AGENT_LABELS.get(actor.get('agent'), 'An agent tab')
+    return actor['source']
 
 
 def folder():
@@ -208,8 +227,17 @@ def _scalar(value):
     return type(value) in (str, int, bool, type(None)) or (type(value) is float and math.isfinite(value))
 
 
-def _cap(value, limit):
-    return value[:limit] if isinstance(value, str) else value
+def clip(text, limit):
+    """Shorten audit text to its cap, preserving a word break if it fits."""
+    if not isinstance(text, str) or len(text) <= limit:
+        return text
+    if limit <= 0:
+        return ''
+    prefix = text[:limit - 1]
+    boundary = re.search(r'\s\S*\Z', prefix)
+    if boundary and boundary.start() * 2 >= limit:
+        prefix = re.sub(r'[\s,;:–—-]+\Z', '', prefix[:boundary.start()])
+    return prefix + '…'
 
 
 def _unordered(path):
@@ -240,11 +268,11 @@ def record(kind, summary, *, old=MISSING, new=MISSING, project=None, actor=None,
         setting = KINDS[kind] == 'settings'
         if setting and old is not MISSING and new is not MISSING and old == new:
             return None
-        entry = {'kind': kind, 'summary': ' '.join(summary.split())[:200], 'actor': _resolve_actor(actor)}
+        entry = {'kind': kind, 'summary': clip(' '.join(summary.split()), 200), 'actor': _resolve_actor(actor)}
         if setting:
             for key, value in (('old', old), ('new', new)):
                 if _scalar(value):
-                    entry[key] = _cap(value, 120)
+                    entry[key] = clip(value, 120)
         if isinstance(project, str) and project:
             entry['project'] = project
         if undo:
@@ -253,7 +281,7 @@ def record(kind, summary, *, old=MISSING, new=MISSING, project=None, actor=None,
         for key, value in detail.items():
             if not _scalar(value) or any(word in key.casefold() for word in _SECRET_KEYS):
                 continue
-            safe[key] = _cap(value, 200)
+            safe[key] = clip(value, 200)
             if len(safe) == 8:
                 break
         if safe:
@@ -371,8 +399,10 @@ def query(text=None, kinds=None, project=None, actor=None, since=None, until=Non
                 continue
             if project and entry.get('project', '').casefold() != project:
                 continue
-            if actor and not any(actor in value.casefold() for value in entry['actor'].values()):
-                continue
+            if actor:
+                entry_actor = entry['actor']
+                if not any(actor in value.casefold() for value in (*entry_actor.values(), actor_name(entry_actor))):
+                    continue
             if words:
                 values = [value.casefold() for value in _text_values(entry)]
                 if not all(any(word in value for value in values) for word in words):

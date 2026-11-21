@@ -26,11 +26,11 @@ def handles(path):
     return path.split('?', 1)[0] == PATH
 
 
-def get(handler, env):
+def get(handler, env, lock=None):
     """?brief=1: no checks (the Undo buttons only need what comes next; History asks for the reasons)."""
     brief = 'brief=1' in handler.path.split('?', 1)[1:2][0].split('&') if '?' in handler.path else False
     try:
-        handler.respond(200, undo.history(env, check=not brief))
+        handler.respond(200, undo.history(env, check=not brief, close_lock=lock))
     except undo_store.LockError as exc:
         handler.respond(503, {'error': str(exc)})
     except OSError:
@@ -88,7 +88,7 @@ def headers(status):
     """Save the step this request recorded and name it in the answer: X-Tether-Undo (id), X-Tether-Undo-Label."""
     if status >= 300:
         return {}
-    entry = undo_store.flush()
+    entry = undo_store.flush() or undo_store.offered_checkpoint()
     if not entry:
         return {}
     return {'X-Tether-Undo': entry['id'], 'X-Tether-Undo-Label': quote(entry['label'], safe='')}

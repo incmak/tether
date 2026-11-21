@@ -1,8 +1,7 @@
 """Stop one Claude subagent or background task without disturbing the main turn.
 
-Shells and monitors stop by signal (task_process), which does not depend on the terminal screen.
-Agents run inside the Claude process, so they stop through /tasks. That path reads the screen and
-refuses whenever the screen does not match what it expects; it never guesses a row."""
+Claude's /tasks dialog stops agents, shells and monitors. Waiting agents appear in the agent bar
+instead. Both paths require a verified screen identity. Shells have an exact process fallback."""
 import json
 import os
 import re
@@ -42,14 +41,14 @@ def dialog_open(screen):
             or list_navigation(screen) and has_action(screen, 'Esc to close'))
 
 
-def close(entry, run, sleep):
+def close(entry, run, sleep, *, is_open=dialog_open):
     """Esc is safe only while the tasks dialog's hint remains visible."""
     for _ in range(3):
-        if not dialog_open(visible(entry, run)):
+        if not is_open(visible(entry, run)):
             return
         press(entry, 'Escape', run=run)
         sleep(0.35)
-    if dialog_open(visible(entry, run)):
+    if is_open(visible(entry, run)):
         raise StopError('The tasks dialog did not close. Check the terminal view.')
 
 
@@ -61,6 +60,7 @@ def matches(description, shown):
 SECTIONS = {'shell': 'Shells', 'agent': 'Local agents', 'monitor': 'Monitors'}
 AGENT_SECTIONS = ('Local agents', 'Background agents')
 ROW_STATUS = r'(?:running|completed|failed|stopped|killed)'
+TASK_COUNT = r'\d+ (?:shells?|monitors?|(?:local |background )?agents?)'
 
 
 def task_section(section):
@@ -82,6 +82,12 @@ def rows(text):
         summary = re.findall(r'\d+ active (shell|agent|monitor)s?\b', line)
         if summary and re.fullmatch(r'\s*\d+ active \w+(?:\s*·\s*\d+ active \w+)*\s*', line):
             section = SECTIONS[summary[0]] if len(summary) == 1 else None
+            continue
+        if re.fullmatch(rf'{TASK_COUNT}(?:\s*,\s*{TASK_COUNT})*|\d+ background tasks', line.strip()):
+            if 'agent' in line or 'background tasks' in line:
+                section = None  # Section headers follow the summary.
+            else:
+                section = 'Shells' if 'shell' in line else 'Monitors'
             continue
         header = re.fullmatch(r'\s*(.+?) \(\d+\)\s*', line)
         if header:
@@ -321,8 +327,269 @@ def stop_selected(entry, target, run, sleep, clock=time.time, pressed=None, obse
     visible(entry, run)
 
 
+BAR_READ_ERROR = 'Could not read the agent bar. Check the terminal view.'
+BAR_ID_ERROR = 'Could not identify that agent. Stop it in the terminal.'
+BAR_CLOSE_ERROR = 'The agent bar did not close. Check the terminal view.'
+BAR_NARROW_ERROR = 'The terminal is too narrow to identify that agent. Widen it or stop it in the terminal.'
+WAITING_COUNT = r'([1-9]\d*) (shell|monitor)s?'
+BAR_ROW = re.compile(r'(❯ )?\s*([●◯])\s+([1-9]\d* idle agents?|\S+)(?:\s{2,}(.+)| (stopped · .+))?')
+PROMPT_ACTIONS = {'↓ to manage', '↓ to resume subagent', 'esc to interrupt', '← for agents'}
+TASKS_PILL_ACTION = 'enter to view tasks'
+ARTIFACT_ACTIONS = {'enter to view artifacts', 'enter to open in browser'}
+STOP_ALL_ACTION = 'ctrl+x ctrl+k to stop all agents'
+COLLAPSE_ACTION = 'esc to collapse'
+ROW_ACTIONS = {'↑/↓ to select', 'enter to view', 'x to stop', 'x to clear', STOP_ALL_ACTION}
+# Compare clipped actions with the other controls in Claude's 2.1.330 footer.
+FOCUS_ACTIONS = PROMPT_ACTIONS | {TASKS_PILL_ACTION}
+FOOTER_ACTIONS = FOCUS_ACTIONS | ROW_ACTIONS | ARTIFACT_ACTIONS | {
+    'esc to stop', 'esc to return to team lead', COLLAPSE_ACTION, 'enter to expand', '← to go back',
+    'ctrl+t to show tasks', 'ctrl+t to hide tasks', 'shift+tab to cycle', '? for shortcuts',
+    '/tasks to see subagents', 'ctrl+c to copy', 'shift+click to native select',
+    'option+click to native select', 'hold space to speak',
+}
+
+
+def waiting_row(text):
+    """Keep the displayed text after the waiting counts, including any visible since suffix."""
+    action, separator, value = text.partition(' · ')
+    if not separator:
+        action, separator, value = text.rpartition(' ·')
+        if value:
+            return None, None
+    if not separator or not re.fullmatch(rf'waiting on {WAITING_COUNT}(?:, {WAITING_COUNT})*', action):
+        return None, None
+    if not value.endswith('…'):
+        name, divider, tail = value.rpartition(' · ')
+        if not (name and divider and tail.startswith('since ') and tail[6:].strip()):
+            return value, None
+    waiting = {'shell': 0, 'monitor': 0}
+    for count, kind in re.findall(WAITING_COUNT, action):
+        if waiting[kind]:
+            return None, None
+        waiting[kind] = int(count)
+    return value, waiting
+
+
+def agent_bar_parts(screen):
+    """Locate the prompt, footer, and row block without interpreting the footer text."""
+    lines = [line.rstrip() for line in screen.splitlines()]
+    rules = [i for i, line in enumerate(lines) if re.fullmatch(r'─+', line)]
+    if len(rules) < 2:
+        return None
+    top, bottom = rules[-2:]
+    prompt = lines[top + 1:bottom]
+    if (not prompt or not re.match(r'^❯(?:\s|$)', prompt[0])
+            or prompt[0][1:].strip().startswith('Message @')):
+        return None
+    below = [line for line in lines[bottom + 1:] if line]
+    if not below:
+        return None
+    footer, *row_lines = below
+    return prompt, footer, row_lines
+
+
+def bar_rows(row_lines):
+    """Verify the whole row block and locate its selection without reading the footer."""
+    parsed = []
+    selected, main = [], []
+    for index, line in enumerate(row_lines):
+        row = BAR_ROW.fullmatch(line)
+        if row is None:
+            return None
+        cursor, dot, kind, text, compact = row.groups()
+        if cursor:
+            selected.append(index)
+        if kind == 'main':
+            if dot != '●' or text or compact:
+                return None
+            main.append(index)
+        elif dot == '●' or not (text or compact or re.fullmatch(r'[1-9]\d* idle agents?', kind)):
+            return None
+        value, waiting = waiting_row(text or '')
+        parsed.append({'kind': kind, 'value': value, 'waiting': waiting})
+    if len(main) != 1 or len(selected) > 1:
+        return None
+    return parsed, selected[0] if selected else None, main[0]
+
+
+def agent_bar(screen):
+    """Read focus, rows and the main prompt draft from one visible Claude capture."""
+    parts = agent_bar_parts(screen)
+    if parts is None:
+        return None
+    prompt, footer, row_lines = parts
+    rows = bar_rows(row_lines)
+    if rows is None:
+        return None
+    parsed, selected, main = rows
+    actions = {_norm(part) for part in footer.split('·')}
+    row_actions = actions - {STOP_ALL_ACTION, COLLAPSE_ACTION}
+    action = None
+    if selected == main and row_actions == {'↑/↓ to select'}:
+        focus = 'row'
+    elif selected is not None and row_actions in ({'enter to view', 'x to stop'},
+                                                 {'enter to view', 'x to clear'}) and selected != main:
+        focus, action = 'row', 'stop' if 'x to stop' in row_actions else 'clear'
+    elif selected is not None or actions & (ROW_ACTIONS | ARTIFACT_ACTIONS) or '❯' in footer:
+        return None
+    else:
+        last_action = _norm(footer.rsplit('·', 1)[-1])
+        if last_action.endswith('…'):
+            prefix = last_action[:-1].rstrip()
+            completions = [known for known in FOOTER_ACTIONS if known.startswith(prefix)]
+            if len(completions) != 1 or completions[0] not in FOCUS_ACTIONS:
+                return None
+            actions.add(completions[0])
+        elif any(last_action.startswith(known + ' ') for known in FOCUS_ACTIONS):
+            return None
+        if TASKS_PILL_ACTION in actions:
+            if actions & PROMPT_ACTIONS:
+                return None
+            focus = 'pill'
+        elif actions & PROMPT_ACTIONS:
+            focus = 'prompt'
+        else:
+            return None
+    return {'focus': focus, 'action': action, 'rows': parsed, 'selected': selected,
+            'selected_text': row_lines[selected] if selected is not None else None,
+            'draft': bool(prompt[0][1:].strip() or any(line.strip() for line in prompt[1:]))}
+
+
+def rendered_description(meta_description):
+    """Return the description Claude puts in the bar, or None for unsupported text."""
+    # In the 2.1.330 bundle, follow _9e's "since" field to Vbe's held row, then
+    # Ki (chunk-874m1hb1.js) and Tt. Ki normalizes whitespace and caps the input
+    # at 800 UTF-16 units before Tt cuts at 200 display columns, including the ellipsis.
+    # ANSI stripping, combining graphemes and widths outside this single-column
+    # ASCII/common Latin set (plus middle dot and ellipsis) are not verified.
+    if not isinstance(meta_description, str) or not re.fullmatch(r'[ -~\t-\r\xa0·…À-ÖØ-öø-ſ]*', meta_description):
+        return None
+    description = re.sub(r'[\t-\r \xa0]+', ' ', meta_description).strip(' ')
+    return description if len(description) <= 200 else description[:199] + '…'
+
+
+def bar_target(bar, kind, rendered, waiting):
+    boundary = rendered + ' ·'
+    values = [(index, row['value'], row['waiting']) for index, row in enumerate(bar['rows'])
+              if row['kind'] == kind and row['value'] is not None]
+    candidates = [index for index, value, counts in values if counts is not None and value.startswith(boundary)
+                  and (value.endswith('…') or value.rpartition(' · ')[0] == rendered)]
+    if len(candidates) > 1:
+        raise StopError('Multiple agents share this name. Stop it in the terminal.')
+    if not candidates and any((counts is None or value.endswith('…'))
+                              and len(value.removesuffix('…')) < len(boundary) for _, value, counts in values):
+        raise StopError(BAR_NARROW_ERROR)
+    if not candidates or bar['rows'][candidates[0]]['waiting'] != waiting:
+        raise StopError(BAR_ID_ERROR)
+    return candidates[0]
+
+
+def tasks_panel_open(screen):
+    """Distinguish the /tasks panel's actions from the agent bar's own x to stop."""
+    sections = re.split(r'(?m)^▔+[ \t]*$', screen)
+    if len(sections) < 2 or not sections[-1].strip():
+        return False
+    footer = sections[-1].rstrip().splitlines()[-1]
+    actions = tuple(action for action in map(_norm, footer.split('·')) if action != 'f to foreground')
+    return actions in (
+        ('↑/↓ to navigate', 'x to stop', 'Enter to view', 'Esc to close'),
+        ('↑/↓ to select', 'Enter to view', 'x to stop', 'Esc to close'),
+        ('← to go back', 'x to stop', 'Enter/Space to close', 'Esc to close'),
+        ('← to go back', 'Esc/Enter/Space to close', 'x to stop'),
+    )
+
+
+def stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar=None):
+    """Navigate with Down, then stop only the freshly verified waiting agent."""
+    def parse(screen):
+        bar = agent_bar(screen)
+        if bar is not None and observe_bar is not None:
+            observe_bar(screen, bar)
+        return bar
+
+    def identify(bar):
+        if bar is None:
+            raise StopError(BAR_READ_ERROR)
+        if bar['draft']:
+            raise StopError('There is an unsent draft in the agent input. Clear it, then try again.')
+        return bar_target(bar, target['kind'], rendered, agent['waiting'])
+
+    rendered = rendered_description(agent['description'])
+    if rendered is None:
+        raise StopError(BAR_ID_ERROR)
+    if not rendered:
+        raise StopError(BAR_NARROW_ERROR)
+    bar = parse(visible(entry, run))
+    if bar is None:
+        raise StopError(BAR_READ_ERROR)
+    sent_bar_key = False
+    try:
+        for step in range(9):
+            position = identify(bar)
+            selected = bar['selected']
+            if selected == position:
+                break
+            if (selected is not None and selected > position) or step == 8:
+                raise StopError('Could not reach that agent in the agent bar. Stop it in the terminal.')
+            press(entry, 'Down', run=run)
+            sent_bar_key = True
+            sleep(0.18)
+            bar = parse(visible(entry, run))
+
+        if bar['action'] != 'stop':
+            raise StopError(BAR_ID_ERROR)
+        selected_text = bar['selected_text']
+        row = bar['rows'][position]
+        visible_prefix = row['value'].removesuffix('…')
+        listed = subagents.listing(entry, limit=False)['agents']
+        try:
+            pool = subagents.bar_candidates(entry)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise StopError(BAR_ID_ERROR) from exc
+        fitting = []
+        for item in pool:
+            if (item.get('type') or 'general-purpose') != row['kind']:
+                continue
+            name = rendered_description(item.get('description') or '')
+            if name is None:
+                raise StopError(BAR_ID_ERROR)
+            if visible_prefix.startswith(name) or name.startswith(visible_prefix):
+                fitting.append(item)
+        bar = parse(visible(entry, run))
+        position = identify(bar)
+        if bar['selected'] != position or bar['action'] != 'stop' or bar['selected_text'] != selected_text:
+            raise StopError(BAR_ID_ERROR)
+        if len(fitting) > 1:
+            raise StopError('Multiple agents share this name. Stop it in the terminal.')
+        current = next((item for item in listed if item['id'] == agent['id']), None)
+        if (not fitting or fitting[0]['id'] != agent['id']
+                or sum(item['id'] == agent['id'] for item in pool) != 1 or current is None
+                or current['state'] != 'running' or current.get('waiting') != agent['waiting']):
+            raise StopError(BAR_ID_ERROR)
+        pressed['x'] = True
+        press(entry, 'x', run=run)
+        sent_bar_key = True
+        sleep(0.18)
+    finally:
+        if sent_bar_key:
+            row_escapes = 0
+            while True:
+                screen = visible(entry, run)
+                bar = parse(screen)
+                parts = agent_bar_parts(screen)
+                rows = bar_rows(parts[2]) if parts is not None else None
+                if rows is None or rows[1] is None or row_escapes == 3:
+                    break
+                row_escapes += 1
+                # Collapse can preserve the row cursor. Verify it after each Escape.
+                press(entry, 'Escape', run=run)
+                sleep(0.35)
+            if bar is None or bar['focus'] != 'prompt':
+                raise StopError(BAR_CLOSE_ERROR)
+
+
 # The newest Claude Code version whose /tasks screens the stop tests and a live run were checked on.
-CHECKED_TASKS_UI = '2.1.325'
+CHECKED_TASKS_UI = '2.1.330'
 SESSIONS = paths.CLAUDE / 'sessions'
 
 
@@ -336,9 +603,10 @@ def claude_version(entry):
 
 
 def with_version(entry, message):
-    """Name a Claude Code update as the likely cause when /tasks could not be read."""
+    """Name the Claude Code version when its Stop controls could not be read."""
     version = claude_version(entry)
-    if version is None or version == CHECKED_TASKS_UI or not re.search(r'Could not (identify|read|see|reach)|dialog', message):
+    if version is None or version == CHECKED_TASKS_UI or not re.search(
+            r'Could not (identify|read|see|reach)|dialog|agent bar|share this name|too narrow', message):
         return message
     return f'{message} This tab runs Claude Code {version}; Tether checked Stop on {CHECKED_TASKS_UI}.'
 
@@ -399,7 +667,7 @@ def task_target(entry, item, is_task):
         noun = 'task' if is_task else 'agent'
         raise StopError(f'Could not identify that {noun}. Stop it in the terminal.')
     body = first or ''
-    if not is_task:
+    if not is_task and 'waiting' not in item:
         try:
             body = subagents.detail(entry, item['id']).get('prompt') or ''
         except (OSError, ValueError, RuntimeError):
@@ -409,7 +677,7 @@ def task_target(entry, item, is_task):
 
 
 def stop(entry, agent_id, run=subprocess.run, sleep=time.sleep, clock=time.time, *, allow_process_fallback=True,
-         observe_list=None):
+         observe_list=None, observe_bar=None):
     noun = 'agent'
     try:
         if entry.get('agent') != 'claude':
@@ -427,6 +695,7 @@ def stop(entry, agent_id, run=subprocess.run, sleep=time.sleep, clock=time.time,
         if agent is None or agent['state'] != 'running':
             raise StopError(f'That {noun} is not running.')
         target = task_target(entry, agent, is_task)
+        waiting = not is_task and 'waiting' in agent
 
         pressed = {}
         bound = bind(entry, agent) if is_task and allow_process_fallback else None
@@ -434,22 +703,30 @@ def stop(entry, agent_id, run=subprocess.run, sleep=time.sleep, clock=time.time,
         def by_terminal():
             terminal_input.verify(entry, run)
             # Do not drive an unverified pane, including a pane for another agent.
-            close(entry, run, sleep)
+            if waiting:
+                close(entry, run, sleep, is_open=tasks_panel_open)
+            else:
+                close(entry, run, sleep)
             try:
                 if terminal_input.live_status(entry, run)['state'] not in ('Idle', 'Working'):
                     raise StopError(f'Claude is waiting for you. Answer its prompt before stopping a {noun}.')
-                if any(terminal_input.prompt_draft(entry, run)):
-                    raise StopError(f'There is an unsent draft in the {noun} input. Clear it, then try again.')
-                stop_selected(entry, target, run, sleep, clock, pressed, observe_list=observe_list)
+                if waiting:
+                    # The bar parser reads the prompt draft and also refuses the subagent input view.
+                    stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar)
+                else:
+                    if any(terminal_input.prompt_draft(entry, run)):
+                        raise StopError(f'There is an unsent draft in the {noun} input. Clear it, then try again.')
+                    stop_selected(entry, target, run, sleep, clock, pressed, observe_list=observe_list)
             finally:
-                close(entry, run, sleep)
+                if not waiting:
+                    close(entry, run, sleep)
             return confirm(entry, agent_id, is_task, sleep)
 
         # Tasks: /tasks first, so Claude records the task as stopped by the user. A signal makes
         # Claude report a failed command, and its agent may then debug or rerun it. For a shell the
         # signal is the fallback: it does not read the screen, so it still works when a Claude Code
-        # update changes /tasks. Agents and monitors have no exact process marker, so they stop
-        # through /tasks only. After x, Claude may already be stopping the task, so a failure after
+        # update changes /tasks. Agents and monitors have no exact process marker, so they use
+        # Claude's controls only. After x, Claude may already be stopping the task, so a failure after
         # x never falls back to a signal.
         try:
             return by_terminal()

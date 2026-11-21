@@ -14,6 +14,9 @@ const GROUP = { setting: 'settings', passkey: 'settings', tab: 'tabs', review: '
 const id = (at, n) => `${String(Math.round(at * 1000)).padStart(16, '0')}-${n.toString(16).padStart(6, '0')}`
 const ui = { source: 'ui', device: 'Chrome on Mac' }
 const agent = { source: 'agent-cli', tab: 'Audit Log with a very long tab name that has to wrap on a phone', pane: '%12' }
+const agentLabels = new Map([['claude', 'Claude tab'], ['codex', 'Codex tab'], ['antigravity', 'Antigravity tab']])
+const actorName = actor => actor.tab || actor.device
+  || ((actor.pane || ['agent-cli', 'hook'].includes(actor.source)) ? agentLabels.get(actor.agent) || 'An agent tab' : actor.source)
 // 65 entries: 5 named ones, then filler, so Load more has a second page. Newest first.
 function entries() {
   const named = [
@@ -27,6 +30,8 @@ function entries() {
   for (let n = 0; n < 60; n++) list.push({ kind: n % 2 ? 'tab.start' : 'review.verdict', summary: n % 2 ? `Started tab Worker ${n} (claude)` : `Review verdict: APPROVED ${n}`, project: n % 3 ? 'Tether' : 'Other', actor: agent, at: now - 86400 * (1 + Math.floor(n / 10)) - n })
   // A review verdict comes from the server, named by the reviewer tab (review_links.py).
   Object.assign(list[5], { summary: 'Approved by reviewer', actor: { source: 'server', pane: '%40', tab: 'B56 review' } })
+  Object.assign(list[6], { summary: 'Started an unnamed tab', actor: { source: 'agent-cli', pane: '%305' } })
+  Object.assign(list[7], { summary: 'Closed an unnamed Claude tab', actor: { source: 'hook', pane: '%7', agent: 'claude' } })
   return list.map((entry, n) => ({ id: id(entry.at, n), ...entry }))
 }
 // Like server/audit.py query(): newest first, filters, a cursor and limit+1.
@@ -38,7 +43,8 @@ function query(all, params) {
   const match = entry => (!words.length || words.every(word => JSON.stringify(entry).toLowerCase().includes(word)))
     && (!kinds.length || kinds.some(kind => entry.kind === kind || GROUP[entry.kind.split('.')[0]] === kind))
     && (!params.get('project') || entry.project === params.get('project'))
-    && (!params.get('actor') || Object.values(entry.actor).some(value => value.toLowerCase().includes(params.get('actor').toLowerCase())))
+    && (!params.get('actor') || [...Object.values(entry.actor), actorName(entry.actor)]
+      .some(value => value.toLowerCase().includes(params.get('actor').toLowerCase())))
     && (since === null || entry.at >= since) && (until === null || entry.at < until)
     && (!before || entry.id < before)
   const found = all.filter(match).sort((a, b) => b.id.localeCompare(a.id)).slice(0, limit + 1)
@@ -46,7 +52,7 @@ function query(all, params) {
   const result = { entries: page, next: found.length > limit ? page[page.length - 1].id : null, retention_days: 90 }
   if (params.get('facets') === '1') result.facets = {
     kinds: [], projects: [...new Set(all.map(entry => entry.project).filter(Boolean))].sort(),
-    actors: [...new Set(all.map(entry => entry.actor.tab || entry.actor.device).filter(Boolean))].sort(),
+    actors: [...new Set(all.map(entry => actorName(entry.actor)))].sort(),
   }
   return result
 }
@@ -253,6 +259,10 @@ async function main() {
       check(`${at} screen readers hear the old value too`, await plain.locator('.audit-old').getAttribute('aria-hidden') === null)
       check(`${at} a review verdict names the reviewer tab`, /Approved by reviewer[\s\S]*B56 review/.test(await rows.filter({ hasText: 'Approved by reviewer' }).innerText()))
       check(`${at} an agent row names the tab and the project`, /Audit Log with a very long tab name[\s\S]*Tether/.test(await rows.nth(4).innerText()))
+      const unnamed = rows.filter({ hasText: 'Started an unnamed tab' }).locator('.audit-actor')
+      const claude = rows.filter({ hasText: 'Closed an unnamed Claude tab' }).locator('.audit-actor')
+      check(`${at} a legacy pane actor has a generic label`, await unnamed.innerText() === 'An agent tab')
+      check(`${at} an agent actor has a named label and keeps the hook suffix`, await claude.innerText() === 'Claude tab · hook')
       check(`${at} rows sit under day headings`, (await section.locator('.audit-day h4').first().innerText()).toLowerCase() === 'today')
       check(`${at} a row has a machine time`, !!(await rows.nth(0).locator('time').getAttribute('datetime')))
       const shown = await section.locator('.visually-hidden').evaluateAll(els => els.filter(el => el.getBoundingClientRect().width > 1).map(el => el.textContent))
@@ -418,6 +428,14 @@ async function main() {
       await section.locator('.audit-state').getByRole('button', { name: 'Clear filters' }).click()
       await page.waitForFunction(() => document.querySelectorAll('section.activity-log .audit-row').length === 50)
       check(`${at} Clear filters brings back every row`, !asks[asks.length - 1].get('kind') && !asks[asks.length - 1].get('actor'))
+      await who.focus()
+      await page.keyboard.press('Enter')
+      await page.getByRole('option', { name: 'An agent tab', exact: true }).click()
+      await unnamed.waitFor()
+      check(`${at} the unnamed agent facet returns its row`, await rows.count() === 1
+        && asks[asks.length - 1].get('actor') === 'An agent tab')
+      await section.locator('.audit-tools').getByRole('button', { name: 'Clear filters' }).click()
+      await page.waitForFunction(() => document.querySelectorAll('section.activity-log .audit-row').length === 50)
       // Date range: From today sends since = the start of today, local time.
       // The browser's day and time zone, not the runner's: they differ when CI sets TZ (B56 review).
       const [day, since] = await page.evaluate(() => { const now = new Date(); return [now.toLocaleDateString('en-CA'), String(new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 1000)] })

@@ -2,11 +2,9 @@
 (TMUX_TMPDIR), never the user's tmux. Reopened agent tabs get a harmless command instead of claude or codex."""
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import contextlib
-import functools
 import io
 import json
 import os
-import shutil
 import subprocess
 import tempfile
 import threading
@@ -27,6 +25,7 @@ import undo
 import undo_api
 import tmux_merge
 import undo_store
+from test_tmux_isolation import private_tmux
 
 
 class Private(unittest.TestCase):
@@ -47,6 +46,15 @@ class Private(unittest.TestCase):
 
 
 class StoreTests(Private):
+    def test_successful_close_offers_the_checkpoint_without_writing_another_step(self):
+        tab = {'pane': '%1', 'name': 'Test tab', 'server': '10:20', 'options': {}, 'session_options': {}}
+        with undo_store.acting('user'), undo_store.step():
+            identifier = undo.close_tab('%1', mock.Mock(), tab, 'Test tab', close=lambda: None)
+            headers = undo_api.headers(200)
+        step, = undo_store.entries()
+        self.assertEqual(headers, {'X-Tether-Undo': identifier, 'X-Tether-Undo-Label': 'Closed%20tab%20%60Test%20tab%60'})
+        self.assertEqual(identifier, step['id'])
+
     def test_off_until_enabled_writes_nothing_and_reads_no_tmux(self):
         # Other test modules and tools import the routes: they must never write the real history (server.py enables).
         run = mock.Mock(side_effect=AssertionError('no tmux read while recording is off'))
@@ -217,6 +225,159 @@ class OrderTests(Private):
             undo.run('undo', first, undo.Env())
 
 
+class CloseRedoTests(Private):
+    def test_failed_pending_close_is_removed_before_the_next_undo(self):
+        for session in (False, True):
+            with self.subTest(session=session):
+                undo_store.edit(list.clear)
+                prefs_sync.save({'order': ['b', 'a']})
+                earlier = undo_store.record('prefs.order', 'Earlier step', key='order', sub=None,
+                                            old=['a', 'b'], new=['b', 'a'])
+                tab = {'pane': '%2', 'name': 'Fixture', 'server': '1:2'}
+                env = undo.Env(run=mock.Mock())
+                if session:
+                    undo_store.record('session.close', 'Close', saved={'session_id': '$2', 'tabs': [tab]}, pending=True)
+                else:
+                    undo_store.record('tab.close', 'Close', tab=tab, pending=True)
+                original = undo_store.entries()
+                with mock.patch.object(undo, 'kill_outcome', return_value=None):
+                    with self.assertRaisesRegex(undo.Refused, 'Try Undo again'):
+                        undo.run('undo', None, env)
+                    self.assertEqual(undo.history(env)['next_undo'], original[-1]['id'])
+                    self.assertEqual(undo_store.entries(), original)
+                with mock.patch.object(undo, 'kill_outcome', return_value=False):
+                    subject = 'session' if session else 'tab'
+                    with self.assertRaisesRegex(undo.Refused, f'The {subject} did not close. Nothing to undo.'):
+                        undo.run('undo', None, env)
+                    self.assertEqual(undo_store.entries(), [earlier])
+                self.assertEqual(undo.run('undo', None, env)['id'], earlier['id'])
+                self.assertEqual(prefs_sync.load()['prefs']['order'], ['a', 'b'])
+
+    def test_checkpoint_only_ends_redo_for_a_close_that_happened_or_is_unknown(self):
+        for outcome in ('stale', 'closed', 'unknown'):
+            with self.subTest(outcome=outcome):
+                undo_store.edit(list.clear)
+                prefs_sync.save({'order': ['b', 'a']})
+                undo.record_order('order', ['a', 'b'], ['b', 'a'])
+                env = undo.Env(run=mock.Mock())
+                earlier = undo.run('undo', None, env)['id']
+                before = undo_store.entries()
+                tab = {'pane': '%2', 'name': 'Fixture', 'server': '1:2'}
+
+                def close():
+                    self.assertEqual(undo.next_target('redo'), earlier)
+                    if outcome == 'stale':
+                        raise undo.helper_tabs.Stale('The tab changed.')
+                    if outcome == 'unknown':
+                        raise subprocess.TimeoutExpired('tmux', 5)
+
+                with (undo_store.acting('user'), mock.patch.object(undo, 'note_released'),
+                      mock.patch.object(undo, 'kill_outcome', return_value=None)):
+                    if outcome == 'closed':
+                        undo.close_tab('%2', env.run, tab, 'Fixture', close=close)
+                    else:
+                        with self.assertRaises(undo.CloseInterrupted) as failure:
+                            undo.close_tab('%2', env.run, tab, 'Fixture', close=close)
+                        self.assertEqual(failure.exception.status, 409 if outcome == 'stale' else 503)
+                if outcome == 'closed':
+                    self.assertFalse(undo_store.entries()[0]['redo'])
+                    self.assertIsNone(undo.next_target('redo'))
+                else:
+                    if outcome == 'unknown':
+                        self.assertIsNone(undo.next_target('redo'))
+                        with mock.patch.object(undo, 'kill_outcome', return_value=None):
+                            self.assertFalse(undo.history(env)['entries'][-1]['redo'])
+                            with self.assertRaisesRegex(undo.Refused, 'cannot be redone'):
+                                undo.run('redo', earlier, env)
+                        with mock.patch.object(undo, 'kill_outcome', return_value=False):
+                            history = undo.history(env)
+                        self.assertEqual([row['id'] for row in history['entries']], [earlier])
+                        self.assertEqual(history['next_redo'], earlier)
+                    self.assertEqual(undo_store.entries(), before)
+                    self.assertEqual(undo.run('redo', None, env)['id'], earlier)
+                    self.assertEqual(prefs_sync.load()['prefs']['order'], ['b', 'a'])
+
+    def test_a_failed_checkpoint_does_not_evict_history_at_the_limit(self):
+        with mock.patch.object(undo_store, 'LIMIT', 1):
+            before = undo_store.record('prefs.order', 'Earlier step', key='order', sub=None, old=[], new=[])
+            identifier = undo_store.checkpoint(None, 'Tentative close', [{'kind': 'tab.close'}],
+                                               server='1:2', status='staged')
+            undo_store.checkpoint(identifier, 'Tentative close', [], server='1:2')
+            self.assertEqual(undo_store.entries(), [before])
+
+    def test_tab_and_session_redo_timeout_keep_only_the_close_that_took_effect(self):
+        for kind, key, target, outcome in (
+            (kind, key, target, outcome)
+            for kind, key, target in (('tab.close', 'tab', '%2'), ('session.close', 'saved', '$2'))
+            for outcome in (True, False, None)
+        ):
+            with self.subTest(kind=kind, outcome=outcome), contextlib.ExitStack() as stack:
+                undo_store.edit(list.clear)
+                is_session = kind == 'session.close'
+                tab = {'pane': '%2', 'server': '1:2'}
+                captured = {'session_id': '$2', 'tabs': [tab]} if is_session else tab
+                undo_store.record(kind, 'Closed fixture', **{key: captured})
+                entry = undo_store.entries()[-1]
+                entry['state'] = 'undone'
+                entry['redo'] = True
+                entry['actions'][0].update(reopened=target, reopened_server='1:2')
+                undo_store.edit(lambda found: found.__setitem__(-1, entry))
+                env = undo.Env(run=mock.Mock())
+                handler = undo.KINDS[kind]
+                stack.enter_context(mock.patch.object(handler, 'check'))
+                stack.enter_context(mock.patch.object(handler, 'effects', return_value=[]))
+                stack.enter_context(mock.patch.object(undo, 'capture_session' if is_session else 'capture',
+                                                       return_value=captured))
+                stack.enter_context(mock.patch.object(undo, '_server', return_value='1:2'))
+                stack.enter_context(mock.patch.object(undo, '_show', return_value=['$3']))
+                for name in ('_restack_released', '_restore_reviews', 'note_released'):
+                    stack.enter_context(mock.patch.object(undo, name, return_value=None))
+                reopen = stack.enter_context(mock.patch.object(undo, '_reopen_session' if is_session else '_reopen',
+                                                                return_value=['%3'] if is_session else '%3'))
+                stack.enter_context(mock.patch.object(undo.auto_resume, 'forget_pane'))
+                stack.enter_context(mock.patch.object(undo.helper_close, 'release_reviews'))
+                checkpoint = []
+                gone = False
+
+                def close(*_):
+                    nonlocal gone
+                    checkpoint.append(undo_store.find(undo_store.entries(), entry['id']))
+                    gone = outcome
+                    if outcome is False:
+                        raise subprocess.CalledProcessError(1, 'tmux')
+                    raise subprocess.TimeoutExpired('tmux', 5)
+
+                stack.enter_context(mock.patch.object(undo, '_close_session' if is_session else '_close',
+                                                       side_effect=close))
+                observed = stack.enter_context(mock.patch.object(undo, 'kill_outcome', side_effect=lambda *_,
+                                                                 **__: gone))
+                if outcome is None:
+                    with self.assertRaises(undo.Refused):
+                        undo.run('redo', entry['id'], env)
+                    self.assertEqual(undo.history(env, check=False)['next_undo'], entry['id'])
+                    gone = True
+                    self.assertEqual(undo.run('undo', entry['id'], env)['state'], 'undone')
+                    reopen.assert_called_once()
+                elif outcome:
+                    try:
+                        undo.run('redo', entry['id'], env)
+                    except undo.Refused:
+                        pass
+                    self.assertEqual(undo.run('undo', entry['id'], env)['state'], 'undone')
+                    reopen.assert_called_once()
+                else:
+                    with self.assertRaises(undo.Refused):
+                        undo.run('redo', entry['id'], env)
+                    self.assertEqual(undo_store.find(undo_store.entries(), entry['id']), entry)
+                    self.assertEqual(undo.next_target('redo'), entry['id'])
+                    reopen.assert_not_called()
+                observed.assert_any_call(target, '1:2', env.run, session=is_session)
+                self.assertEqual(checkpoint[0]['redo_close']['pending']['target'], target)
+                action, = checkpoint[0]['redo_close']['pending']['actions']
+                self.assertTrue(action['pending'])
+                self.assertEqual(action[key], captured)
+
+
 class ApiTests(Private):
     def call(self, body):
         data = json.dumps(body).encode()
@@ -256,11 +417,9 @@ class ApiTests(Private):
 class TmuxBase(Private):
     def setUp(self):
         super().setUp()
-        self.socket_dir = tempfile.mkdtemp(prefix='tun', dir='/tmp')  # short: long socket paths fail
-        env = {key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE')}
-        env['TMUX_TMPDIR'] = self.socket_dir
-        env['SHELL'] = '/bin/sh'
-        self.run_tmux = functools.partial(subprocess.run, env=env)
+        self.private = private_tmux(self, 'tun', {'SHELL': '/bin/sh'})
+        self.run_tmux = self.private.run
+        self.tmux = self.private.tmux
         for target, name, value in ((paths, 'SCOPE_TMUX', False),
                                     (undo_store, '_server', lambda: auto_resume.server_id(run=self.run_tmux)[1])):
             patch = mock.patch.object(target, name, value)
@@ -273,13 +432,6 @@ class TmuxBase(Private):
         self.a1, self.a2 = self.panes(self.a)
         self.b1, = self.panes(self.b)
         self.env = undo.Env(run=self.run_tmux)
-
-    def tearDown(self):
-        self.tmux('kill-server')
-        shutil.rmtree(self.socket_dir, ignore_errors=True)
-
-    def tmux(self, *args):
-        return self.run_tmux([paths.TMUX, *args], capture_output=True, text=True, timeout=5)
 
     def new(self, name):
         self.tmux('new-session', '-d', '-s', name, '-x', '120', '-y', '40', '-c', self.folder, '/bin/sh')

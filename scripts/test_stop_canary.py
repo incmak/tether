@@ -21,6 +21,8 @@ import stop_canary as canary  # noqa: E402
 
 FIXTURE = canary.FIXTURES / 'claude_2.1.325_tasks'
 NO_SECTIONS = canary.FIXTURES / 'claude_2.1.327_tasks' / 'list_no_sections.txt'
+BAR_FIXTURE = canary.FIXTURES / 'claude_2.1.330_agent_bar'
+NO_SECTIONS_330 = canary.FIXTURES / 'claude_2.1.330_tasks' / 'list_no_sections.txt'
 VERSION = '2.1.327'
 NOW = 1_800_000_000
 PID = 4242
@@ -40,6 +42,8 @@ def timestamp(age):
 
 class Replay:
     """Emulate the pane and the records its three tasks write."""
+    list_without_sections = NO_SECTIONS
+
     def __init__(self, root, change=None, unconfirmed=None, row_order=ROW_ORDER):
         self.root = root
         self.change = change
@@ -113,7 +117,7 @@ class Replay:
             screen = (FIXTURE / f'{name}.txt').read_text()
         elif 'agent' not in self.row_order:
             name = 'list'
-            screen = NO_SECTIONS.read_text().replace('❯ ●', '  ●')
+            screen = self.list_without_sections.read_text().replace('❯ ●', '  ●')
             selected = {'subagent_shell': 'sleep 601', 'monitor': 'Stop canary monitor', 'shell': 'sleep 600'}
             screen = screen.replace(f'  ● {selected[kind]}', f'❯ ● {selected[kind]}')
             screen = screen.replace('sleep 600', COMMANDS['shell']).replace('Stop canary monitor', MONITOR)
@@ -170,6 +174,84 @@ class Replay:
         return subprocess.CompletedProcess(args, 0)
 
 
+class WaitingReplay(Replay):
+    """Replay the 2.1.330 transition to waiting and the agent-bar Stop."""
+    list_without_sections = NO_SECTIONS_330
+
+    def __init__(self, root, unconfirmed=None):
+        super().__init__(root, unconfirmed=unconfirmed, row_order=['subagent_shell', 'monitor', 'shell'])
+        self.bar_keys = []
+        self.preflight = []
+
+    @contextmanager
+    def session(self):
+        with super().session() as entry:
+            registry = json.loads(entry['registry'].read_text())
+            entry['registry'].write_text(json.dumps(dict(registry, version='2.1.330')))
+            child = 'bchild'
+            self.child_output = self.output.with_name(f'{child}.output')
+            self.child_output.touch()
+            with self.agent_path.open('a') as stream:
+                for record in (
+                    {'type': 'assistant', 'message': {'content': [
+                        {'type': 'tool_use', 'name': 'Bash', 'id': 'child', 'input': {'command': 'sleep 601'}},
+                    ]}},
+                    {'type': 'user', 'timestamp': timestamp(137), 'toolUseResult': {'backgroundTaskId': child},
+                     'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'child'}]}},
+                ):
+                    stream.write(json.dumps(record) + '\n')
+            with patch.object(canary.task_process, 'find', return_value=canary.task_process.Process(PID + 1, 'child')):
+                yield entry
+
+    def listing(self, entry):
+        listed = super().listing(entry)
+        self.preflight.append('waiting' in listed['agents'][0])
+        if len(self.preflight) == 1:
+            self.meta.write_text(json.dumps(dict(json.loads(self.meta.read_text()), finished=True)))
+        return listed
+
+    def screen(self):
+        name = {'prompt': 'prompt_waiting_working', 'bar_pill': 'pill_focus', 'bar_main': 'main_selected',
+                'bar_agent': 'agent_selected', 'bar_stopped': 'agent_stopped'}.get(self.mode)
+        if name is not None:
+            screen = (BAR_FIXTURE / f'{name}.txt').read_text()
+            if self.mode == 'prompt' and 'agent' in self.stopped:
+                screen = (BAR_FIXTURE / 'after_escape.txt').read_text()
+                stopped = (BAR_FIXTURE / 'agent_stopped.txt').read_text().splitlines()[-1]
+                screen = '\n'.join([*screen.splitlines()[:-1], stopped.replace('❯', ' ', 1)]) + '\n'
+            return screen.replace('Stop canary agent', AGENT).replace('Probe agent', AGENT).replace(
+                'waiting on 1 shell, 1 monitor', 'waiting on 1 shell')
+        screen = super().screen()
+        if self.mode == 'list' and 'subagent_shell' not in self.row_order:
+            screen = '\n'.join(line for line in screen.splitlines() if '● sleep 601' not in line) + '\n'
+            screen = screen.replace('2 shells, 1 monitor', '1 shell, 1 monitor')
+        return screen
+
+    def run(self, args, **kwargs):
+        if args[1] == 'send-keys':
+            keys = tuple(args[4:])
+            next_mode = {
+                ('prompt', ('Down',)): 'bar_pill',
+                ('bar_pill', ('Down',)): 'bar_main',
+                ('bar_main', ('Down',)): 'bar_agent',
+                ('bar_agent', ('x',)): 'bar_stopped',
+                ('bar_stopped', ('Escape',)): 'prompt',
+            }.get((self.mode, keys))
+            if next_mode:
+                self.keys.append(keys)
+                self.bar_keys.append(keys[0])
+                self.mode = next_mode
+                if keys == ('x',):
+                    self.stopped.append('agent')
+                    if self.unconfirmed != 'agent':
+                        self.meta.write_text(json.dumps(dict(json.loads(self.meta.read_text()), stoppedByUser=True)))
+                        self.child_output.write_text('[killed]\n')
+                        self.row_order = ['monitor', 'shell']
+                        self.selection = 0
+                return subprocess.CompletedProcess(args, 0)
+        return super().run(args, **kwargs)
+
+
 class StopCanaryTests(unittest.TestCase):
     def setUp(self):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -185,7 +267,10 @@ class StopCanaryTests(unittest.TestCase):
     def run_canary(self, change=None, *flags, sleep=lambda _: None, unconfirmed=None, version=VERSION,
                    row_order=ROW_ORDER):
         def factory(root):
-            self.replay = Replay(root, change, unconfirmed, row_order)
+            if version == '2.1.330':
+                self.replay = WaitingReplay(root, unconfirmed)
+            else:
+                self.replay = Replay(root, change, unconfirmed, row_order)
             return self.replay
 
         output = io.StringIO()
@@ -215,6 +300,30 @@ class StopCanaryTests(unittest.TestCase):
         self.assertEqual(self.state.read_text(), VERSION + '\n')
         self.assertTrue(self.replay.closed)
         self.assertFalse(self.replay.root.exists())
+
+    def test_waiting_agent_uses_the_bar_and_saves_its_parsed_screens(self):
+        shutil.copytree(BAR_FIXTURE, self.fixtures / BAR_FIXTURE.name)
+        code, output = self.run_canary(None, '--save-fixtures', version='2.1.330')
+        self.assertEqual(code, 0, output)
+        report = json.loads(self.report.read_text())
+        self.assertTrue(report['screens_parsed'])
+        self.assertEqual(report['agent_bar_baseline'], BAR_FIXTURE.name)
+        self.assertEqual(report['tasks'], {kind: {'passed': True, 'state': 'stopped'} for kind in canary.KINDS})
+        self.assertEqual(self.replay.preflight, [False, True])
+        self.assertEqual(self.replay.bar_keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
+        self.assertEqual(self.replay.opened, [
+            ('shell', ()), ('monitor', ()), ('shell', ('agent',)), ('monitor', ('agent', 'shell')),
+        ])
+        self.assertEqual(self.replay.stopped, list(canary.KINDS))
+        self.assertEqual(self.replay.keys.count(('x',)), 3)
+        for name in ('prompt_waiting_shell', 'pill_focus', 'main_selected',
+                     'agent_selected', 'agent_stopped', 'after_escape'):
+            with self.subTest(name=name):
+                saved = self.fixtures / BAR_FIXTURE.name / f'{name}.txt'
+                self.assertIn(saved.read_text(), self.replay.frames)
+                self.assertIn(f'agent_bar/{name}.txt', report['diffs'])
+        saved_tasks = self.fixtures / 'claude_2.1.330_tasks'
+        self.assertEqual({path.name for path in saved_tasks.iterdir()}, {'list.txt', 'shell_detail.txt', 'monitor_detail.txt'})
 
     def test_same_version_skips_quietly_without_starting_tmux(self):
         self.state.write_text(VERSION + '\n')
