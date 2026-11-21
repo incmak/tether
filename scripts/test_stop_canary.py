@@ -200,7 +200,8 @@ class WaitingReplay(Replay):
                      'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'child'}]}},
                 ):
                     stream.write(json.dumps(record) + '\n')
-            yield entry
+            with patch.object(canary.task_process, 'find', return_value=canary.task_process.Process(PID + 1, 'child')):
+                yield entry
 
     def listing(self, entry):
         listed = super().listing(entry)

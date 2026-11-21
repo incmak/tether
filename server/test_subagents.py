@@ -546,6 +546,8 @@ class ProcessTasksTests(unittest.TestCase):
         self.enterContext(patch.object(subagents, 'TASKS_TMP', self.tmp))
         self.enterContext(patch.object(subagents, 'PROJECTS', self.project.parent))
         self.fds = self.enterContext(patch.object(subagents, '_fd_links', return_value=[self.tasks]))
+        self.find_task = self.enterContext(patch.object(subagents.task_process, 'find'))
+        self.find_task.return_value = subagents.task_process.Process(124, '457')
 
     def old_agent(self, identifier='abc', *, meta=None):
         path = self.old_folder / f'agent-{identifier}.jsonl'
@@ -737,6 +739,7 @@ class ProcessTasksTests(unittest.TestCase):
         self.assertEqual(tasks['shell02']['summary'], 'Notification failure')
 
     def test_finished_agent_waits_until_its_running_children_finish(self):
+        self.enterContext(patch.object(subagents.task_process, 'running', return_value=True))
         self.agent(meta={'finished': True, 'requestShape': 'background'}, records=[
             self.record('user', 'Wait for the children', seconds=-125),
             *self.task_start('shell01'),
@@ -782,6 +785,53 @@ class ProcessTasksTests(unittest.TestCase):
         self.assertEqual({agent['id']: agent['state'] for agent in listed['agents']},
                          {'stopping': 'stopped', 'failed': 'failed', 'other': 'finished'})
         self.assertTrue(all('waiting' not in agent for agent in listed['agents']))
+
+    def test_waiting_parent_counts_child_older_than_public_task_limit(self):
+        self.agent(meta={'finished': True}, records=self.task_start('shell01', seconds=-200))
+        self.output('shell01')
+        records = []
+        for index in range(42):
+            identifier = f'task{index:03}'
+            records.extend(self.task_start(identifier, seconds=-100 + index))
+            self.output(identifier, '[exited with code 0]')
+        self.write(self.main, records)
+        listed = subagents.listing(self.config)
+        self.assertEqual(len(listed['tasks']), 40)
+        self.assertNotIn('shell01', {item['id'] for item in listed['tasks']})
+        agent, = listed['agents']
+        self.assertEqual((agent['state'], agent['waiting']), ('running', {'shell': 1, 'monitor': 0}))
+
+    def test_unfinished_child_output_cannot_reopen_parent_without_a_live_process(self):
+        for seconds in (-400, -100):
+            with self.subTest(seconds=seconds):
+                self.agent(meta={'finished': True}, records=self.task_start('shell01', seconds=seconds),
+                           age=-seconds)
+                self.output('shell01')
+                self.find_task.reset_mock()
+                self.find_task.return_value = None if seconds == -100 else subagents.task_process.Process(124, '457')
+                agent, = subagents.listing(self.config)['agents']
+                self.assertEqual(agent['state'], 'finished')
+                self.assertNotIn('waiting', agent)
+                self.assertEqual(self.find_task.call_count, int(seconds == -100))
+
+    def test_waiting_agent_survives_clear_until_its_children_finish(self):
+        path = self.old_agent(meta={'finished': True, 'requestShape': 'background'})
+        link = self.tasks / 'abc.output'
+        link.unlink()
+        link.symlink_to(self.folder / path.name)
+        for kind, tool, identifier in (('shell', 'Bash', 'shell01'), ('monitor', 'Monitor', 'monitor1')):
+            with self.subTest(kind=kind):
+                self.write(path, self.task_start(identifier, name=tool))
+                if kind == 'shell':
+                    self.output(identifier)
+                with patch.object(subagents.task_process, 'running', return_value=True):
+                    listed = subagents.listing(self.config)
+                agent, = listed['agents']
+                self.assertEqual(agent['state'], 'running')
+                self.assertEqual(agent['waiting'][kind], 1)
+                self.assertEqual([(task['id'], task['parent']) for task in listed['tasks']], [(identifier, 'abc')])
+                self.output(identifier, '[exited with code 0]')
+                self.assertEqual(subagents.listing(self.config)['agents'], [])
 
     def test_monitor_in_old_running_agent_has_parent_and_kind(self):
         old = self.old_agent()

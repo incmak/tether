@@ -1027,14 +1027,14 @@ class AgentBarTests(unittest.TestCase):
     def test_waiting_identity_requires_supported_counts_and_complete_name(self):
         screen = self.screen('agent_selected')
         self.assertEqual(stop.agent_bar(screen)['rows'][1], {
-            'kind': 'general-purpose', 'name': self.NAME, 'waiting': self.agent['waiting'],
+            'kind': 'general-purpose', 'name': self.NAME, 'waiting': self.agent['waiting'], 'name_clipped': False,
         })
         for text in (screen.replace('1 monitor', '1 worker'), screen.replace('1 monitor', '2 shells'),
                      screen.replace(' · since 8:54 AM', '')):
             self.assertIsNone(stop.agent_bar(text)['rows'][1]['waiting'])
         narrow = self.screen('narrow_agent_selected')
         self.assertEqual(stop.agent_bar(narrow)['rows'][1], {
-            'kind': 'general-purpose', 'name': 'Prob…', 'waiting': {'shell': 1, 'monitor': 0},
+            'kind': 'general-purpose', 'name': 'Prob…', 'waiting': {'shell': 1, 'monitor': 0}, 'name_clipped': True,
         })
 
     def drive(self, frames, fresh=None):
@@ -1056,9 +1056,10 @@ class AgentBarTests(unittest.TestCase):
             position += 1
             return subprocess.CompletedProcess(args, 0, '', '')
 
-        def listing(entry):
+        def listing(entry, *, limit=True):
             state = 'stopped' if 'x' in self.keys else self.agent['state']
             if fresh is not None and self.keys and state == 'running':
+                self.assertFalse(limit)
                 fresh()
             return {'agents': [dict(self.agent, state=state), *self.siblings], 'tasks': []}
 
@@ -1094,10 +1095,70 @@ class AgentBarTests(unittest.TestCase):
         self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
 
     def test_closes_a_recognized_tasks_panel_before_navigating_the_bar(self):
-        tasks = RealScreenTests.FOLDER_330 / 'list_subagent_shell.txt'
-        frames = [(tasks.read_text(), 'Escape'), *self.wide_frames()]
+        for name in ('list_subagent_shell', 'list', 'detail_agent', 'shell_detail'):
+            with self.subTest(name=name):
+                tasks = RealScreenTests.FOLDER_330 / f'{name}.txt'
+                frames = [(tasks.read_text(), 'Escape'), *self.wide_frames()]
+                self.assertEqual(self.drive(frames), {'ok': True, 'state': 'stopped'})
+                self.assertEqual(self.keys, ['Escape', 'Down', 'Down', 'Down', 'x', 'Escape'])
+
+    def test_btw_panel_body_actions_do_not_authorize_escape(self):
+        screen = (self.FOLDER.parent / 'claude_btw_answer.txt').read_text()
+        body, footer = screen.rstrip().rsplit('\n', 1)
+        for text in ('x to stop', '↑/↓ to navigate · x to stop · Enter to view · Esc to close'):
+            with self.subTest(text=text), self.assertRaisesRegex(stop.StopError, 'Could not read'):
+                self.drive([(f'{body}\n  {text}\n\n{footer}\n', None)])
+            self.assertEqual(self.keys, [])
+
+    def test_wide_selection_allows_one_stop_with_the_stop_all_hint(self):
+        frames = self.wide_frames()
+        for index in (2, 3, 4):
+            screen, key = frames[index]
+            footer = ('↑/↓ to select', 'x to stop', 'x to clear')[index - 2]
+            frames[index] = (screen.replace(footer, footer + ' · ctrl+x ctrl+k to stop all agents'), key)
         self.assertEqual(self.drive(frames), {'ok': True, 'state': 'stopped'})
-        self.assertEqual(self.keys, ['Escape', 'Down', 'Down', 'Down', 'x', 'Escape'])
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
+
+    def test_since_field_truncation_keeps_the_whole_name(self):
+        for tail in ('sin…', 's…', 'since 8:5…'):
+            with self.subTest(tail=tail):
+                frames = self.wide_frames()
+                frames[3] = (frames[3][0].replace('since 8:54 AM', tail), 'x')
+                self.siblings = [dict(self.agent, id='beta', description=self.NAME + ' extra')]
+                self.assertEqual(self.drive(frames), {'ok': True, 'state': 'stopped'})
+                self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
+
+    def test_name_preclipped_by_claude_can_still_have_a_full_since_field(self):
+        frames = self.wide_frames()
+        self.agent['description'] = 'a' * 200 + ' suffix'
+        frames = [(screen.replace(self.NAME, 'a' * 199 + '…'), key) for screen, key in frames]
+        self.assertEqual(self.drive(frames), {'ok': True, 'state': 'stopped'})
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
+
+    def test_clipped_non_time_suffix_does_not_establish_the_whole_name(self):
+        frames = self.wide_frames()
+        for tail in ('since lunch…', 'sibling…'):
+            with self.subTest(tail=tail), self.assertRaisesRegex(stop.StopError, 'Could not identify'):
+                changed = frames[3][0].replace('since 8:54 AM', tail)
+                self.drive([*frames[:3], (changed, 'Escape'), frames[-1]])
+            self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+
+    def test_artifact_and_ambiguous_footers_refuse_navigation_and_cleanup(self):
+        frames = self.wide_frames()
+        for action in ('enter to view arti…', 'enter to view…'):
+            with self.subTest(action=action):
+                unknown = frames[1][0].replace('enter to view tasks', 'esc to interrupt · ' + action)
+                with self.assertRaisesRegex(stop.StopError, 'Could not read'):
+                    self.drive([(unknown, None)])
+                self.assertEqual(self.keys, [])
+                with self.assertRaisesRegex(stop.StopError, 'agent bar did not close'):
+                    self.drive([frames[0], (unknown, None)])
+                self.assertEqual(self.keys, ['Down'])
+
+    def test_whole_interrupt_hint_identifies_prompt_before_task_toggle_hint(self):
+        screen = self.screen('prompt_waiting_working').replace(
+            '← for agents · ↓ to manage', 'ctrl+t to show tasks')
+        self.assertEqual(stop.agent_bar(screen)['focus'], 'prompt')
 
     def test_refusals_at_prompt_press_no_keys(self):
         prompt = self.screen('prompt_waiting_shell_monitor')
@@ -1166,6 +1227,38 @@ class AgentBarTests(unittest.TestCase):
 
         with self.assertRaisesRegex(stop.StopError, 'unsent draft'):
             self.drive(frames, fresh=redraw)
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+
+    def test_same_name_replacement_after_listing_refuses(self):
+        for earlier, later in (('8:54 AM', '8:55 AM'), ('8:54 AM', '8:54  AM')):
+            with self.subTest(later=later):
+                frames = self.wide_frames()
+                frames[3:] = [(frames[3][0], 'Escape'), frames[-1]]
+
+                def replace_selected():
+                    self.assertEqual(self.reads.count(3), 1)
+                    frames[3] = (frames[3][0].replace(earlier, later), 'Escape')
+
+                with self.assertRaisesRegex(stop.StopError, 'Could not identify'):
+                    self.drive(frames, fresh=replace_selected)
+                self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+
+    def test_same_name_agent_appears_in_final_listing(self):
+        frames = self.wide_frames()
+        frames[3:] = [(frames[3][0], 'Escape'), frames[-1]]
+
+        def add_agent():
+            self.siblings.append(dict(self.agent, id='beta', waiting={'shell': 2, 'monitor': 0}))
+
+        with self.assertRaisesRegex(stop.StopError, 'share this name'):
+            self.drive(frames, fresh=add_agent)
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+
+    def test_waiting_counts_change_in_final_listing(self):
+        frames = self.wide_frames()
+        frames[3:] = [(frames[3][0], 'Escape'), frames[-1]]
+        with self.assertRaisesRegex(stop.StopError, 'Could not identify'):
+            self.drive(frames, fresh=lambda: self.agent.update(waiting={'shell': 2, 'monitor': 0}))
         self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
 
     def test_navigation_stops_after_eight_down_keys(self):

@@ -525,7 +525,7 @@ def _footer(path):
     return state, match[1]
 
 
-def _tasks(config, tasks_dir, files, shown, now, since, *, include_finished=False):
+def _tasks(config, tasks_dir, files, now, since, *, include_finished=False):
     if tasks_dir is None:
         return []
     main = Path(config['transcript']).resolve()
@@ -541,7 +541,7 @@ def _tasks(config, tasks_dir, files, shown, now, since, *, include_finished=Fals
             continue
     for identifier, group in files.items():
         for path in group:
-            sources[path] = (identifier, identifier in shown)
+            sources[path] = (identifier, False)
     # tasks_dir is always TASKS_TMP.resolve()/<slug>/<uuid>/tasks, so one scan per transcript and root
     # serves every tab of the project.
     starts, notifications, calls, scans = {}, {}, {}, []
@@ -586,8 +586,6 @@ def _tasks(config, tasks_dir, files, shown, now, since, *, include_finished=Fals
                 # Claude makes an output file for every Bash call, so a foreground command can move to
                 # the background. Only a start record (backgroundTaskId/taskId) makes it a background task.
                 continue
-            if state != 'running' and not start.get('_scope') and not include_finished:
-                continue
             started = start.get('started')
             stamp = _stamp(started)
             if stamp is None:
@@ -599,13 +597,14 @@ def _tasks(config, tasks_dir, files, shown, now, since, *, include_finished=Fals
                            'state': state, 'started': started,
                            'ended': datetime.fromtimestamp(ended, timezone.utc).isoformat().replace('+00:00', 'Z') if ended is not None else None,
                            'seconds': int((ended if ended is not None else now) - stamp),
-                           'parent': start.get('parent'), 'summary': (footer or summary) if state in ('failed', 'stopped') else None})
+                           'parent': start.get('parent'), 'summary': (footer or summary) if state in ('failed', 'stopped') else None,
+                           '_scope': start['_scope'], '_output': path})
         except (OSError, ValueError, RuntimeError):
             continue
     result.extend(_monitors(config, tasks_dir, starts, notifications, ledger, seen, now, since,
                             include_finished=include_finished))
     result.sort(key=lambda item: _stamp(item['started']) or 0)
-    return result[-40:]
+    return result
 
 
 STOPPED_BY_TETHER = 'Stopped from Tether.'
@@ -614,7 +613,8 @@ STOPPED_BY_TETHER = 'Stopped from Tether.'
 def _monitors(config, tasks_dir, starts, notifications, ledger, seen, now, since, *, include_finished=False):
     """Claude Code 2.1.325 writes no output file for a monitor; read its state from its process."""
     waiting = {identifier: start for identifier, start in starts.items()
-               if start.get('kind') == 'monitor' and identifier not in seen and (start.get('_scope') or include_finished)}
+               if start.get('kind') == 'monitor' and identifier not in seen
+               and (start['_scope'] or start.get('parent') is not None or include_finished)}
     if not waiting:
         return []
     pids = None
@@ -638,13 +638,40 @@ def _monitors(config, tasks_dir, starts, notifications, ledger, seen, now, since
                 state, summary = ('running', None) if alive else ('finished', None)
         if task_process.key(tasks_dir, identifier) in ledger and state != 'running':
             state, summary = 'stopped', STOPPED_BY_TETHER
-        if state != 'running' and not start.get('_scope') and not include_finished:
-            continue
         found.append({'id': identifier, 'kind': 'monitor', 'description': start.get('description'),
                       'command': start.get('command'), 'state': state, 'started': start.get('started'),
                       'ended': None, 'seconds': int(now - stamp) if state == 'running' else None,
-                      'parent': start.get('parent'), 'summary': summary if state in ('failed', 'stopped') else None})
+                      'parent': start.get('parent'), 'summary': summary if state in ('failed', 'stopped') else None,
+                      '_scope': start['_scope'], '_output': None})
     return found
+
+
+def _waiting_children(config, tasks, finished, since):
+    waiting = defaultdict(lambda: {'shell': 0, 'monitor': 0})
+    pids = None
+    for task in tasks:
+        parent, kind = task['parent'], task['kind']
+        if parent not in finished or task['state'] != 'running':
+            continue
+        if (output := task['_output']) is not None:
+            # An output file without an exit marker can outlive the process that wrote it.
+            stamp = _stamp(task['started'])
+            if since is None or stamp is None or stamp < since - 5:
+                continue
+            if pids is None:
+                try:
+                    pids = task_process.children(config['owner_pid'])
+                except (OSError, ValueError):
+                    pids = []
+            if kind == 'shell':
+                alive = task_process.find(config['owner_pid'], task, output, stamp, pids=pids) is not None
+            else:
+                alive = task_process.running(config['owner_pid'], task, stamp, pids=pids)
+            if not alive:
+                continue
+        # _monitors already checked liveness for monitors without output.
+        waiting[parent][kind] += 1
+    return waiting
 
 
 def _listing(config, *, limit=True, include_finished=False):
@@ -672,19 +699,35 @@ def _listing(config, *, limit=True, include_finished=False):
     except (OSError, ValueError):
         pass
     now = time.time()
-    owners, spawned = {}, {}
+    candidates = {}
     for identifier, group in files.items():
         try:
             entry, data, meta = _entry(identifier, group, now, notifications, since, members)
         except (OSError, ValueError, UnicodeError, RecursionError):
             continue
+        if identifier not in current and entry['state'] not in ('running', 'finished') and not include_finished:
+            continue
+        candidates[identifier] = entry, data['tool_ids'], meta.get('toolUseId')
+
+    sources = {identifier: group for identifier, group in files.items()
+               if identifier in current or identifier in candidates}
+    tasks = _tasks(config, tasks_dir, sources, now, since, include_finished=include_finished)
+    # A waiting background agent can survive /clear. Resolve waiting before applying chat scope or limits.
+    finished = {identifier for identifier, (entry, _, _) in candidates.items() if entry['state'] == 'finished'}
+    waiting = _waiting_children(config, tasks, finished, since)
+    owners, spawned = {}, {}
+    for identifier, (entry, tool_ids, spawn_id) in candidates.items():
+        if entry['state'] == 'finished' and identifier in waiting:
+            start = _stamp(entry['started'])
+            entry.update(state='running', ended=None, seconds=int(now - start) if start is not None else None,
+                         waiting=waiting[identifier])
         if identifier not in current and entry['state'] != 'running' and not include_finished:
             continue
         result['agents'].append(entry)
-        for tool_id in data['tool_ids']:
-            owners[tool_id] = entry['id']
-        if isinstance(meta.get('toolUseId'), str):
-            spawned[entry['id']] = meta['toolUseId']
+        for tool_id in tool_ids:
+            owners[tool_id] = identifier
+        if isinstance(spawn_id, str):
+            spawned[identifier] = spawn_id
     for entry in result['agents']:
         parent = owners.get(spawned.get(entry['id']))
         entry['parent'] = parent if parent != entry['id'] else None
@@ -692,17 +735,14 @@ def _listing(config, *, limit=True, include_finished=False):
     if limit:
         result['agents'] = result['agents'][-40:]
     shown = {item['id'] for item in result['agents']}
-    sources = {identifier: group for identifier, group in files.items() if identifier in current or identifier in shown}
-    result['tasks'] = _tasks(config, tasks_dir, sources, shown, now, since, include_finished=include_finished)
-    waiting = defaultdict(lambda: {'shell': 0, 'monitor': 0})
-    for task in result['tasks']:
-        if task['parent'] is not None and task['state'] == 'running':
-            waiting[task['parent']][task['kind']] += 1
-    for entry in result['agents']:
-        if entry['state'] == 'finished' and entry['id'] in waiting:
-            start = _stamp(entry['started'])
-            entry.update(state='running', ended=None, seconds=int(now - start) if start is not None else None,
-                         waiting=waiting[entry['id']])
+    for task in tasks:
+        in_scope = task.pop('_scope')
+        output = task.pop('_output')
+        parent = task['parent']
+        if parent in shown or (parent is None or parent in current) and (
+                in_scope or include_finished or output is not None and task['state'] == 'running'):
+            result['tasks'].append(task)
+    result['tasks'] = result['tasks'][-40:]
     return result
 
 
@@ -889,14 +929,15 @@ def _codex_worker(config, agent_id):
     return files[agent_id]
 
 
-def listing(config):
+def listing(config, *, limit=True):
     if config.get('agent') != 'codex':
-        return _listing(config)
+        return _listing(config, limit=limit)
     model, files = _codex_workers(config)
     now, since = time.time(), _owner_since(config) if files else None
     entries = [_codex_entry(worker, now, since) for worker in files.values()]
     entries.sort(key=lambda entry: _stamp(entry['started']) or 0)
-    result = {'main': {'model': model, 'context': None, 'title': None}, 'agents': entries[-40:], 'tasks': []}
+    result = {'main': {'model': model, 'context': None, 'title': None},
+              'agents': entries[-40:] if limit else entries, 'tasks': []}
     if config.get('thread') is not None:
         result['thread'] = config['thread']
     return result

@@ -332,22 +332,48 @@ BAR_ID_ERROR = 'Could not identify that agent. Stop it in the terminal.'
 BAR_CLOSE_ERROR = 'The agent bar did not close. Check the terminal view.'
 WAITING_COUNT = r'([1-9]\d*) (shell|monitor)s?'
 BAR_ROW = re.compile(r'(❯ )?\s*([●◯])\s+(\S+)(?:\s{2,}(.+)| (stopped · .+))?')
+PROMPT_ACTIONS = {'↓ to manage', '↓ to resume subagent', 'esc to interrupt', '← for agents'}
+TASKS_PILL_ACTION = 'enter to view tasks'
+ARTIFACT_ACTIONS = {'enter to view artifacts', 'enter to open in browser'}
+STOP_ALL_ACTION = 'ctrl+x ctrl+k to stop all agents'
+ROW_ACTIONS = {'↑/↓ to select', 'enter to view', 'x to stop', 'x to clear', STOP_ALL_ACTION}
+# Compare clipped actions with the other controls in Claude's 2.1.330 footer.
+FOCUS_ACTIONS = PROMPT_ACTIONS | {TASKS_PILL_ACTION}
+FOOTER_ACTIONS = FOCUS_ACTIONS | ROW_ACTIONS | ARTIFACT_ACTIONS | {
+    'esc to stop', 'esc to return to team lead', 'esc to collapse', 'enter to expand', '← to go back',
+    'ctrl+t to show tasks', 'ctrl+t to hide tasks', 'shift+tab to cycle', '? for shortcuts',
+    '/tasks to see subagents', 'ctrl+c to copy', 'shift+click to native select',
+    'option+click to native select', 'hold space to speak',
+}
+
+
+def clipped_since(tail):
+    if not tail.endswith('…'):
+        return False
+    prefix = tail[:-1]
+    return bool(prefix and ('since '.startswith(prefix) or re.fullmatch(
+        r'since (?:[01]?\d|2[0-3])(?::(?:[0-5](?:\d(?: [AP]M?)?)?)?)?', prefix)))
 
 
 def waiting_row(text):
     """Read the full waiting identity, or a name with Claude's explicit truncation mark."""
     action, separator, name = text.partition(' · ')
     if not separator or not re.fullmatch(rf'waiting on {WAITING_COUNT}(?:, {WAITING_COUNT})*', action):
-        return None, None
-    name, since, when = name.rpartition(' · since ') if ' · since ' in name else (name, '', '')
-    if not name or (since and not when) or (not since and not name.endswith('…')):
-        return None, None
+        return None, None, False
+    label, divider, tail = name.rpartition(' · ')
+    since_clipped = bool(divider) and clipped_since(tail)
+    has_since = since_clipped or (divider and tail.startswith('since ') and tail[6:].strip()
+                                  and not tail.endswith('…'))
+    if has_since:
+        name = label
+    if not name or (not has_since and not name.endswith('…')):
+        return None, None, False
     waiting = {'shell': 0, 'monitor': 0}
     for count, kind in re.findall(WAITING_COUNT, action):
         if waiting[kind]:
-            return None, None
+            return None, None, False
         waiting[kind] = int(count)
-    return name, waiting
+    return name, waiting, name.endswith('…') and not since_clipped
 
 
 def agent_bar(screen):
@@ -380,44 +406,50 @@ def agent_bar(screen):
             main.append(index)
         elif dot == '●' or not (text or compact):
             return None
-        name, waiting = waiting_row(text or '')
-        parsed.append({'kind': kind, 'name': name, 'waiting': waiting})
+        name, waiting, clipped = waiting_row(text or '')
+        parsed.append({'kind': kind, 'name': name, 'waiting': waiting, 'name_clipped': clipped})
     if len(main) != 1 or len(selected) > 1:
         return None
 
-    last_action = footer.rsplit('·', 1)[-1].strip()
-    prefix = last_action[:-1].rstrip() if last_action.endswith('…') else ''
-
-    def footer_action(action):
-        return has_action(footer, action) or len(prefix) >= 4 and action.startswith(prefix)
-
     actions = {_norm(part) for part in footer.split('·')}
-    selection_actions = {'↑/↓ to select', 'enter to view', 'x to stop', 'x to clear'}
-    mode_or_tasks = re.match(rf'\s*(?:[⏵⏸]|{TASK_COUNT}\b|\d+ background tasks\b)', footer)
+    row_actions = actions - {STOP_ALL_ACTION}
     action = None
-    if selected == main and actions == {'↑/↓ to select'}:
+    if selected == main and row_actions == {'↑/↓ to select'}:
         focus = 'row'
-    elif selected and selected != main and actions in ({'enter to view', 'x to stop'},
-                                                        {'enter to view', 'x to clear'}):
-        focus, action = 'row', 'stop' if 'x to stop' in actions else 'clear'
-    elif selected or actions & selection_actions or '❯' in footer:
+    elif selected and selected != main and row_actions in ({'enter to view', 'x to stop'},
+                                                            {'enter to view', 'x to clear'}):
+        focus, action = 'row', 'stop' if 'x to stop' in row_actions else 'clear'
+    elif selected or actions & (ROW_ACTIONS | ARTIFACT_ACTIONS) or '❯' in footer:
         return None
-    elif footer_action('enter to view tasks'):
-        focus = 'pill'
-    elif (footer_action('↓ to manage') or footer_action('↓ to resume subagent')
-          or (mode_or_tasks and len(prefix) >= 4)):
-        # Narrow panes can lose the prompt action entirely. Only Down is allowed here.
-        focus = 'prompt'
     else:
-        return None
+        last_action = _norm(footer.rsplit('·', 1)[-1])
+        if last_action.endswith('…'):
+            prefix = last_action[:-1].rstrip()
+            completions = [known for known in FOOTER_ACTIONS if known.startswith(prefix)]
+            if len(completions) != 1 or completions[0] not in FOCUS_ACTIONS:
+                return None
+            actions.add(completions[0])
+        elif any(last_action.startswith(known + ' ') for known in FOCUS_ACTIONS):
+            return None
+        if TASKS_PILL_ACTION in actions:
+            focus = 'pill'
+        elif actions & PROMPT_ACTIONS:
+            focus = 'prompt'
+        else:
+            return None
     return {'focus': focus, 'action': action, 'rows': parsed, 'selected': selected[0] if selected else None,
+            'selected_text': row_lines[selected[0]] if selected else None,
             'draft': bool(prompt[0][1:].strip() or any(line.strip() for line in prompt[1:]))}
+
+
+def matches_bar_name(description, row):
+    return matches(description, row['name']) if row['name_clipped'] else description == row['name']
 
 
 def bar_target(bar, target, waiting):
     candidates = [index for index, row in enumerate(bar['rows'])
                   if row['kind'] == target['kind'] and row['name'] is not None
-                  and any(matches(label, row['name']) for label in target['labels'])]
+                  and any(matches_bar_name(label, row) for label in target['labels'])]
     if len(candidates) > 1:
         raise StopError('Multiple agents share this name. Stop it in the terminal.')
     if not candidates or bar['rows'][candidates[0]]['waiting'] != waiting:
@@ -427,8 +459,17 @@ def bar_target(bar, target, waiting):
 
 def tasks_panel_open(screen):
     """Distinguish the /tasks panel's actions from the agent bar's own x to stop."""
-    sections = re.split(r'(?m)^(▔+|─+)[ \t]*$', screen)
-    return len(sections) > 1 and sections[-2].startswith('▔') and dialog_open(sections[-1])
+    sections = re.split(r'(?m)^▔+[ \t]*$', screen)
+    if len(sections) < 2 or not sections[-1].strip():
+        return False
+    footer = sections[-1].rstrip().splitlines()[-1]
+    actions = tuple(action for action in map(_norm, footer.split('·')) if action != 'f to foreground')
+    return actions in (
+        ('↑/↓ to navigate', 'x to stop', 'Enter to view', 'Esc to close'),
+        ('↑/↓ to select', 'Enter to view', 'x to stop', 'Esc to close'),
+        ('← to go back', 'x to stop', 'Enter/Space to close', 'Esc to close'),
+        ('← to go back', 'Esc/Enter/Space to close', 'x to stop'),
+    )
 
 
 def stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar=None):
@@ -462,21 +503,20 @@ def stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar=N
             sleep(0.18)
             bar = read()
 
-        listed = [item for item in subagents.listing(entry)['agents'] if item['state'] == 'running']
-        current = next((item for item in listed if item['id'] == agent['id']), None)
-        if current is None or current.get('waiting') != agent['waiting']:
+        if bar['action'] != 'stop':
             raise StopError(BAR_ID_ERROR)
+        selected_text = bar['selected_text']
+        row = bar['rows'][position]
+        fitting = [item for item in subagents.listing(entry, limit=False)['agents']
+                   if item['state'] == 'running' and (item.get('type') or 'general-purpose') == row['kind']
+                   and matches_bar_name(item.get('description') or '', row)]
         bar = read()
         position = identify(bar)
-        if bar['selected'] != position or bar['action'] != 'stop':
+        if bar['selected'] != position or bar['action'] != 'stop' or bar['selected_text'] != selected_text:
             raise StopError(BAR_ID_ERROR)
-        name = bar['rows'][position]['name']
-        fitting = [item['id'] for item in listed
-                   if (item.get('type') or 'general-purpose') == target['kind']
-                   and matches(item.get('description') or '', name)]
         if len(fitting) > 1:
             raise StopError('Multiple agents share this name. Stop it in the terminal.')
-        if fitting != [agent['id']]:
+        if not fitting or fitting[0]['id'] != agent['id'] or fitting[0].get('waiting') != agent['waiting']:
             raise StopError(BAR_ID_ERROR)
         pressed['x'] = True
         press(entry, 'x', run=run)
