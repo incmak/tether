@@ -35,6 +35,8 @@ class BacklogObservedTests(unittest.TestCase):
         self.file.write_text(INITIAL)
         self.archive = backlog.folder() / 'DONE.md'
         self.snapshot = audit.folder() / 'backlog-seen.json'
+        self.enterContext(mock.patch.object(backlog, '_busy_since', None))
+        self.enterContext(mock.patch.object(backlog, '_observed_files', None))
 
     @contextlib.contextmanager
     def sandbox(self, quiet=True):
@@ -516,6 +518,82 @@ class BacklogObservedTests(unittest.TestCase):
         backlog.observe()
         entry, = self.entries()
         self.assert_observed(entry, 'backlog.done', 'B12 done: Fix warnings', UNKNOWN)
+
+
+    # B303 round 4 review
+
+    @unittest.skipIf(os.geteuid() == 0, 'root ignores file modes')
+    def test_audit_lock_cannot_be_opened_read_only(self):
+        with backlog._audit_lock():
+            pass
+        lock = audit.folder() / '.backlog-seen.lock'
+        self.assertEqual(lock.stat().st_mode & 0o777, 0o200)
+        with self.assertRaises(PermissionError):
+            os.open(lock, os.O_RDONLY)
+
+    def test_aborted_write_with_a_stale_read_records_no_false_removal(self):
+        backlog.observe()
+        self.file.write_text(INITIAL + '- [ ] Direct edit #B14\n')
+        backlog.observe()
+
+        def abort():
+            raise RuntimeError('version changed')
+        with backlog._locked(), self.assertRaises(RuntimeError):
+            backlog._replace(INITIAL, INITIAL + '- [ ] Stale write #B15\n', audit_before=INITIAL, before_write=abort)
+        backlog.observe()
+        entry, = self.entries()
+        self.assert_observed(entry, 'backlog.add', 'B14 added: Direct edit', UNKNOWN)
+
+    def test_write_over_a_stale_read_leaves_the_difference_to_observe(self):
+        backlog.observe()
+        self.file.write_text(INITIAL + '- [ ] Direct edit #B14\n')
+        backlog.observe()
+        with backlog._locked():
+            backlog._replace(INITIAL, INITIAL + '- [ ] Stale write #B15\n', audit_before=INITIAL)
+        backlog.observe()
+        kinds = sorted((e['kind'], e['summary']) for e in self.entries())
+        self.assertEqual(kinds, [('backlog.add', 'B14 added: Direct edit (seen in the file)'),
+                                 ('backlog.add', 'B15 added: Stale write'),
+                                 ('backlog.add', 'B15 added: Stale write (seen in the file)'),
+                                 ('backlog.remove', 'B14 removed: Direct edit (seen in the file)')])
+
+    def test_archive_read_again_does_not_add_an_item_already_removed(self):
+        backlog.observe()
+        self.archive.mkdir()
+        self.file.write_text(INITIAL.replace('- [ ] Fix warnings #B12\n', ''))
+        with contextlib.redirect_stderr(io.StringIO()):
+            backlog.observe()
+        self.archive.rmdir()
+        self.archive.write_text('## Build (moved 2026-11-21 10:00)\n- [x] Fix warnings #B12\n')
+        backlog.observe()
+        entry, = self.entries()
+        self.assert_observed(entry, 'backlog.remove', 'B12 removed: Fix warnings', UNKNOWN)
+
+    @unittest.skipUnless(Path('/proc/self/fd').is_dir(), 'needs /proc')
+    def test_audit_lock_close_error_does_not_fail_a_saved_action(self):
+        real_close = os.close
+
+        def close(fd):
+            name = os.readlink(f'/proc/self/fd/{fd}')
+            real_close(fd)
+            if name.endswith('.backlog-seen.lock'):
+                raise OSError('close failed')
+        with mock.patch.object(backlog.os, 'close', side_effect=close):
+            self.cli_add('Saved once')
+        self.assertIn('Saved once', self.file.read_text())
+
+    def test_observe_goes_on_without_a_backlog_lock_held_too_long(self):
+        backlog.observe()
+        self.file.write_text(INITIAL + '- [ ] Direct edit #B14\n')
+        clock = iter([100.0, 100.0 + backlog.BUSY_LIMIT])
+        with open(backlog.folder() / '.lock', 'rb') as handle, \
+                mock.patch.object(backlog.time, 'monotonic', side_effect=lambda: next(clock)):
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            backlog.observe()
+            self.assertEqual(self.entries(), [])
+            backlog.observe()
+        entry, = self.entries()
+        self.assert_observed(entry, 'backlog.add', 'B14 added: Direct edit', UNKNOWN)
 
 
 if __name__ == '__main__':

@@ -52,6 +52,8 @@ WORKTREE = re.compile(r'gitdir:\s*(.+?)/\.git/worktrees/')
 _SEEN = 'backlog-seen.json'
 _observed_files = None
 _READ = object()  # _catch_up reads DONE.md itself
+_busy_since = None
+BUSY_LIMIT = 30.0
 
 
 def folder():
@@ -225,8 +227,10 @@ def _replace(current, text, everything=False, audit_before=None, before_write=No
 
 
 def _replace_audited(current, text, everything, audit_before, before_write, audited):
-    # Catch up before _archive adds this write's items to DONE.md.
-    seen = _catch_up(current) if audited else None
+    # Catch up before _archive adds this write's items to DONE.md. Use the file on disk: the caller read `current`
+    # before it held the audit lock, and a worker can replace the backlog lock.
+    on_disk = _disk_text() if audited else None
+    seen = _catch_up(on_disk) if on_disk is not None else None
     highest = max(_ids(current) + _ids(text) + [0])
     if highest > _last_id():
         _write(folder() / 'last-id', f'{highest}\n')
@@ -241,7 +245,9 @@ def _replace_audited(current, text, everything, audit_before, before_write, audi
     _keep(text)
     if audited:
         recorded = audit_before is None or _audit_changes(audit_before, edited)
-        if seen is not None and recorded:
+        # When the file changed after the caller read it, this write may drop those changes. Keep the snapshot at
+        # the file before the write, so observe() records the whole difference (a repeat is better than a loss).
+        if seen is not None and recorded and on_disk == current:
             # Only this write's own archived items join the seen set. Anything else new in DONE.md stays for observe().
             moved = _audit_items(edited)[0].keys() - _audit_items(text)[0].keys()
             _save_seen(text, seen | moved)
@@ -260,11 +266,13 @@ def _audit_writable():
 
 @contextlib.contextmanager
 def _audit_lock(block=True):
-    """Serialise catch-ups. The lock lives in the audit folder: a sandboxed worker cannot replace it there."""
+    """Serialise catch-ups. The lock lives in the audit folder, which a sandboxed worker cannot write. The file is
+    write-only (0200), so the worker cannot open it read-only to hold the lock either."""
     place = audit.folder()
     place.mkdir(mode=0o700, parents=True, exist_ok=True)
-    handle = os.open(place / '.backlog-seen.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    handle = os.open(place / '.backlog-seen.lock', os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o200)
     try:
+        os.fchmod(handle, 0o200)
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | (0 if block else fcntl.LOCK_NB))
         except BlockingIOError:
@@ -272,7 +280,8 @@ def _audit_lock(block=True):
         else:
             yield True
     finally:
-        os.close(handle)
+        with contextlib.suppress(OSError):
+            os.close(handle)  # also releases the lock; an error here must not fail a saved action
 
 
 def _save_seen(text, archived):
@@ -304,9 +313,21 @@ def _catch_up(text, *, archive=_READ):
     except Exception as exc:
         audit._warn(f'could not compare the backlog snapshot ({type(exc).__name__}).')
         return None
-    # An unreadable archive keeps the old set, so its new entries still count once it can be read again.
+    # An unreadable archive keeps the old set, so its new entries still count once it can be read again. Items that
+    # left the list meanwhile were recorded as removed; their archive entries must not count again later.
     refs = set(archived) if archived is not None else old_archived or set()
+    if archived is None and old_archived is not None:
+        refs |= _audit_items(before)[0].keys() - _audit_items(text)[0].keys()
     return refs if _save_seen(text, refs) else None
+
+
+def _disk_text():
+    try:
+        text = _file_text(_read_file(_path(), 4 * LIMIT + 1))
+    except OSError as exc:
+        audit._warn(f'could not read the backlog for the audit ({type(exc).__name__}).')
+        return None
+    return text if len(text) <= LIMIT else None
 
 
 def _read_file(path, limit=-1):
@@ -350,6 +371,18 @@ def _seen_revision():
     return path, (info.st_dev, info.st_ino, info.st_mtime_ns)
 
 
+def _backlog_lock_free(locked):
+    """A sandboxed worker can hold the backlog lock without end. Wait BUSY_LIMIT seconds, then observe without it."""
+    global _busy_since
+    if locked:
+        _busy_since = None
+        return True
+    now = time.monotonic()
+    if _busy_since is None:
+        _busy_since = now
+    return now - _busy_since >= BUSY_LIMIT
+
+
 def observe():
     """Catch up after a file change. A failed observation never fails an audit request, and a busy lock skips it."""
     global _observed_files
@@ -357,7 +390,7 @@ def observe():
         if (_seen_revision(), _backlog_files()) == _observed_files:
             return
         with _audit_lock(block=False) as audit_locked, _try_locked() as locked:
-            if not (audit_locked and locked):
+            if not audit_locked or not _backlog_lock_free(locked):
                 return
             revision, files = _seen_revision(), _backlog_files()
             if (revision, files) == _observed_files:
