@@ -1,7 +1,7 @@
 import { createPortal, flushSync } from 'react-dom'
 import { Fragment, forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react'
 import { useWords } from './words'
-import { Lightbulb, Plus, X } from 'lucide-react'
+import { Lightbulb, Network, Plus, X } from 'lucide-react'
 import { TaskDot, TaskFrom } from './TaskChips'
 import { moveTabFocus, openFromTab, restoreTabFocus } from './tabsKeyboard'
 import { isTaskAdvisor, taskChildren, taskState, taskStateLabel } from './taskTree'
@@ -399,7 +399,7 @@ export const PaneTabs = forwardRef<HTMLDivElement, Props>(function PaneTabs({ se
       const advisor = isTaskAdvisor(item)
       const advising = advisor && state === 'working'
       return <Fragment key={item.id}><button data-pane={item.id} data-select-pane={item.id} role="tab" aria-controls={panelId} aria-selected={item.id === pane.id} aria-keyshortcuts={pick ? 'Delete' : undefined} className={[item.id === pane.id ? 'active' : '', picked ? 'picked' : '', dragging === item.id ? 'dragging' : '', fresh === item.id ? 'task-new' : '', advisor ? 'advisor-tab' : '', advising ? 'advising' : ''].filter(Boolean).join(' ')}
-      aria-label={`${paneTitle(item)}${shownIndex(item) ? ` ${shownIndex(item)}` : ''}${item.from ? `, from ${item.from.name}` : ''}, ${advisor ? 'Advisor task' : 'Task'}, ${advising ? 'Advising' : taskStateLabel[state]}${children.length ? `, ${helperCount(children.length)}` : ''}${picked ? ', selected' : ''}`}
+      aria-label={`${paneTitle(item)}${shownIndex(item) ? ` ${shownIndex(item)}` : ''}${item.from ? `, from ${item.from.name}` : ''}, ${advisor ? 'Advisor task' : 'Task'}${item.coordinator ? ', Coordinator' : ''}, ${advising ? 'Advising' : taskStateLabel[state]}${children.length ? `, ${helperCount(children.length)}` : ''}${picked ? ', selected' : ''}`}
       tabIndex={item.id === (byId.has(tabFocus) ? tabFocus : pane.id) ? 0 : -1} onFocus={() => setTabFocus(item.id)}
       onClick={event => {
         if (suppressClick.current) return
@@ -423,7 +423,7 @@ export const PaneTabs = forwardRef<HTMLDivElement, Props>(function PaneTabs({ se
       }}
       onMouseEnter={clipTitle} onContextMenu={event => { event.preventDefault(); if (!drag.current?.touch && !suppressClick.current) onPaneActions(item.id, anchorOf(event)) }}>
       <TaskDot state={state} label={advising ? 'Advising' : undefined} />{advisor && <Lightbulb size={14} className="tab-advisor" aria-hidden="true" />}
-      <span className="pane-tab-name">{paneTitle(item)}</span>{shownIndex(item) && <span className="pane-index">{shownIndex(item)}</span>}
+      <span className="pane-tab-name">{paneTitle(item)}</span>{shownIndex(item) && <span className="pane-index">{shownIndex(item)}</span>}{item.coordinator && <Network size={12} className="tab-coordinator" aria-hidden="true" />}
       <TaskFrom pane={item} />{children.length > 0 && <span className="task-count" aria-hidden="true">{children.length}</span>}
     </button>
     {/* A sibling, not inside the tab: a tab holds no other control. It sits over the tab's right edge (App.css). Not a

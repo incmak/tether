@@ -32,6 +32,8 @@ async function main() {
   const pageErrors = [], posts = []
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
   const posted = endpoint => posts.filter(item => item.endpoint === endpoint).map(item => item.body)
+  const waitForPost = endpoint => page.waitForResponse(response =>
+    response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/api/' + endpoint))
   try {
     await fs.mkdir(SHOTS, { recursive: true })
     const origin = 'http://tether.test'
@@ -80,7 +82,7 @@ async function main() {
     const alpha = await stack('Alpha').boundingBox()
     // HTML5 drag events with one DataTransfer, sent in the order Chromium sends them. Native mouse drags do not
     // reach the page in every shared-browser mode, so the test sends the events the browser would send.
-    await page.evaluate(({ x, y }) => {
+    await Promise.all([waitForPost('groups/reorder'), page.evaluate(({ x, y }) => {
       const tabs = [...document.querySelectorAll('.group-row .group-tab')]
       const from = tabs.find(tab => tab.textContent.includes('Gamma')), to = tabs.find(tab => tab.textContent.includes('Alpha'))
       const data = new DataTransfer()
@@ -91,8 +93,7 @@ async function main() {
         send(to, 'dragenter', { x, y }); send(to, 'dragover', { x, y })
         requestAnimationFrame(() => { send(to, 'drop', { x, y }); requestAnimationFrame(() => { send(from, 'dragend', { x, y }); resolve() }) })
       }))
-    }, { x: alpha.x + 4, y: alpha.y + alpha.height / 2 })
-    await page.waitForTimeout(300)
+    }, { x: alpha.x + 4, y: alpha.y + alpha.height / 2 })])
     check('1280: a drag saves the new stack order', JSON.stringify(posted('groups/reorder').at(-1)) === JSON.stringify({ session: '$1', groups: ['g00000003', 'g00000001', 'g00000002'] }), JSON.stringify(posted('groups/reorder')))
     const shown = await page.locator('.group-row .group-tab .group-name').allTextContents()
     check('1280: the row shows the new order at once', shown.join() === 'Unstacked,Gamma,Alpha,Beta', shown.join())
@@ -103,8 +104,7 @@ async function main() {
     await menu.waitFor({ state: 'visible' })
     check('1280: the stack menu has New tab here and Move left/right', await menu.getByRole('button', { name: 'New tab here' }).isVisible() && await menu.getByRole('button', { name: 'Move right' }).isDisabled())
     await page.screenshot({ path: path.join(SHOTS, 'stack-menu-1280.png') })
-    await menu.getByRole('button', { name: 'Move left' }).click()
-    await page.waitForTimeout(200)
+    await Promise.all([waitForPost('groups/reorder'), menu.getByRole('button', { name: 'Move left' }).click()])
     check('1280: Move left starts from the order the row shows', JSON.stringify(posted('groups/reorder').at(-1)?.groups) === JSON.stringify(['g00000003', 'g00000002', 'g00000001']), JSON.stringify(posted('groups/reorder').at(-1)))
 
     // New stack: a popover with a name, a folder picker and a first task.
@@ -156,8 +156,7 @@ async function main() {
       check(`${width}: the suggestion lists the stack and the tabs that go to Unstacked`, rows.length === 2 && rows[0].startsWith('Login') && rows[1].startsWith('Unstacked') && rows[1].includes('Docs pass') && !rows[1].includes('Loose tab'), rows.join(' | '))
       check(`${width}: no side scroll with the sheet open`, await noSideScroll())
       await page.screenshot({ path: path.join(SHOTS, `suggest-stacks-${width}.png`) })
-      await sheet.getByRole('button', { name: 'Apply stacks' }).click()
-      await page.waitForTimeout(200)
+      await Promise.all([waitForPost('groups/arrange'), sheet.getByRole('button', { name: 'Apply stacks' }).click()])
       const body = posted('groups/arrange').at(-1)
       check(`${width}: Apply sends the stacks and the tabs for Unstacked`, JSON.stringify(body) === JSON.stringify({ session: '$1', stacks: [{ name: 'Login', panes: ['%2', '%3'] }], unstack: ['%4'] }), JSON.stringify(body))
       check(`${width}: the suggestion went to the tabs kind`, posted('suggest-groups').at(-1)?.kind === 'tabs')

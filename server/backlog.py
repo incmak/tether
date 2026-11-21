@@ -8,13 +8,21 @@ paths.TETHER/backlog/
   DONE.md      finished items moved out of BACKLOG.md when it grows near its limit, in file order, under their section
 
 Codex's sandbox gets write access to this folder only, so it holds nothing else. Agents change the list through
-agent_backlog_cli.py. A saved version check catches anything that edits the file another way."""
+agent_backlog_cli.py. A saved version check catches anything that edits the file another way.
+
+The sandbox cannot write the audit log (B303). audit.folder()/backlog-seen.json holds the last audited list and the
+IDs of checked items in DONE.md; the server records the difference when it sees the files change. The sandbox can
+write anything in the backlog folder, so the server cannot prove who made a change. The server sees only net changes,
+and a change undone before observation leaves no trace."""
 import contextlib
 from collections import Counter, defaultdict
 import fcntl
 import hashlib
+import json
 import os
 import re
+import stat
+import threading
 import time
 from pathlib import Path
 
@@ -28,6 +36,7 @@ LIMIT = 200000
 # Past ARCHIVE_AT characters, finished items move to DONE.md, in file order, until the list is at ARCHIVE_TO or less.
 # Agents read the whole list, so it stays short; LIMIT is room for a list with many open items.
 ARCHIVE_AT, ARCHIVE_TO = 48000, 36000
+ARCHIVE_READ = 32 * 1024 * 1024  # the server compares DONE.md up to this size (B303); it is about 220 KB in 2026
 VERSIONS = 50
 # The patterns below run on every line of a text the browser sends. Each runs in linear time: no match can start
 # inside a run of spaces, and nothing lazy meets a trailing \s*. Long runs of spaces took seconds before (15 Nov 2026).
@@ -37,7 +46,14 @@ SOURCE = re.compile(r'(?<!\s)\s*\((?:claude|codex)(?: · [^()·]+)*\)\s*$')
 ID = re.compile(r'(?<!\s)\s+#B([0-9]+)\s*$')  # every item ends with its ID, like #B12. The UI gives IDs the same way (backlogItems.ts).
 ID_QUERY = re.compile(r'#?[Bb]([0-9]+)')
 STATUS = re.compile(r'\s+- (?:Doing|Done):')
+PANE_HINT = re.compile(r'pane (%[0-9]+)')
+ARCHIVE_STAMP = re.compile(r' \(moved [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}\)$')
 WORKTREE = re.compile(r'gitdir:\s*(.+?)/\.git/worktrees/')
+_SEEN = 'backlog-seen.json'
+_observed_files = None
+_READ = object()  # _catch_up reads DONE.md itself
+_busy_since = None
+BUSY_LIMIT = 30.0
 
 
 def folder():
@@ -78,16 +94,38 @@ def read():
     return _state(text)
 
 
-@contextlib.contextmanager
-def _locked():
+def _open_lock():
     folder().mkdir(mode=0o700, parents=True, exist_ok=True)
     _path()
-    handle = os.open(folder() / '.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    return os.open(folder() / '.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+
+
+@contextlib.contextmanager
+def _locked():
+    handle = _open_lock()
     try:
         fcntl.flock(handle, fcntl.LOCK_EX)
         yield
     finally:
         os.close(handle)  # also releases the lock
+
+
+@contextlib.contextmanager
+def _try_locked():
+    try:
+        handle = _open_lock()
+    except OSError:  # a worker can put a folder or a link at the lock path; treat it as a busy lock
+        yield False
+        return
+    try:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+        else:
+            yield True
+    finally:
+        os.close(handle)
 
 
 def _keep(text):
@@ -182,6 +220,21 @@ def _archive(text, everything=False):
 
 
 def _replace(current, text, everything=False, audit_before=None, before_write=None):
+    with contextlib.ExitStack() as stack:
+        audited = _audit_writable()
+        if audited:
+            try:
+                stack.enter_context(_audit_lock())
+            except OSError:
+                audited = False
+        return _replace_audited(current, text, everything, audit_before, before_write, audited)
+
+
+def _replace_audited(current, text, everything, audit_before, before_write, audited):
+    # Catch up before _archive adds this write's items to DONE.md. Use the file on disk: the caller read `current`
+    # before it held the audit lock, and a worker can replace the backlog lock.
+    on_disk = _disk_text() if audited else None
+    seen = _catch_up(on_disk) if on_disk is not None else None
     highest = max(_ids(current) + _ids(text) + [0])
     if highest > _last_id():
         _write(folder() / 'last-id', f'{highest}\n')
@@ -194,9 +247,182 @@ def _replace(current, text, everything=False, audit_before=None, before_write=No
         before_write()
     _write(_path(), text)
     _keep(text)
-    if audit_before is not None:
-        _audit_changes(audit_before, edited)
+    if audited:
+        recorded = audit_before is None or _audit_changes(audit_before, edited)
+        # When the file changed after the caller read it, this write may drop those changes. Keep the snapshot at
+        # the file before the write, so observe() records the whole difference (a repeat is better than a loss).
+        if seen is not None and recorded and on_disk == current:
+            # Only this write's own archived items join the seen set. Anything else new in DONE.md stays for observe().
+            moved = _audit_items(edited)[0].keys() - _audit_items(text)[0].keys()
+            _save_seen(text, seen | moved)
     return _state(text)
+
+
+def _audit_writable():
+    try:
+        place = audit.folder()
+        while not place.exists() and place != place.parent:
+            place = place.parent  # the audit folder is made on the first record
+        return os.access(place, os.W_OK | os.X_OK)
+    except OSError:
+        return False
+
+
+@contextlib.contextmanager
+def _audit_lock(block=True):
+    """Serialise catch-ups. The lock lives in the audit folder, which a sandboxed worker cannot write. The file is
+    write-only (0200), so the worker cannot open it read-only to hold the lock either."""
+    place = audit.folder()
+    place.mkdir(mode=0o700, parents=True, exist_ok=True)
+    handle = os.open(place / '.backlog-seen.lock', os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o200)
+    try:
+        os.fchmod(handle, 0o200)
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | (0 if block else fcntl.LOCK_NB))
+        except BlockingIOError:
+            yield False
+        else:
+            yield True
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(handle)  # also releases the lock; an error here must not fail a saved action
+
+
+def _save_seen(text, archived):
+    try:
+        _write(audit.folder() / _SEEN, json.dumps({'text': text, 'archived': sorted(archived)}))
+    except Exception as exc:
+        audit._warn(f'could not write the backlog snapshot ({type(exc).__name__}).')
+        return False
+    return True
+
+
+def _catch_up(text, *, archive=_READ):
+    """Record changes since the last audited list, and return the checked DONE.md IDs that the snapshot now holds, or
+    None when it did not advance. The caller holds the audit lock. An archive write can be half done or fail half way
+    (DONE.md has an item that BACKLOG.md still holds). Such an item is not counted as archived yet, so the next pass
+    sees it leave the list for DONE.md."""
+    try:
+        path = audit.folder() / _SEEN
+        old_archived = None
+        if path.exists():
+            seen = json.loads(_read(path))
+            before, old_archived = seen['text'], set(seen['archived'])
+        archived = _checked_archive(_read_archive() if archive is _READ else archive)
+        if archived and old_archived is not None:
+            # Defer only IDs that are new to the snapshot; the snapshot keeps the IDs it already holds.
+            listed = _audit_items(text)[0].keys()
+            archived = {ref: row for ref, row in archived.items() if ref not in listed or ref in (old_archived or ())}
+        if archived is None:
+            audit._warn('could not read the backlog archive; items that left the list count as removed.')
+        if old_archived is not None:
+            if before == text and (archived is None or old_archived == archived.keys()):
+                return old_archived
+            if not _audit_changes(before, text, observed=True, archived=archived or {}, old_archived=old_archived):
+                # Keep the old snapshot. A later pass can repeat successful records, which is better than losing one.
+                return None
+    except Exception as exc:
+        audit._warn(f'could not compare the backlog snapshot ({type(exc).__name__}).')
+        return None
+    # An unreadable archive keeps the old set, so its new entries still count once it can be read again. Items that
+    # left the list meanwhile were recorded as removed; their archive entries must not count again later.
+    refs = set(archived) if archived is not None else old_archived or set()
+    if archived is None and old_archived is not None:
+        refs |= _audit_items(before)[0].keys() - _audit_items(text)[0].keys()
+    return refs if _save_seen(text, refs) else None
+
+
+def _disk_text():
+    try:
+        text = _file_text(_read_file(_path(), 4 * LIMIT + 1))
+    except OSError as exc:
+        audit._warn(f'could not read the backlog for the audit ({type(exc).__name__}).')
+        return None
+    return text if len(text) <= LIMIT else None
+
+
+def _read_file(path, limit=-1):
+    # The sandbox can write in this folder. Refuse links and do not wait on pipes.
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return b''
+    with os.fdopen(fd, 'rb') as source:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f'{path.name} is not a regular file.')
+        return source.read(limit)
+
+
+def _file_text(contents):
+    return contents.decode('utf-8', errors='replace').replace('\r\n', '\n').replace('\r', '\n')
+
+
+def _read_archive():
+    """DONE.md, or None when it cannot be read (not a regular file, or too large). Unrelated changes still record."""
+    try:
+        contents = _read_file(folder() / 'DONE.md', ARCHIVE_READ + 1)
+    except OSError:
+        return None
+    return None if len(contents) > ARCHIVE_READ else contents
+
+
+def _backlog_files():
+    path = _path()
+    # DONE.md can change while BACKLOG.md returns to the same bytes.
+    return path, _read_file(path, 4 * LIMIT + 1), _read_archive()
+
+
+def _seen_revision():
+    # A CLI write can advance the snapshot between observations and invalidate the cached comparison.
+    path = audit.folder() / _SEEN
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return path, None
+    return path, (info.st_dev, info.st_ino, info.st_mtime_ns)
+
+
+def _backlog_lock_free(locked):
+    """A sandboxed worker can hold the backlog lock without end. Wait BUSY_LIMIT seconds, then observe without it."""
+    global _busy_since
+    if locked:
+        _busy_since = None
+        return True
+    now = time.monotonic()
+    if _busy_since is None:
+        _busy_since = now
+    return now - _busy_since >= BUSY_LIMIT
+
+
+def observe():
+    """Catch up after a file change. A failed observation never fails an audit request, and a busy lock skips it."""
+    global _observed_files
+    try:
+        if (_seen_revision(), _backlog_files()) == _observed_files:
+            return
+        with _audit_lock(block=False) as audit_locked, _try_locked() as locked:
+            if not audit_locked or not _backlog_lock_free(locked):
+                return
+            revision, files = _seen_revision(), _backlog_files()
+            if (revision, files) == _observed_files:
+                return
+            _, contents, archive = files
+            text = _file_text(contents)
+            if len(text) > LIMIT:
+                raise OSError('The backlog is too long to observe.')
+            if _catch_up(text, archive=archive) is not None:
+                _observed_files = _seen_revision(), files
+    except Exception as exc:
+        audit._warn(f'could not observe the backlog ({type(exc).__name__}).')
+
+
+def watch(stop=None, interval=2.0):
+    if stop is None:
+        stop = threading.Event()
+    while True:
+        observe()
+        if stop.wait(interval):
+            return
 
 
 def with_ids(text, before=''):
@@ -339,7 +565,11 @@ def _bare(text):
     return SOURCE.sub('', ID.sub('', text))
 
 
-def _audit_items(text):
+def _last_status(lines, label):
+    return next((line for line in reversed(lines) if line.lstrip().startswith(label)), None)
+
+
+def _audit_items(text, *, blocks=None, unnumbered_blocks=None):
     lines = text.split('\n')
     items, unnumbered = {}, Counter()
     project = None
@@ -348,14 +578,20 @@ def _audit_items(text):
         if heading:
             project = heading[1] or None
         elif item := ITEM.fullmatch(line):
-            doing = next((part.strip()[len('- Doing:'):].strip() for part in reversed(lines[at + 1:_item_end(lines, at)])
-                          if part.lstrip().startswith('- Doing:')), None)
+            end = _item_end(lines, at)
+            doing_line = _last_status(lines[at + 1:end], '- Doing:')
+            doing = doing_line.split(':', 1)[1].strip() if doing_line else None
             stage = 'done' if item[1] != ' ' else 'building' if doing is not None else 'ready'
             snapshot = (project, _bare(item[2]).strip(), stage, doing)
             if number := ID.search(line):
-                items[f'B{number[1]}'] = snapshot
+                ref = f'B{number[1]}'
+                items[ref] = snapshot
+                if blocks is not None:
+                    blocks[ref] = lines[at:end]
             else:
                 unnumbered[snapshot] += 1
+                if unnumbered_blocks is not None:
+                    unnumbered_blocks[snapshot].append(lines[at:end])
     return items, unnumbered
 
 
@@ -370,13 +606,66 @@ def done_ids():
     return {ident for ident, item in (archived | current).items() if item[2] == 'done'}
 
 
-def _audit_changes(before, after):
+def _pane_hint(kind, block):
+    if not block:
+        return None
+    if kind == 'backlog.add':
+        source = SOURCE.search(ID.sub('', block[0]))
+        if source and (pane := PANE_HINT.search(source[0])):
+            return pane[1]
+    if kind == 'backlog.done':
+        done = _last_status(block[1:], '- Done:')
+        dated = DONE_AT.fullmatch(done.rstrip()) if done else None
+        source = SOURCE.search(dated[2]) if dated and dated[2] else None
+        if source and source[0][0].isspace() and (pane := PANE_HINT.search(source[0])):
+            return pane[1]
+    if kind in ('backlog.start', 'backlog.done'):
+        doing = _last_status(block[1:], '- Doing:')
+        if doing:
+            who = doing.split(':', 1)[1].strip()
+            if SOURCE.fullmatch(f'({who})') and (pane := PANE_HINT.search(who)):
+                return pane[1]
+    return None
+
+
+def _checked_archive(contents):
+    if contents is None:
+        return None
+    blocks = {}
+    items, _ = _audit_items(_file_text(contents), blocks=blocks)
+    return {ref: (row, blocks[ref]) for ref, row in items.items() if row[2] == 'done'}
+
+
+def _audit_changes(before, after, *, observed=False, archived=None, old_archived=frozenset()):
     # The sheet saves a whole list, while the CLI and board change one item. Compare the intended items before
     # automatic archiving so the same action records once and archiving does not look like a deletion.
-    if before == after:
-        return
+    archived = archived or {}
+    new_archived = archived.keys() - old_archived
+    if before == after and not new_archived:
+        return True
     previous, unnumbered = _audit_items(before)
-    current, _ = _audit_items(after)
+    blocks = {}
+    unnumbered_blocks = defaultdict(list) if observed else None
+    current, current_unnumbered = _audit_items(after, blocks=blocks if observed else None,
+                                               unnumbered_blocks=unnumbered_blocks)
+    added_unnumbered = current_unnumbered - unnumbered
+    unnumbered -= current_unnumbered  # only items that left the unnumbered list can get an ID or be removed
+    succeeded = True
+
+    def record(kind, summary, *, block=(), **detail):
+        nonlocal succeeded
+        if observed:
+            pane = _pane_hint(kind, block)
+            actor = {'source': 'agent-cli', 'pane': pane} if pane else {'source': 'unknown'}
+            detail.update(observed=True, actor=actor)
+            summary += ' (seen in the file)'
+        try:
+            if audit.record(kind, summary, **detail) is None:
+                succeeded = False
+        except Exception as exc:
+            succeeded = False
+            audit._warn(f'could not record ({type(exc).__name__}).')
+
     by_title = defaultdict(list)
     if unnumbered:
         # An existing item can get its first ID during a write. Match unchanged items before matching a legacy
@@ -398,26 +687,46 @@ def _audit_changes(before, after):
                     previous[ref] = rows.pop(at)
     for ref, (project, title, stage, doing) in current.items():
         short = title[:80]
+        block = blocks.get(ref, ())
         if ref not in previous:
-            audit.record('backlog.add', f'{ref} added: {short}', project=project)
+            record('backlog.add', f'{ref} added: {short}', project=project, block=block)
+            if observed and stage != 'ready':  # an add and a start or done that the server saw in one change
+                record(f'backlog.{"start" if stage == "building" else "done"}',
+                       f'{ref} {"started" if stage == "building" else "done"}: {short}', project=project, block=block)
             continue
         old_project, _, old_stage, old_doing = previous[ref]
         if project != old_project:
-            audit.record('backlog.move', f'{ref} moved: {short}', project=project,
-                         from_project=old_project or 'Inbox', to_project=project or 'Inbox')
+            record('backlog.move', f'{ref} moved: {short}', project=project,
+                   from_project=old_project or 'Inbox', to_project=project or 'Inbox')
         if stage == 'building' and (stage != old_stage or doing != old_doing):
-            audit.record('backlog.start', f'{ref} started: {short}', project=project)
+            record('backlog.start', f'{ref} started: {short}', project=project, block=block)
         elif stage == 'done' and stage != old_stage:
-            audit.record('backlog.done', f'{ref} done: {short}', project=project)
+            record('backlog.done', f'{ref} done: {short}', project=project, block=block)
         elif stage == 'ready' and stage != old_stage:
-            audit.record('backlog.move', f'{ref} moved to Ready: {short}', project=project, from_stage=old_stage,
-                         to_stage=stage)
-    for ref, (project, title, _, _) in previous.items():
-        if ref not in current:
-            audit.record('backlog.remove', f'{ref} removed: {title[:80]}', project=project)
+            record('backlog.move', f'{ref} moved to Ready: {short}', project=project, from_stage=old_stage,
+                   to_stage=stage)
+    for ref, (project, title, stage, _) in previous.items():
+        if ref in current:
+            continue
+        if ref not in new_archived:  # an entry the snapshot already held does not vouch for this removal
+            record('backlog.remove', f'{ref} removed: {title[:80]}', project=project)
+        elif stage != 'done':
+            record('backlog.done', f'{ref} done: {title[:80]}', project=project, block=archived[ref][1])
+    for ref in sorted(new_archived - previous.keys() - current.keys()):
+        (project, title, _, _), block = archived[ref]
+        project = ARCHIVE_STAMP.sub('', project or '')
+        project = None if project == 'Inbox' else project
+        record('backlog.add', f'{ref} added: {title[:80]}', project=project, block=block)
+        record('backlog.done', f'{ref} done: {title[:80]}', project=project, block=block)
+    if observed:
+        for row, count in added_unnumbered.items():
+            project, title, _, _ = row
+            for block in unnumbered_blocks[row][-count:]:
+                record('backlog.add', f'Added backlog item: {title[:80]}', project=project, block=block)
     for rows in by_title.values():
         for project, title, _, _ in rows:
-            audit.record('backlog.remove', f'Removed backlog item: {title[:80]}', project=project)
+            record('backlog.remove', f'Removed backlog item: {title[:80]}', project=project)
+    return succeeded
 
 
 def _by_id(lines, number, need_open):
@@ -543,6 +852,8 @@ def mark_done(query, project='', result='', who=''):
 
 def _done_line(result, who):
     """The Done line, dated, so the work board can show the item for a week (board_items)."""
+    if not who and SOURCE.search(result or ''):
+        who = 'unknown'  # else the result's own (codex · pane %N) would read as the who part (B303)
     return f'  - Done: {time.strftime("%Y-%m-%d %H:%M")} · {result or "finished"}{f" ({who})" if who else ""}'
 
 

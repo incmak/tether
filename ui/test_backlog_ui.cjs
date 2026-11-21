@@ -250,9 +250,12 @@ async function main() {
           && await sheet.getByRole('button', { name: 'Add backlog search', exact: true }).evaluate(node => node === document.activeElement))
         await page.keyboard.press('ArrowDown')
         const saves = posts.length
-        await pane.getByRole('checkbox', { name: 'draw the stripes' }).check()
+        const [stepSave] = await Promise.all([
+          page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/api/projects/backlog')),
+          pane.getByRole('checkbox', { name: 'draw the stripes' }).check(),
+        ])
         await pane.getByText('2 of 2').waitFor()
-        check(`${at} a step saves from the details`, posts.length === saves + 1 && posts.at(-1).text.includes('  - [x] draw the stripes'))
+        check(`${at} a step saves from the details`, stepSave.ok() && posts.length === saves + 1 && posts.at(-1).text.includes('  - [x] draw the stripes'))
         // An agent renames the item during a Reword: Tether asks before it writes over the new title.
         const agentSaves = text => { saved = { ...saved, text, version: `agent${Date.now()}` } }
         await pane.getByRole('button', { name: 'Reword' }).click()
@@ -270,10 +273,12 @@ async function main() {
         agentSaves(saved.text.replace(/- \[ \] Zebra theirs #B9\n(  - .*\n)*/, ''))
         await pane.getByText('This item is gone').waitFor({ timeout: 6000 })
         check(`${at} a gone item keeps the new wording`, (await pane.innerText()).includes('Zebra kept'))
-        await pane.getByRole('button', { name: 'Add as a new item' }).click()
+        const [addSave] = await Promise.all([
+          page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/api/projects/backlog')),
+          pane.getByRole('button', { name: 'Add as a new item' }).click(),
+        ])
         await page.waitForFunction(() => document.querySelector('#backlog-detail .backlog-detail-kept') === null)
-        await page.waitForTimeout(1200)
-        check(`${at} Add as a new item saves the words`, posts.at(-1).text.includes('- [ ] Zebra kept'))
+        check(`${at} Add as a new item saves the words`, addSave.ok() && posts.at(-1).text.includes('- [ ] Zebra kept'))
         agentSaves(backlog)
         await pane.locator('#backlog-detail-title', { hasText: /^Zebra item$/ }).waitFor({ timeout: 6000 })
         await zebra.focus()

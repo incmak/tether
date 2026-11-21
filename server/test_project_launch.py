@@ -34,6 +34,11 @@ class UnitTests(unittest.TestCase):
             patch = mock.patch.object(paths, name, value)
             patch.start()
             self.addCleanup(patch.stop)
+        for name, file in (('SYSTEM_CONFIG', 'system.toml'), ('MANAGED_CONFIG', 'managed.toml'),
+                           ('MANAGED_PREFERENCES', 'managed-preferences')):
+            patch = mock.patch.object(project_launch, name, self.temp / file)
+            patch.start()
+            self.addCleanup(patch.stop)
         patch = mock.patch.dict(os.environ, {'TMUX': '', 'TMUX_PANE': '', 'CODEX_HOME': '',
                                              'TETHER_CDP_URL': '', 'PLAYWRIGHT_MCP_CDP_ENDPOINT': '',
                                              'TETHER_LAUNCH': ''})
@@ -459,6 +464,271 @@ class UnitTests(unittest.TestCase):
                            '--add-dir', str(paths.reminders())]
                 self.assertIn(folders, [argv[i:i+len(folders)] for i in range(len(argv))])
                 self.assertFalse(any(arg.startswith('shell_environment_policy.set.TETHER_CDP_URL') for arg in argv))
+
+    def instruction_repo(self, name='repo'):
+        repo = self.temp / name
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        return repo
+
+    @staticmethod
+    def instruction_layer(folder, contents):
+        layer = folder / '.codex' / 'config.toml'
+        layer.parent.mkdir(parents=True, exist_ok=True)
+        layer.write_text(contents)
+        return layer
+
+    @staticmethod
+    def project_trust(folder, level='trusted'):
+        key = project_launch.toml_string(os.path.realpath(folder))
+        return f'\n[projects.{key}]\n' + (f'trust_level = "{level}"\n' if level else '')
+
+    def assert_codex_text(self, cwd, text, args=()):
+        heading = text + '\n\n' if text is not None else ''
+        override = 'developer_instructions=' + project_launch.toml_string(heading + self.block(None))
+        self.assertEqual(project_launch.codex_args(None, list(args), cwd=cwd), ['-c', override, *args])
+
+    def test_codex_trusted_instructions_replace_home_text(self):
+        repo = self.instruction_repo()
+        self.config('developer_instructions = "home"' + self.project_trust(repo))
+        self.instruction_layer(repo, 'developer_instructions = "repo"')
+        self.assert_codex_text(repo, 'repo')
+
+    def test_codex_untrusted_instructions_leave_home_or_tether_text(self):
+        repo = self.instruction_repo()
+        without_layer = project_launch.codex_args(PID, [], cwd=repo)
+        self.instruction_layer(repo, 'developer_instructions = "repo"\n' + self.project_trust(repo))
+        for trust in ('', self.project_trust(repo, 'untrusted')):
+            with self.subTest(trust=trust):
+                self.config(trust)
+                self.assertEqual(project_launch.codex_args(PID, [], cwd=repo), without_layer)
+                self.config('developer_instructions = "home"' + trust)
+                self.assert_codex_text(repo, 'home')
+
+    def test_codex_empty_project_layers_leave_home_text(self):
+        repo = self.instruction_repo()
+        self.config('developer_instructions = "home"' + self.project_trust(repo))
+        (repo / '.codex').mkdir()
+        self.assert_codex_text(repo, 'home')
+        self.instruction_layer(repo, 'sandbox_mode = "workspace-write"')
+        self.assert_codex_text(repo, 'home')
+
+    def test_codex_nested_trust_and_layer_order(self):
+        repo = self.instruction_repo()
+        nested = repo / 'src'
+        nested.mkdir()
+        root_trust = self.project_trust(repo)
+        self.config(root_trust)
+        self.instruction_layer(repo, 'developer_instructions = "root"')
+        self.assert_codex_text(nested, 'root')
+        self.instruction_layer(nested, 'developer_instructions = "nested"')
+        for level, expected in (('trusted', 'nested'), ('untrusted', 'root'), (None, 'nested')):
+            with self.subTest(level=level):
+                self.config(root_trust + self.project_trust(nested, level))
+                self.assert_codex_text(nested, expected)
+
+    def test_codex_project_layers_stop_at_git_root(self):
+        repo = self.instruction_repo()
+        self.config('developer_instructions = "home"' + self.project_trust(self.temp))
+        self.instruction_layer(self.temp, 'developer_instructions = "above root"')
+        self.assert_codex_text(repo, 'home')
+
+    def test_codex_worktree_uses_main_checkout_trust_only(self):
+        repo = self.instruction_repo()
+        git = ['git', '-C', str(repo), '-c', 'user.email=t@example.com', '-c', 'user.name=t']
+        subprocess.run([*git, 'commit', '-q', '--allow-empty', '-m', 'x'], check=True)
+        linked = self.temp / 'linked'
+        subprocess.run([*git, 'worktree', 'add', '-q', str(linked)], check=True)
+        self.config('developer_instructions = "home"' + self.project_trust(repo))
+        self.instruction_layer(repo, 'developer_instructions = "main"')
+        self.assert_codex_text(linked, 'home')
+        self.instruction_layer(linked, 'developer_instructions = "worktree"')
+        self.assert_codex_text(linked, 'worktree')
+
+    def test_codex_cli_instructions_win_over_trusted_project_layer(self):
+        repo = self.instruction_repo()
+        self.config(self.project_trust(repo))
+        self.instruction_layer(repo, 'developer_instructions = "repo"')
+        args = ['resume', '--config=developer_instructions="cli"']
+        self.assertEqual(project_launch.codex_args(None, args, cwd=repo), [
+            'resume', '--config=developer_instructions=' + project_launch.toml_string('cli\n\n' + self.block(None))])
+
+    def test_codex_ignore_user_config_drops_user_and_profile_but_keeps_cli_trust(self):
+        repo = self.instruction_repo()
+        trust = self.project_trust(repo)
+        self.config('developer_instructions = "home"' + trust)
+        (paths.CODEX / 'work.config.toml').write_text('developer_instructions = "profile"' + trust)
+        self.instruction_layer(repo, 'developer_instructions = "repo"')
+        args = ['--ignore-user-config', '-p', 'work']
+        self.assert_codex_text(repo, None, args)
+        self.assert_codex_text(repo, 'repo', [*args, '-c', f'projects.{os.path.realpath(repo)}.trust_level="trusted"'])
+
+    def test_codex_invalid_or_unreadable_config_omits_override(self):
+        repo = self.instruction_repo()
+        self.config('developer_instructions = "home"' + self.project_trust(repo))
+        files = (project_launch.SYSTEM_CONFIG, paths.CODEX / 'config.toml', paths.CODEX / 'work.config.toml',
+                 project_launch.MANAGED_CONFIG, self.instruction_layer(repo, 'developer_instructions = "repo"'))
+        args = ['-p', 'work']
+        read_text = Path.read_text
+        for file in files:
+            with self.subTest(file=file):
+                original = file.read_text() if file.exists() else ''
+                file.write_text('invalid [toml')
+                self.assertEqual(project_launch.codex_args(None, args, cwd=repo), args)
+                file.write_text(original)
+
+                def read(path, *a, **kw):
+                    if os.path.realpath(path) == os.path.realpath(file):
+                        raise PermissionError(path)
+                    return read_text(path, *a, **kw)
+
+                with mock.patch.object(Path, 'read_text', read):
+                    self.assertEqual(project_launch.codex_args(None, args, cwd=repo), args)
+
+    def test_codex_legacy_profile_or_invalid_markers_omit_override(self):
+        repo = self.instruction_repo()
+        for config, args in (('profile = "old"', []), ('', ['-c', 'profile="old"']),
+                             ('project_root_markers = false', []), ('project_root_markers = [1]', []),
+                             ('', ['-c', 'project_root_markers.invalid=".git"'])):
+            with self.subTest(config=config, args=args):
+                self.config(config)
+                self.assertEqual(project_launch.codex_args(None, args, cwd=repo), args)
+
+    def test_codex_unmodelled_managed_config_uses_home_and_rules(self):
+        repo = self.instruction_repo()
+        self.config('developer_instructions = "home"' + self.project_trust(repo))
+        self.instruction_layer(repo, 'invalid [toml')  # The trusted project file would normally cancel the override.
+        prefs = project_launch.MANAGED_PREFERENCES / 'user'
+        prefs.mkdir(parents=True)
+        (prefs / 'com.openai.codex.plist').touch()
+        for platform in ('darwin', 'win32'):
+            with self.subTest(platform=platform), mock.patch.object(project_launch.sys, 'platform', platform):
+                self.assert_codex_text(repo, 'home')
+
+    def test_codex_never_opens_untrusted_instruction_layer(self):
+        repo = self.instruction_repo()
+        self.config('developer_instructions = "home"' + self.project_trust(repo, 'untrusted'))
+        without_layer = project_launch.codex_args(None, [], cwd=repo)
+        layer = self.instruction_layer(repo, 'invalid [toml')
+        with mock.patch.object(project_launch, '_toml', wraps=project_launch._toml) as load:
+            self.assertEqual(project_launch.codex_args(None, [], cwd=repo), without_layer)
+            self.assertNotIn(os.path.realpath(layer), [os.path.realpath(call.args[0]) for call in load.call_args_list])
+        layer_dir = os.path.realpath(layer.parent)
+        stat = os.stat
+
+        def deny_layer_dir(path, *args, **kwargs):
+            if str(path) == layer_dir:
+                raise PermissionError(path)
+            return stat(path, *args, **kwargs)
+
+        with mock.patch.object(os, 'stat', deny_layer_dir):
+            self.assertEqual(project_launch.codex_args(None, [], cwd=repo), without_layer)
+
+    def test_codex_profile_overrides_home_text_and_trust(self):
+        repo = self.instruction_repo()
+        profile = paths.CODEX / 'work.config.toml'
+        self.config('developer_instructions = "home"' + self.project_trust(repo))
+        profile.write_text('developer_instructions = "profile"' + self.project_trust(repo, 'untrusted'))
+        self.instruction_layer(repo, 'developer_instructions = "repo"')
+        for args in (['-p', 'work'], ['--profile', 'work'], ['--profile=work']):
+            with self.subTest(args=args):
+                self.assert_codex_text(repo, 'profile', args)
+        self.config('developer_instructions = "home"')
+        profile.write_text('developer_instructions = "profile"' + self.project_trust(repo))
+        self.assert_codex_text(repo, 'repo', ['-p', 'work'])
+
+    def test_codex_cli_discovery_splits_dots_literally_and_replaces_intermediate_scalars(self):
+        repo = self.instruction_repo('repo.with.dot')
+        self.instruction_layer(repo, 'developer_instructions = "dotted"')
+        dotted_key = project_launch.toml_string(os.path.realpath(repo))
+        self.assert_codex_text(repo, None, ['-c', f'projects.{dotted_key}.trust_level="trusted"'])
+        repo = self.instruction_repo('plain')
+        self.instruction_layer(repo, 'developer_instructions = "plain"')
+        key = os.path.realpath(repo)
+        trust = ['-c', f'projects.{key}.trust_level="trusted"']
+        self.assert_codex_text(repo, 'plain', trust)
+        self.assert_codex_text(repo, 'plain', ['-c', 'projects=1', '-c', f'projects.{key}=false', *trust])
+        self.assert_codex_text(repo, None, [*trust, '-c', 'projects={}'])
+
+    def test_codex_managed_instructions_and_trust_have_highest_precedence(self):
+        repo = self.instruction_repo()
+        self.config(self.project_trust(repo, 'untrusted'))
+        self.instruction_layer(repo, 'developer_instructions = "repo"')
+        args = ['-c', f'projects.{os.path.realpath(repo)}.trust_level="untrusted"']
+        project_launch.MANAGED_CONFIG.write_text(self.project_trust(repo))
+        self.assert_codex_text(repo, 'repo', args)
+        project_launch.MANAGED_CONFIG.write_text('developer_instructions = "managed"')
+        self.assertEqual(project_launch.codex_args(None, args, cwd=repo), args)
+
+    def test_codex_system_config_provides_instructions_and_trust(self):
+        repo = self.instruction_repo()
+        project_launch.SYSTEM_CONFIG.write_text('developer_instructions = "system"' + self.project_trust(repo))
+        self.assert_codex_text(repo, 'system')
+        self.config('developer_instructions = "home"')
+        self.assert_codex_text(repo, 'home')
+        self.instruction_layer(repo, 'developer_instructions = "repo"')
+        self.assert_codex_text(repo, 'repo')
+
+    def test_codex_cd_selects_start_folder(self):
+        repo = self.instruction_repo()
+        self.config(self.project_trust(repo))
+        self.instruction_layer(repo, 'developer_instructions = "root"')
+        self.instruction_layer(repo / 'src', 'developer_instructions = "nested"')
+        self.assert_codex_text(repo, 'root')
+        self.assert_codex_text(repo, 'nested', ['-C', 'src'])
+        self.assert_codex_text(self.temp, 'nested', ['--cd=repo/src'])
+
+    def test_codex_cd_tries_canonical_trust_key_before_logical_key(self):
+        repo = self.instruction_repo()
+        alias = self.temp / 'alias'
+        alias.symlink_to(repo)
+        self.instruction_layer(repo, 'developer_instructions = "repo"')
+        logical = f'[projects."{os.path.realpath(self.temp)}/alias"]\ntrust_level = "trusted"\n'
+        self.config(logical)
+        self.assert_codex_text(self.temp, 'repo', ['-C', 'alias'])
+        self.config(logical + self.project_trust(repo, 'untrusted'))
+        self.assert_codex_text(self.temp, None, ['-C', 'alias'])
+
+    def test_codex_cd_keeps_logical_ancestors_for_git_trust(self):
+        repo = self.instruction_repo()
+        nested = repo / 'src'
+        self.instruction_layer(nested, 'developer_instructions = "nested"')
+        (self.temp / 'alias').symlink_to(nested)
+        self.config(self.project_trust(repo))
+        self.assert_codex_text(repo, 'nested', ['-C', 'src'])
+        self.assert_codex_text(self.temp, None, ['-C', 'alias'])
+
+    def test_codex_managed_worktree_does_not_use_source_instructions(self):
+        repo = self.instruction_repo()
+        self.config('developer_instructions = "home"' + self.project_trust(repo))
+        self.instruction_layer(repo, 'developer_instructions = "source repo"')
+        self.assert_codex_text(repo, 'home', ['--worktree'])
+
+    def test_codex_project_markers_can_change_or_disable_root_discovery(self):
+        repo = self.instruction_repo()
+        nested = repo / 'src'
+        nested.mkdir()
+        (nested / '.git').mkdir()  # Missing HEAD, so it is not a marker.
+        self.config(self.project_trust(repo))
+        self.instruction_layer(repo, 'developer_instructions = "root"')
+        self.assert_codex_text(nested, 'root')
+        self.assert_codex_text(nested, None, ['-c', 'project_root_markers=[]'])
+        (nested / '.project').touch()
+        self.config('project_root_markers = [".project"]' + self.project_trust(repo))
+        self.assert_codex_text(nested, None)
+        self.assert_codex_text(nested, 'root', ['-c', 'project_root_markers=[".git"]'])
+
+    def test_codex_home_directory_is_not_a_project_layer_even_through_a_symlink(self):
+        repo = self.instruction_repo()
+        self.config('developer_instructions = "home"' + self.project_trust(repo))
+        (paths.CODEX / 'work.config.toml').write_text('developer_instructions = "profile"')
+        (repo / '.codex').symlink_to(paths.CODEX)
+        self.assert_codex_text(repo, 'profile', ['-p', 'work'])
+
+    def test_codex_non_string_project_instructions_omit_override(self):
+        repo = self.instruction_repo()
+        self.config('developer_instructions = "home"' + self.project_trust(repo))
+        self.instruction_layer(repo, 'developer_instructions = 1')
+        self.assertEqual(project_launch.codex_args(None, ['resume'], cwd=repo), ['resume'])
 
     def test_hook_prints_context_or_nothing(self):
         def run_hook(pid):

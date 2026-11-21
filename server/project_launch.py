@@ -258,15 +258,16 @@ def _gitdir(dot_git):
     return _join(dot_git.parent, target)
 
 
-def _repo_root(cwd):
+def _repo_root(cwd, *, logical=False):
     """The trust root Codex uses: the main checkout of a repository, also for a linked worktree.
-    A port of git-utils/src/trust.rs resolve_root (same in Codex 0.166 and 0.169); git itself is not run.
+    A port of git-utils/src/trust.rs resolve_root (same in Codex 0.166 through 0.170); git itself is not run.
     Find the nearest folder with a .git entry, skipping .git folders without HEAD. A .git folder is its own root.
     A .git file counts only for a registered linked worktree: its gitdir is <common>/worktrees/<name>,
     whose gitdir and commondir files point back to this checkout and to <common>, and the main checkout
     owns <common>. A submodule or a --separate-git-dir checkout gives no root. Where this port may differ
     from Codex (a symlinked .git), it gives no root, so Tether starts Codex without --add-dir."""
-    base = _canon(cwd)  # Codex gets its cwd from the kernel, with symlinks resolved
+    # The process cwd is canonical, but Codex can preserve nested symlinks passed to --cd.
+    base = str(cwd) if logical else _canon(cwd)
     if base is None:
         return None
     if not os.path.isdir(base):
@@ -324,7 +325,9 @@ def _repo_root(cwd):
     return main_root
 
 
-SYSTEM_FILES = ('/etc/codex/config.toml', '/etc/codex/requirements.toml', '/etc/codex/managed_config.toml')
+SYSTEM_CONFIG = '/etc/codex/config.toml'
+MANAGED_CONFIG = '/etc/codex/managed_config.toml'
+SYSTEM_FILES = (SYSTEM_CONFIG, '/etc/codex/requirements.toml', MANAGED_CONFIG)
 MANAGED_PREFERENCES = '/Library/Managed Preferences'
 
 
@@ -332,8 +335,11 @@ def _managed():
     """True when Codex can load system or administrator config: /etc/codex files, or on macOS forced (MDM)
     preferences for com.openai.codex (config/src/loader/macos.rs), stored for all users or for one user.
     Other systems (Windows) are not modelled, so they count as managed."""
-    if any(os.path.exists(path) for path in SYSTEM_FILES):
-        return True
+    return any(os.path.exists(path) for path in SYSTEM_FILES) or _unmodelled_managed_config()
+
+
+def _unmodelled_managed_config():
+    """Detect macOS MDM preferences (config/src/loader/macos.rs) or an unsupported platform."""
     if sys.platform == 'darwin':
         name = 'com.openai.codex.plist'
         try:
@@ -452,13 +458,149 @@ def codex_folders(args=()):
     return out
 
 
-def codex_args(pid, args, group=None):
+def _cli_discovery_layer(options):
+    """Build the discovery fields of the CLI layer as config/src/overrides.rs apply_toml_override does."""
+    layer = {}
+    for arg in _option(options, '-c', '--config'):
+        key, sep, value = arg.partition('=')
+        parts = key.strip().split('.')
+        if not sep:
+            continue
+        if parts == ['profile']:
+            return None
+        if parts[0] not in ('projects', 'project_root_markers'):
+            continue
+        table = layer
+        for part in parts[:-1]:
+            if not isinstance(table.get(part), dict):
+                table[part] = {}
+            table = table[part]
+        table[parts[-1]] = _override(value)
+    return layer
+
+
+def _merge_tables(base, overlay):
+    """Merge the discovery tables like config/src/merge.rs merge_toml_values."""
+    merged = {**base, **overlay}
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            merged[key] = _merge_tables(base[key], value)
+    return merged
+
+
+def _has_project_marker(folder, marker):
+    path = _join(folder, marker)
+    return path is not None and os.path.exists(path) and (
+        marker != '.git' or not os.path.isdir(path) or os.path.exists(os.path.join(path, 'HEAD')))
+
+
+def _trust_keys(path):
+    if path is not None:
+        raw = str(path)
+        real = _canon(raw)
+        if real and real != raw:
+            yield real
+        yield raw
+
+
+def _project_trust(config):
+    """Read typed trust decisions as config/src/loader/mod.rs project_trust_context does."""
+    entries = config.get('projects', {})
+    if not isinstance(entries, dict) or any(
+        not isinstance(entry, dict) or ('trust_level' in entry and entry['trust_level'] not in ('trusted', 'untrusted'))
+        for entry in entries.values()
+    ):
+        return None
+    return {key: entry['trust_level'] for key, entry in entries.items() if 'trust_level' in entry}
+
+
+def _trusted_project_configs(cwd, home, markers, trust):
+    """Port config/src/loader/mod.rs discover_project_root, decision_for_dir and discover_project_layers.
+    Resolve trust for every layer before the caller reads any project config."""
+    folders = [cwd, *cwd.parents]
+    root_index = next((i for i, folder in enumerate(folders)
+                       if any(_has_project_marker(folder, marker) for marker in markers)), 0)
+    inherited = [*_trust_keys(folders[root_index]), *_trust_keys(_repo_root(cwd, logical=True))]
+    home_real = _canon(home)
+    for folder in reversed(folders[:root_index + 1]):
+        level = next((trust[key] for key in [*_trust_keys(folder), *inherited] if key in trust), None)
+        if level != 'trusted':
+            continue
+        layer = folder / '.codex'
+        if os.path.isdir(layer) and layer != home and not (home_real and _canon(layer) == home_real):
+            yield layer / 'config.toml'
+
+
+def _instruction_cwd(options, cwd):
+    """Resolve --cd like utils/absolute-path/src/lib.rs canonicalize_existing_preserving_symlinks."""
+    base = (_canon(cwd) or cwd) if cwd is not None else os.getcwd()
+    cd = (_option(options, '-C', '--cd') or [''])[-1]
+    logical = _join(base, cd)
+    real = _canon(os.path.join(base, cd))
+    if not logical or not real:
+        return None
+    folder = Path(logical)
+    if logical != real and any(parent.is_symlink() for parent in [folder, *folder.parents][:-2]):
+        return folder  # Keep nested symlinks; canonicalize top-level aliases such as macOS /tmp.
+    return Path(real)
+
+
+def _instruction_config(options, cwd):
+    """Select local instructions using config/src/loader/mod.rs load_config_layers_state.
+    Enterprise cloud config bundles are not readable locally and are not modelled."""
+    import paths
+    home = Path(os.environ.get('CODEX_HOME') or paths.CODEX).absolute()
+    system, managed = _toml(SYSTEM_CONFIG), _toml(MANAGED_CONFIG)
+    if system is None or managed is None or 'developer_instructions' in managed:
+        return None
+    user, profile = {}, {}
+    if '--ignore-user-config' not in options:
+        user = _toml(home / 'config.toml')
+        if user is None or isinstance(user.get('profile'), str):
+            return None
+        name = (_option(options, '-p', '--profile') or [''])[-1]
+        if name:
+            # ProfileV2Name (protocol/src/config_types.rs) accepts plain ASCII names only.
+            if not re.fullmatch(r'[A-Za-z0-9_-]+', name):
+                return None
+            profile = _toml(home / f'{name}.config.toml')
+            if profile is None:
+                return None
+
+    cli = _cli_discovery_layer(options)
+    if cli is None:
+        return None
+    discovery = {}
+    for layer in (system, user, profile, cli, managed):
+        discovery = _merge_tables(discovery, {k: layer[k] for k in ('projects', 'project_root_markers') if k in layer})
+    markers = discovery.get('project_root_markers', ['.git'])
+    if not isinstance(markers, list) or not all(isinstance(marker, str) for marker in markers):
+        return None
+
+    config = {**system, **user, **profile}
+    if _unmodelled_managed_config() or '--worktree' in options:
+        return config  # The final checkout of --worktree is chosen by Codex after startup.
+    trust = _project_trust(discovery)
+    if trust is None:
+        return None  # project_trust_context cannot deserialize the projects table.
+    start = _instruction_cwd(options, cwd)
+    if start is None:
+        return config
+    for path in list(_trusted_project_configs(start, home, markers, trust)):
+        layer = _toml(path)
+        if layer is None:
+            return None
+        if 'developer_instructions' in layer:
+            config['developer_instructions'] = layer['developer_instructions']
+    return config
+
+
+def codex_args(pid, args, group=None, cwd=None):
     options = args[:args.index('--')] if '--' in args else args
     if any(arg in CODEX_PLAIN for arg in options):
         return args
     import autonomy
     import codex_level
-    import paths
     # Children inherit the root developer_instructions, and Codex rebuilds them after compaction. Do not set
     # features.multi_agent_v2.subagent_developer_instructions: it would replace what children inherit.
     block = autonomy.codex_standing_rules(autonomy.resolve(pid), codex_level.resolve(pid))
@@ -474,9 +616,9 @@ def codex_args(pid, args, group=None):
                 args[i] = prefix + 'developer_instructions=' + toml_string(user + '\n\n' + block)
             return [*folder_args, *args]
 
-    config = {} if '--ignore-user-config' in options else _toml(Path(os.environ.get('CODEX_HOME') or paths.CODEX) / 'config.toml')
+    config = _instruction_config(options, cwd)
     if config is None:
-        return [*folder_args, *args]  # An unreadable config may contain user instructions.
+        return [*folder_args, *args]
     if 'developer_instructions' in config:
         user = config['developer_instructions']
         root_args = ['-c', 'developer_instructions=' + toml_string(user + '\n\n' + block)] if isinstance(user, str) else []

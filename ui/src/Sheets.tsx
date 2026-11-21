@@ -3,10 +3,11 @@ import { canMoveInto, moveIntoTask, taskChildren } from './taskTree'
 import { Bone, Loading, Skeleton } from './Skeleton'
 import { useWords, count } from './words'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { FolderInput, Eye, Archive, ListChecks, ArchiveRestore, ArrowDown, BookMarked, ArrowUp, Bell, Check, Columns2, GitFork, LayoutDashboard, Merge, ArrowRightLeft, Plus, PanelBottom, PanelRight, Pencil, Pin, PinOff, Shapes, Sparkles, RotateCw, Rows2, Square, Trash2, X } from 'lucide-react'
+import { FolderInput, Eye, Archive, ListChecks, ArchiveRestore, ArrowDown, BookMarked, ArrowUp, Bell, Check, Columns2, GitFork, LayoutDashboard, Merge, ArrowRightLeft, Plus, PanelBottom, PanelRight, Pencil, Pin, PinOff, Shapes, Sparkles, RotateCw, Rows2, Square, Trash2, Network, X } from 'lucide-react'
 import { ColorRow, GroupPicker } from './Organize'
 import type { SessionGroup, TagColor } from './Organize'
 import { ReviewLinkPicker } from './ReviewLinks'
+import { CoordinatorPicker, canCoordinate, coordinatorLabel } from './Coordinator'
 import { SelectMenu } from './SelectMenu'
 import { TabAdvisor } from './ClaudeAdvisor'
 import { SESSION_NAME, SESSION_NAME_HELP, canFork, creditsLabel, errorText, usageLabel } from './api'
@@ -208,7 +209,10 @@ export function PaneActions({ api, session, tabCount, archived, pane, panes, at,
   api: Api; session: Session | undefined; tabCount: number; archived: boolean; pane: Pane; panes: Pane[]; at?: Anchor; place?: Place; targets: Session[]; onArchive: () => void; onFork?: () => void; onDone: (newPane?: string, direction?: 'right' | 'down') => void; onClose: () => void
 }) {
   const words = useWords()
-  const [mode, setMode] = useState<'menu' | 'rename' | 'icon' | 'close' | 'move' | 'review' | 'group' | 'new-group' | 'task-move'>(startClose ? 'close' : 'menu')
+  const [mode, setMode] = useState<'menu' | 'rename' | 'icon' | 'close' | 'move' | 'review' | 'coordinator' | 'group' | 'new-group' | 'task-move'>(startClose ? 'close' : 'menu')
+  // The chat the Coordinator picker opened for, and the menu item that gets focus back after Back.
+  const [coordinatorThread, setCoordinatorThread] = useState<string | null>(null)
+  const [backFrom, setBackFrom] = useState<'coordinator' | null>(null)
   const [name, setName] = useState(pane.pane_name ?? '')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
@@ -261,6 +265,8 @@ export function PaneActions({ api, session, tabCount, archived, pane, panes, at,
       ? <NewGroup api={api} session={session} panes={[pane]} mainModel={mainModel} onClose={() => setMode('group')} onDone={() => onDone(undefined)} />
       : mode === 'review'
       ? <ReviewLinkPicker pane={pane} panes={panes} pending={pending} onBack={() => setMode('menu')} onPick={(worker, reviewer) => void run(async () => { await api('review-link', { worker, reviewer }); return undefined })} />
+      : mode === 'coordinator'
+      ? <CoordinatorPicker pane={pane} panes={panes} thread={coordinatorThread} pending={pending} error={error} onBack={() => { setError(''); setBackFrom('coordinator'); setMode('menu') }} onPick={(choice, take) => void run(async () => { await api('coordinator-role', { pane: pane.id, thread: coordinatorThread, mode: choice, take }); return undefined })} />
       : mode === 'icon'
       ? <IconPicker api={api} pane={pane} pending={pending} run={run} onBack={() => setMode('menu')} />
       : closingTask
@@ -284,6 +290,7 @@ export function PaneActions({ api, session, tabCount, archived, pane, panes, at,
           <button disabled={pending} onClick={() => setMode('move')}><ArrowRightLeft size={18} />Move to session…</button>
           {session && <button disabled={pending} onClick={() => setMode('group')}><FolderInput size={18} />Move to stack…{!!session.groups?.length && <small>{placeName(pane.group ?? '', session.groups)}</small>}</button>}
           {(pane.agent === 'claude' || pane.agent === 'codex') && <button disabled={pending} onClick={() => setMode('review')}><Eye size={18} />Link a review…</button>}
+          {canCoordinate(pane) && <button disabled={pending} autoFocus={backFrom === 'coordinator'} onClick={() => { setError(''); setCoordinatorThread(pane.thread); setMode('coordinator') }}><Network size={18} />Coordinator…{pane.coordinator && <small>{coordinatorLabel(pane.coordinator)}</small>}</button>}
           <hr />
           <PlaceItems place={place} pending={pending} onClose={onClose} />
           <button disabled={pending} onClick={() => void split('right')}><Columns2 size={18} />{words.newRight}{words.tmux && <kbd>Ctrl-b %</kbd>}</button>
@@ -294,7 +301,7 @@ export function PaneActions({ api, session, tabCount, archived, pane, panes, at,
           <button disabled={pending} onClick={() => { onArchive(); onClose() }}>{archived ? <ArchiveRestore size={18} /> : <Archive size={18} />}{archived ? 'Restore' : 'Archive'} {words.pane}</button>
           <button className="danger-item" disabled={pending} onClick={() => setMode('close')}><Trash2 size={18} />Close {words.pane}{words.tmux && <kbd>Ctrl-b x</kbd>}</button>
         </div>}
-    {error && <p className="error" role="alert">{error}</p>}
+    {error && mode !== 'coordinator' && <p className="error" role="alert">{error}</p>}
   </dialog>
 }
 

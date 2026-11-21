@@ -105,7 +105,8 @@ REFUSED = {
         # These can type into, start, stop, or reconfigure a terminal or agent.
         'approval', 'ask-answer', 'ask-engage', 'attention/digest', 'attention/handled',
         'attention/opened', 'attention/snooze', 'auto-resume', 'broadcast', 'clear-draft',
-        'continue', 'continue-preview', 'delegate', 'dialog', 'fork', 'groups/close', 'key', 'live/summary',
+        'continue', 'continue-preview', 'coordinator-role', 'delegate', 'dialog', 'fork', 'groups/close', 'key',
+        'live/summary',
         'menu', 'merge', 'message', 'mode', 'model', 'model-options', 'pane-icon', 'pane-icon/draw',
         'pane-name', 'pick', 'projects/backlog-start', 'prompt-action', 'quick-tab/move',
         'quick-tab/route', 'quick-tab/start', 'rename', 'resume', 'review-link', 'review-stop',

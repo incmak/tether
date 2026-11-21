@@ -7,7 +7,10 @@ from http.server import HTTPServer
 import io
 import json
 import multiprocessing
+import os
+from pathlib import Path
 from queue import Queue
+import tempfile
 import threading
 import time
 import unittest
@@ -15,6 +18,7 @@ from unittest.mock import patch
 
 import agent_coordinator_cli as cli
 import coordinator
+import history
 import paths
 
 
@@ -38,7 +42,7 @@ class Tmux:
 
 def tab(pane, session='$0', agent='claude', **extra):
     return dict({'id': pane, 'tmux_session': session, 'agent': agent, 'writable': True, 'owner_pid': 1,
-                 'pane_name': 'tab ' + pane[1:]}, **extra)
+                 'pane_name': 'tab ' + pane[1:], 'transcript': 'tab-' + pane[1:] + '.jsonl'}, **extra)
 
 
 class World:
@@ -47,6 +51,8 @@ class World:
         self.tmux = Tmux(self)
         self.states = {}
         self.replies = {'%2': 'Fixed the login test.\n\nNeeds you: no'}
+        self.turns = {}
+        self.outcomes = {}
         self.sent = []
         self.fail = None
         self.busy = False   # the fresh read under the send lock finds the coordinator at work
@@ -54,7 +60,7 @@ class World:
         self.lock = threading.Lock()
         self.feed = coordinator.Feed(clock=lambda: self.now)
         self.deliver = partial(coordinator.deliver, lock=self.lock, fresh=lambda: self.fresh(),
-                               fresh_status=self.fresh_status, last_reply=self.last_reply,
+                               fresh_status=self.fresh_status, latest_outcome=lambda entry: self.delivery_outcome(entry),
                                submit_locked=self.submit_locked)
 
     def fresh(self):
@@ -76,6 +82,25 @@ class World:
     def last_reply(self, entry):
         return self.replies.get(entry['id'], '')
 
+    def outcome(self, entry):
+        pane = entry['id']
+        if pane in self.outcomes:
+            return self.outcomes[pane]
+        text = self.last_reply(entry)
+        return {'kind': 'asks' if 'Needs you: yes' in text else 'done',
+                'text': ' '.join(text.split()), 'identity': str(self.turns.get(pane, 0))}
+
+    def delivery_outcome(self, entry):
+        return self.outcome(entry)
+
+    def change_role(self, pane='%2', thread='thread-2', mode='all', **extra):
+        def fresh():
+            assert self.lock.locked()
+            return self.fresh()
+        return coordinator.browser_role(dict(pane=pane, thread=thread, mode=mode, **extra),
+                                        fresh=fresh, lock=self.lock, run=self.tmux,
+                                        status=self.fresh_status, send=self.send)
+
     def send(self, entry, message, state=None):
         assert self.lock.locked()
         if self.fail:
@@ -95,12 +120,14 @@ class World:
 
     def tick(self, seconds=2, *, entries=None):
         self.now += seconds
-        self.feed.observe(self.fresh() if entries is None else entries, self.status, self.deliver, self.last_reply)
+        self.feed.observe(self.fresh() if entries is None else entries, self.status, self.deliver, self.outcome,
+                          lock=self.lock, fresh=self.fresh)
 
     def run_turn(self, pane, work=10):
         """One turn of `pane`: it works, then it is idle long enough to count."""
         self.states[pane] = 'Working'
         self.tick()
+        self.turns[pane] = self.turns.get(pane, 0) + 1
         self.states[pane] = 'Idle'
         self.tick(work)
         self.tick(coordinator.SETTLE)
@@ -281,6 +308,490 @@ class Commands(unittest.TestCase):
         self.assertEqual(self.world.marked(), {})
 
 
+class BrowserRole(unittest.TestCase):
+    def setUp(self):
+        self.world = World()
+        self.world.entries[1]['thread'] = 'thread-2'
+
+    def test_new_claim_sends_rules_and_take_reports_the_replaced_pane(self):
+        for take in (False, True):
+            with self.subTest(take=take):
+                if take:
+                    self.world.act('%2', action='release')
+                    self.world.act('%1', action='claim', events='off')
+                self.assertEqual(self.world.change_role(mode='needs', take=take),
+                                 {'coordinator': '%2', 'events': 'needs', 'sent': True,
+                                  'replaced': '%1' if take else None})
+                self.assertEqual(self.world.marked(), {'%2': 'needs'})
+                self.assertEqual(self.world.sent[-1], ('%2',
+                    '[Tether] The user made this tab the coordinator of this session in Tether.\n' + coordinator.rules()))
+        self.assertEqual(len(self.world.sent), 2)
+
+    def test_a_send_failure_restores_each_previous_mark(self):
+        for mode in ('off', None):
+            with self.subTest(previous_mode=mode):
+                if mode:
+                    self.world.act('%1', action='claim', events=mode)
+                else:
+                    self.world.act('%1', action='release')
+                self.world.fail = RuntimeError('Terminal draft')
+                with self.assertRaisesRegex(RuntimeError, 'Terminal draft'):
+                    self.world.change_role(take=True)
+                self.assertEqual(self.world.marked(), {'%1': mode} if mode else {})
+                self.assertFalse(self.world.lock.locked())
+
+    def test_take_has_to_be_explicit_and_the_error_names_the_tab(self):
+        self.world.act('%1', action='claim')
+        for agent in ('claude', 'shell'):
+            self.world.entries[0]['agent'] = agent
+            for take in (False, 1):
+                with self.subTest(agent=agent, take=take), self.assertRaisesRegex(
+                        ValueError, r'`tab 1` \(%1\) is the coordinator'):
+                    self.world.change_role(take=take)
+        self.assertEqual(self.world.marked(), {'%1': 'all'})
+        self.assertEqual(self.world.sent, [])
+
+    def test_stale_and_missing_threads_are_refused(self):
+        for thread in ('old-thread', None):
+            with self.subTest(thread=thread), self.assertRaisesRegex(ValueError, 'That tab started a new chat. Try again.'):
+                self.world.change_role(thread=thread)
+        self.assertEqual(self.world.marked(), {})
+        self.assertEqual(self.world.sent, [])
+
+    def test_reviewer_and_advisor_tabs_are_refused(self):
+        for role in ({'helper': 'reviewer'}, {'role': 'advisor'}):
+            with self.subTest(role=role):
+                with patch.dict(self.world.entries[1], role), self.assertRaisesRegex(ValueError, 'reviewer or advisor'):
+                    self.world.change_role(take=True)
+        self.assertEqual(self.world.marked(), {})
+
+    def test_mode_change_and_release_send_nothing(self):
+        self.world.act('%2', action='claim')
+        for mode in ('off', 'needs', None):
+            with self.subTest(mode=mode):
+                self.assertEqual(self.world.change_role(mode=mode),
+                                 {'coordinator': '%2' if mode else None, 'events': mode,
+                                  'sent': False, 'replaced': None})
+                self.assertEqual(self.world.marked(), {'%2': mode} if mode else {})
+        self.assertEqual(self.world.sent, [])
+
+    def test_claim_refuses_prompts_unavailable_and_unknown_states(self):
+        for state in ('Approval', 'Input needed', 'Unavailable', 'Unknown', None):
+            with self.subTest(state=state):
+                self.world.states['%2'] = state
+                with self.assertRaises(RuntimeError):
+                    self.world.change_role()
+                self.assertEqual(self.world.marked(), {})
+        self.assertEqual(self.world.sent, [])
+
+    def test_refused_take_preserves_both_marks_and_the_old_queue(self):
+        for state, writable in (('Approval', True), ('Input needed', True), ('Unknown', True), ('Idle', False)):
+            with self.subTest(state=state, writable=writable):
+                world = World()
+                world.entries[1].update(thread='thread-2', writable=writable)
+                world.act('%1', action='claim')
+                world.run_turn('%3')
+                queue = world.feed.queues['%1']
+                queued = queue['events'].copy()
+                self.assertEqual(len(queued), 1)
+                world.states['%2'] = state
+                tmux = world.tmux
+
+                def observe_after_mark(*args, **kwargs):
+                    result = tmux(*args, **kwargs)
+                    world.tick(0)
+                    return result
+
+                with patch.object(world, 'tmux', side_effect=observe_after_mark), self.assertRaises(RuntimeError):
+                    world.change_role(take=True)
+                self.assertEqual(world.marked(), {'%1': 'all'})
+                self.assertEqual(world.feed.queues['%1']['events'], queued)
+                self.assertEqual(world.sent, [])
+
+    def test_failed_browser_and_command_takeovers_keep_queued_reports(self):
+        for claim in ('browser', 'command'):
+            with self.subTest(claim=claim):
+                world = World()
+                world.entries[1]['thread'] = 'thread-2'
+                world.act('%1', action='claim')
+                world.run_turn('%3')
+                queued = world.feed.queues['%1']['events'].copy()
+                self.assertEqual(len(queued), 1)
+                snapshots = []
+
+                def fail_while_observing(*args, **kwargs):
+                    snapshots.append(world.fresh())
+                    self.assertNotIn('%1', coordinator.marks(snapshots[-1]))
+                    world.tick(0, entries=snapshots[-1])
+                    raise RuntimeError('Takeover failed.')
+
+                tmux = world.tmux
+
+                def fail_new_mark(args, **kwargs):
+                    if args[1:5] == ['set-option', '-p', '-t', '%2']:
+                        fail_while_observing()
+                    return tmux(args, **kwargs)
+
+                if claim == 'browser':
+                    with patch.object(world, 'send', side_effect=fail_while_observing), self.assertRaisesRegex(
+                            RuntimeError, 'Takeover failed'):
+                        world.change_role(take=True)
+                else:
+                    # The command returns its rules to the caller. Its new tmux mark can fail before that reply.
+                    with patch.object(world, 'tmux', side_effect=fail_new_mark), self.assertRaisesRegex(
+                            RuntimeError, 'Takeover failed'):
+                        world.act('%2', action='claim', take=True)
+                self.assertEqual(world.marked(), {'%1': 'all'})
+                self.assertEqual(world.feed.queues['%1']['events'], queued)
+                world.tick(0, entries=snapshots[-1])  # discovery may still cache the temporary marks
+                self.assertEqual(world.feed.queues['%1']['events'], queued)
+                world.tick(coordinator.JOIN)
+                self.assertEqual([pane for pane, _ in world.sent], ['%1'])
+
+    def test_a_working_tab_can_be_claimed_and_gets_the_rules_held(self):
+        # A held send waits for the turn to end, like the coordinator's own messages to a working tab.
+        for state in ('Working', 'Idle'):
+            with self.subTest(state=state):
+                world = World()
+                world.entries[1]['thread'] = 'thread-2'
+                world.states['%2'] = state
+                self.assertTrue(world.change_role(mode='all')['sent'])
+                self.assertEqual(world.marked(), {'%2': 'all'})
+                self.assertEqual(len(world.sent), 1)
+
+    def test_claim_rejects_invalid_modes_and_unsupported_panes(self):
+        with self.assertRaisesRegex(ValueError, 'all, needs or off'):
+            self.world.change_role(mode='loud')
+        for agent in ('shell', 'antigravity'):
+            with self.subTest(agent=agent), patch.dict(self.world.entries[1], agent=agent):
+                with self.assertRaisesRegex(ValueError, 'Claude or Codex'):
+                    self.world.change_role()
+        self.assertEqual(self.world.marked(), {})
+
+
+class TurnOutcome(unittest.TestCase):
+    def setUp(self):
+        folder = self.enterContext(tempfile.TemporaryDirectory())
+        self.path = Path(folder) / 'transcript.jsonl'
+        self.latest = coordinator.Feed().latest_outcome
+        # Most tests check kind, text and identity; test_open_marks_a_turn_in_progress checks `open`.
+        self.outcome = lambda entry: {key: value for key, value in self.latest(entry).items() if key != 'open'}
+
+    def fixture(self, agent, count=None, *, name=None):
+        source = Path(__file__).parent / 'fixtures' / 'coordinator_failed' / f'{name or agent}.jsonl'
+        self.path.write_bytes(b''.join(source.read_bytes().splitlines(keepends=True)[:count]))
+        return tab('%2', agent=agent, transcript=str(self.path))
+
+    def append(self, *records):
+        with self.path.open('a') as stream:
+            for row in records:
+                stream.write(json.dumps(row) + '\n')
+
+    def test_open_marks_a_turn_in_progress(self):
+        # open: a reply of the turn arrived and the turn has not ended. A prompt with no reply (a local command,
+        # a sign-in) is not open, so the feed treats the last outcome as old on first sight.
+        for agent, name, count, expected in (
+                ('claude', 'claude_shell', 6, False),   # a tool_use reply with no text keeps the old identity
+                ('claude', 'claude_shell', None, False),
+                ('claude', 'claude_local_command', None, False),
+                ('claude', 'claude_peer', 7, True),     # final text, no turn_duration yet (Stop hooks run)
+                ('codex', 'codex_task_complete', 3, True),  # task_started
+                ('codex', 'codex_task_complete', None, False),
+                ('codex', 'codex', None, False)):          # turn_aborted
+            with self.subTest(name=name, count=count):
+                self.assertIs(self.latest(self.fixture(agent, count, name=name))['open'], expected)
+
+    def test_claude_api_error_has_a_new_identity_even_after_a_good_reply(self):
+        entry = self.fixture('claude', 3)
+        self.assertEqual(self.outcome(entry), {'kind': 'done', 'identity': 'prompt-1', 'text': 'Done.'})
+        failed = self.fixture('claude', 5)
+        self.assertEqual(self.outcome(failed), {'kind': 'failed', 'identity': 'prompt-2',
+                                                'text': 'You have reached your usage limit.'})
+
+    def test_claude_task_notification_starts_a_new_turn(self):
+        for kind, text in (('failed', 'API Error: Authentication failed.'), ('done', 'Second result.')):
+            with self.subTest(kind=kind):
+                entry = self.fixture('claude', 3, name='claude_notifications')
+                first = self.outcome(entry)
+                self.assertEqual(first['kind'], 'done')
+                entry = self.fixture('claude', None if kind == 'failed' else 6, name='claude_notifications')
+                if kind == 'done':
+                    self.append({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': text}]}})
+                second = self.outcome(entry)
+                self.assertEqual((second['kind'], second['text']), (kind, text))
+                self.assertNotEqual(first['identity'], second['identity'])
+                self.assertEqual((first['identity'], second['identity']), ('notice-1', 'notice-2'))
+
+    def test_claude_hidden_inputs_start_answered_turns(self):
+        for name, text in (('claude_peer', 'Peer message result.'),
+                           ('claude_idle_notice', 'Idle notice result.')):
+            with self.subTest(name=name):
+                before = self.outcome(self.fixture('claude', 3, name=name))
+                after = self.outcome(self.fixture('claude', name=name))
+                self.assertEqual((before['kind'], before['text']), ('done', 'First result.'))
+                self.assertEqual((after['kind'], after['text']), ('done', text))
+                self.assertNotEqual(before['identity'], after['identity'])
+
+    def test_claude_shell_input_changes_outcome_only_when_answered(self):
+        name = 'claude_shell'
+        before = self.outcome(self.fixture('claude', 3, name=name))
+        self.assertEqual(self.outcome(self.fixture('claude', 7, name=name)), before)
+        answered = self.outcome(self.fixture('claude', 8, name=name))
+        self.assertEqual((answered['kind'], answered['text']), ('done', 'Shell command result.'))
+        self.assertNotEqual(before['identity'], answered['identity'])
+        self.assertEqual(self.outcome(self.fixture('claude', name=name)), answered)
+
+    def test_claude_local_model_command_without_answer_keeps_last_outcome(self):
+        name = 'claude_local_command'
+        before = self.outcome(self.fixture('claude', 3, name=name))
+        self.assertEqual((before['kind'], before['text']), ('done', 'First result.'))
+        self.assertEqual(self.outcome(self.fixture('claude', name=name)), before)
+
+    def test_claude_answered_shell_input_recovers_from_interrupt(self):
+        name = 'claude_interrupt_shell'
+        before = self.outcome(self.fixture('claude', 3, name=name))
+        interrupted = self.outcome(self.fixture('claude', 7, name=name))
+        self.assertIsNone(interrupted['kind'])
+        self.assertEqual(self.outcome(self.fixture('claude', 12, name=name)), interrupted)
+        answered = self.outcome(self.fixture('claude', name=name))
+        self.assertEqual((answered['kind'], answered['text']), ('done', 'Shell command result.'))
+        self.assertNotIn(answered['identity'], (before['identity'], interrupted['identity']))
+
+    def test_claude_skill_command_starts_a_turn_when_claude_answers(self):
+        # Real shape (Claude Code 2.1): the command record, then the skill text as isMeta, then the reply.
+        for reply, kind in (({'type': 'assistant', 'uuid': 'r', 'message': {'content': [{'type': 'text', 'text': 'Shots pass.'}]}}, 'done'),
+                            ({'type': 'assistant', 'uuid': 'r', 'isApiErrorMessage': True,
+                              'message': {'content': [{'type': 'text', 'text': 'API Error: Overloaded.'}]}}, 'failed')):
+            with self.subTest(kind=kind):
+                entry = self.fixture('claude', 3)
+                before = self.outcome(entry)
+                self.append({'type': 'user', 'uuid': 'skill', 'message': {
+                                'content': '<command-message>verify</command-message>\n<command-name>/verify</command-name>'}},
+                            {'type': 'user', 'uuid': 'skill-text', 'isMeta': True, 'message': {'content': [{'type': 'text', 'text': 'Skill body.'}]}},
+                            reply)
+                after = self.outcome(entry)
+                self.assertEqual((after['kind'], after['identity']), (kind, 'skill'))
+                self.assertNotEqual(after['identity'], before['identity'])
+
+    def test_claude_non_prompt_records_keep_the_turn_identity(self):
+        entry = self.fixture('claude', 3)
+        prompt = {'type': 'user', 'uuid': 'non-prompt', 'message': {'content': 'Text outside a turn.'}}
+        self.append(*(dict(prompt, **{flag: True}) for flag in (
+            'isMeta', 'isSidechain', 'isCompactSummary', 'isAutoCompactSummary')),
+            dict(prompt, message={'content': [{'type': 'tool_result', 'content': 'Tool output.'},
+                                             {'type': 'text', 'text': 'Tool context.'}]}))
+        self.assertEqual(self.outcome(entry), {'kind': 'done', 'identity': 'prompt-1', 'text': 'Done.'})
+
+    def test_claude_scheduled_fire_and_queued_prompt_start_turns(self):
+        for prompt in (
+                {'type': 'user', 'isMeta': True, 'turnOrigin': 'scheduled', 'scheduledTaskId': 'job',
+                 'message': {'role': 'user', 'content': 'Check the job.'}},
+                {'type': 'attachment', 'attachment': {'type': 'queued_command', 'prompt': 'Check the job.'}}):
+            with self.subTest(kind=prompt['type']):
+                entry = self.fixture('claude', 3)
+                self.append({'type': 'user', 'message': {'content': '[Request interrupted by user]'}},
+                            dict(prompt, uuid='next'),
+                            {'type': 'assistant', 'message': {'content': 'Checked.'}})
+                self.assertEqual(self.outcome(entry), {'kind': 'done', 'identity': 'next', 'text': 'Checked.'})
+
+    def test_claude_system_error_recovery_and_user_interrupt(self):
+        entry = self.fixture('claude', 5)
+        self.append({'type': 'assistant', 'uuid': 'retry-reply',
+                     'message': {'content': [{'type': 'text', 'text': 'Which branch?\nNeeds you: yes'}]}})
+        self.assertEqual(self.outcome(entry), {'kind': 'asks', 'identity': 'prompt-2',
+                                               'text': 'Which branch? Needs you: yes'})
+        self.append({'type': 'system', 'subtype': 'api_error', 'content': 'Authentication failed.'})
+        self.assertEqual(self.outcome(entry), {'kind': 'failed', 'identity': 'prompt-2',
+                                               'text': 'Authentication failed.'})
+        self.append({'type': 'user', 'uuid': 'interrupt', 'message': {'content': [
+            {'type': 'text', 'text': '[Request interrupted by user for tool use]'}]}})
+        self.assertIsNone(self.outcome(entry)['kind'])
+
+    def test_claude_system_error_reads_the_notice_message(self):
+        entry = self.fixture('claude', 2)
+        self.append({'type': 'system', 'subtype': 'error', 'message': 'Invalid credentials.'},
+                    {'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'name': 'Read'}]}})
+        self.assertEqual(self.outcome(entry), {'kind': 'failed', 'identity': 'prompt-1',
+                                               'text': 'Invalid credentials.'})
+
+    def codex_event(self, kind, **fields):
+        return {'type': 'event_msg', 'payload': dict(type=kind, **fields)}
+
+    def test_codex_terminal_error_then_retry_and_interruption(self):
+        entry = self.fixture('codex', 3)
+        self.append(self.codex_event('error', message='API Error: Authentication failed.'))
+        self.assertEqual(self.outcome(entry), {'kind': 'failed', 'identity': 'turn-2',
+                                               'text': 'API Error: Authentication failed.'})
+        self.append(self.codex_event('task_complete', turn_id='turn-2', root_turn_id='turn-2',
+                                     last_agent_message='Authenticated.'))
+        self.assertEqual(self.outcome(entry), {'kind': 'done', 'identity': 'turn-2', 'text': 'Authenticated.'})
+        self.append(self.codex_event('task_started', turn_id='turn-3', root_turn_id='turn-3'),
+                    self.codex_event('turn_aborted', turn_id='turn-3', root_turn_id='turn-3', reason='interrupted'))
+        self.assertIsNone(self.outcome(entry)['kind'])
+
+    def test_codex_real_abort_shape_and_non_interrupt_reason(self):
+        entry = self.fixture('codex')
+        self.assertIsNone(self.outcome(entry)['kind'])
+        self.append(self.codex_event('task_started', turn_id='turn-3', root_turn_id='turn-3'),
+                    self.codex_event('turn_aborted', turn_id='turn-3', root_turn_id='turn-3', reason='error'))
+        self.assertEqual(self.outcome(entry), {'kind': 'failed', 'identity': 'turn-3', 'text': 'Turn error.'})
+
+    def test_codex_task_complete_with_error_reports_a_failed_turn(self):
+        entry = self.fixture('codex', 2, name='codex_task_complete')
+        self.assertEqual(self.outcome(entry), {'kind': 'done', 'identity': 'turn-1', 'text': 'Done.'})
+        self.fixture('codex', name='codex_task_complete')
+        self.assertEqual(self.outcome(entry), {'kind': 'failed', 'identity': 'turn-2',
+                                               'text': 'The requested model is unavailable.'})
+        error_text = 'API Error: You have hit your usage limit.'
+        self.append(self.codex_event('task_started', turn_id='turn-3'),
+                    self.codex_event('task_complete', turn_id='turn-3', last_agent_message=None,
+                                     error={'message': error_text, 'codex_error_info': 'usage_limit_exceeded'}))
+        self.assertEqual(self.outcome(entry), {'kind': 'failed', 'identity': 'turn-3', 'text': error_text})
+
+    def test_codex_task_complete_with_null_reply_and_no_error_is_done(self):
+        entry = self.fixture('codex', 3, name='codex_task_complete')
+        self.append(self.codex_event('task_complete', turn_id='turn-2', root_turn_id='turn-2',
+                                     last_agent_message=None))
+        self.assertEqual(self.outcome(entry), {'kind': 'done', 'identity': 'turn-2', 'text': ''})
+
+    def test_codex_abort_reports_only_failure_reasons(self):
+        reasons = {'interrupted': None, 'replaced': None, 'review_ended': None, 'budget_limited': 'failed'}
+        for reason, kind in reasons.items():
+            with self.subTest(reason=reason):
+                entry = self.fixture('codex', 3)
+                self.assertIsNone(self.outcome(entry)['kind'])
+                self.append(self.codex_event('turn_aborted', turn_id='turn-2', root_turn_id='turn-2', reason=reason))
+                self.assertEqual(self.outcome(entry), {'kind': kind, 'identity': 'turn-2',
+                                                       'text': 'Turn budget_limited.' if kind else ''})
+
+    def test_transcript_is_read_only_when_its_signature_changes(self):
+        entry = self.fixture('codex', 2)
+        initial = self.outcome(entry)
+        with patch('builtins.open', side_effect=AssertionError('opened unchanged transcript')):
+            self.assertEqual(self.outcome(entry), initial)
+        with self.path.open('rb+') as stream:
+            content = stream.read()
+            stream.seek(0)
+            stream.write(content.replace(b'Done.', b'Next.'))
+        metadata = self.path.stat()
+        os.utime(self.path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1000000))
+        self.assertEqual(self.outcome(entry)['text'], 'Next.')
+
+
+class OutcomeCache(unittest.TestCase):
+    def setUp(self):
+        self.folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(patch.object(history, '_states', {}))
+
+    def fixture(self, agent):
+        path = Path(__file__).parent / 'fixtures' / 'coordinator_failed' / f'{agent}.jsonl'
+        lines = path.read_bytes().splitlines(keepends=True)
+        end = 3 if agent == 'claude' else 2
+        return lines[:end], lines[end:]
+
+    def tabs(self, agent, count, lines):
+        entries = []
+        for i in range(count):
+            path = self.folder / f'{agent}-{i}.jsonl'
+            path.write_bytes(b''.join(lines))
+            entries.append(tab(f'%{i}', agent=agent, transcript=str(path)))
+        return entries
+
+    def assert_incremental_poll(self, agent, count, *, chat_reads=0):
+        initial, appended = self.fixture(agent)
+        entries = self.tabs(agent, count, initial)
+        latest = coordinator.Feed().latest_outcome
+        parser = f'_{agent}_turn'
+        with patch.object(coordinator, parser, wraps=getattr(coordinator, parser)) as consume:
+            for entry in entries:
+                self.assertEqual(latest(entry)['text'], 'Done.')
+            self.assertEqual(consume.call_count, count * len(initial))
+            consume.reset_mock()
+            self.read_chats(chat_reads)
+            for entry in entries:
+                with open(entry['transcript'], 'ab') as stream:
+                    stream.writelines(appended)
+            for entry in entries:
+                self.assertEqual(latest(entry)['kind'], 'failed' if agent == 'claude' else None)
+            self.assertEqual(consume.call_count, count * len(appended))
+
+    def read_chats(self, count):
+        for i in range(count):
+            path = self.folder / f'chat-{i}.jsonl'
+            path.write_text('{"text":"Chat message."}\n')
+            history.read(path, list, lambda state, index, record: state.append(record['text']))
+
+    def test_busy_polls_parse_only_appended_records(self):
+        for agent in ('claude', 'codex'):
+            for count in (13, 30):
+                with self.subTest(agent=agent, count=count):
+                    self.assert_incremental_poll(agent, count)
+
+    def test_chat_reads_do_not_evict_coordinator_parsers(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                self.assert_incremental_poll(agent, 5, chat_reads=21)
+
+    def test_coordinator_reads_leave_the_shared_lru_unchanged(self):
+        self.read_chats(21)
+        before = list(history._states.items())
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                feed = coordinator.Feed()
+                for entry in self.tabs(agent, 30, self.fixture(agent)[0]):
+                    self.assertEqual(feed.latest_outcome(entry)['text'], 'Done.')
+                self.assertEqual(list(history._states.items()), before)
+
+    def test_truncation_and_same_size_rewrite_reset_the_parser(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                feed = coordinator.Feed()
+                initial, appended = self.fixture(agent)
+                entry, = self.tabs(agent, 1, initial + appended)
+                pane = entry['id']
+                path = Path(entry['transcript'])
+                self.assertEqual(feed.latest_outcome(entry)['kind'], 'failed' if agent == 'claude' else None)
+                old_parser = feed.parsers[pane][1]
+                path.write_bytes(b''.join(initial))
+                outcome = feed.latest_outcome(entry)
+                self.assertEqual((outcome['kind'], outcome['text']), ('done', 'Done.'))
+                self.assertIsNot(feed.parsers[pane][1], old_parser)
+
+                old_parser = feed.parsers[pane][1]
+                before = path.stat()
+                path.write_bytes(b''.join(initial).replace(b'Done.', b'Next.'))
+                os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1000000))
+                self.assertEqual(feed.latest_outcome(entry), dict(outcome, text='Next.'))
+                self.assertIsNot(feed.parsers[pane][1], old_parser)
+
+    def test_path_change_replaces_the_panes_only_parser(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                feed = coordinator.Feed()
+                first, second = self.tabs(agent, 2, self.fixture(agent)[0])
+                pane = first['id']
+                self.assertEqual(feed.latest_outcome(first)['text'], 'Done.')
+                old_parser = feed.parsers[pane][1]
+                second_path = Path(second['transcript'])
+                second_path.write_bytes(second_path.read_bytes().replace(b'Done.', b'Next.'))
+                self.assertEqual(feed.latest_outcome(dict(second, id=pane))['text'], 'Next.')
+                self.assertEqual(set(feed.parsers), {pane})
+                self.assertIsNot(feed.parsers[pane][1], old_parser)
+
+    def test_observe_prunes_closed_panes(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                feed = coordinator.Feed()
+                entries = self.tabs(agent, 2, self.fixture(agent)[0])
+                for entry in entries:
+                    feed.latest_outcome(entry)
+                remaining = entries[:1]
+                feed.observe(remaining, None, None, feed.latest_outcome, lock=threading.Lock(),
+                             fresh=lambda: remaining)
+                self.assertEqual(set(feed.parsers), {remaining[0]['id']})
+                self.assertEqual(set(feed.outcomes), {remaining[0]['id']})
+
+
 class Feed(unittest.TestCase):
     def setUp(self):
         self.world = World()
@@ -392,11 +903,362 @@ class Feed(unittest.TestCase):
         self.wait_for_send()
         self.assertEqual(self.world.sent, [])
 
-    def test_a_closed_coordinator_drops_its_updates(self):
+    def test_an_absent_or_restarting_coordinator_drops_its_updates_after_hold(self):
+        for shell in (False, True):
+            with self.subTest(shell=shell):
+                world = World()
+                world.act('%1', action='claim')
+                world.run_turn('%2')
+                if shell:
+                    world.entries[0].update(agent='shell', writable=False)
+                else:
+                    world.entries.pop(0)
+                world.tick()
+                world.tick(599)
+                self.assertTrue(world.feed.queues['%1']['events'])
+                world.tick(1)
+                self.assertEqual((world.sent, world.feed.queues), ([], {}))
+
+    def test_an_absent_coordinator_can_return_to_its_queue(self):
         self.world.run_turn('%2')
-        self.world.entries = [entry for entry in self.world.entries if entry['id'] != '%1']
-        self.wait_for_send()
+        entry = self.world.entries.pop(0)
+        self.world.tick(coordinator.JOIN)
+        self.assertTrue(self.world.feed.queues['%1']['events'])
+        self.world.entries.insert(0, entry)
+        self.world.tick()
+        self.assertIn('tab 2', self.world.sent[0][1])
+
+    def test_a_coordinator_that_cannot_write_keeps_its_queue(self):
+        self.world.run_turn('%2')
+        self.world.entries[0]['writable'] = False
+        self.world.tick(coordinator.JOIN)
+        self.assertEqual(self.world.sent, [])
+        self.assertTrue(self.world.feed.queues['%1']['events'])
+        self.world.entries[0]['writable'] = True
+        self.world.tick()
+        self.assertIn('tab 2', self.world.sent[0][1])
+
+    def test_shell_gap_keeps_the_queue_and_observes_work_in_the_same_session(self):
+        for queued in (True, False):
+            with self.subTest(queued=queued):
+                world = World()
+                world.entries[0]['transcript'] = 'same.jsonl'
+                world.act('%1', action='claim')
+                world.tick()
+                if queued:
+                    world.run_turn('%2')
+                world.states['%3'] = 'Working'
+                world.tick()
+                world.entries[0].update(agent='shell', transcript=None, writable=False)
+                world.tick(10)
+                world.turns['%3'] = 1   # the turn that finishes in the gap
+                world.states['%3'] = 'Idle'
+                world.tick()
+                world.tick(coordinator.SETTLE)
+                self.assertEqual(world.sent, [])
+                world.entries[0].update(agent='claude', transcript='same.jsonl', writable=True)
+                world.tick(coordinator.JOIN)
+                self.assertEqual(len(world.sent), 1)
+                self.assertIn('tab 3', world.sent[0][1])
+                self.assertEqual('tab 2' in world.sent[0][1], queued)
+
+    def test_unbound_coordinator_keeps_its_queue_until_its_chat_returns(self):
+        for middle in (dict(agent='claude', transcript=None, pending_conversation=True),
+                       dict(agent='claude', transcript='pending.jsonl', pending_conversation=True),
+                       dict(agent='codex', transcript=None)):
+            with self.subTest(middle=middle):
+                world = World()
+                entry = world.entries[0]
+                entry['agent'] = middle['agent']
+                world.act('%1', action='claim')
+                world.tick()
+                world.run_turn('%2')
+                bound = entry.copy()
+                entry.update(agent='shell', transcript=None, writable=False)
+                world.tick()
+                entry.update(middle, writable=True)
+                world.tick(coordinator.JOIN)
+                self.assertEqual(world.sent, [])
+                self.assertTrue(world.feed.queues['%1']['events'])
+                entry.pop('pending_conversation', None)
+                entry.update(bound)
+                world.tick()
+                self.assertEqual(len(world.sent), 1)
+                self.assertIn('tab 2', world.sent[0][1])
+
+    def test_unbound_coordinator_is_away_until_hold_expires(self):
+        for middle in (dict(transcript='pending.jsonl', pending_conversation=True), dict(transcript=None)):
+            with self.subTest(middle=middle):
+                world = World()
+                world.act('%1', action='claim')
+                world.run_turn('%2')
+                world.entries[0].update(middle)
+                world.tick()
+                world.tick(coordinator.HOLD - 1)
+                self.assertTrue(world.feed.queues['%1']['events'])
+                world.tick(1)
+                self.assertEqual((world.sent, world.feed.queues), ([], {}))
+
+    def test_delivery_retries_an_unbound_coordinator_seen_under_the_lock(self):
+        for middle in (dict(transcript='pending.jsonl', pending_conversation=True), dict(transcript=None)):
+            with self.subTest(middle=middle):
+                world = World()
+                world.act('%1', action='claim')
+                world.run_turn('%2')
+                snapshot = world.fresh()
+                world.entries[0].update(middle)
+                queue = world.feed.queues['%1']
+                self.assertIsNone(world.deliver('%1', queue, queue['events']))
+                world.tick(coordinator.JOIN, entries=snapshot)
+                self.assertEqual(world.sent, [])
+                self.assertTrue(world.feed.queues['%1']['events'])
+                world.entries[0] = snapshot[0]
+                world.tick()
+                self.assertEqual(len(world.sent), 1)
+
+    def test_unbound_source_keeps_its_previous_turn_state(self):
+        for middle in (dict(transcript='pending.jsonl', pending_conversation=True), dict(transcript=None)):
+            with self.subTest(middle=middle):
+                world = World()
+                world.act('%1', action='claim')
+                world.tick()
+                world.states['%2'] = 'Working'
+                world.tick()
+                bound = world.entries[1].copy()
+                world.entries[1].update(middle)
+                world.states['%2'] = 'Unknown'
+                world.tick(coordinator.MINIMUM_WORK)
+                world.entries[1] = bound
+                world.states['%2'] = 'Idle'
+                world.turns['%2'] = 1
+                world.tick()
+                world.tick(coordinator.SETTLE)
+                world.tick(coordinator.JOIN)
+                self.assertEqual(len(world.sent), 1)
+                self.assertIn('tab 2', world.sent[0][1])
+
+    def test_unbound_source_keeps_its_queued_update(self):
+        for middle in (dict(transcript='pending.jsonl', pending_conversation=True), dict(transcript=None)):
+            with self.subTest(middle=middle):
+                world = World()
+                world.act('%1', action='claim')
+                world.run_turn('%2')
+                bound = world.entries[1].copy()
+                world.entries[1].update(middle)
+                world.tick(coordinator.JOIN)
+                self.assertEqual(world.sent, [])
+                world.entries[1] = bound
+                world.tick()
+                self.assertEqual(len(world.sent), 1)
+                self.assertIn('tab 2', world.sent[0][1])
+
+    def test_release_drops_an_existing_queue_immediately(self):
+        self.world.run_turn('%2')
+        self.world.act('%1', action='release')
+        self.world.tick(0)
         self.assertEqual((self.world.sent, self.world.feed.queues), ([], {}))
+
+    def test_a_new_chat_after_a_shell_gap_drops_the_previous_chats_queue(self):
+        self.world.entries[0]['transcript'] = 'first.jsonl'
+        self.world.run_turn('%2')
+        self.world.entries[0].update(agent='shell', transcript=None, writable=False)
+        self.world.tick()
+        self.assertTrue(self.world.feed.queues['%1']['events'])
+        self.world.entries[0].update(agent='claude', transcript='another.jsonl', writable=True)
+        self.world.tick(0)
+        self.assertEqual(self.world.sent, [])
+        self.assertFalse(self.world.feed.queues.get('%1', {}).get('events'))
+
+    def test_failure_is_reported_once_per_turn_without_a_working_tick(self):
+        for identity in ('first-failure', 'second-failure'):
+            self.world.outcomes['%2'] = {'kind': 'failed', 'text': 'Check your credentials.', 'identity': identity}
+            self.world.tick(coordinator.SETTLE)
+            self.wait_for_send()
+            count = 1 if identity == 'first-failure' else 2
+            self.assertEqual(len(self.world.sent), count)
+            self.assertIn('failed: Check your credentials.', self.world.sent[-1][1])
+            self.wait_for_send()
+            self.assertEqual(len(self.world.sent), count)
+
+    def test_a_failure_from_before_the_first_sight_is_not_reported(self):
+        # A server restart and a new claim both see the tabs for the first time; an old failure is no update.
+        for restart in (False, True):
+            with self.subTest(restart=restart):
+                world = World()
+                world.outcomes['%2'] = {'kind': 'failed', 'text': 'Old failure.', 'identity': 'old'}
+                if restart:
+                    world.act('%1', action='claim')
+                    world.feed = coordinator.Feed(clock=lambda: world.now)
+                else:
+                    world.tick()
+                    world.act('%1', action='claim')
+                world.tick()
+                world.tick(coordinator.SETTLE)
+                world.tick(coordinator.JOIN)
+                world.tick(coordinator.GAP)
+                self.assertEqual(world.sent, [])
+                world.outcomes['%2'] = {'kind': 'failed', 'text': 'New failure.', 'identity': 'new'}
+                world.tick(coordinator.SETTLE)
+                world.tick(coordinator.JOIN)
+                world.tick(coordinator.GAP)
+                self.assertEqual(len(world.sent), 1)
+                self.assertIn('failed: New failure.', world.sent[0][1])
+
+    def test_first_idle_after_an_unknown_or_unavailable_read_seeds_the_old_turn(self):
+        for first in ('Unknown', 'Unavailable'):
+            with self.subTest(first=first):
+                world = World()
+                world.outcomes['%2'] = {'kind': 'failed', 'text': 'Old failure.', 'identity': 'old'}
+                world.states['%2'] = first
+                world.act('%1', action='claim')
+                world.tick()
+                world.states['%2'] = 'Idle'
+                world.tick()
+                world.tick(coordinator.SETTLE)
+                world.tick(coordinator.JOIN)
+                self.assertEqual(world.sent, [])
+
+    def test_first_working_after_an_unknown_read_reports_the_turn_when_it_ends(self):
+        world = World()
+        world.states['%2'] = 'Unknown'
+        world.act('%1', action='claim')
+        world.tick()
+        world.states['%2'] = 'Working'
+        world.outcomes['%2'] = {'kind': 'done', 'text': 'Partial text.', 'identity': 'new', 'open': True}
+        world.tick()
+        world.outcomes['%2'] = {'kind': 'done', 'text': 'Finished text.', 'identity': 'new'}
+        world.states['%2'] = 'Idle'
+        world.tick(coordinator.MINIMUM_WORK)
+        world.tick(coordinator.SETTLE)
+        world.tick(coordinator.JOIN)
+        self.assertEqual(len(world.sent), 1)
+        self.assertIn('finished: Finished text.', world.sent[0][1])
+
+    def test_a_turn_running_at_first_sight_is_reported_when_it_ends(self):
+        # The real parsers fix a turn's identity when it starts, so first sight during the turn sees its identity.
+        for restart in (False, True):
+            with self.subTest(restart=restart):
+                world = World()
+                world.states['%2'] = 'Working'
+                world.outcomes['%2'] = {'kind': 'done', 'text': 'Partial text.', 'identity': 'running', 'open': True}
+                if restart:
+                    world.act('%1', action='claim')
+                    world.feed = coordinator.Feed(clock=lambda: world.now)
+                else:
+                    world.tick()
+                    world.act('%1', action='claim')
+                world.tick()
+                world.tick(coordinator.MINIMUM_WORK)
+                world.outcomes['%2'] = {'kind': 'done', 'text': 'Finished text.', 'identity': 'running'}
+                world.states['%2'] = 'Idle'
+                world.tick()
+                world.tick(coordinator.SETTLE)
+                world.tick(coordinator.JOIN)
+                world.tick(coordinator.GAP)
+                self.assertEqual(len(world.sent), 1)
+                self.assertIn('finished: Finished text.', world.sent[0][1])
+
+    def test_first_known_running_state_reports_an_immediate_outcome(self):
+        for state in ('Working', 'Approval', 'Input needed'):
+            for kind, word in (('failed', 'failed'), ('done', 'finished')):
+                with self.subTest(state=state, kind=kind):
+                    world = World()
+                    world.act('%1', action='claim')
+                    world.states['%2'] = 'Unknown'
+                    world.tick()
+                    world.states['%2'] = state
+                    world.tick(0)
+                    world.outcomes['%2'] = {'kind': kind, 'text': 'Turn result.', 'identity': 'new'}
+                    world.states['%2'] = 'Idle'
+                    world.tick(0)
+                    world.tick(coordinator.SETTLE)
+                    world.tick(coordinator.JOIN)
+                    world.tick(coordinator.GAP)
+                    self.assertEqual(len(world.sent), 1)
+                    self.assertIn(f'{word}: Turn result.', world.sent[0][1])
+
+    def test_first_sight_of_a_waiting_tab_reports_no_old_turn(self):
+        # A sign-in or approval prompt on first sight is not a new turn. Only an outcome identity that differs
+        # from the one at first sight is reported.
+        # A transcript with no closing record (no turn_duration, a Codex turn that ends on an error) still reads
+        # as open, so open alone is no evidence that a turn runs.
+        cases = [(state, kind, False) for state in ('Input needed', 'Approval', 'Working') for kind in ('done', 'failed')]
+        cases += [(state, kind, True) for state in ('Input needed', 'Approval') for kind in ('done', 'failed')]
+        for state, kind, still_open in cases:
+                with self.subTest(state=state, kind=kind, open=still_open):
+                    world = World()
+                    world.act('%1', action='claim')
+                    world.outcomes['%2'] = {'kind': kind, 'text': 'Old turn.', 'identity': 'old', 'open': still_open}
+                    world.states['%2'] = 'Unknown'
+                    world.tick()
+                    world.states['%2'] = state
+                    world.tick(0)
+                    world.states['%2'] = 'Idle'
+                    world.tick(0)
+                    world.tick(coordinator.SETTLE)
+                    world.tick(coordinator.JOIN)
+                    world.tick(coordinator.GAP)
+                    self.assertEqual([text for _, text in world.sent if 'Old turn.' in text], [])
+
+    def test_first_sight_with_real_transcripts_reports_only_a_changed_outcome(self):
+        # Real parsers: transcripts with no closing record read as open. A prompt that closes with the transcript
+        # unchanged sends nothing. A turn that was running at the prompt and then ends is reported.
+        folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        source = Path(__file__).parent / 'fixtures' / 'coordinator_failed'
+        lines = lambda name, count: b''.join((source / f'{name}.jsonl').read_bytes().splitlines(keepends=True)[:count])
+        codex_error = json.dumps({'type': 'event_msg', 'payload': {
+            'type': 'error', 'turn_id': 'turn-2', 'root_turn_id': 'turn-2', 'message': 'Usage limit.'}}).encode() + b'\n'
+        codex_done = json.dumps({'type': 'event_msg', 'payload': {
+            'type': 'task_complete', 'turn_id': 'turn-2', 'root_turn_id': 'turn-2',
+            'last_agent_message': 'Turn result.'}}).encode() + b'\n'
+        cases = (
+            ('claude reply, no turn_duration', 'claude', lines('claude_peer', 7), b'', 0),
+            ('claude api error, no turn_duration', 'claude', lines('claude', 5), b'', 0),
+            ('codex ends on error', 'codex', lines('codex', 3) + codex_error, b'', 0),
+            ('codex turn runs at the prompt', 'codex', lines('codex', 3), codex_done, 1),
+        )
+        for name, agent, before, after, reports in cases:
+            for state in ('Input needed', 'Approval'):
+                with self.subTest(name=name, state=state):
+                    path = folder / f'{agent}-{state[0]}-{len(before)}.jsonl'
+                    path.write_bytes(before)
+                    world = World()
+                    real = coordinator.Feed(clock=lambda: world.now).latest_outcome
+                    world.outcome = lambda entry: real(dict(entry, agent=agent, transcript=str(path)))
+                    world.act('%1', action='claim')
+                    world.states['%2'] = state
+                    world.tick()
+                    with path.open('ab') as stream:
+                        stream.write(after)
+                    world.states['%2'] = 'Idle'
+                    world.tick(0)
+                    world.tick(coordinator.SETTLE)
+                    world.tick(coordinator.JOIN)
+                    world.tick(coordinator.GAP)
+                    self.assertEqual(len(world.sent), reports)
+
+    def test_failed_turn_waits_for_idle_to_settle(self):
+        self.world.states['%2'] = 'Working'
+        self.world.outcomes['%2'] = {'kind': 'failed', 'text': 'Rate limit reached.', 'identity': 'failed'}
+        self.world.tick()
+        self.world.states['%2'] = 'Idle'
+        self.world.tick()
+        self.world.tick(coordinator.SETTLE - 1)
+        self.assertFalse(self.world.feed.queues.get('%1', {}).get('events'))
+        self.world.tick(1)
+        self.wait_for_send()
+        self.assertIn('failed: Rate limit reached.', self.world.sent[0][1])
+
+    def test_report_words_and_mode_matrix(self):
+        words = {'done': 'finished', 'asks': 'finished and asks the user',
+                 'needs': 'waits on the user', 'failed': 'failed'}
+        for mode, allowed in (('all', set(words)), ('needs', {'asks', 'needs', 'failed'}), ('off', set())):
+            for kind, word in words.items():
+                with self.subTest(mode=mode, kind=kind):
+                    event = {'kind': kind, 'name': 'worker', 'pane': '%2', 'text': 'Example'}
+                    self.assertIn(f'{word}: Example', coordinator.message([event], mode))
+                    self.assertEqual(coordinator.wanted(event, mode), kind in allowed)
+        self.assertIn('needs: tabs that wait on the user or failed', coordinator.rules())
 
 
     # Delivery checks everything again: a check made when the update was queued may be out of date.
@@ -456,21 +1318,41 @@ class Feed(unittest.TestCase):
         self.wait_for_send()
         self.assertEqual(self.world.sent, [])
 
-    def test_changed_reply_drops_a_completion_even_outside_the_summary(self):
-        for needs_you in ('no', 'yes'):
-            with self.subTest(needs_you=needs_you):
+    def test_delivery_rebuilds_a_queued_turn_and_applies_the_current_mode(self):
+        cases = (
+            ('all', 'done', 'done', 'finished'),
+            ('all', 'done', 'asks', 'finished and asks the user'),
+            ('needs', 'asks', 'done', None),
+            ('all', 'done', 'failed', 'failed'),
+            ('needs', 'done', 'failed', 'failed'),
+            ('all', 'done', None, None),
+        )
+        for mode, previous, current, word in cases:
+            with self.subTest(mode=mode, previous=previous, current=current):
                 world = World()
                 world.act('%1', action='claim')
-                prefix = 'Same first part of the reply. ' * coordinator.SUMMARY
-                world.replies['%2'] = f'{prefix}First turn.\n\nNeeds you: {needs_you}'
+                world.tick()   # first sight: the turn below is new
+                world.outcomes['%2'] = {'kind': previous, 'text': 'First turn.', 'identity': 'first'}
                 world.run_turn('%2')
-                event = world.feed.queues['%1']['events'][0]
-                self.assertEqual(event['kind'], 'asks' if needs_you == 'yes' else 'done')
-                self.assertNotIn('First turn', event['text'])
-                world.replies['%2'] = f'{prefix}Second turn.\n\nNeeds you: {needs_you}'
-                world.tick(coordinator.JOIN)  # both snapshots see Idle
-                self.assertEqual(world.sent, [])
+                world.act('%1', action='events', events=mode)
+                world.replies['%2'] = 'Second turn.\nNeeds you: ' + ('yes' if current == 'asks' else 'no')
+                # The next short turn finishes before the read under the delivery lock.
+                def next_turn(entry):
+                    outcome = {'kind': current, 'text': 'Second turn.', 'identity': 'second'}
+                    world.outcomes[entry['id']] = outcome
+                    return outcome
+
+                with patch.object(world, 'delivery_outcome', side_effect=next_turn):
+                    world.tick(coordinator.JOIN)
+                if word:
+                    self.assertEqual(len(world.sent), 1)
+                    self.assertIn(f'{word}: Second turn.', world.sent[0][1])
+                    self.assertNotIn('First turn.', world.sent[0][1])
+                else:
+                    self.assertEqual(world.sent, [])
                 self.assertEqual(world.feed.queues['%1']['events'], [])
+                world.tick(coordinator.JOIN + coordinator.GAP)
+                self.assertEqual(len(world.sent), int(bool(word)))
 
     def test_a_prompt_that_changed_is_not_reported_as_the_old_one(self):
         self.world.states['%2'] = {'state': 'Approval', 'approval': {'id': 'a1', 'text': 'Bash command\nrm -r build'}}
@@ -605,11 +1487,12 @@ class ServerSend(unittest.TestCase):
         return patch.object(self.server, 'fresh_status', side_effect=read)
 
     def deliver(self):
-        event = {'pane': '%2', 'session': '$0', 'chat': None, 'kind': 'needs', 'text': 'update',
+        event = {'pane': '%2', 'session': '$0', 'chat': self.source['transcript'], 'kind': 'needs', 'text': 'update',
                  'name': 'tab 2', 'token': ('approval', 'id', 'a1')}
-        return coordinator.deliver('%1', {'session': '$0', 'chat': None}, [event], lock=self.server.SEND_LOCK,
+        queue = {'session': '$0', 'chat': self.entry['transcript']}
+        return coordinator.deliver('%1', queue, [event], lock=self.server.SEND_LOCK,
                                    fresh=lambda: [self.entry, self.source], fresh_status=self.server.fresh_status,
-                                   last_reply=self.server.last_reply, submit_locked=self.server.submit_locked)
+                                   latest_outcome=coordinator.FEED.latest_outcome, submit_locked=self.server.submit_locked)
 
     def test_a_draft_refuses_the_send_and_is_not_moved(self):
         with self.fresh('Idle'), patch.object(self.server, 'terminal_submit',
@@ -714,6 +1597,68 @@ class SendRouteTests(unittest.TestCase):
         self.assertEqual(body['error'], 'That tab moved or started a new chat. Run tabs again.')
         self.assertEqual(calls, [])
         self.assertFalse(locked)
+
+
+class BrowserRoleRoute(unittest.TestCase):
+    def setUp(self):
+        import server
+
+        self.server = server
+        self.world = World()
+        self.world.entries[1]['thread'] = 'thread-2'
+        self.world.lock = server.SEND_LOCK
+        self.enterContext(patch.object(server.auth, 'token', return_value='test-token'))
+        self.enterContext(patch.object(server, 'fresh_sessions', self.world.fresh))
+        self.enterContext(patch.object(server, 'fresh_status', self.world.fresh_status))
+        self.enterContext(patch.object(server.subprocess, 'run', self.world.tmux))
+        self.send = self.enterContext(patch.object(server, 'send_text', side_effect=self.send_text))
+
+    def send_text(self, entry, text, state, *, held):
+        self.assertTrue(held)
+        return self.world.send(entry, text, state)
+
+    def post(self, *, cookie=True, origin='http://tether.test', header='1', thread='thread-2'):
+        handler = object.__new__(self.server.Handler)
+        body = json.dumps({'pane': '%2', 'thread': thread, 'mode': 'all'}).encode()
+        handler.command = 'POST'
+        handler.path = '/mobile/api/coordinator-role'
+        handler.headers = {'Host': 'tether.test', 'Origin': origin, 'Content-Length': str(len(body)),
+                           'X-Codex-Mobile': header, 'X-Tether-Hook': self.server.auth.session_value()}
+        if cookie:
+            handler.headers['Cookie'] = f'{self.server.auth.COOKIE}={self.server.auth.session_value()}'
+        handler.client_address = ('127.0.0.1', 0)
+        handler.rfile = io.BytesIO(body)
+        with patch.object(handler, 'respond') as respond:
+            handler.do_POST()
+        respond.assert_called_once()
+        return respond.call_args.args
+
+    def test_browser_role_requires_cookie_origin_and_write_header(self):
+        for headers in ({'cookie': False}, {'origin': 'http://not-tether.test'}, {'header': ''}):
+            with self.subTest(headers=headers):
+                status, *_ = self.post(**headers)
+                self.assertIn(status, (401, 403))
+        self.send.assert_not_called()
+        self.assertEqual(self.world.marked(), {})
+        self.assertEqual(self.post()[0], 200)
+        self.send.assert_called_once()
+        self.assertIn('/mobile/api/coordinator-role', self.server.TMUX_WRITES)
+
+    def test_browser_role_shows_the_stale_thread_error(self):
+        status, body = self.post(thread='old-thread')
+        self.assertIn(status, (400, 409))
+        self.assertEqual(body['error'], 'That tab started a new chat. Try again.')
+        self.send.assert_not_called()
+
+    def test_session_row_exposes_the_active_mode(self):
+        entry = self.world.entries[1]
+        with patch.object(self.server, 'shared_status', self.world.status), \
+                patch.object(self.server, 'tab_folder', return_value='/'):
+            self.assertIsNone(self.server.session_row(entry).get('coordinator'))
+            for mode in ('all', 'needs', 'off'):
+                with self.subTest(mode=mode):
+                    entry['coordinator'] = mode
+                    self.assertEqual(self.server.session_row(entry)['coordinator'], mode)
 
 
 class Cli(unittest.TestCase):

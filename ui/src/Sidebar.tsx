@@ -14,7 +14,7 @@ import { needsYou, isDone } from './paneState'
 import { placesOf, tabFor, topState } from './groups'
 import { Suspense, lazy, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { Archive, CalendarClock, ArchiveRestore, ListFilter, History, Asterisk, BarChart3, BookMarked, BookOpen, Bug, Cpu, Database, FileText, FlaskConical, GitBranch, Globe, LayoutDashboard, MessageSquare, MessagesSquare, Mic, Palette, Rocket, Server, Shield, Sparkles, Wrench, Zap, ChevronRight, ChevronsDownUp, ChevronsUpDown, Code2, GripVertical, Layers, Pin, PinOff, Plus, RefreshCw, RotateCw, Search, Settings, SlidersHorizontal, Terminal, Trash2, X, Factory } from 'lucide-react'
+import { Archive, CalendarClock, ArchiveRestore, ListFilter, History, Asterisk, BarChart3, BookMarked, BookOpen, Bug, Cpu, Database, FileText, FlaskConical, GitBranch, Globe, LayoutDashboard, MessageSquare, MessagesSquare, Mic, Palette, Rocket, Server, Shield, Sparkles, Wrench, Zap, ChevronRight, ChevronsDownUp, ChevronsUpDown, Code2, GripVertical, Layers, Network, Pin, PinOff, Plus, RefreshCw, RotateCw, Search, Settings, SlidersHorizontal, Terminal, Trash2, X, Factory } from 'lucide-react'
 import { KeepChoice, keepNeeded } from './Project'
 import { FolderMenu } from './SelectMenu'
 import type { Keep, ProjectMark, ProjectMarks } from './Project'
@@ -760,6 +760,7 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
         const picked = !!tabPick?.picked.has(pane.id)
         const from = pane.from ? `, from ${pane.from.name}` : ''
         const label = pane.task ? helperLabel(pane) : `${name}${from}, Task, ${taskStateLabel[state]}`
+        const named = pane.coordinator ? `${label}, Coordinator` : label
         const source = carry?.taskSource
         const drop = !!source && canMoveInto(source, pane, session.panes, session.groups)
         const actions = (event: React.MouseEvent) => onPaneActions(pane, anchorOf(event))
@@ -769,12 +770,12 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
           onDrop={drop ? event => { event.stopPropagation(); event.preventDefault(); setOver(null); onCarry(null); onTaskMove(source, pane) } : undefined}>
           <button type="button" {...dragAs(DRAG_PANE, pane.id, { session: session.id, pane: pane.id, taskSource: pane })}
             data-select-pane={pane.id} className={`task-row-main${pane.id === selected ? ' selected' : ''}${picked ? ' picked' : ''}`}
-            aria-label={picked ? label + ', selected' : label} aria-describedby={describedBy} aria-current={pane.id === selected ? 'page' : undefined}
+            aria-label={picked ? named + ', selected' : named} aria-describedby={describedBy} aria-current={pane.id === selected ? 'page' : undefined}
             onMouseEnter={clipTitle} onTouchStart={event => onHold(event, { session: session.id, pane: pane.id }, name, () => onPaneActions(pane))}
             onClick={event => pickOr(event, pane.id, () => onOpen(pane))}
             onContextMenu={event => { event.preventDefault(); actions(event) }}>
             <TaskDot state={state} /><span className="pane-child-name">{name}</span><TaskFrom pane={pane} />
-            {pane.task && <span className="task-role">{taskRole(pane)}</span>}
+            {pane.task && <span className="task-role">{taskRole(pane)}</span>}{pane.coordinator && <Network size={13} className="side-coordinator" aria-hidden="true" />}
             <WorkMark mark={workMarks?.[pane.id]} /><CronMark pane={pane} />{tagDot(prefs.colors?.[pane.id])}{slotKey(pane.id)}
           </button>
           {controls}
@@ -874,7 +875,7 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
             {multi && !filtered && <ChevronRight size={14} className="chevron" aria-hidden="true" />}
             {!multi && dot(state)}
             {!multi && avatar(session.name)}
-            <span className="session-text"><span className="session-title">{session.name}{tag}{pinned ? null : prefs.pinned.includes(session.id) && <Pin size={11} aria-label="Pinned" />}{projectMark(marks?.[session.id])}{!multi && <><WorkMark mark={workMarks?.[session.panes[0].id]} /><CronMark pane={session.panes[0]} /></>}</span>{prefs.showPaths && <span className="session-folder"><bdi dir="ltr">{session.dir}</bdi></span>}</span>
+            <span className="session-text"><span className="session-title">{session.name}{tag}{pinned ? null : prefs.pinned.includes(session.id) && <Pin size={11} aria-label="Pinned" />}{projectMark(marks?.[session.id])}{!multi && <>{session.panes[0].coordinator && <Network size={13} className="side-coordinator" role="img" aria-label="Coordinator" />}<WorkMark mark={workMarks?.[session.panes[0].id]} /><CronMark pane={session.panes[0]} /></>}</span>{prefs.showPaths && <span className="session-folder"><bdi dir="ltr">{session.dir}</bdi></span>}</span>
             {!multi && slotKey(session.panes[0].id)}
             {multi && (waits > 0 ? <span className="rollup">{waits}<span className="visually-hidden"> need you</span></span> : !open && state.kind !== 'idle' && dot(state))}
             {!multi && tabPick?.picked.has(session.panes[0].id) && <span className="visually-hidden">, selected</span>}

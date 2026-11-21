@@ -1,0 +1,6 @@
+{"parentUuid":null,"isSidechain":false,"type":"user","uuid":"prompt-1","message":{"role":"user","content":"First task"}}
+{"parentUuid":"prompt-1","isSidechain":false,"type":"assistant","uuid":"reply-1","message":{"role":"assistant","content":[{"type":"text","text":"Done."}],"stop_reason":"end_turn"}}
+{"type":"system","subtype":"turn_duration","durationMs":1500}
+{"parentUuid":"reply-1","isSidechain":false,"type":"user","uuid":"prompt-2","message":{"role":"user","content":"Second task"}}
+{"parentUuid":"prompt-2","isSidechain":false,"type":"assistant","uuid":"reply-2","message":{"role":"assistant","content":[{"type":"text","text":"API Error: You have reached your usage limit."}],"stop_reason":"stop_sequence"},"error":"rate_limit","isApiErrorMessage":true,"failedResponseHadNoToolCall":true}
+{"type":"system","subtype":"turn_duration","durationMs":1100}

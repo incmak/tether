@@ -1,13 +1,17 @@
 """Audit API and permission decisions with a mocked terminal."""
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
+import fcntl
 import io
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import Mock, patch
 
 import audit
+import backlog
+import paths
 import server
 import terminal_input
 
@@ -15,7 +19,8 @@ import terminal_input
 class AuditRouteTests(unittest.TestCase):
     def setUp(self):
         self.folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.enterContext(patch.object(audit.paths, 'CONFIG', self.folder))
+        self.enterContext(patch.object(paths, 'CONFIG', self.folder / 'config'))
+        self.enterContext(patch.object(paths, 'TETHER', self.folder / 'tether'))
 
     def handler(self, method, path, body=None):
         handler = object.__new__(server.Handler)
@@ -62,6 +67,24 @@ class AuditRouteTests(unittest.TestCase):
             query.assert_not_called()
             query.side_effect = OSError('internal path')
             self.assertEqual(self.get(''), (500, {'error': 'Tether could not read the audit log.'}))
+
+    def test_get_does_not_wait_on_a_held_audit_lock(self):
+        # B303: a sandboxed agent can hold audit/.lock from a read-only descriptor. Activity must still open.
+        audit.record('backlog.add', 'Seed')
+        backlog.observe()
+        (backlog.folder() / 'BACKLOG.md').write_text('- [ ] Added by hand #B1\n')
+        replies = []
+        with open(audit.folder() / '.lock', 'rb') as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            reader = threading.Thread(target=lambda: replies.append(self.get('?kind=backlog')), daemon=True)
+            reader.start()
+            reader.join(10)  # fails the test, rather than hanging it, if the GET waits on the held lock
+            self.assertFalse(reader.is_alive())
+        status, body = replies[0]
+        self.assertEqual(status, 200)
+        self.assertEqual([entry['summary'] for entry in body['entries']], ['Seed'])
+        backlog.observe()  # the watcher records the change once the lock is free
+        self.assertEqual(audit.query(kinds=['backlog'])['entries'][0]['detail'], {'observed': True})
 
     def test_permission_decisions_use_verified_option_and_store_no_prompt_data(self):
         config = {'id': '%12', 'thread': 'chat', 'agent': 'codex', 'pane_name': 'Audit Log', 'writable': True}
