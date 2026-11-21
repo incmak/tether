@@ -15,6 +15,9 @@ except ImportError:
     import paths
 
 PREFIX = '/mobile/api/friday-notes'
+TARGET_PATH = f'{PREFIX}/target'
+FRIDAY_TARGET = f'{PREFIX}/friday-target'
+SELF_TARGET = 'Choose a destination other than the draft chat.'
 ACTIONS = ('hold', 'drop', 'draft', 'draft-edit', 'draft-send', 'draft-close', 'draft-asked')
 SENT_AGE = 7 * 86400
 TITLE_LIMIT = 60
@@ -155,7 +158,7 @@ def _raw_topics(source):
         index = skip(source, index + 1).end()
 
 
-def _load(folder, now, *, strict=False):
+def _load(folder, now, *, strict=False, include_expired=False):
     try:
         source = (folder / 'notes.json').read_bytes().decode('utf-8')
         data = json.loads(source)
@@ -189,7 +192,7 @@ def _load(folder, now, *, strict=False):
             if draft and draft['state'] == 'drafting' and now - draft['updated'] > DRAFT_STALE:
                 draft.update(state='failed', error=DRAFT_STOPPED)
             # A sent topic can leave the list before its draft chat reaches its own close deadline.
-            if _visible(topic, now) or _open_chat(draft):
+            if include_expired or _visible(topic, now) or _open_chat(draft):
                 topics.append(topic)
                 order.append(topic)
     return {'next': next_id, 'topics': topics, 'order': order}
@@ -230,18 +233,21 @@ def _normalized(name):
     return ' '.join(re.findall(r'[a-z0-9]+', name.casefold()))
 
 
-def find(topics, name, *, open_only=True):
+def find(topics, name, *, open_only=True, match_sent=False):
     wanted = _normalized(name)
-    matches = []
+    exact, matches = [], []
     for topic in topics:
         if open_only and topic['state'] != 'open':
             continue
         title = _normalized(topic['title'])
         if title == wanted:
-            return topic
-        if topic['state'] == 'open' and wanted and title and (
+            if not match_sent:
+                return topic
+            exact.append(topic)
+        elif (topic['state'] == 'open' or match_sent) and wanted and title and (
                 f' {wanted} ' in f' {title} ' or f' {title} ' in f' {wanted} '):
             matches.append(topic)
+    matches = exact or matches
     if len(matches) > 1:
         titles = ', '.join(topic['title'] for topic in matches)
         raise NotesError(f'Several topics match: {titles}. Which one?')
@@ -258,10 +264,22 @@ def missing(topics, name):
     return NotesError(f'No topic matches {name}. {available}', 404)
 
 
-def listing(now=None, *, strict=False):
+def listing(now=None, *, strict=False, scope='visible'):
     now = time.time() if now is None else now
-    topics = _load(paths.friday_notes(), now, strict=strict)['topics']
-    return {'topics': [public(topic) for topic in sorted(topics, key=_order) if _visible(topic, now)]}
+    topics = _load(paths.friday_notes(), now, strict=strict, include_expired=scope == 'stored')['topics']
+    if scope == 'draft':
+        topics = [topic for topic in topics if _open_chat(topic['draft']) or
+                  (_visible(topic, now) and topic['draft'] and topic['draft']['state'] == 'closed'
+                   and topic['draft']['chat'])]
+    elif scope != 'stored':
+        topics = [topic for topic in topics if _visible(topic, now)]
+    return {'topics': [public(topic) for topic in sorted(topics, key=_order)]}
+
+
+def check_draft_destination(draft, pane, thread):
+    chat = draft['chat']
+    if chat and (pane == chat['pane'] or thread == chat['thread']):
+        raise NotesError(SELF_TARGET, 409)
 
 
 def hold(topic, notes, chat=None, now=None):
@@ -365,7 +383,8 @@ def pinned(now=None, budget=4000):
         if draft := topic['draft']:
             latest = draft['revisions'][-1] if draft['revisions'] else {}
             item['draft'] = {'state': draft['state'], 'rev': latest.get('rev'),
-                             'summary': latest.get('summary', ''), 'skill': latest.get('skill')}
+                             'summary': latest.get('summary', ''), 'skill': latest.get('skill'),
+                             'length': len(latest.get('text', ''))}
     size = len(json.dumps(result))
     if size <= budget:
         return result
@@ -399,7 +418,23 @@ def pinned(now=None, budget=4000):
 
 def handles(path):
     path = path.split('?', 1)[0]
-    return path in (PREFIX, f'{PREFIX}/target') or path in [f'{PREFIX}/{action}' for action in ACTIONS]
+    return path in (PREFIX, TARGET_PATH) or path in [f'{PREFIX}/{action}' for action in ACTIONS]
+
+
+def friday_target(handler, *, draft_runtime):
+    import command_history
+    import friday_drafts
+
+    try:
+        if not command_history.friday_authorized(handler):
+            handler.respond(403, {'error': 'Friday access refused.'})
+            return
+        chat = parse_qs(urlsplit(handler.path).query).get('chat', [''])[0]
+        handler.respond(200, friday_drafts.resolve(chat, runtime=draft_runtime()))
+    except NotesError as exc:
+        handler.respond(exc.status, {'error': str(exc)})
+    except OSError:
+        handler.respond(503, {'error': 'Live chats could not be read.'})
 
 
 def get(handler, *, draft_runtime):
@@ -408,17 +443,26 @@ def get(handler, *, draft_runtime):
     try:
         url = urlsplit(handler.path)
         query = parse_qs(url.query)
-        if url.path == f'{PREFIX}/target':
+        if url.path == TARGET_PATH:
             handler.respond(200, friday_drafts.resolve(query.get('chat', [''])[0], runtime=draft_runtime))
             return
         if url.path != PREFIX:
             raise NotesError('Not found', 404)
         friday_drafts.schedule_sweep(runtime=draft_runtime)
-        result = listing()
         name = query.get('topic', [''])[0].strip()
+        scope = query.get('scope', [''])[0]
+        result = listing(strict=scope in ('open', 'draft'), scope='draft' if scope == 'draft' and name else 'visible')
         if name:
             topics = result['topics']
-            topic = find(topics, name, open_only=False)
+            if scope == 'draft':
+                opened = [item for item in topics if _open_chat(item['draft'])]
+                exact = [item for item in opened if _normalized(item['title']) == _normalized(name)]
+                # An exact repeat of a close must never close a different topic by partial match.
+                closed = [item for item in topics if item['draft']['state'] == 'closed'
+                          and _normalized(item['title']) == _normalized(name)]
+                topic = find(exact or closed or opened, name, open_only=False, match_sent=True)
+            else:
+                topic = find(topics, name, open_only=scope == 'open')
             if topic is None:
                 raise missing(topics, name)
             result = {'topics': [topic]}

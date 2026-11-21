@@ -15,7 +15,7 @@ import { bloomFromBubble, foldToBubble, openFrom, popBubble, settle } from './li
 import { speakable } from './speech'
 import { BACKLOG_PATH } from './backlogNews'
 import { addReminders, listReminders } from './fridayReminders'
-import { dropNotes, holdNotes, readNotes, useHeldNotes } from './fridayNotes'
+import { closeDraft, createDraftWatch, dropNotes, editPrompt, holdNotes, makePrompt, readNotes, sendPrompt, useHeldNotes } from './fridayNotes'
 import { HeldNotes } from './HeldNotes'
 import { parseBacklog, type Item } from './backlogItems'
 import { itemPrompt } from './backlogSend'
@@ -173,6 +173,8 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
   const [awake, setAwake] = useState(false)
   const [problem, setProblem] = useState('')
   const notes = useHeldNotes(api)
+  const [shownDraft, setShownDraft] = useState<{ id: string; rev: number; at: number } | null>(null)
+  const draftWatches = useRef<ReturnType<typeof createDraftWatch> | null>(null)
   const held = useRef(notes.refresh)
   held.current = notes.refresh
   const [menu, setMenu] = useState(false)
@@ -532,7 +534,17 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
     hold_note: args => holdNotes(live.current.api, args).finally(() => void held.current()),
     read_notes: args => readNotes(live.current.api, args),
     drop_notes: args => dropNotes(live.current.api, args).finally(() => void held.current()),
+    make_prompt: args => startDraft(makePrompt, args),
+    edit_prompt: args => startDraft(editPrompt, args),
+    send_prompt: args => sendPrompt(live.current.api, args).finally(() => void held.current()),
+    close_draft: args => closeDraft(live.current.api, args).finally(() => void held.current()),
   })
+  function startDraft(tool: typeof makePrompt, args: Record<string, unknown>) {
+    const watches = draftWatches.current
+    return tool(live.current.api, args, id => {
+      if (watches === draftWatches.current) watches?.start(id)
+    }).finally(() => void held.current())
+  }
   function showChatPane(pane: Pane | undefined, wanted: string) {
     if (!pane) return { error: `No chat called ${wanted}.` }
     const error = live.current.onShowPane(pane.id)
@@ -576,6 +588,18 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
   // Start: the Friday agent when its worker runs, else the phrase loop. Then a short briefing.
   useEffect(() => {
     let gone = false
+    const watches = createDraftWatch(live.current.api, (text, show) => {
+      void held.current()
+      if (show) setShownDraft({ ...show, at: Date.now() })
+      if (agent.current) agent.current.say(text)
+      else flow.current.announce(ASSISTANT, text)
+    })
+    draftWatches.current = watches
+    const stopDraftWatches = () => {
+      draftWatches.current = null
+      watches.clear()
+    }
+    window.addEventListener('pagehide', stopDraftWatches)
     const blocked = (failure: unknown) => failure instanceof DOMException && failure.name === 'NotAllowedError'
     const classic = () => {
       const engine = new LiveVoice({
@@ -603,6 +627,7 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
         onBotText: (text, fresh) => lines.current.reply({ who: ASSISTANT, text }, fresh),
         onMetrics: metrics => console.debug('Friday turn', metrics),
         onVoice: kind => { if (!gone) setVoiceKind(kind) },
+        onShowDraft: show => { if (!gone && agent.current === friday) setShownDraft({ ...show, at: Date.now() }) },
         onClosed: reason => {
           reportVoice({ kind: 'friday', event: 'closed', detail: String(reason) })
           if (gone || agent.current !== friday) return
@@ -633,7 +658,12 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
         classic()
       }
     })
-    return () => { gone = true; agent.current?.close('ended'); agent.current = null; voice.current?.close(); voice.current = null }
+    return () => {
+      gone = true
+      window.removeEventListener('pagehide', stopDraftWatches)
+      stopDraftWatches()
+      agent.current?.close('ended'); agent.current = null; voice.current?.close(); voice.current = null
+    }
   }, [])
 
   // Friday hears the chat list whenever it changes, so it can answer "what's running" from facts.
@@ -937,7 +967,7 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
           <canvas ref={canvas} aria-hidden="true" onClick={talk} />
         </div>
         <div className="live-status" aria-live="polite" title={`${awake ? 'Screen on' : 'Screen may sleep'}${agentOn ? ` · ${voiceInfo}` : ''}`}>{status}{working ? <span> · {working} working</span> : null}</div>
-        <HeldNotes api={api} topics={notes.topics} refresh={notes.refresh} onEmpty={focusControls} />
+        <HeldNotes api={api} topics={notes.topics} refresh={notes.refresh} onEmpty={focusControls} show={shownDraft} />
         <div ref={words} className="live-words" data-no-drag tabIndex={past.length ? 0 : undefined} role={past.length ? 'region' : undefined} aria-label={past.length ? 'Conversation' : undefined} onScroll={onWordsScroll} onWheel={stopJump} onTouchStart={stopJump} onKeyDown={stopJump}>
           {past.length > 0 && <ol className="live-past" aria-label="Earlier in this call">
             {past.map(line => <li key={line.id} data-you={line.you}><span className="live-who">{line.you ? 'You' : line.who}</span>{line.text}</li>)}

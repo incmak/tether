@@ -55,6 +55,8 @@ def proposal_args(proposal):
         return args
     if proposal['name'] == 'answer_approval':
         return {'chat': proposal['chat'], 'decision': proposal['payload']}
+    if proposal['name'] == 'send_prompt':
+        return {'topic': proposal['topic'], 'chat': proposal['chat'], 'read_all': proposal['read_all']}
     args = {'chat': proposal['chat'], 'prompt': proposal['payload']}
     if proposal.get('attach'):
         args['attach_call'] = True
@@ -96,7 +98,7 @@ def _score(trace, expect, expected_tools):
     if readback_chat is not None:
         readback_tool = expect.get('readback_tool', 'send_to_chat')
         if proposal is None:
-            matches = readback_tool not in ('answer_approval', 'drop_notes') and _asks_send_to(reply, readback_chat)
+            matches = readback_tool not in ('answer_approval', 'drop_notes', 'send_prompt') and _asks_send_to(reply, readback_chat)
         else:
             matches = (proposal['name'] == readback_tool
                        and proposal['chat'].strip().casefold() == readback_chat.casefold())
@@ -140,8 +142,22 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
             if friday.is_real_user(m) and isinstance(m.get('content'), str)
             and m['content'].strip() and not m['content'].startswith(friday.EVENT_PREFIX))
     user_turn = 1
+    draft_topics = case.get('draft_topics', [])
+
+    def resolve(chat):
+        for target in fixture.get('draft_targets', []):
+            if ' '.join(target['name'].casefold().split()) == ' '.join(chat.casefold().split()):
+                return target
+        raise friday.friday_notes.NotesError(f'No chat called {chat}.', 404)
+
     # An eval case's stored proposal stands for a read-back that played to the end.
-    pending = friday.SendProposal(**case['pending'], turn=0, heard=True) if 'pending' in case else None
+    saved_pending = case.get('pending')
+    pending = None
+    if saved_pending:
+        fields = dict(saved_pending)
+        if 'target' in fields:
+            fields['target'] = tuple(fields['target'])
+        pending = friday.SendProposal(**fields, turn=0, heard=True)
     if pending and not pending.follows(previous_assistant):
         pending = None
     declined = None
@@ -175,7 +191,17 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
             name, args = call['function']['name'], _tool_args(call)
             args = friday.confirmed_args(name, args, last_user_text, previous_assistant, pending or declined, user_turn)
             reason = friday.check_tool(name, args, source, last_user_text, used, previous_assistant,
-                                       pending=pending or declined, user_turn=user_turn, suggestions=suggestions)
+                                       pending=pending or declined, user_turn=user_turn, suggestions=suggestions,
+                                       draft_topics=draft_topics)
+            draft_proposal = None
+            if name == 'send_prompt' and (reason is None or reason == friday.READBACK_REQUIRED):
+                try:
+                    draft_proposal = friday.prompt_readback_proposal(args, user_turn, draft_topics, resolve)
+                except friday.friday_notes.NotesError as exc:
+                    reason = str(exc)
+                else:
+                    if reason is None and draft_proposal.key != pending.key:
+                        reason = friday.READBACK_REQUIRED
             if reason in (friday.READBACK_REQUIRED, friday.APPROVAL_CONFIRM_REQUIRED) and trace['proposal'] is None:
                 try:
                     if name == 'drop_notes':
@@ -183,6 +209,8 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
                                        notes=[{'text': text} for text in item['notes']])
                                   for i, item in enumerate(topic_notes or [], 1)]
                         proposal = friday.drop_readback_proposal(args, user_turn, topics)
+                    elif name == 'send_prompt':
+                        proposal = draft_proposal
                     else:
                         proposal = friday.SendProposal.from_args(name, args, user_turn)
                 except friday.friday_notes.NotesError as exc:
@@ -191,6 +219,8 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
                     trace['proposal'] = {'name': name, 'chat': proposal.chat, 'payload': proposal.payload}
                     if name == 'drop_notes':
                         trace['proposal']['note'] = proposal.target[1]
+                    if name == 'send_prompt':
+                        trace['proposal'].update(topic=proposal.topic, rev=proposal.target[1], read_all=proposal.target[4])
                     if proposal.attach:
                         trace['proposal']['attach'] = True
                     pending = None
@@ -210,6 +240,8 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
                 result = {'error': reason}
             else:
                 used.add(name)
+                if name == 'send_prompt':
+                    pending = None
                 if name == 'read_last_reply':
                     trace['reads'].append(str(args.get('chat') or ''))
                     returned = results.get(name, {})
@@ -286,12 +318,23 @@ def load_fixture(path):
             raise ValueError(f'{label}: event must be a boolean')
         if 'pending' in case:
             pending = case['pending']
-            if (not isinstance(pending, dict) or pending.keys() != {'name', 'chat', 'payload'}
-                    or pending['name'] not in (*friday.SEND_TOOLS, 'answer_approval')
-                    or not all(isinstance(value, str) for value in pending.values())):
+            base = {'name', 'chat', 'payload'}
+            is_draft = isinstance(pending, dict) and pending.get('name') == 'send_prompt'
+            keys = base | {'target', 'topic', 'requested_topic', 'summary', 'skill'} if is_draft else base
+            if (not isinstance(pending, dict) or pending.keys() != keys
+                    or pending['name'] not in (*friday.DELIVERY_TOOLS, 'answer_approval')
+                    or not all(isinstance(pending[key], str) for key in base)):
                 raise ValueError(f'{label}: pending must specify a read-back tool name, chat and payload')
             if pending['name'] == 'answer_approval' and pending['payload'] not in ('approve', 'deny'):
                 raise ValueError(f'{label}: pending approval payload must be approve or deny')
+            if is_draft:
+                target = pending['target']
+                if (not isinstance(target, list) or len(target) != 5 or not isinstance(target[0], str)
+                        or type(target[1]) is not int or not all(isinstance(value, str) for value in target[2:4])
+                        or type(target[4]) is not bool
+                        or not all(isinstance(pending[key], str) for key in ('topic', 'requested_topic', 'summary'))
+                        or (pending['skill'] is not None and not isinstance(pending['skill'], str))):
+                    raise ValueError(f'{label}: invalid pending draft proposal')
         _validate_context(case, label, names)
         _validate_expectation(case.get('expect'), label, names)
     return fixture
@@ -302,6 +345,14 @@ def _validate_context(data, label, names):
         raise ValueError(f'{label}: state and tool_results must be objects')
     if not isinstance(data.get('topic_notes', []), list):
         raise ValueError(f'{label}: topic_notes must be a list')
+    if (not isinstance(data.get('draft_topics', []), list)
+            or not all(friday.friday_notes._valid(topic) for topic in data.get('draft_topics', []))):
+        raise ValueError(f'{label}: invalid draft topic store')
+    if (not isinstance(data.get('draft_targets', []), list)
+            or not all(isinstance(target, dict) and
+                       all(isinstance(target.get(key), str) for key in ('pane', 'thread', 'name', 'agent'))
+                       for target in data.get('draft_targets', []))):
+        raise ValueError(f'{label}: invalid draft target list')
     for name in data.get('tool_results', {}):
         if name not in names:
             raise ValueError(f'{label}: unknown tool {name!r}')

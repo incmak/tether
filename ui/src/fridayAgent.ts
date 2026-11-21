@@ -26,6 +26,7 @@ export interface AgentEvent { id: string; chat: string; kind: 'approval' | 'ques
 // Kept small: the state goes into the LLM prompt on most turns (about 7 ms per token on this CPU).
 export interface AgentChats { target: string; busy: string[]; needs: { chat: string; needs: string }[]; idle: number }
 export interface AgentChatList { target: string; chats: string[]; sessions: string[] }
+export interface AgentShowDraft { id: string; rev: number }
 
 export interface AgentEvents {
   onTurn: (turn: AgentTurn) => void
@@ -34,6 +35,7 @@ export interface AgentEvents {
   onBotText: (text: string, fresh: boolean) => void
   onMetrics?: (metrics: AgentMetrics) => void
   onVoice?: (kind: VoiceKind | null) => void
+  onShowDraft?: (draft: AgentShowDraft) => void
   onClosed: (reason: string) => void
   tools: Record<string, ToolHandler>
 }
@@ -152,6 +154,7 @@ export class FridayAgent {
         },
         onServerMessage: (message: { t?: string; d?: unknown }) => {
           if (message?.t === 'metrics') this.events.onMetrics?.(message.d as AgentMetrics)
+          else if (message?.t === 'show_draft') this.events.onShowDraft?.(message.d as AgentShowDraft)
           else if (message?.t === 'ready') { if (this.voice.kind) this.mode(this.voice.kind) }
           else if (message?.t === 'say') { const d = message.d as { turn: number; seq: number; text: string }; this.bot = d.seq ? `${this.bot} ${d.text}` : d.text; this.events.onBotText(this.bot, !d.seq); this.voice.say(d.turn, d.seq, d.text) }
           else if (message?.t === 'say_end') { const d = message.d as { turn: number; count: number }; this.voice.end(d.turn, d.count) }

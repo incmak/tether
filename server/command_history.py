@@ -282,12 +282,16 @@ def _body(handler):
     return body
 
 
+def friday_authorized(handler):
+    token = handler.headers.get(FRIDAY_HEADER, '')
+    return (auth.is_loopback(handler.client_address[0])
+            and not any(name in handler.headers for name in ('Origin', 'Cookie', 'X-Forwarded-For', 'Forwarded'))
+            and bool(token) and hmac.compare_digest(token.encode(), friday_token().encode()))
+
+
 def friday_post(handler):
     try:
-        token = handler.headers.get(FRIDAY_HEADER, '')
-        if (not auth.is_loopback(handler.client_address[0])
-                or any(name in handler.headers for name in ('Origin', 'Cookie', 'X-Forwarded-For', 'Forwarded'))
-                or not token or not hmac.compare_digest(token.encode(), friday_token().encode())):
+        if not friday_authorized(handler):
             handler.respond(403, {'error': 'Friday access refused.'})
             return
         body = _body(handler)

@@ -2224,7 +2224,8 @@ class Handler(BaseHTTPRequestHandler):
     def deny(self):
         """Answer and return True when the request is not signed in."""
         if (command_history.FRIDAY_HEADER in self.headers
-                and self.path.split('?', 1)[0] in (command_history.PATH, command_history.DELETE_PATH, '/mobile/api/message')):
+                and self.path.split('?', 1)[0] in (command_history.PATH, command_history.DELETE_PATH,
+                                                  '/mobile/api/message', friday_notes.TARGET_PATH)):
             self.respond(403, {'error': 'Friday access refused.'})
             return True
         if auth.signed_in(self.headers.get('Cookie')) or auth.tailscale_signed_in(self.headers.get('Tailscale-User-Login'), self.client_address[0]):
@@ -2536,6 +2537,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
             else:
                 self.login()
+            return
+        if path == friday_notes.FRIDAY_TARGET:
+            friday_notes.friday_target(self, draft_runtime=friday_draft_runtime)
             return
         if path not in ('/mobile/manifest.webmanifest', '/mobile/icon-192.png', '/mobile/icon-512.png', '/mobile/apple-touch-icon.png') and self.deny():
             return

@@ -134,6 +134,8 @@ REFUSED = {
         'activity', 'activity/publish', 'auto-merge', 'autonomy', 'autonomy/decisions', 'autonomy/lessons',
         'autonomy/review', 'autonomy/setup', 'claude-advisor', 'codex-level', 'codex-provider',
         'codex-trust', 'commit-gate', 'feedback', 'friday-notes/hold', 'friday-notes/drop',
+        'friday-notes/draft', 'friday-notes/draft-edit', 'friday-notes/draft-send',
+        'friday-notes/draft-close', 'friday-notes/draft-asked',
         'groups/arrange', 'groups/create', 'groups/move',
         'groups/remove', 'groups/rename', 'groups/reorder', 'groups/ungroup', 'history/hide', 'passkeys',
         'projects/backlog-add', 'projects/budget', 'projects/instructions', 'projects/note',

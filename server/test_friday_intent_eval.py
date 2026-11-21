@@ -99,6 +99,45 @@ class IntentEvalTests(unittest.TestCase):
             self.assertEqual(result['fails'], {'blocked': 1})
             self.assertIsNone(result['samples'][0]['proposal'])
 
+    def test_draft_intent_cases_use_fixed_readbacks_and_reject_ordinary_sends(self):
+        data = evaluation.load_fixture(evaluation.DEFAULT_CASES)
+        cases = {item['id']: item for item in data['cases']}
+        scenarios = {
+            'make a prompt for the auth notes': 'make_prompt',
+            'add a step to run the tests': 'edit_prompt',
+            'send it to api-server': 'send_prompt',
+            'read all of it': 'send_prompt',
+            'send the auth prompt to api-server': 'send_prompt',
+            'yes after an edit': 'send_prompt',
+            'yes to the wrong chat': 'send_prompt',
+            'yes after a Friday question': 'send_prompt',
+        }
+        for prefix, split in (('', 'dev'), ('h-', 'holdout')):
+            for ident, tool in scenarios.items():
+                with self.subTest(ident=ident, split=split):
+                    example = cases[prefix + ident]
+                    self.assertEqual(example['split'], split)
+                    args = {'topic': 'Auth'}
+                    if tool == 'edit_prompt':
+                        args['change'] = example['user']
+                    if ident == 'read all of it':
+                        args['read_all'] = True
+                    if ident == 'yes to the wrong chat':
+                        args['chat'] = 'docs-site'
+                    result, _ = self.run_script(example, assistant(tool_calls=[call(tool, **args)]), data=data)
+                    self.assertEqual(result['passed'], 1, result['fails'])
+                    sample, = result['samples']
+                    if tool == 'send_prompt':
+                        self.assertEqual(sample['actions'], [])
+                        self.assertEqual(sample['proposal']['rev'], 2 if ident == 'yes after an edit' else 1)
+                    if ident == 'send the auth prompt to api-server':
+                        text = example['draft_topics'][0]['draft']['revisions'][-1]['text']
+                        wrong = assistant(tool_calls=[call('send_to_chat', chat='api-server', prompt=text)])
+                        result, _ = self.run_script(example, wrong, assistant('I can read it back.'), data=data)
+                        self.assertEqual(result['passed'], 0)
+                        blocked, = result['samples'][0]['blocked']
+                        self.assertEqual(blocked['blocked'], 'Use send_prompt for a drafted prompt.')
+
     def test_lookup_uses_case_result_and_scores_extra_action(self):
         example = case(expect={'tool': 'send_to_chat', 'args': {'chat': '(?i)friday test'}},
                        tool_results={'list_chats': {'chats': ['Friday test']}})

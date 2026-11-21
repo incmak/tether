@@ -644,8 +644,7 @@ def send(topic_id, rev, pane, thread, now=None, *, runtime):
         draft, revision = _require_revision(topic, rev)
         if topic['state'] != 'open':
             raise notes.NotesError('This topic was already sent.', 409)
-        if draft['chat'] and (pane == draft['chat']['pane'] or thread == draft['chat']['thread']):
-            raise notes.NotesError('Choose a destination other than the draft chat.', 409)
+        notes.check_draft_destination(draft, pane, thread)
         entry = _bound(runtime.entries(), pane, thread, TARGET_CHANGED)
         text, title = revision['text'], _chat_name(entry)
         # Older stored drafts predate the prefix check. Only the server-added skill may precede the prose.
@@ -657,7 +656,8 @@ def send(topic_id, rev, pane, thread, now=None, *, runtime):
             raise notes.NotesError(TARGET_CHANGED, 409) from exc
         topic.update(state='sent', sent_at=now, sent_to=title, updated=now)
         notes._save(folder, data)
-    return {'sent': True, 'chat': title, 'rev': rev, 'length': len(text)}
+    return {'sent': True, 'chat': title, 'rev': rev, 'length': len(text),
+            'ask_close': notes._open_chat(draft) and not draft['asked_close']}
 
 
 def close(topic_id, pane, thread, now=None, *, runtime):
@@ -681,9 +681,11 @@ def mark_asked(topic_id, now=None):
         draft = _topic(data, topic_id)['draft']
         if draft is None:
             raise notes.NotesError('This topic has no draft.', 404)
-        draft['asked_close'] = True
-        notes._save(folder, data)
-    return {'asked_close': True}
+        ask_close = notes._open_chat(draft) and not draft['asked_close']
+        if not draft['asked_close']:
+            draft['asked_close'] = True
+            notes._save(folder, data)
+    return {'asked_close': True, 'ask_close': ask_close}
 
 
 def sweep(now=None, *, runtime):
