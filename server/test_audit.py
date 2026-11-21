@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr
 from datetime import date, datetime, timedelta, timezone
 from io import StringIO
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -35,6 +36,24 @@ class AuditTests(unittest.TestCase):
         self.enterContext(mock.patch.object(audit, '_FACETS', None))
         self.enterContext(mock.patch.object(audit, '_TABS', {}))
         self.folder = paths.CONFIG / 'audit'
+
+    @unittest.skipIf(os.geteuid() == 0, 'root ignores file modes')
+    def test_a_read_only_holder_of_the_marker_file_does_not_block_appends(self):
+        # B303: a sandboxed agent can read the audit folder. Its lock on .lock must not stop a record.
+        self.assertIsNotNone(audit.record('backlog.add', 'Seed'))
+        guard = audit.folder() / '.write-lock'
+        self.assertEqual(guard.stat().st_mode & 0o777, 0o200)
+        with self.assertRaises(PermissionError):
+            os.open(guard, os.O_RDONLY)
+        with open(audit.folder() / '.lock', 'rb') as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            done = []
+            writer = threading.Thread(target=lambda: done.append(audit.record('backlog.add', 'While held')),
+                                      daemon=True)
+            writer.start()
+            writer.join(10)  # fails the test, rather than hanging it, if the append waits on the held lock
+            self.assertFalse(writer.is_alive())
+        self.assertIsNotNone(done[0])
 
     def test_append_uses_utc_day_and_owner_permissions(self):
         self.clock.return_value = AT + 0.123

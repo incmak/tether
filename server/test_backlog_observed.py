@@ -596,5 +596,43 @@ class BacklogObservedTests(unittest.TestCase):
         self.assert_observed(entry, 'backlog.add', 'B14 added: Direct edit', UNKNOWN)
 
 
+    # B303 round 5 review
+
+    def test_unusable_backlog_lock_path_uses_the_busy_fallback(self):
+        for make in (lambda lock: lock.mkdir(), lambda lock: lock.symlink_to(self.file)):
+            with self.subTest(make=make):
+                backlog.observe()
+                lock = backlog.folder() / '.lock'
+                lock.unlink(missing_ok=True)
+                make(lock)
+                count = len(self.entries())
+                self.file.write_text(self.file.read_text() + f'- [ ] Direct edit {count} #B{20 + count}\n')
+                with mock.patch.object(backlog, 'BUSY_LIMIT', 0):
+                    backlog.observe()
+                self.assertEqual(len(self.entries()), count + 1)
+                lock.rmdir() if lock.is_dir() and not lock.is_symlink() else lock.unlink()
+
+    def half_done_archive(self, item):
+        """A write archives an item: DONE.md is written, BACKLOG.md not yet. A worker holds the backlog lock."""
+        backlog.observe()
+        handle = self.enterContext(open(backlog.folder() / '.lock', 'rb'))
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        self.enterContext(mock.patch.object(backlog, 'BUSY_LIMIT', 0))
+        self.archive.write_text(f'## Build (moved 2026-11-21 10:00)\n- [x] {item}\n  - Done: 2026-11-21 10:00 · ok\n')
+        backlog.observe()
+        self.assertEqual(self.entries(), [])
+        self.file.write_text(INITIAL.replace(f'- [ ] {item}\n', '').replace(f'- [x] {item}\n', ''))
+        backlog.observe()
+
+    def test_fallback_between_the_two_files_of_an_archive_records_done(self):
+        self.half_done_archive('Fix warnings #B12')
+        entry, = self.entries()
+        self.assert_observed(entry, 'backlog.done', 'B12 done: Fix warnings', UNKNOWN)
+
+    def test_fallback_between_the_two_files_of_an_archive_of_a_done_item_records_nothing(self):
+        self.half_done_archive('Old fix #B13')
+        self.assertEqual(self.entries(), [])
+
+
 if __name__ == '__main__':
     unittest.main()
