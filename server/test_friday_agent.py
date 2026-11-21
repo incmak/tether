@@ -578,9 +578,10 @@ class FridayRulesTests(unittest.TestCase):
                                             'Add this to the backlog', set()))
 
     def test_one_action_per_speech_turn(self):
-        for name, args in [('send_to_chat', {'prompt': 'Fix the login bug'}),
-                           ('answer_approval', {'decision': 'approve'})]:
-            self.assertIsNone(friday.check_tool(name, args, 'speech', 'yes, tell it to fix login', set()))
+        for name, args, utterance in [
+                ('send_to_chat', {'prompt': 'Fix the login bug'}, 'yes, tell it to fix login'),
+                ('answer_approval', {'decision': 'approve'}, 'yes')]:
+            self.assertIsNone(friday.check_tool(name, args, 'speech', utterance, set()))
             used = {name}
             self.assertIsNotNone(friday.check_tool(name, args, 'speech', 'yes', used))
             self.assertEqual(used, {name})
@@ -601,6 +602,73 @@ class FridayRulesTests(unittest.TestCase):
             for word in words:
                 self.assertIsNone(friday.check_tool('answer_approval', {'decision': decision},
                     'speech', word.upper() + '!', set()))
+
+    def test_approval_requires_a_whole_consent_answer(self):
+        cases = (
+            ('docs', 'Okay, what is on the backlog?', 'approve', False),
+            ('docs', 'Okay what is on the backlog', 'approve', False),
+            ('docs', 'Sure, what did docs say', 'approve', False),
+            ('docs', 'Yes, and also tell docs to deploy', 'approve', False),
+            ('docs', 'ok so whats next', 'approve', False),
+            ('docs', 'No, what did docs say', 'deny', False),
+            ('docs', 'Okay?', 'approve', False),
+            ('docs', 'Okay.', 'approve', True),
+            ('docs', 'Yes, approve docs.', 'approve', False),  # a chat name is never removed: Friday asks again
+            ('docs', 'Yes, approve.', 'approve', True),
+            ('docs', 'Yes, approve it.', 'approve', True),
+            ('docs', 'Sure, go ahead.', 'approve', True),
+            ('docs', 'Yup, alright.', 'approve', True),
+            ('API Docs', 'Deny API Docs, please.', 'deny', False),
+            ('API Docs', 'Deny it, please.', 'deny', True),
+            ('API Docs', 'Deny Docs, please.', 'deny', False),
+            ('docs', 'Yes and no', 'approve', False),
+            ('docs', 'Go', 'approve', False),
+            ('docs', 'Dont', 'deny', False),
+            ('docs', 'Do not', 'deny', False),
+            # A chat title never stands in for words of the answer.
+            ('Hold off', 'Okay, hold off', 'approve', False),
+            ('No thanks', 'Okay, no thanks', 'approve', False),
+            ('Hold off', 'Okay, hold off.', 'deny', False),
+            ('Hold off', 'Approve Hold off.', 'approve', False),
+            ('No thanks', 'Yes, approve it in No thanks.', 'approve', False),  # fail-safe: Friday asks again
+            # A title that is a decision word never absorbs a separate decision.
+            ('No', 'Approve. No.', 'approve', False),
+            ('Yes', 'Deny. Yes.', 'deny', False),
+            ('Go ahead', 'Deny. Go ahead.', 'deny', False),
+            # A chat title never hides a withdrawal or a delay.
+            ('It Hold off', 'Approve it. Hold off.', 'approve', False),
+            ('A minute', 'Okay, in a minute.', 'approve', False),
+            ('Wait', 'Approve. Wait.', 'approve', False),
+            ('Later today', 'Yes, approve it later today.', 'approve', False),
+            ('Later', 'Approve later.', 'approve', False),
+            # Still decide.
+            ('docs', 'Approve', 'approve', True),
+            ('docs', 'Yes approve it', 'approve', True),
+            ('docs', 'Deny', 'deny', True),
+            ('docs', 'No', 'deny', True),
+            ('docs', 'Go ahead', 'approve', True),
+            # "Don't" alone denies; a negated command decides nothing.
+            ('docs', "Don't deny.", 'deny', False),
+            ('docs', "Don't stop.", 'deny', False),
+            ('docs', "Don\u2019t approve it.", 'approve', False),
+            ('docs', "Don't!", 'deny', True),
+            ('docs', "Don\u2019t, please.", 'deny', True),
+        )
+        for chat, text, decision, allowed in cases:
+            with self.subTest(chat=chat, text=text, decision=decision):
+                reason = friday.check_tool('answer_approval', {'chat': chat, 'decision': decision},
+                                           'speech', text, set())
+                self.assertEqual(reason, None if allowed else
+                                 'The user did not give unambiguous consent for this decision.')
+
+    def test_backlog_question_after_readback_does_not_confirm_send(self):
+        args = {'chat': 'docs', 'prompt': 'Run the tests'}
+        proposal = friday.SendProposal('send_to_chat', args['chat'], args['prompt'], 4, heard=True)
+        for text in ('Okay, what is on the backlog?', 'Sure, what did docs say'):
+            with self.subTest(text=text):
+                self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', text, set(),
+                                                   friday.send_readback(proposal), proposal, 5),
+                                 friday.READBACK_REQUIRED)
 
     def test_echo_sends(self):
         for prompt in ('What was the response?', 'What is the reply?',
@@ -858,15 +926,15 @@ class FridayRulesTests(unittest.TestCase):
         for answer in ('Yes, but later.', 'Okay, once the tests pass.', 'Sure, but make it D.',
                        'Yes, please do not send it yet.', 'Yes, why not ask deploy instead.'):
             with self.subTest(answer=answer):
-                self.assertFalse(friday.plain_yes(answer, 'docs'))
+                self.assertFalse(friday.plain_yes(answer))
                 args = friday.confirmed_args('send_to_chat', {'chat': 'docs', 'prompt': 'Keep option C.'},
                                              answer, readback, proposal, 5)
                 self.assertIsNotNone(friday.check_tool('send_to_chat', args, 'speech', answer, set(),
                                                        readback, proposal, 5))
-        for answer in ('Yes.', 'Yes, please do.', 'Okay, go ahead.', 'Sure, send it to docs.', 'Yeah, do it. Thanks.'):
+        for answer in ('Yes.', 'Yes, please do.', 'Okay, go ahead.', 'Yes please send it.', 'Yeah, do it. Thanks.'):
             for previous, pending in ((readback, proposal), ('Should I tell docs to keep option C?', None)):
                 with self.subTest(answer=answer, previous=previous):
-                    self.assertTrue(friday.plain_yes(answer, 'docs'))
+                    self.assertTrue(friday.plain_yes(answer))
                     args = friday.confirmed_args('send_to_chat', {'chat': 'docs', 'prompt': 'Archive the draft.'},
                                                  answer, previous, pending, 5)
                     # Friday's own words bind nothing: the model's text stays, and the guard reads it back.
@@ -886,7 +954,7 @@ class FridayRulesTests(unittest.TestCase):
         args = {'chat': 'docs', 'prompt': 'Keep option C.'}
         for answer in ("That's correct?", 'Yes?', 'Okay, go ahead?'):
             with self.subTest(answer=answer):
-                self.assertFalse(friday.plain_yes(answer, 'docs'))
+                self.assertFalse(friday.plain_yes(answer))
                 self.assertIsNotNone(friday.check_tool('send_to_chat', args, 'speech', answer, set(),
                                                        readback, proposal, 5))
 
@@ -936,8 +1004,8 @@ class FridayRulesTests(unittest.TestCase):
     def test_a_question_without_its_mark_is_not_a_yes(self):
         for answer in ('You sure', 'you sure then', 'Okay you'):
             with self.subTest(answer=answer):
-                self.assertFalse(friday.plain_yes(answer, 'docs'))
-        self.assertTrue(friday.plain_yes('Yes, thank you.', 'docs'))
+                self.assertFalse(friday.plain_yes(answer))
+        self.assertTrue(friday.plain_yes('Yes, thank you.'))
 
     def test_a_question_that_names_the_chat_makes_the_next_turn_an_answer(self):
         previous = 'Would you like me to ping docs about option C?'
@@ -1002,11 +1070,19 @@ class FridayRulesTests(unittest.TestCase):
                                            'Yes.', set(), 'Should I send the approval checklist to docs?'),
                          'The user answered a send question, not an approval.')
         proposal = friday.SendProposal('send_to_chat', 'Hold Off', 'Ship it.', 4, heard=True)
-        self.assertFalse(friday.plain_yes('Yes, hold off.', 'Hold Off'))
+        self.assertFalse(friday.plain_yes('Yes, hold off.'))
         self.assertEqual(friday.check_tool('send_to_chat', {'chat': 'Hold Off', 'prompt': 'Ship it.'}, 'speech',
                                            'Yes, hold off.', set(), friday.send_readback(proposal), proposal, 5),
                          refusal)
-        self.assertTrue(friday.plain_yes('Yes, send it to Hold Off.', 'Hold Off'))
+        # A chat title is free text: it never stands in for words of a yes. Friday asks "Yes or no?" again.
+        for chat, answer in (('Hold Off', 'Yes, send it to Hold Off.'), ('docs', 'Sure, send it to docs.'),
+                             ('Tomorrow', 'Yes, send it to tomorrow')):
+            with self.subTest(chat=chat, answer=answer):
+                self.assertFalse(friday.plain_yes(answer))
+                proposal = friday.SendProposal('send_to_chat', chat, 'Ship it.', 4, heard=True)
+                self.assertEqual(friday.check_tool('send_to_chat', {'chat': chat, 'prompt': 'Ship it.'}, 'speech',
+                                                   answer, set(), friday.send_readback(proposal), proposal, 5),
+                                 friday.READBACK_REQUIRED)
 
     def test_friday_own_words_never_confirm_a_send(self):
         # 20 Nov advisor decision: only the server's stored proposal binds a yes. Parsing Friday's
@@ -2156,9 +2232,10 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         return {'id': ident, 'type': 'function',
                 'function': {'name': 'list_chats', 'arguments': '{}'}}
 
-    async def tool_flow(self, user, responses, proposal=None, *, trim=False):
+    async def tool_flow(self, user, responses, proposal=None, *, aggregate=False, trim=False):
         """Drive Pipecat completions and return the downstream frame and dispatch order."""
         from pipecat.processors.aggregators.llm_context import LLMContext
+        from pipecat.processors.aggregators.llm_response_universal import LLMAssistantAggregator
         from pipecat.processors.frame_processor import FrameProcessor
         from pipecat.processors.frameworks.rtvi.processor import RTVIProcessor
 
@@ -2168,22 +2245,38 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         session.pending_proposal = proposal
         session.rtvi = RTVIProcessor()
         session.prepare_messages = friday.trim_context if trim else lambda messages: messages
-        llm = self.rt.FridayLLM(session, friday.brain_config({}))
+        llm = session.llm = self.rt.FridayLLM(session, friday.brain_config({}))
         llm._setup = SimpleNamespace(observer=None, enable_metrics=True, enable_usage_metrics=False,
             report_only_initial_ttfb=False, pipeline_worker=SimpleNamespace(app_resources=None, worker_runner=None))
         messages = [{'role': 'user', 'content': user}] if isinstance(user, str) else list(user)
         context = LLMContext(messages)
+        assistant = None
+        if aggregate:
+            session.wake = asyncio.Event()
+            session.tts = SimpleNamespace(device_voice_pending=lambda: False)
+            session.llm_running = session.reply_open = session.bot_speaking = False
+            session.busy = True
+            assistant = LLMAssistantAggregator(context)
+            llm.track_assistant(assistant, context)
         direction = self.rt.FrameDirection.DOWNSTREAM
         frames = []
         browser_results = {}
         elapsed = [100.0]
 
         async def push(processor, frame, direction=direction):
-            if direction == self.rt.FrameDirection.DOWNSTREAM:
+            if processor is assistant:
+                if direction == self.rt.FrameDirection.UPSTREAM and isinstance(frame, self.rt.LLMContextFrame):
+                    await assistant._call_event_handler('on_before_push_frame', frame)
+                    frames.append(frame)
+            elif direction == self.rt.FrameDirection.DOWNSTREAM:
                 if processor is session.rtvi:
                     await llm.process_frame(frame, direction)
                 else:
                     frames.append(frame)
+                    if assistant is not None:
+                        await assistant._call_event_handler('on_before_process_frame', frame)
+                        await assistant.process_frame(frame, direction)
+                        await assistant._call_event_handler('on_after_process_frame', frame)
 
         async def dispatch(message, **kwargs):
             data = message.data
@@ -2224,6 +2317,8 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                         browser_results[ident] = result
                     with patch.object(llm, 'get_chat_completions', completion(text, current, delay)):
                         await llm.process_frame(self.rt.LLMContextFrame(context), direction)
+                    if assistant is not None:
+                        continue
                     reads = [(ident, name, args) for ident, name, args in current if name == 'read_last_reply'
                              and ('dispatch', name) in frames]
                     if reads:
@@ -2240,6 +2335,94 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         session.context = context
         session.call_log = llm.call_log
         return session, frames
+
+    async def test_readback_batch_speaks_once_without_aggregator_rerun(self):
+        listing = ('list_chats', {}, {'chats': [{'name': 'Docs'}]})
+        send = ('send_to_chat', {'chat': 'Docs', 'prompt': 'Fix docs'}, {'ok': True})
+        for calls in ([listing, send], [send, listing]):
+            with self.subTest(first=calls[0][0]), patch('sys.stderr'):
+                session, frames = await self.tool_flow('Can you fix docs?', [('', 1, calls)], aggregate=True)
+                self.assertNotIn(('dispatch', 'send_to_chat'), frames)
+                self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)
+                                  and f.append_to_context],
+                                 ['Not sent yet. Should I send this to Docs? Fix docs. Yes or no?'])
+                self.assertEqual(sum(isinstance(f, self.rt.LLMContextFrame) for f in frames), 0)
+                self.assertFalse(session.waiting_for_read)
+                self.assertFalse(session.llm.tool_work_pending)
+                self.assertFalse(session.busy)
+
+    async def test_ordinary_tool_batch_runs_aggregator_once_after_last_result(self):
+        listing = ('list_chats', {}, {'chats': [{'name': 'Docs'}]})
+        read = ('read_last_reply', {'chat': 'Docs'}, {'text': 'Done.'})
+        for calls in ([listing, read], [read, listing]):
+            with self.subTest(first=calls[0][0]):
+                _, frames = await self.tool_flow('Check Docs', [('', 1, calls)], aggregate=True)
+                reruns = [f for f in frames if isinstance(f, self.rt.LLMContextFrame)]
+                results = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
+                self.assertEqual(len(results), 2)
+                self.assertEqual(len(reruns), 1)
+                self.assertLess(frames.index(results[-1]), frames.index(reruns[0]))
+
+    async def test_tool_batch_keeps_updates_pending_and_respects_explicit_run_flags(self):
+        from pipecat.frames.frames import FunctionCallFromLLM
+        from pipecat.processors.frame_processor import FrameProcessor
+
+        llm = self.rt.FridayLLM(SimpleNamespace(), friday.brain_config({}))
+        name = 'list_chats'
+
+        def result(ident, **kwargs):
+            return self.rt.FunctionCallResultFrame(name, ident, {}, {'chats': []}, **kwargs)
+
+        try:
+            with patch.object(FrameProcessor, 'push_frame', AsyncMock()):
+                ids = ['updated', 'explicit-frame', 'explicit-property', 'cancelled', 'other']
+                await llm.push_frame(self.rt.FunctionCallsStartedFrame([
+                    FunctionCallFromLLM(name, ident, {}, None) for ident in ids]))
+                update = result('updated', properties=self.rt.FunctionCallResultProperties(is_final=False))
+                explicit_frame = result('explicit-frame', run_llm=True)
+                explicit_property = result('explicit-property', properties=self.rt.FunctionCallResultProperties(run_llm=False))
+                other = result('other')
+                last = result('updated')
+                for frame in (update, explicit_frame, explicit_property,
+                              self.rt.FunctionCallCancelFrame(name, 'cancelled'), other, last):
+                    await llm.push_frame(frame)
+                self.assertEqual([f.run_llm for f in (update, explicit_frame, explicit_property, other, last)],
+                                 [False, True, None, False, None])
+                self.assertIs(explicit_property.properties.run_llm, False)
+        finally:
+            await llm._client.close()
+
+    async def test_late_tool_result_uses_the_read_back_state_of_its_own_run(self):
+        from pipecat.frames.frames import FunctionCallFromLLM
+        from pipecat.processors.frame_processor import FrameProcessor
+
+        llm = self.rt.FridayLLM(SimpleNamespace(), friday.brain_config({}))
+        name = 'list_chats'
+
+        async def batch(run, ident):
+            llm.tool_run = run
+            await llm.push_frame(self.rt.FunctionCallsStartedFrame([FunctionCallFromLLM(name, ident, {}, None)]))
+
+        def result(ident):
+            return self.rt.FunctionCallResultFrame(name, ident, {}, {'chats': []})
+
+        spoke, plain = SimpleNamespace(readback_spoken=True, pending={}), SimpleNamespace(readback_spoken=False, pending={})
+        try:
+            with patch.object(FrameProcessor, 'push_frame', AsyncMock()):
+                # A late result of a turn that spoke its read-back stays silent in the next turn.
+                await batch(spoke, 'old-readback')
+                llm.tool_run = SimpleNamespace(readback_spoken=False, pending={})
+                late = result('old-readback')
+                await llm.push_frame(late)
+                # A read-back in the new turn does not silence a late result of an ordinary turn.
+                await batch(plain, 'old-plain')
+                llm.tool_run = SimpleNamespace(readback_spoken=True, pending={})
+                ordinary = result('old-plain')
+                await llm.push_frame(ordinary)
+                self.assertEqual((late.run_llm, ordinary.run_llm), (False, None))
+                self.assertEqual((llm.tool_batches, llm.tool_batch_runs), ({}, {}))
+        finally:
+            await llm._client.close()
 
     def attachment_confirmation(self, args):
         proposal = friday.SendProposal('send_to_chat', args['chat'], args['prompt'], 0, heard=True, attach=True)
@@ -2396,7 +2579,8 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 _, frames = await self.tool_flow('Send it', [('', 1.25, calls)])
                 results = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
                 self.assertEqual(len(results), len(calls))
-                self.assertTrue(all(f.properties is None and f.run_llm is None for f in results))
+                self.assertTrue(all(f.properties is None for f in results))
+                self.assertEqual([f.run_llm for f in results], [False] * (len(calls) - 1) + [None])
                 self.assertFalse(any(isinstance(f, self.rt.TTSSpeakFrame) for f in frames))
 
     async def test_read_fillers_are_once_per_spoken_turn_and_skip_text_and_events(self):
@@ -2410,7 +2594,8 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(filler.append_to_context)
                 self.assertLess(frames.index(filler), frames.index(('dispatch', call[0])))
                 results = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
-                self.assertTrue(all(f.properties is None and f.run_llm is None for f in results))
+                self.assertTrue(all(f.properties is None for f in results))
+                self.assertEqual([f.run_llm for f in results], [False, None])
 
         _, frames = await self.tool_flow('Check it', [
             ('Let me see.', 1, [reads[0]]), ('', 2, [reads[1]]), ('', 3, [reads[2]])])
@@ -2540,19 +2725,46 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                                  ['Codex is done with B318.'])
                 self.assertFalse(any(isinstance(f, self.rt.TTSSpeakFrame) for f in frames))
 
+    async def test_mixed_script_reply_preserves_chunk_order(self):
+        for chunks in (['東京', ' is idle.'], ['The idle chat is ', '東京', '.'], ['서울', ' is idle.'],
+                       ['“', '東京', '” is idle.'], ['...'], ['“', '”']):
+            with self.subTest(chunks=chunks), patch('sys.stderr') as stderr:
+                _, frames = await self.tool_flow('Check it', [(chunks, 1, [])])
+                self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], chunks)
+                self.assertFalse(any(isinstance(f, self.rt.TTSSpeakFrame) for f in frames))
+                stderr.write.assert_not_called()
+
+    async def test_mixed_script_reply_preserves_buffered_chunks(self):
+        send = ('send_to_chat', {'chat': 'Docs', 'prompt': 'Fix docs'}, {'error': 'Missing chat'})
+        for chunks in (['東京', ' is idle.'], ['The idle chat is ', '서울', '.']):
+            with self.subTest(chunks=chunks):
+                _, frames = await self.tool_flow('Send this', [('', 1, [send]), (chunks, 2, [])])
+                self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], chunks)
+
+    async def test_stray_only_reply_logs_total_and_uses_fallback(self):
+        # The decision is per reply: punctuation around a stray name does not change it.
+        for chunks in (['사'], ['사', ' ', '東京', '.'], ['“東京”'], ['“', '東京', '”'], ['—', '서울'], ['- ', '東京']):
+            with self.subTest(chunks=chunks), patch('sys.stderr') as stderr:
+                _, frames = await self.tool_flow('Check it', [(chunks, 1, [])])
+                self.assertFalse(any(isinstance(f, self.rt.LLMTextFrame) for f in frames))
+                self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)],
+                                 ['Sorry, I lost my words. Say that again?'])
+                log = ''.join(c.args[0] for c in stderr.write.call_args_list)
+                self.assertEqual(log, f'Friday dropped stray text: {sum(map(len, chunks))} chars\n')
+
     async def test_stray_text_is_dropped_with_fallback_only_for_an_empty_reply(self):
         cases = (
-            (['層'], [], [], ['Sorry, I lost my words. Say that again?']),
-            (['', 'あ', 'OK 層', ' B318'], [], ['OK 層', ' B318'], []),
-            (['ش'], [('list_chats', {}, {'chats': []})], [], ['Checking the chats.']),
+            (['層'], [], [], ['Sorry, I lost my words. Say that again?'], 1),
+            (['', 'あ', 'OK 層', ' B318'], [], ['あ', 'OK 層', ' B318'], [], 0),
+            (['ش'], [('list_chats', {}, {'chats': []})], [], ['Checking the chats.'], 1),
         )
-        for chunks, calls, text, speech in cases:
+        for chunks, calls, text, speech, dropped in cases:
             with self.subTest(chunks=chunks), patch('sys.stderr') as stderr:
                 _, frames = await self.tool_flow('Check it', [(chunks, 1, calls)])
                 self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], text)
                 self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)], speech)
                 log = ''.join(c.args[0] for c in stderr.write.call_args_list)
-                self.assertEqual(log, 'Friday dropped stray text: 1 chars\n')
+                self.assertEqual(log, f'Friday dropped stray text: {dropped} chars\n' if dropped else '')
 
     async def test_joined_speech_confirms_pending_send_and_success_clears_it(self):
         proposal = friday.SendProposal('send_to_chat', 'Automation tether . Can we have…', 'Review the context.', 0, heard=True)
