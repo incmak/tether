@@ -566,9 +566,11 @@ def declined_claim(text):
     # A claim has a claim shape: a sentence that opens with the decision ("Denied because it was not
     # safe.", "Okay, denied.") or a subject that did it ("I have denied it", "It's rejected").
     # "It wants the installation approved" describes the request and is kept.
-    # "It asks whether the request was approved" reports a question, not a decision.
+    # "It asks whether (or not) the request was approved" reports a question, not a decision. The
+    # exemption holds for its own clause only: "I asked if it was approved, and it was approved." claims.
     text = text.replace('\u2019', "'")
-    return any(not re.search(r'\b(?:whether|if)\s+$', text[:match.start()].lower())
+    return any(not re.search(r'\b(?:whether|if)\b',
+                             re.split(r'[.!?;,]|\b(?:and|but|so)\b', text[:match.start()])[-1], re.I)
                for match in DECISION_CLAIM.finditer(text))
 
 
@@ -606,7 +608,15 @@ YES_FILLER = frozenset('do it that this go right now thanks thank sounds good gr
 
 
 CORRECTION_OBJECTS = frozenset('it that this these those them the a an my its his her their to me'.split())
-QUESTION_MARK = re.compile(r'[?\uff1f\u00bf\u2e2e]')  # "?", full-width "？", "¿", "⸮": each asks
+class _QuestionMark:
+    """Any question mark in any script asks: "?", "？", "؟", "⁇", "¿", ";" (Greek), "‽"."""
+
+    @staticmethod
+    def search(text):
+        return any(char in '?\u203d' or 'QUESTION' in unicodedata.name(char, '') for char in text)
+
+
+QUESTION_MARK = _QuestionMark()
 
 
 def plain_yes(text):
@@ -621,8 +631,8 @@ def plain_yes(text):
     # ("That's correct, go ahead"); with an object ("correct it", "correct the chat") it asks for a change.
     if any(word == 'ahead' and 'go' not in words[max(0, i - 2):i] for i, word in enumerate(words)):
         return False
-    if any(word == 'correct' and words[i + 1:i + 2] and words[i + 1] in CORRECTION_OBJECTS
-           for i, word in enumerate(words)):
+    # Read the raw text: "Correct, it sounds good" has a pause before "it" and still consents.
+    if re.search(r"\bcorrect\s+(?:%s)\b" % '|'.join(sorted(CORRECTION_OBJECTS)), text, re.I):
         return False
     allowed = YES_WORDS | YES_FILLER
     return any(word in YES_WORDS for word in words) and all(word in allowed for word in words)

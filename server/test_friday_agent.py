@@ -674,7 +674,9 @@ class FridayRulesTests(unittest.TestCase):
                                    ('The approved one.', 'not None'), ('The denied one.', 'not None'),
                                    # Review 6: every question mark asks, not only ASCII "?".
                                    ('Yes\uff1f', confirm_required), ('Okay\uff1f', confirm_required),
-                                   ('Yes\u00bf', confirm_required)):
+                                   ('Yes\u00bf', confirm_required), ('Yes\u061f', confirm_required),
+                                   ('Okay\u2047', confirm_required), ('Yes\u203d', confirm_required),
+                                   ('Yes\u037e', confirm_required)):
                 with self.subTest(decision=decision, text=text):
                     reason = friday.check_tool('answer_approval', {'chat': 'Docs', 'decision': decision},
                                                'speech', text, set(), question, proposal, 1)
@@ -705,7 +707,9 @@ class FridayRulesTests(unittest.TestCase):
                 self.assertFalse(friday.plain_yes(answer))
         for answer in ('Go ahead', "That's correct", 'Correct', 'Correct, send it', 'Yes, correct',
                        # Review 6: ordinary assent that origin/main accepts stays a yes.
-                       'That\u2019s correct, go ahead', 'Go right ahead'):
+                       'That\u2019s correct, go ahead', 'Go right ahead',
+                       # Review 7: a pause after "correct" makes it an answer.
+                       'Correct, it sounds good', 'Correct, that\u2019s it'):
             with self.subTest(answer=answer):
                 self.assertTrue(friday.plain_yes(answer))
         for name, key, payload in (('send_to_chat', 'prompt', 'Check the logs'), ('backlog_send', 'item', 'B12')):
@@ -2894,7 +2898,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                    {'role': 'user', 'content': 'No, what does it want?'}]  # not bare: the model runs
         for reply in (['Denied.'], ['Okay, I have ', 'denied it.'], ['Denied. Anything else?'],
                       ['I rejected the request.'], ['Denied. I did not send anything.'],
-                      ['Denied because it was not safe.']):
+                      ['Denied because it was not safe.'], ['I asked if it was approved, and it was approved.']):
             with self.subTest(reply=reply), patch('sys.stderr'):
                 _, frames = await self.tool_flow(history, [(reply, 1, [])], proposal)
                 self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], [])
@@ -2902,7 +2906,8 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                                  [friday.APPROVAL_DECLINED_REPLY])
         # Review 5: an answer that describes the request is not a claim and is kept.
         for reply in ('Okay, I will leave it waiting.', 'It wants the installation approved before it can continue.',
-                      'It asks whether the request was approved.'):
+                      'It asks whether the request was approved.',
+                      'It asks whether or not the request was approved.'):
             with self.subTest(reply=reply), patch('sys.stderr'):
                 _, frames = await self.tool_flow(history, [([reply], 1, [])], proposal)
                 self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], [reply])
