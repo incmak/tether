@@ -571,7 +571,17 @@ class FridayRulesTests(unittest.TestCase):
             ('No thanks', 'Okay, no thanks', 'approve', False),
             ('Hold off', 'Okay, hold off.', 'deny', False),
             ('Hold off', 'Approve Hold off.', 'approve', True),
-            ('No thanks', 'Yes, approve it in No thanks.', 'approve', True),
+            ('No thanks', 'Yes, approve it in No thanks.', 'approve', False),  # fail-safe: Friday asks again
+            # A title that is a decision word never absorbs a separate decision.
+            ('No', 'Approve. No.', 'approve', False),
+            ('Yes', 'Deny. Yes.', 'deny', False),
+            ('Go ahead', 'Deny. Go ahead.', 'deny', False),
+            # "Don't" alone denies; a negated command decides nothing.
+            ('docs', "Don't deny.", 'deny', False),
+            ('docs', "Don't stop.", 'deny', False),
+            ('docs', "Don\u2019t approve it.", 'approve', False),
+            ('docs', "Don't!", 'deny', True),
+            ('docs', "Don\u2019t, please.", 'deny', True),
         )
         for chat, text, decision, allowed in cases:
             with self.subTest(chat=chat, text=text, decision=decision):

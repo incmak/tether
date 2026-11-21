@@ -574,6 +574,25 @@ def approval_answer(text, chat=''):
     """Return the decision in a whole utterance that answers an approval."""
     if '?' in text:
         return None
+    words = re.sub(r'\bdon t\b', "don't", norm(text.replace('\u2019', "'")))
+    if "don't" in words.split():
+        # "Don't!" alone denies; "Don't deny" or "Don't stop" negates a command and decides nothing.
+        return 'deny' if set(words.split()) - {"don't"} <= APPROVAL_FILLER else None
+    name = norm(chat)
+    # The chat name counts only as one whole phrase right after a decision word or "in"/"for"
+    # ("approve docs", "deny it in docs"): a title such as "Hold off" never turns other words into consent.
+    # A title that holds a decision word ("No", "Yes", "Go ahead") never counts: norm drops the sentence
+    # boundary, so "Approve. No." would read as "approve No".
+    if name and not set(name.split()) & (APPROVAL_ANSWERS | DENIAL_ANSWERS | {'go', 'ahead', 'don'}):
+        words = re.sub(rf'\b(approve|approved|deny|denied|in|for) {re.escape(name)}(?= |$)', r'\1 it', words)
+    words = set(re.sub(r'\bgo ahead\b', 'approve', words).split())
+    if words - (APPROVAL_ANSWERS | DENIAL_ANSWERS | APPROVAL_FILLER):
+        return None
+    approve = bool(words & APPROVAL_ANSWERS)
+    deny = bool(words & DENIAL_ANSWERS)
+    if approve != deny:
+        return 'approve' if approve else 'deny'
+    return None
     words = norm(re.sub(r"\bdon't\b", 'deny', text, flags=re.I))
     name = norm(chat)
     if name:
