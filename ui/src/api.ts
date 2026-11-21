@@ -387,20 +387,32 @@ export async function request<T>(path: string, body?: unknown, signal?: AbortSig
     if (response.ok && path.split('?')[0] === 'footer') throw error
     return {}
   })
-  if (init.method !== 'GET') announceUndo(response)
+  if (init.method !== 'GET') announceUndo(response, data)
   if (!response.ok) throw new ApiError(response.status, data.error || `Request failed (${response.status}). Please try again.`, data.draft === true, data.approval === 'required')
   return data as T
 }
 
-/** A step the server recorded in the undo history (undo_api.headers): the page offers Undo in a toast (Undo.tsx). */
-export interface UndoStep { id: string; label: string }
+/** A moved tab whose agent still runs with the project it started in (server tmux_merge.restart_info, B326). The page
+ *  offers Restart in the same toast; restart-tab starts the agent again in place so it loads the session's project. */
+export interface RestartOffer { pane: string; thread: string | null; project: string; name: string; session: string }
+/** A step the server recorded in the undo history (undo_api.headers): the page offers Undo in a toast (Undo.tsx).
+ *  id is '' when a move needs a restart but the server recorded no undo step. */
+export interface UndoStep { id: string; label: string; restart?: RestartOffer }
 export const UNDO_EVENT = 'tether-undo-step'
-function announceUndo(response: Response) {
-  const id = response.headers.get('X-Tether-Undo')
-  if (!id || typeof window === 'undefined') return
+function restartOffer(data: unknown): RestartOffer | undefined {
+  const offer = (data as { restart?: Partial<RestartOffer> } | null)?.restart
+  if (!offer || typeof offer.pane !== 'string' || typeof offer.name !== 'string' || typeof offer.session !== 'string') return undefined
+  return { pane: offer.pane, thread: typeof offer.thread === 'string' && offer.thread ? offer.thread : null,
+    project: typeof offer.project === 'string' ? offer.project : '', name: offer.name, session: offer.session }
+}
+function announceUndo(response: Response, data: unknown) {
+  if (typeof window === 'undefined') return
+  const id = response.headers.get('X-Tether-Undo') ?? ''
+  const restart = response.ok ? restartOffer(data) : undefined
+  if (!id && !restart) return
   let label = ''
   try { label = decodeURIComponent(response.headers.get('X-Tether-Undo-Label') ?? '') } catch { /* a bad label: use the plain one */ }
-  window.dispatchEvent(new CustomEvent<UndoStep>(UNDO_EVENT, { detail: { id, label: label || 'Last step' } }))
+  window.dispatchEvent(new CustomEvent<UndoStep>(UNDO_EVENT, { detail: { id, label: label || 'Last step', ...(restart && { restart }) } }))
 }
 /** A GET that the server can answer with 304 Not Modified. It sends the ETag of the last answer and returns the last
  *  data again when nothing changed, so a poll of an unchanged list moves no body bytes. `last` holds the state per caller. */

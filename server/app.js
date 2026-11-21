@@ -6,6 +6,8 @@ window.fetch = async (...args) => {
   return response;
 };
 const chat = document.querySelector('#chat');
+// Fold labels for prompts Tether sent, by the receipt's prompt kind (server/injected_prompts.py track_send).
+const TETHER_PROMPTS = {status: 'Tether status update', review: 'Review message from Tether', rules: 'Coordinator rules from Tether'};
 const status = document.querySelector('#status');
 const tabs = document.querySelector('#tabs');
 const latest = document.querySelector('#latest');
@@ -504,19 +506,24 @@ async function refresh(pushed) {
     if (live.size) for (const [id, item] of rendered) if (!live.has(id)) { item.element.remove(); rendered.delete(id); }
     for (let position = data.messages.length - 1; position >= 0; position--) {
       const message = data.messages[position], existing = rendered.get(message.id);
-      if (existing?.text === message.text) { next = existing.element; continue; }
+      // A receipt can bind after the first render: same id and text, new provenance. Key on both.
+      const key = message.text + '\u0000' + (message.source || '') + '\u0000' + (message.prompt || '');
+      if (existing?.key === key) { next = existing.element; continue; }
       const article = document.createElement('article');
       article.className = 'message ' + message.role;
       if (message.kind === 'notice') article.classList.add('agent-notice');
       if (message.kind === 'banner') article.classList.add('agent-banner');
       const carried = message.role === 'user' && /^This session is being continued from a previous conversation/.test(message.text);
-      if (carried) {
-        // The summary Claude Code inserts after a context reset: not something you wrote, so it stays folded.
-        article.className = 'message agent-actions';
+      // A prompt Tether sent (the server proved it with a send receipt): never shown as your words.
+      const sent = message.role === 'user' && message.source === 'tether';
+      if (carried || sent) {
+        // The summary Claude Code inserts after a context reset, or a Tether prompt: not something you wrote, so it stays folded.
+        article.className = 'message agent-actions' + (sent ? ' tether-sent' : '');
         const details = document.createElement('details'), summary = document.createElement('summary'), body = document.createElement('div');
-        summary.textContent = 'Summary of the earlier conversation'; body.className = 'carried-summary';
+        summary.textContent = carried ? 'Summary of the earlier conversation' : (Object.hasOwn(TETHER_PROMPTS, message.prompt) ? TETHER_PROMPTS[message.prompt] : 'Sent by Tether');
+        body.className = 'carried-summary';
         details.append(summary, body); article.append(details); format(body, message.text);
-        rendered.set(message.id, {text: message.text, element: article, role: message.role});
+        rendered.set(message.id, {key, element: article, role: message.role});
         if (existing) existing.element.replaceWith(article); else if (next) next.before(article); else chat.append(article);
         changed = true; next = article;
         continue;
@@ -544,7 +551,7 @@ async function refresh(pushed) {
       else if (next) next.before(article);
       else chat.append(article);
       changed = true; next = article;
-      rendered.set(message.id, {text: message.text, element: article, role: message.role});
+      rendered.set(message.id, {key, element: article, role: message.role});
     }
     if (data.earlier > 0) {
       const reachable = data.limit < (data.max_limit || Infinity);   // the server never sends more than max_limit messages
@@ -565,7 +572,7 @@ async function refresh(pushed) {
     setState(selected, data.state || (data.busy ? 'Working' : 'Idle'));
     const pending = pendingMessages.get(selected + ':' + thread) || [];
     // Confirmed = a user message with the same text that arrived after this one was sent (by position in the history, not by clock).
-    const confirmed = item => data.messages.some(message => message.role === 'user' && sameText(message.text, item.text) && !(parseFloat(message.id) <= item.after));
+    const confirmed = item => data.messages.some(message => message.role === 'user' && message.source !== 'tether' && sameText(message.text, item.text) && !(parseFloat(message.id) <= item.after));
     const matched = new Set(pending.filter(confirmed));
     let last = -1, dropped = 0;
     pending.forEach((item, position) => { if (matched.has(item)) last = position; });
@@ -587,7 +594,7 @@ async function refresh(pushed) {
     }
     workingLabel.textContent = (agentNames[agent] || agent) + ' is working…';
     working.hidden = !!data.approval || !!data.attention || (data.state !== 'Working' && !data.busy);
-    const lastUser = [...chat.querySelectorAll('.message.user')].at(-1);
+    const lastUser = [...chat.querySelectorAll(':scope > .message.user, :scope > .message.tether-sent')].at(-1);   // rows only: a message may render HTML with these classes
     if (lastUser) lastUser.after(working); else chat.prepend(working);
     updateUsage(data.usage);
     const busy = !!(data.busy || data.state === 'Working');

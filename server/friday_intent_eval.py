@@ -46,13 +46,23 @@ def _asks_send_to(reply, chat):
     return bool(re.search(ASK + re.escape(chat) + r'(?: chat)?(?: now)?\?', reply))
 
 
+def proposal_args(proposal):
+    """The action a read-back proposes, including a call transcript attachment."""
+    if proposal['name'] == 'answer_approval':
+        return {'chat': proposal['chat'], 'decision': proposal['payload']}
+    args = {'chat': proposal['chat'], 'prompt': proposal['payload']}
+    if proposal.get('attach'):
+        args['attach_call'] = True
+    return args
+
+
 def _score(trace, expect, expected_tools):
     action, reply, proposal = trace['action'], trace['reply'], trace['proposal']
     name, args = (action['name'], action['args']) if action else (None, {})
     readback_chat = expect.get('readback_chat')
     if expect.get('readback_ok') and proposal is not None and action is None:
         # A read-back of the expected send also passes: the guard sends only text the user heard.
-        name, args = proposal['name'], {'chat': proposal['chat'], 'prompt': proposal['payload']}
+        name, args = proposal['name'], proposal_args(proposal)
     readback_instead = (proposal is not None and action is None and None not in expected_tools
                         and not expect.get('readback_ok'))
     if trace['blocked']:
@@ -64,7 +74,7 @@ def _score(trace, expect, expected_tools):
     elif name not in expected_tools:
         yield 'wrong_tool'
     if proposal and readback_chat is not None:
-        args = {'chat': proposal['chat'], 'prompt': proposal['payload']}
+        args = proposal_args(proposal)
     # A key such as "chat|session" passes when any of its names matches: show_chat and show_session
     # name the same target with different argument names.
     wrong_args = not all(any(name in args and re.search(pattern, str(args[name])) for name in key.split('|'))
@@ -80,10 +90,11 @@ def _score(trace, expect, expected_tools):
     if 'read_chat' in expect and not all(re.search(expect['read_chat'], chat) for chat in trace.get('reads', [])):
         yield 'wrong_read'
     if readback_chat is not None:
+        readback_tool = expect.get('readback_tool', 'send_to_chat')
         if proposal is None:
-            matches = _asks_send_to(reply, readback_chat)
+            matches = readback_tool != 'answer_approval' and _asks_send_to(reply, readback_chat)
         else:
-            matches = (proposal['name'] == expect.get('readback_tool', 'send_to_chat')
+            matches = (proposal['name'] == readback_tool
                        and proposal['chat'].strip().casefold() == readback_chat.casefold())
         if not matches:
             yield 'readback'
@@ -127,15 +138,17 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
     user_turn = 1
     # An eval case's stored proposal stands for a read-back that played to the end.
     pending = friday.SendProposal(**case['pending'], turn=0, heard=True) if 'pending' in case else None
-    if pending and previous_assistant != friday.send_readback(pending):
+    if pending and not pending.follows(previous_assistant):
         pending = None
     declined = None
-    if pending and friday.APPROVAL_NO.search(last_user_text):
-        # Clear the pending proposal but keep it for guards in this run.
-        declined, pending = pending, None
+    if pending and friday.declines(pending, last_user_text):
+        declined, pending = pending, None  # The guards still check the decline in this run.
     used = set()
     results = {**fixture.get('tool_results', {}), **case.get('tool_results', {})}
 
+    if declined and source == 'speech' and friday.bare_decline(declined, last_user_text):
+        trace['reply'] = friday.APPROVAL_DECLINED_REPLY  # the runtime does not run the model
+        return
     for _ in range(4):
         suggestions = friday.suggested_replies(messages) if source == 'speech' else ()
         trace['steps'] += 1
@@ -146,23 +159,33 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
         trace['prompt_tokens'] += usage.get('prompt_tokens') or 0
         if not message.get('tool_calls'):
             trace['reply'] = message.get('content') or ''
+            if (declined and declined.name == 'answer_approval' and not trace['actions']
+                    and friday.declined_claim(trace['reply'])):
+                trace['reply'] = friday.APPROVAL_DECLINED_REPLY  # the runtime replaces the claim
             return
         messages.append(message)
-        replay_action_result = False
+        replay_action_result = declined_reply = False
         for call in message['tool_calls']:
             name, args = call['function']['name'], _tool_args(call)
             args = friday.confirmed_args(name, args, last_user_text, previous_assistant, pending or declined, user_turn)
             reason = friday.check_tool(name, args, source, last_user_text, used, previous_assistant,
                                        pending=pending or declined, user_turn=user_turn, suggestions=suggestions)
-            if reason == friday.READBACK_REQUIRED and name in friday.SEND_TOOLS:
+            if reason in (friday.READBACK_REQUIRED, friday.APPROVAL_CONFIRM_REQUIRED):
                 if trace['proposal'] is None:
-                    key = 'prompt' if name == 'send_to_chat' else 'item'
-                    proposal = friday.SendProposal(name, str(args.get('chat') or ''), str(args.get(key) or ''),
-                                                   user_turn)
+                    proposal = friday.SendProposal.from_args(name, args, user_turn)
                     trace['proposal'] = {'name': name, 'chat': proposal.chat, 'payload': proposal.payload}
+                    if proposal.attach:
+                        trace['proposal']['attach'] = True
                     pending = None
                     trace['reply'] = friday.send_readback(proposal)
-                result = {'error': 'Not sent yet. Friday asked the user to confirm.'}
+                status = (friday.APPROVAL_READBACK_START[args['decision']]
+                          if reason == friday.APPROVAL_CONFIRM_REQUIRED else 'Not sent yet.')
+                result = {'error': f'{status} Friday asked the user to confirm.'}
+            elif reason == friday.APPROVAL_DECLINED:
+                # The runtime speaks a fixed reply and does not run the model again; later calls still run.
+                trace['reply'] = friday.APPROVAL_DECLINED_REPLY
+                declined_reply = True
+                result = {'error': reason}
             elif reason:
                 trace['blocked'].append({'name': name, 'args': args, 'blocked': reason})
                 result = {'error': reason}
@@ -180,7 +203,7 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
                     replay_action_result |= name in results
                 result = results.get(name, {'ok': True})
             messages.append({'role': 'tool', 'tool_call_id': call['id'], 'content': json.dumps(result)})
-        if trace['proposal'] is not None or (trace['action'] is not None and not replay_action_result):
+        if declined_reply or trace['proposal'] is not None or (trace['action'] is not None and not replay_action_result):
             return
 
 
@@ -245,9 +268,11 @@ def load_fixture(path):
         if 'pending' in case:
             pending = case['pending']
             if (not isinstance(pending, dict) or pending.keys() != {'name', 'chat', 'payload'}
-                    or pending['name'] not in friday.SEND_TOOLS
+                    or pending['name'] not in (*friday.SEND_TOOLS, 'answer_approval')
                     or not all(isinstance(value, str) for value in pending.values())):
-                raise ValueError(f'{label}: pending must specify a send tool name, chat and payload')
+                raise ValueError(f'{label}: pending must specify a read-back tool name, chat and payload')
+            if pending['name'] == 'answer_approval' and pending['payload'] not in ('approve', 'deny'):
+                raise ValueError(f'{label}: pending approval payload must be approve or deny')
         _validate_context(case, label, names)
         _validate_expectation(case.get('expect'), label, names)
     return fixture
@@ -296,8 +321,8 @@ def _validate_expectation(expect, label, names):
         raise ValueError(f'{label}: readback_ok must be true or false on a send case')
     if 'readback_chat' in expect and not isinstance(expect['readback_chat'], str):
         raise ValueError(f'{label}: readback_chat must be text')
-    if 'readback_tool' in expect and expect['readback_tool'] not in friday.SEND_TOOLS:
-        raise ValueError(f'{label}: readback_tool must be a send tool')
+    if 'readback_tool' in expect and expect['readback_tool'] not in (*friday.SEND_TOOLS, 'answer_approval'):
+        raise ValueError(f'{label}: readback_tool must be a send or approval tool')
 
 
 class LiveError(RuntimeError):

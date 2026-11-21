@@ -901,6 +901,60 @@ class WrapperTests(unittest.TestCase):
         self.tmux('set-option', '-t', 'proj', '@project', 'b1b2c3d4e5f6')
         self.assertEqual(self.run_in_pane(f'{launcher} claude y')[1:], ['y', '1'])
 
+    def hook_in(self, pane, pid):
+        """The SessionStart hook as Claude Code runs it in that pane, with the project id it started with."""
+        out = self.temp / 'hook-out'
+        out.unlink(missing_ok=True)
+        self.tmux('send-keys', '-t', pane, f'{sys.executable} {HERE / "project_launch.py"} hook {pid} </dev/null >{out}; '
+                  f'env -u TMUX -u TMUX_PANE tmux -N -S {self.socket} -f /dev/null wait-for -S hooked', 'Enter')
+        self.tmux('wait-for', 'hooked')
+        text = out.read_text()
+        return json.loads(text)['hookSpecificOutput']['additionalContext'] if text else ''
+
+    def stale(self, pane):
+        with mock.patch.object(paths, 'TETHER', self.temp / 'tether'), mock.patch.object(paths, 'TMUX', str(self.temp / 'bin/private-tmux')):
+            return [session for session, mark in projects.marks().items() if pane in mark['stale']]
+
+    def test_hook_after_a_move_loads_the_new_project_and_keeps_the_stale_mark(self):
+        alpha, beta = 'a1a1a1a1a1a1', 'b2b2b2b2b2b2'
+        with mock.patch.object(paths, 'TETHER', self.temp / 'tether'):
+            projects.set_instructions(alpha, 'Alpha rules.', 0)
+            projects.set_instructions(beta, 'Beta rules.', 0)
+        self.tmux('set-option', '-t', 'proj', '@project', alpha)
+        for name, pid in (('other', beta), ('third', None)):
+            self.tmux('new-session', '-d', '-s', name, '-c', str(self.temp), '-x', '120', '-y', '30', '/bin/sh').check_returncode()
+            if pid:
+                self.tmux('set-option', '-t', name, '@project', pid)
+        self.tmux('split-window', '-t', 'proj', '-c', str(self.temp), '/bin/sh').check_returncode()
+        pane = self.tmux('display-message', '-p', '-t', 'proj', '#{pane_id}').stdout.strip()
+        self.tmux('set-option', '-p', '-t', pane, '@project_rev', f'{alpha}:0')
+        # At home the hook gives the start project and records it.
+        text = self.hook_in(pane, alpha)
+        self.assertIn('Alpha rules.', text)
+        self.assertNotIn(project_launch.MOVED_NOTE, text)
+        self.assertEqual(self.stale(pane), [])
+        started = self.tmux('display-message', '-p', '-t', pane, '#{@project_rev}').stdout.strip()
+        self.assertRegex(started, f'^{alpha}:[0-9]+$')
+        # Moved by break-pane (tmux_merge.move_pane and break_out): the new project's text, and the tab stays stale.
+        self.tmux('break-pane', '-d', '-s', pane, '-t', 'other:').check_returncode()
+        for _ in range(2):  # stale before and after a second hook run: the hook never clears the mark
+            text = self.hook_in(pane, alpha)
+            self.assertIn('Beta rules.', text)
+            self.assertNotIn('Alpha rules.', text)
+            self.assertIn(str(self.temp / 'tether/projects' / beta), text)
+            self.assertIn(project_launch.MOVED_NOTE, text)
+            self.assertEqual(self.tmux('display-message', '-p', '-t', pane, '#{@project_rev}').stdout.strip(), started)
+            self.assertEqual(len(self.stale(pane)), 1)
+        # Moved by move-window (tmux_merge.merge_session) into a session with no project yet: it gets its own.
+        self.tmux('move-window', '-d', '-s', pane, '-t', 'third:').check_returncode()
+        text = self.hook_in(pane, alpha)
+        third = self.tmux('show-options', '-t', 'third', '-v', '@project').stdout.strip()
+        self.assertRegex(third, projects.ID)
+        self.assertNotIn(third, (alpha, beta))
+        self.assertIn(str(self.temp / 'tether/projects' / third), text)
+        self.assertNotIn('Beta rules.', text)
+        self.assertEqual(len(self.stale(pane)), 1)
+
     def test_outside_tmux_runs_plain(self):
         out = subprocess.run([sys.executable, str(HERE / 'project_launch.py'), 'claude', 'z'], env=self.env, capture_output=True, text=True, timeout=10)
         self.assertEqual(out.returncode, 0, out.stderr)

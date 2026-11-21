@@ -17,6 +17,7 @@ TETHER_FRIDAY_GEMINI_EFFORT configure the brain. TETHER_FRIDAY_VAD_STOP defaults
 with Smart Turn. Without Smart Turn, VAD uses 0.8s.
 """
 import asyncio
+from bisect import bisect_right
 from collections import deque
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -77,13 +78,15 @@ SYSTEM_PROMPT = (
     'When the user answers a chat\'s question, send only the answers the user gave, in the user\'s words. '
     'Never copy a reply the chat suggested, such as reply "C, yes to all", unless the user said those words. '
     'Sending work to a chat, with send_to_chat or backlog_send: '
+    'Set attach_call on send_to_chat when the user asks to send this call, voice log, transcript, or conversation, '
+    'and use the prompt to say what the chat should do with it. Do not summarize the call in the prompt instead. '
     'Always write the chat name exactly as in state, for example api-server, even when speech-to-text '
     'misheard it ("docs sight" is docs-site): use the closest name in state. '
     '1. If the user said send, tell, ask, prompt, instruct, message, forward, have it, or get it to, call the tool now. '
     'Those words are the consent; do not read back. "Don\'t send" or "not yet" is never consent. '
     '2. Otherwise call the tool anyway: it reads the task back and asks yes or no. '
     'Never ask "Shall I send" in your own words. '
-    '3. When the user says yes to that read-back, call the tool again with the same chat and task. '
+    '3. When the user says yes to that read-back, call the tool again with the same chat, task, and attach_call value. '
     'Speech-to-text may hear "suggest to me" as "search to me"; that is not a send word. '
     'Never say you sent, switched, opened, or did anything unless its tool returned ok in this turn. '
     'After a tool error, say plainly that it did not happen. For show tools, give the reason. '
@@ -95,7 +98,7 @@ SYSTEM_PROMPT = (
     'Outside your tools (GitHub, email, accounts), call no tool in that turn: say you cannot do it directly, even when the user said send; offer '
     'send_to_chat to a named chat or new_chat. Read that prompt back and wait for yes. '
     'Use answer_approval only when a chat in state needs approval and the user clearly said approve or yes, '
-    'or deny or no, to that approval in this turn. A yes to your read-back is not an approval. '
+    'or deny or no, to that approval in this turn. A yes to a send read-back is not an approval. '
     'Use new_chat only when the user asks you to create a chat. If the user asks a chat to start a tab or do work, send it to that chat. '
     'The backlog is the user\'s list of work for later. Each item has an ID like B12; say it as B 12. '
     'Call backlog_list when asked what is on the backlog. Use backlog_add only when the user asks to add work to the backlog. '
@@ -109,6 +112,9 @@ SYSTEM_PROMPT = (
 )
 STATE_PREFIX = 'Current Tether state: '
 EVENT_PREFIX = 'Tether news to tell the user in one sentence; do not act on it: '
+CALL_GAP_SECONDS = 900
+CALL_TRANSCRIPT_LIMIT = 40000
+CALL_PROMPT_LIMIT = 60000
 MAX_REPLY_TOKENS = 120
 BARGE_IN_WORDS = 3
 FRIDAY_HOTWORDS = ('Tether', 'tether')
@@ -121,17 +127,28 @@ SEND_INTENT = re.compile(
     r'(?:prompt|message)\s+(?:it|them|\w+(?:-\w+)*)\b(?![^.!]*\?)'
     r'|\bhave\s+(?:it|them|\w+(?:-\w+)+)\s+\w+'
     r'|\bget\s+(?:it|them)\s+to\b', re.I)
+CALL_LOG_INTENT = re.compile(
+    r'\b(?:voice logs?|call logs?|transcript|conversation|(?:this|the|our|whole) call|call with (?:you|friday)'
+    r'|logs? (?:i had )?with you|(?:what|everything) (?:we|i) (?:said|discussed))\b', re.I)
+CALL_LOG_EXCLUSION = re.compile(
+    r"\b(?:without|not|never|don['’]?t|no|exclud(?:e|es|ed|ing)|except|omit|skip|avoid|private"
+    r"|leave(?:\W+\w+){0,8}\W+out|keep(?:\W+\w+){0,8}\W+private)\b", re.I)
+CALL_NOT_REQUESTED = 'The user did not ask to send the call.'
 APPROVAL_YES = re.compile(r'\b(?:approve|approved|yes|yeah|yep|ok|okay|sure|allow|go ahead)\b', re.I)
-APPROVAL_NO = re.compile(r"\b(?:deny|denied|no|nope|reject|stop|don't)\b", re.I)
+APPROVAL_NO = re.compile(r"\b(?:deny|denied|no|nope|reject|stop|don['’]?t)\b", re.I)
 # "Do not approve it" or "Not yet" decides nothing: a negation refuses answer_approval, never denies.
 APPROVAL_NEGATION = re.compile(r"\b(?:not|never)\b", re.I)
 SEND_TOOLS = ('send_to_chat', 'backlog_send')
 ACTION_TOOLS = (*SEND_TOOLS, 'answer_approval', 'new_chat', 'switch_chat', 'show_chat', 'show_session',
                 'backlog_add', 'open_panel', 'reminder_add')
 READBACK_REQUIRED = 'Read the prompt back and ask the user to confirm before sending.'
+APPROVAL_CONFIRM_REQUIRED = 'Ask the user to confirm this approval decision first.'
+APPROVAL_DECLINED = 'The user said no to the approval question. Nothing was decided; do not ask again.'
+APPROVAL_DECLINED_REPLY = 'Okay. I did not approve or deny it.'
 SEND_READBACK_START = 'Not sent yet. Should I send '
 SEND_READBACK_END = '. Yes or no?'
 SEND_READBACK_QUESTION_END = '?' + SEND_READBACK_END.removeprefix('.')
+APPROVAL_READBACK_START = {'approve': 'Not approved yet.', 'deny': 'Not denied yet.'}
 SUGGESTED_REPLY = re.compile(
     r'\b(?:reply|answer|say|send)\s+(?:"([^"]{1,80})"|“([^”]{1,80})”'
     r"|'((?:[^']|(?<=\w)'(?=\w)){1,80})'(?!\w)|‘((?:[^’]|(?<=\w)’(?=\w)){1,80})’(?!\w))", re.I)
@@ -383,7 +400,7 @@ def action_ok(result):
     return isinstance(result, dict) and result.get('ok') is True and 'error' not in result
 
 
-def action_ack(name, args, result):
+def action_ack(name, args, result, *, call_turn_count=0):
     """Use confirmed browser results for short spoken acknowledgements."""
     if not action_ok(result):
         return None
@@ -398,6 +415,11 @@ def action_ack(name, args, result):
     # 'queued': the agent was busy; the prompt waits in its input queue, so "sent" would overclaim.
     queued = field('delivery') == 'queued'
     if name == 'send_to_chat':
+        if call_turn_count:
+            attachment = f' with {call_turn_count} call turns.'
+            if queued:
+                return 'Queued' + (' for ' + chat if chat else '') + attachment + ' It is busy.'
+            return 'Sent' + to_chat + attachment
         return f'Queued for {chat}. It is busy.' if queued and chat else 'Queued.' if queued else f'Sent{to_chat}.'
     if name == 'answer_approval':
         decision = field('decision') or args.get('decision')
@@ -449,10 +471,18 @@ class SendProposal:
     heard: bool = False
     marker_id: str | None = None
     voice_turn: int | None = None
+    attach: bool = False
+    cue: bool = False
+
+    @classmethod
+    def from_args(cls, name, args, turn):
+        key = {'send_to_chat': 'prompt', 'backlog_send': 'item', 'answer_approval': 'decision'}[name]
+        return cls(name, str(args.get('chat') or ''), str(args.get(key) or ''), turn,
+                   attach=name == 'send_to_chat' and bool(args.get('attach_call')))
 
     @property
     def key(self):
-        return self.name, self.chat.strip().casefold(), same_text(self.payload)
+        return self.name, self.chat.strip().casefold(), same_text(self.payload), self.attach
 
     def live(self, user_turn):
         return 1 <= user_turn - self.turn <= 2
@@ -467,7 +497,7 @@ MAX_READBACK_REPLAYS = 2
 
 
 class ReadbackBudget:
-    """Count retries for the same unheard send, even after its proposal clears."""
+    """Count retries for the same unheard read-back, even after its proposal clears."""
 
     def __init__(self):
         self.key = None
@@ -505,6 +535,11 @@ def readback_overlapped(session):
 def send_readback(proposal):
     # The whole name: "Release . Staging" and "Release . Production" must sound different.
     chat = ' '.join(proposal.chat.replace(' . ', ', ').split())
+    if proposal.name == 'answer_approval':
+        decision = proposal.payload
+        return f'{APPROVAL_READBACK_START[decision]} Should I {decision} {chat}{SEND_READBACK_QUESTION_END}'
+    if proposal.attach:
+        chat += " with this call's transcript"
     if proposal.name == 'backlog_send':
         return f'{SEND_READBACK_START}{proposal.payload} to {chat}{SEND_READBACK_QUESTION_END}'
     # The whole prompt, never a cut: a yes confirms only the words the user heard.
@@ -518,19 +553,37 @@ def false_success(text):
             and not re.search(r'\bnot\b|n[’\']t|\?', text, re.I))
 
 
+DECISION_WORD = r'(?:approved|denied|rejected|allowed|accepted|declined|sent|done|handled)\b'
+DECISION_CLAIM = re.compile(
+    r"(?:^|[.!?;]\s*)(?:(?:okay|ok|alright|sure|right|got it|no problem|all set)[,.!]?\s+)*" + DECISION_WORD
+    + r"|\b(?:i|i've|i have|i just|it's|it is|it was|it has|that's|that is|that was|that has|"
+      r"the request(?: is| was| has)?|request(?: is| was| has))\s+(?:been\s+|now\s+|just\s+|already\s+)*" + DECISION_WORD,
+    re.I)
+
+
+def declined_claim(text):
+    """True when a reply after "no" to the approval question claims a decision Friday did not make."""
+    # A claim has a claim shape: a sentence that opens with the decision ("Denied because it was not
+    # safe.", "Okay, denied.") or a subject that did it ("I have denied it", "It's rejected").
+    # "It wants the installation approved" describes the request and is kept.
+    # "It asks whether (why, when ...) the request was approved" reports a question, not a decision:
+    # any question word earlier in the same sentence exempts the claim. Dropping a real answer costs more
+    # than a rare claim hidden behind an "if" in one sentence.
+    text = text.replace('\u2019', "'")
+    return any(not re.search(r'\b(?:whether|if|why|when|how|what|who|whom|whose|which|where)\b', re.split(r'[.!?;]', text[:match.end()])[-1], re.I)
+               for match in DECISION_CLAIM.finditer(text))
+
+
+def has_plain(text):
+    return any((char.isascii() and char.isdigit()) or (char.isalpha() and unicodedata.name(char, '').startswith(
+        ('LATIN ', 'FULLWIDTH LATIN '))) for char in text)
+
+
 def stray_text(text):
-    stray = False
-    for char in text:
-        if char.isdigit():
-            return False
-        if char.isalpha():
-            name = unicodedata.name(char, '')
-            if name.startswith(('LATIN ', 'FULLWIDTH LATIN ')):
-                return False
-            if name.startswith(('CJK ', 'HANGUL ', 'HIRAGANA ', 'KATAKANA', 'THAI ', 'ARABIC ',
-                                'HALFWIDTH HANGUL ', 'HALFWIDTH KATAKANA ')):
-                stray = True
-    return stray
+    return not has_plain(text) and any(
+        char.isalpha() and unicodedata.name(char, '').startswith(
+            ('CJK ', 'HANGUL ', 'HIRAGANA ', 'KATAKANA', 'THAI ', 'ARABIC ',
+             'HALFWIDTH HANGUL ', 'HALFWIDTH KATAKANA ')) for char in text)
 
 
 def norm(text):
@@ -549,39 +602,134 @@ def same_text(text):
 
 # A yes to a read-back is only these words (and the chat's own name). "Yes, but later",
 # "Okay, once the tests pass" or "Sure, but make it D" hold more, so they are not a plain yes.
-YES_WORDS = frozenset('yes yeah yep yup ok okay sure please send alright absolutely correct ahead'.split())
+YES_WORDS = frozenset('yes yeah yep yup ok okay sure send alright absolutely correct ahead'.split())
 YES_FILLER = frozenset('do it that this go right now thanks thank sounds good great perfect fine '
-                       'uh um and just so then all s to the chat session tab'.split())  # "you" only in "thank you"
+                       'uh um and just so then all s to the chat session tab please'.split())  # "you" only in "thank you"
 
 
-def plain_yes(text, chat=''):
-    if '?' in text:
+CORRECTION_OBJECTS = frozenset('it that this these those them the a an my its his her their to me'.split())
+class _QuestionMark:
+    """Any question mark in any script asks: "?", "？", "؟", "⁇", "¿", ";" (Greek), "‽"."""
+
+    @staticmethod
+    def search(text):
+        return any(char in '?\u203d' or 'QUESTION' in unicodedata.name(char, '') for char in text)
+
+
+QUESTION_MARK = _QuestionMark()
+
+
+def plain_yes(text):
+    if QUESTION_MARK.search(text):
         return False  # "That's correct?" asks; it does not consent.
     # "You sure" (STT drops the "?") asks too; "you" is a yes word only in "thank you".
+    # A chat title is free text ("Hold Off", "Tomorrow"): it never stands in for words of a yes, so
+    # "Yes, send it to docs" gets a fresh "Yes or no?" (fail-safe).
     words = f' {norm(text)} '.replace(' thank you ', ' thanks ')
-    # The chat name counts only as one whole phrase right after "to" ("send it to docs"): a title such
-    # as "Hold Off" or "Can we have…" never turns other words into a yes.
-    for name in {norm(chat), norm(clean_chat(chat))} - {''}:
-        words = words.replace(f' to {name} ', ' to ')
     words = words.split()
+    # "Ahead" consents only after "go" ("Go ahead", "Go right ahead"). "Correct" consents as an answer
+    # ("That's correct, go ahead"); with an object ("correct it", "correct the chat") it asks for a change.
+    if any(word == 'ahead' and 'go' not in words[max(0, i - 2):i] for i, word in enumerate(words)):
+        return False
+    # Read the raw text: "Correct, it sounds good" has a pause before "it" and still consents.
+    if re.search(r"\bcorrect\s+(?:%s)\b" % '|'.join(sorted(CORRECTION_OBJECTS)), text, re.I):
+        return False
     allowed = YES_WORDS | YES_FILLER
     return any(word in YES_WORDS for word in words) and all(word in allowed for word in words)
 
 
+APPROVAL_ANSWERS = frozenset('approve approved yes yeah yep yup ok okay sure allow alright'.split())
+DENIAL_ANSWERS = frozenset('deny denied no nope reject stop'.split())
+APPROVAL_FILLER = frozenset('it that this please the request one right now thanks thank you just uh um and'.split())
+
+
+def approval_answer(text):
+    """Return the decision in a whole utterance that answers an approval.
+
+    The whole answer must be decision words plus filler. A chat name is never removed from it: a title
+    such as "Hold off" or "A minute" could hide words that withdraw or delay the decision. "Yes, approve
+    docs." is refused, and Friday asks again (fail-safe).
+    """
+    if QUESTION_MARK.search(text):
+        return None
+    words = re.sub(r'\bdon t\b', "don't", norm(text.replace('\u2019', "'")))
+    if "don't" in words.split():
+        # "Don't!" alone denies; "Don't deny" or "Don't stop" negates a command and decides nothing.
+        return 'deny' if set(words.split()) - {"don't"} <= APPROVAL_FILLER else None
+    words = set(re.sub(r'\bgo ahead\b', 'approve', words).split())
+    if words - (APPROVAL_ANSWERS | DENIAL_ANSWERS | APPROVAL_FILLER):
+        return None
+    approve = bool(words & APPROVAL_ANSWERS)
+    deny = bool(words & DENIAL_ANSWERS)
+    if approve != deny:
+        return 'approve' if approve else 'deny'
+    return None
+
+
+def answer_words(text):
+    """The one tokenizer for answers to the approval question: "Don’t", "don t" and "dont" are one word."""
+    return re.sub(r"\bdon t\b|\bdont\b", "don't", norm(text.replace('\u2019', "'"))).split()
+
+
+APPROVAL_YES_WORDS = frozenset('yes yeah yep yup ok okay sure alright absolutely'.split())
+# A closed list: only these words, plus filler, answer "Should I approve docs?" or "Should I deny docs?".
+# Only the imperative: "The approved one." names a past decision; it does not answer the question.
+APPROVAL_CONFIRM_WORDS = {'approve': APPROVAL_YES_WORDS | {'approve', 'allow'},
+                          'deny': APPROVAL_YES_WORDS | {'deny', 'reject'}}
+APPROVAL_NO_WORDS = frozenset({'no', 'nope', 'stop', "don't"})
+
+
+def confirms(proposal, text):
+    if proposal.name != 'answer_approval':
+        return plain_yes(text)
+    if QUESTION_MARK.search(text) or APPROVAL_NEGATION.search(text) or proposal.payload not in APPROVAL_CONFIRM_WORDS:
+        return False
+    words = re.sub(r'\bgo ahead\b', 'yes', ' '.join(answer_words(text))).split()
+    allowed = APPROVAL_CONFIRM_WORDS[proposal.payload]
+    return any(word in allowed for word in words) and all(word in allowed | APPROVAL_FILLER for word in words)
+
+
+def declines(proposal, text):
+    if proposal.name != 'answer_approval':
+        return bool(APPROVAL_NO.search(text))
+    return bool(set(answer_words(text)) & (APPROVAL_NO_WORDS | {'deny', 'denied', 'reject'})) and not confirms(proposal, text)
+
+
+def bare_decline(proposal, text):
+    """A whole "No", "Nope, thanks" or "Don't" to the approval question: Friday answers without the model."""
+    words = answer_words(text)
+    return (proposal.name == 'answer_approval' and not QUESTION_MARK.search(text) and bool(set(words) & APPROVAL_NO_WORDS)
+            and all(word in APPROVAL_NO_WORDS | APPROVAL_FILLER for word in words))
+
+
 def confirmed_args(name, args, last_user_text, previous_assistant, pending=None, user_turn=0):
-    """On a plain yes to Friday's fixed read-back, the send carries the stored text the user heard.
+    """On a plain yes to Friday's fixed read-back, use the stored payload the user heard.
 
     The model may reword the read-back text in its tool call; the user confirmed the stored proposal.
     Only the server's own proposal binds: a yes to Friday's free-form words gets the fixed read-back.
     """
-    if name not in SEND_TOOLS or not isinstance(args, dict) or pending is None:
+    if (name not in (*SEND_TOOLS, 'answer_approval') or not isinstance(args, dict) or pending is None):
         return args
-    chat = str(args.get('chat', '')).strip()
-    if not (plain_yes(last_user_text, chat) and pending.live(user_turn)
+    chat = str(args.get('chat') or '').strip()
+    consent = confirms(pending, last_user_text) if name == 'answer_approval' else plain_yes(last_user_text)
+    if not (consent and pending.live(user_turn)
             and pending.heard and pending.follows(previous_assistant)
             and name == pending.name and chat.casefold() == pending.chat.strip().casefold()):
         return args
-    return dict(args, **{'prompt' if name == 'send_to_chat' else 'item': pending.payload})
+    # The browser resolves a chat by its own rules ("STRASSE" is not "Straße"): send the name the user heard.
+    args = dict(args, chat=pending.chat)
+    if name == 'answer_approval':
+        # Only a valid decision is rewritten; a malformed call stays malformed and check_tool refuses it.
+        decision = args.get('decision')
+        return dict(args, decision=pending.payload) if isinstance(decision, str) and decision in APPROVAL_READBACK_START else args
+    if name == 'send_to_chat':
+        # Keep a changed attachment visible to check_tool so either mismatch fails consent.
+        if bool(args.get('attach_call')) != pending.attach:
+            return args
+        if pending.attach or 'attach_call' in args:
+            return dict(args, prompt=pending.payload, attach_call=pending.attach)
+        return dict(args, prompt=pending.payload)
+    return dict(args, item=pending.payload)
 
 
 def binds(payload, proposed):
@@ -615,6 +763,17 @@ def send_intent(text):
     return False
 
 
+def excludes_call(text):
+    """Treat an exclusion close to any call mention as a veto."""
+    mentions = list(CALL_LOG_INTENT.finditer(text))
+    for exclusion in CALL_LOG_EXCLUSION.finditer(text):
+        for mention in mentions:
+            between = text[exclusion.end():mention.start()] or text[mention.end():exclusion.start()]
+            if len(re.findall(r"\w+(?:['’]\w+)*", between)) <= 4:
+                return True
+    return False
+
+
 # Broad on purpose: any send word in a message that asks something makes it a possible send question.
 SEND_WORDS = re.compile(r'\b(?:send|sent|tell|ask|instruct|forward|pass|message|prompt|relay|post|share|ping|poke|'
                         r'nudge|notify|contact|remind|update|reach|hand|assign|delegate|give|let)\b', re.I)
@@ -634,7 +793,7 @@ def hotword_text(names):
             for word in words
         ):
             continue
-        if (YES_WORDS.intersection(norm(name).split())
+        if ((YES_WORDS | {'please'}).intersection(norm(name).split())
                 or APPROVAL_YES.search(name) or APPROVAL_NO.search(name)
                 or SEND_WORDS.search(name) or re.search(r'\bcancel\b', name, re.I)):
             continue
@@ -665,9 +824,13 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
     # The yes must answer the read-back the user heard last. Two turns keep a yes split over two runs
     # (the first run interrupted before it spoke).
     live = pending is not None and pending.live(user_turn)
-    follows_readback = live and pending.follows(previous_assistant)
+    live_send = live and pending.name in SEND_TOOLS
+    follows_readback = live_send and pending.follows(previous_assistant)
     has_proposal = follows_readback and pending.heard
-    if (source == 'speech' and name in SEND_TOOLS and live
+    attach = name == 'send_to_chat' and bool(args.get('attach_call'))
+    if attach and excludes_call(last_user_text):
+        return CALL_NOT_REQUESTED
+    if (source == 'speech' and name in SEND_TOOLS and live_send
             and (follows_readback or (not pending.heard and not previous_assistant.strip()))
             and APPROVAL_NO.search(last_user_text)):
         return 'The user declined the proposed send.'
@@ -687,18 +850,35 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                    for key in ('text', 'when')) for item in items):
             return 'Each reminder needs text and a time.'
     if name == 'answer_approval':
-        # A yes to Friday's send question answers that send, not a tool approval in some chat.
-        # Fail-safe boundary: a real approval question that names a send word is refused too; Friday asks again.
-        if (live or previous_assistant.strip().casefold().startswith(SEND_READBACK_START.casefold())
-                or ('?' in previous_assistant and SEND_WORDS.search(previous_assistant))):
+        if live_send or previous_assistant.strip().casefold().startswith(SEND_READBACK_START.casefold()):
             return 'The user answered a send question, not an approval.'
-        if APPROVAL_NEGATION.search(last_user_text):
-            return 'The user did not give unambiguous consent for this decision.'
-        approve = bool(APPROVAL_YES.search(last_user_text))
-        deny = bool(APPROVAL_NO.search(last_user_text))
         decision = args.get('decision')
-        if approve == deny or decision not in ('approve', 'deny') or (decision == 'approve') != approve:
-            return 'The user did not give unambiguous consent for this decision.'
+        decision = decision if isinstance(decision, str) else None  # a list or dict is invalid, never a crash
+        # "No" to "Should I approve docs?" decides nothing: it is not a denial, and Friday does not ask again.
+        if (live and pending.name == name and pending.follows(previous_assistant)
+                and declines(pending, last_user_text)
+                # "No, deny it" to the approve question asks for the other decision; it gets its own question.
+                # Only a question follows, never a decision; a bare "No" or "Stop" still decides nothing.
+                and not (decision in APPROVAL_READBACK_START and decision != pending.payload
+                         and approval_answer(last_user_text) == decision
+                         and set(answer_words(last_user_text)) - APPROVAL_FILLER - APPROVAL_NO_WORDS)):
+            return APPROVAL_DECLINED
+        bound = (live and pending.name == name and pending.heard and pending.follows(previous_assistant)
+                 and str(args.get('chat') or '').strip() == pending.chat.strip()
+                 and decision == pending.payload and confirms(pending, last_user_text))
+        if not bound:
+            if '?' in previous_assistant and SEND_WORDS.search(previous_assistant):
+                return 'The user answered a send question, not an approval.'
+            ambiguous = 'The user did not give unambiguous consent for this decision.'
+            if APPROVAL_NEGATION.search(last_user_text) or decision not in ('approve', 'deny'):
+                return ambiguous
+            # The browser approves the only waiting chat for a blank name; the question must name it.
+            if not str(args.get('chat') or '').strip():
+                return 'Name the chat that waits for approval.'
+            answer = approval_answer(last_user_text)
+            if answer is not None and answer != decision:
+                return ambiguous
+            return APPROVAL_CONFIRM_REQUIRED
     if name == 'send_to_chat' and re.search(
             r'\bwhat\s+(?:was|is|did)\b.*\b(?:response|reply|answer|say)\b|\bdid it (?:reply|answer|finish)\b',
             str(args.get('prompt', '')), re.I | re.S):
@@ -708,8 +888,10 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
         chat = str(args.get('chat', '')).strip().casefold()
         # A yes confirms the one send Friday proposed: the same tool and chat, and the read-back text exactly.
         proposal_matches = (has_proposal and name == pending.name and chat == pending.chat.strip().casefold()
-                            and binds(payload, pending.payload))
-        yes = plain_yes(last_user_text, chat)
+                            and attach == pending.attach and binds(payload, pending.payload))
+        yes = plain_yes(last_user_text)
+        if attach and not (CALL_LOG_INTENT.search(last_user_text) or (yes and proposal_matches)):
+            return CALL_NOT_REQUESTED
         if suggestions:
             normalized_payload = norm(payload)
             normalized_speech = norm(last_user_text)
@@ -721,9 +903,9 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                         continue
                     if words == normalized_payload or (' ' in words and f' {words} ' in f' {normalized_payload} '):
                         return READBACK_REQUIRED
-        # An answer to a send question never sends directly, even when it holds send words
-        # ("Yes, and can you tell docs ..."). A fresh, explicit request does.
-        if (not (live or readback_debt or answers_question(previous_assistant))
+        # A transcript always requires a heard read-back. Other sends take the direct path
+        # only for a fresh, explicit request, never for an answer that includes a send word.
+        if (not attach and not (live_send or readback_debt or answers_question(previous_assistant))
                 and send_intent(last_user_text)):
             return None
         # Only the server's own stored proposal binds a yes. A yes to Friday's free-form words gets
@@ -757,7 +939,10 @@ def tool_schemas():
         ('list_chats', 'Read current chats, session counts, and the default target. '
          'With session, list only chats in the closest matching tmux session.', {'session': string}, []),
         ('send_to_chat', 'Send a clear, complete coding prompt to a named chat.',
-         {'chat': string, 'prompt': string}, ['chat', 'prompt']),
+         {'chat': string, 'prompt': string, 'attach_call': {'type': 'boolean', 'description':
+          "True when the user asks to send this call, the voice log, the transcript, or this conversation. "
+          "Tether adds this call's user and Friday turns after the prompt. The prompt says what the chat should do with them."}},
+         ['chat', 'prompt']),
         ('answer_approval', 'Approve or deny only with clear user consent for this request in this turn.',
          {'chat': string, 'decision': {'type': 'string', 'enum': ['approve', 'deny']}}, ['chat', 'decision']),
         ('read_last_reply', 'Read the last assistant reply from a named chat. Long replies come in parts.',
@@ -796,6 +981,88 @@ def tool_schemas():
 def is_real_user(message):
     return (message.get('role') == 'user' and not (
         isinstance(message.get('content'), str) and message['content'].startswith(STATE_PREFIX)))
+
+
+class CallLog:
+    """Keep the current call independent of the model context and WebRTC peer."""
+
+    def __init__(self, clock=time.time):
+        self.clock = clock
+        self.turns = []
+        self.generation = 0
+        self._messages = {}
+
+    def start_session(self):
+        self.generation += 1
+        if self.turns and self.clock() - self.turns[-1][0] >= CALL_GAP_SECONDS:
+            self.turns.clear()
+            self._messages.clear()
+
+    def record_readback_cue(self, reply, *, generation):
+        """Insert the heard cue before the assistant message that committed the read-back."""
+        if generation != self.generation or id(reply) not in self._messages:
+            return
+        _, turn = self._messages[id(reply)]
+        for index in range(len(self.turns) - 1, -1, -1):
+            if self.turns[index] is turn:
+                self.turns.insert(index, (turn[0], 'friday', READBACK_CUE))
+                return
+
+    def record_messages(self, messages, *, generation=None):
+        # A peer whose teardown timed out can still deliver frames after reconnect.
+        if generation is not None and generation != self.generation:
+            return
+        for message in messages:
+            if not isinstance(message, dict) or id(message) in self._messages:
+                continue
+            text = message.get('content')
+            if not isinstance(text, str):
+                continue
+            text = text.strip()
+            if not text or text.startswith((STATE_PREFIX.rstrip(), EVENT_PREFIX.rstrip())):
+                continue
+            if is_real_user(message):
+                who = 'user'
+            elif message.get('role') == 'assistant' and not message.get('tool_calls'):
+                who = 'friday'
+            else:
+                continue
+            # Retain the object, including after trim_context, so its ID cannot be reused.
+            turn = (self.clock(), who, text)
+            self._messages[id(message)] = (message, turn)
+            self.turns.append(turn)
+
+
+def format_call_transcript(turns, budget=CALL_TRANSCRIPT_LIMIT):
+    """Return a JSON-size-bounded transcript and the number of turns it includes."""
+    if not turns:
+        return '', 0
+
+    def heading(cut):
+        start = datetime.fromtimestamp(turns[cut][0]).strftime('%H:%M')
+        end = datetime.fromtimestamp(turns[-1][0]).strftime('%H:%M')
+        count = len(turns) - cut
+        unit = 'turn' if count == 1 else 'turns'
+        header = f'Voice call transcript ({count} {unit}, from {start} to {end}):'
+        return f'[{cut} earlier turns cut]\n{header}' if cut else header
+
+    lines = [f'{who.capitalize()}: {text}' for _, who, text in turns]
+    # Each JSON string's two quotes cost the same as the escaped newline before its line.
+    sizes = [len(json.dumps(line)) for line in lines]
+    size = sum(sizes)
+    for cut, line_size in enumerate(sizes):
+        header = heading(cut)
+        if len(json.dumps(header)) + size <= budget:
+            return header + '\n' + '\n'.join(lines[cut:]), len(lines) - cut
+        size -= line_size
+
+    # If even the final turn is too large, keep as much of it as fits.
+    suffix = ' [turn cut]'
+    limit = budget - len(json.dumps(header + '\n' + suffix)) + 2
+    end = bisect_right(range(len(lines[-1]) + 1), limit, key=lambda n: len(json.dumps(lines[-1][:n]))) - 1
+    if end <= len(turns[-1][1].capitalize() + ': '):
+        return '', 0
+    return header + '\n' + lines[-1][:end] + suffix, 1
 
 
 def add_state(messages, state, notes, last_sent):
@@ -1440,6 +1707,8 @@ def runtime_types():
                 base_url=brain.base_url, settings=settings)
             self.brain = brain
             self.session = session
+            self.call_log = getattr(session, 'call_log', None) or CallLog()
+            self.call_log_generation = self.call_log.generation
             self.run_source = 'tool'
             self.last_user_text = ''
             self.user_turn = 0
@@ -1450,6 +1719,8 @@ def runtime_types():
             self._request_messages = ContextVar('friday_request_messages', default=None)
             self._last_reply = (None, ())
             self.tools_in_flight = set()
+            self.tool_batches = {}
+            self.tool_batch_runs = {}
             # An aggregated result awaiting inference, or the context frame that runs it.
             self.tool_followup = None
             self.replay_marker = None
@@ -1483,7 +1754,7 @@ def runtime_types():
                     self.session.waiting_for_read = False
                 response = SimpleNamespace(turn=turn, text=False, tool_output=False,
                                            ttfb=None, completed=False, call_count=0, buffered_text=None,
-                                           request_messages=(), context_frame=frame)
+                                           held_text=[], plain_text=False, request_messages=(), context_frame=frame)
                 token = self._active_response.set(response)
                 try:
                     await super().process_frame(frame, direction)
@@ -1505,7 +1776,7 @@ def runtime_types():
             if call.name not in ACTION_TOOLS:
                 return None
             result = frame.result if isinstance(frame, FunctionCallResultFrame) and not frame.error else None
-            ack = action_ack(call.name, call.args, result)
+            ack = action_ack(call.name, call.args, result, call_turn_count=call.call_turn_count)
             # A partial reminder batch succeeds for the items it saved and still needs a follow-up.
             if ack or (call.name == 'reminder_add' and action_ok(result) and result.get('set')):
                 run.succeeded_action = True
@@ -1514,25 +1785,72 @@ def runtime_types():
             if not ack:
                 return None
             if call.name in SEND_TOOLS:
-                key = 'prompt' if call.name == 'send_to_chat' else 'item'
-                sent = SendProposal(call.name, str(call.args.get('chat') or ''), str(call.args.get(key) or ''), 0)
-                self.readback_budget.reset(sent)
+                self.readback_budget.reset(SendProposal.from_args(call.name, call.args, 0))
                 if (run.proposal is not None and run.proposal.heard
                         and run.proposal is self.session.pending_proposal):
                     self.session.readback_debt = False
                 self.session.pending_proposal = None
+            if (call.name == 'answer_approval' and run.proposal is not None
+                    and run.proposal.name == 'answer_approval' and run.proposal is self.session.pending_proposal):
+                self.readback_budget.reset(run.proposal)
+                self.session.pending_proposal = None
+                self.session.readback_debt = False
             if (call.response.turn == getattr(self.session, 'turn', None) and call.response.call_count == 1
                     and frame.properties is None and frame.run_llm is None):
                 frame.properties = FridaySpokenToolResult(run_llm=False, text=ack)
+
+        async def push_response_text(self, response, frame):
+            # Until the reply shows a Latin letter or a digit, hold every chunk: the decision is per reply,
+            # never per chunk boundary ("“", "東京", "”" is the same reply as "“東京”").
+            if not response.plain_text:
+                if not has_plain(frame.text):
+                    response.held_text.append(frame)
+                    return
+                response.plain_text = True
+            await self.release_text(response, [*response.held_text, frame])
+            response.held_text.clear()
+
+        async def release_text(self, response, frames):
+            for chunk in frames:
+                response.text |= bool(chunk.text.strip())
+                if response.buffered_text is not None:
+                    response.buffered_text.append(chunk)
+                else:
+                    await super().push_frame(chunk)
+
+        def gate_tool_followup(self, frame):
+            ident = frame.tool_call_id
+            batch = self.tool_batches.get(ident)
+            result = isinstance(frame, FunctionCallResultFrame)
+            properties = frame.properties if result else None
+            final = properties is None or properties.is_final
+            run = self.tool_batch_runs.get(ident)
+            if final and batch is not None:
+                del self.tool_batches[ident]
+                batch.remove(ident)
+            if final:
+                self.tool_batch_runs.pop(ident, None)
+            if not result or frame.run_llm is not None or (properties and properties.run_llm is not None):
+                return
+            # Pipecat's group check overlooks siblings that have started but
+            # have yet to send their in-progress frame.
+            siblings_pending = batch and len(batch) > (0 if final else 1)
+            # The run that started the batch decides: a late result never reads a newer turn's read-back.
+            if siblings_pending or (run is not None and run.readback_spoken):
+                frame.run_llm = False
 
         async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
             response = self._active_response.get()
             speech = None
             if direction == FrameDirection.DOWNSTREAM:
                 if isinstance(frame, FunctionCallsStartedFrame):
-                    self.tools_in_flight.update(call.tool_call_id for call in frame.function_calls)
+                    batch = {call.tool_call_id for call in frame.function_calls}
+                    self.tools_in_flight.update(batch)
+                    self.tool_batches.update(dict.fromkeys(batch, batch))
+                    self.tool_batch_runs.update(dict.fromkeys(batch, self.tool_run))
                 elif isinstance(frame, (FunctionCallResultFrame, FunctionCallCancelFrame)):
                     self.finish_browser_tool(frame)
+                    self.gate_tool_followup(frame)
                     if (isinstance(frame, FunctionCallResultFrame)
                             and isinstance(frame.properties, FridaySpokenToolResult)):
                         speech = frame.properties
@@ -1540,13 +1858,8 @@ def runtime_types():
                 if isinstance(frame, LLMFullResponseStartFrame):
                     frame.friday_response = response
                 elif isinstance(frame, LLMTextFrame):
-                    if stray_text(frame.text):
-                        print(f'Friday dropped stray text: {len(frame.text)} chars', file=sys.stderr, flush=True)
-                        return
-                    response.text |= bool(frame.text.strip())
-                    if response.buffered_text is not None:
-                        response.buffered_text.append(frame)
-                        return
+                    await self.push_response_text(response, frame)
+                    return
                 elif isinstance(frame, MetricsFrame) and response.ttfb is None:
                     response.ttfb = next((m.value for m in frame.data if isinstance(m, TTFBMetricsData)
                                           and m.processor == self.name and m.value > 0), None)
@@ -1578,13 +1891,19 @@ def runtime_types():
             if n > MAX_READBACK_REPLAYS:
                 self.session.pending_proposal = None
                 return READBACK_CAP, None, False
-            self.session.pending_proposal = replace(proposal, marker_id=marker_id, heard=False, voice_turn=None)
+            self.session.pending_proposal = replace(proposal, marker_id=marker_id, heard=False,
+                                                    voice_turn=None, cue=n > 0)
             return send_readback(proposal), marker_id, n > 0
 
         def mark_readback_heard(self, proposal):
+            if proposal.heard:
+                return
             self.session.pending_proposal = replace(proposal, heard=True)
             self.session.readback_debt = False
             self.readback_budget.reset(proposal)
+            reply, _ = self._last_reply
+            if proposal.cue and reply is not None and proposal.follows(reply['content']):
+                self.call_log.record_readback_cue(reply, generation=self.call_log_generation)
 
         def track_assistant(self, assistant, context):
             response = None
@@ -1619,6 +1938,9 @@ def runtime_types():
                     reply = messages[-1]
                     if reply is not previous_tail and reply['role'] == 'assistant' and not reply.get('tool_calls'):
                         # The aggregator pushes a context frame immediately after committing speech.
+                        # Pipecat commits TTSSpeakFrame text here too, including Friday's ack and read-back.
+                        # Fillers stay out of context and the transcript.
+                        self.call_log.record_messages((reply,), generation=self.call_log_generation)
                         snapshot = response.request_messages if response is not None else speech_snapshot
                         self._last_reply = (reply, snapshot)
 
@@ -1652,6 +1974,12 @@ def runtime_types():
                         if (replay or frame.tool_call_id in self.tools_in_flight) and s.tts.device_voice_pending():
                             s.busy = True
                     self.tools_in_flight.discard(frame.tool_call_id)
+                    if (not self.tool_work_pending and self.tool_run and self.tool_run.readback_spoken
+                            and s.waiting_for_read):
+                        # The read-back is the reply, so no new context frame will clear the filler gate.
+                        s.waiting_for_read = False
+                        if not (s.llm_running or s.reply_open or s.bot_speaking or s.tts.device_voice_pending()):
+                            s.busy = False
                     s.wake.set()
                 if isinstance(frame, FridayToolSpeechCompleteFrame) and frame.readback_ready:
                     proposal = getattr(s, 'pending_proposal', None)
@@ -1771,13 +2099,13 @@ def runtime_types():
                     live = proposal is not None and proposal.live(self.user_turn)
                     if not live or (not proposal.follows(previous) and (proposal.heard or previous)):
                         self.session.pending_proposal = proposal = None
-                    elif APPROVAL_NO.search(self.last_user_text):
+                    elif declines(proposal, self.last_user_text):
                         self.session.pending_proposal = None
                         self.session.readback_debt = False
                         self.readback_budget.reset(proposal)
                         declined = True
                     elif not proposal.heard:
-                        replay = plain_yes(self.last_user_text, proposal.chat)
+                        replay = confirms(proposal, self.last_user_text)
                         if not replay:
                             self.session.pending_proposal = proposal = None
                 self.tool_run = SimpleNamespace(source=self.run_source,
@@ -1786,6 +2114,8 @@ def runtime_types():
                     suggestions=suggested_replies(messages) if self.run_source == 'speech' else (),
                     user_turn=self.user_turn, proposal=proposal, declined=declined,
                     replay=replay, readback_debt=getattr(self.session, 'readback_debt', False),
+                    # Async tool calls keep the transcript as of the spoken request.
+                    call_turns=tuple(self.call_log.turns),
                     pending={}, filler_spoken=False, failed_action=False, succeeded_action=False, readback_spoken=False)
             else:
                 self.run_source = 'tool'
@@ -1816,27 +2146,51 @@ def runtime_types():
                 if run and run.source == 'speech' and params.function_name in ACTION_TOOLS:
                     run.failed_action = True
                 print(f'Friday blocked {params.function_name}: {reason}', file=sys.stderr, flush=True)
-                if reason == READBACK_REQUIRED:
+                if reason in (READBACK_REQUIRED, APPROVAL_CONFIRM_REQUIRED):
                     speak = (not run.readback_spoken and run is self.tool_run
                              and (not response or response.turn == getattr(self.session, 'turn', None)))
+                    status = (APPROVAL_READBACK_START[params.arguments['decision']]
+                              if reason == APPROVAL_CONFIRM_REQUIRED else 'Not sent yet.')
                     properties = FunctionCallResultProperties(run_llm=False)
                     if speak:
-                        key = 'prompt' if params.function_name == 'send_to_chat' else 'item'
-                        proposal = SendProposal(params.function_name, str(params.arguments.get('chat') or ''),
-                                                str(params.arguments.get(key) or ''), run.user_turn)
+                        proposal = SendProposal.from_args(params.function_name, params.arguments, run.user_turn)
                         run.readback_spoken = True
                         text, marker_id, cue = self.offer_readback(proposal, params.tool_call_id)
                         properties = FridaySpokenToolResult(run_llm=False, text=text, readback_id=marker_id, cue=cue)
-                    await params.result_callback({'error': 'Not sent yet. Friday asked the user to confirm.'},
+                    await params.result_callback({'error': f'{status} Friday asked the user to confirm.'},
                                                  properties=properties)
+                    return
+                if reason == APPROVAL_DECLINED:
+                    # A fixed reply: the model tends to claim a decision after this refusal ("That's denied").
+                    speak = run is self.tool_run and (not response or response.turn == getattr(self.session, 'turn', None))
+                    properties = (FridaySpokenToolResult(run_llm=False, text=APPROVAL_DECLINED_REPLY) if speak
+                                  else FunctionCallResultProperties(run_llm=False))
+                    await params.result_callback({'error': reason}, properties=properties)
                     return
                 await params.result_callback({'error': reason})
                 return
             if run:
                 run.used.add(params.function_name)
+            args = params.arguments
+            call_turn_count = 0
+            if params.function_name == 'send_to_chat' and 'attach_call' in args:
+                params.arguments = dict(args)
+                if params.arguments.pop('attach_call'):
+                    if self.call_log_generation != self.call_log.generation or not run.call_turns:
+                        run.failed_action = True
+                        await params.result_callback({'error': 'There is no call to send yet.'})
+                        return
+                    prompt = str(args.get('prompt', '')) + '\n\n'
+                    budget = min(CALL_TRANSCRIPT_LIMIT, CALL_PROMPT_LIMIT - len(json.dumps(prompt)))
+                    transcript, call_turn_count = format_call_transcript(run.call_turns, budget)
+                    if not transcript:
+                        run.failed_action = True
+                        await params.result_callback({'error': 'The prompt is too long to add the call.'})
+                        return
+                    params.arguments['prompt'] = prompt + transcript
             if run and response:
                 run.pending[params.tool_call_id] = SimpleNamespace(
-                    name=params.function_name, args=params.arguments, response=response)
+                    name=params.function_name, args=args, response=response, call_turn_count=call_turn_count)
                 response.tool_output = True
                 self.record_llm_ttft(response)
                 filler = READ_FILLERS.get(params.function_name)
@@ -1860,6 +2214,7 @@ def runtime_types():
 
         async def _process_context(self, context):
             run_messages = context.get_messages()
+            self.call_log.record_messages(run_messages, generation=self.call_log_generation)
             if run_messages and run_messages[-1]['role'] == 'assistant':
                 reply, snapshot = self._last_reply
                 index = len(run_messages) - 1
@@ -1889,9 +2244,15 @@ def runtime_types():
                 else:
                     await self.push_frame(TTSSpeakFrame(text))
                 return
+            if run and run.declined and self.run_source == 'speech' and bare_decline(run.proposal, run.last_user_text):
+                # A bare "No" to the approval question needs no model: it decides nothing, and the
+                # model tends to claim a decision ("Denied.").
+                await self.push_frame(TTSSpeakFrame(APPROVAL_DECLINED_REPLY))
+                return
             if response and response.turn is not None:
                 self.session.llm_calls += 1
-            if response and run and run.failed_action and not run.succeeded_action:
+            declined_approval = bool(run and run.declined and run.proposal.name == 'answer_approval')
+            if response and run and (run.failed_action or declined_approval) and not run.succeeded_action:
                 # Check the full reply before speaking: a later chunk can negate an earlier one.
                 response.buffered_text = []
             token = self._active_run.set(run)
@@ -1929,9 +2290,20 @@ def runtime_types():
                 if response:
                     response.completed = True
                     self.record_llm_ttft(response)
+                    if response.held_text:
+                        held, response.held_text = response.held_text, []
+                        if stray_text(''.join(frame.text for frame in held)):
+                            chars = sum(len(frame.text) for frame in held)
+                            print(f'Friday dropped stray text: {chars} chars', file=sys.stderr, flush=True)
+                        else:
+                            await self.release_text(response, held)  # only punctuation or space: say it as before
                     if response.text and response.buffered_text is not None:
-                        if (not run.succeeded_action
-                                and false_success(''.join(frame.text for frame in response.buffered_text))):
+                        spoken = ''.join(frame.text for frame in response.buffered_text)
+                        declined_approval = run.declined and run.proposal.name == 'answer_approval'
+                        if declined_approval and not run.succeeded_action and declined_claim(spoken):
+                            print('Friday corrected a decision claim after no', file=sys.stderr, flush=True)
+                            await self.push_frame(TTSSpeakFrame(APPROVAL_DECLINED_REPLY))
+                        elif run.failed_action and not run.succeeded_action and false_success(spoken):
                             print('Friday corrected false success', file=sys.stderr, flush=True)
                             await self.push_frame(TTSSpeakFrame('That did not go through.'))
                         else:
@@ -2117,7 +2489,7 @@ class Session:
     pending_proposal = None
     readback_debt = False
 
-    def __init__(self, rt, models, connection):
+    def __init__(self, rt, models, connection, call_log=None):
         from pipecat.adapters.llm.schemas.function_schema import FunctionSchema
         from pipecat.adapters.llm.schemas.tools_schema import ToolsSchema
         from pipecat.pipeline.pipeline import Pipeline
@@ -2131,6 +2503,8 @@ class Session:
         from pipecat.transports.base_transport import TransportParams
 
         self.rt, self.models, self.connection = rt, models, connection
+        self.call_log = call_log if call_log is not None else CallLog()
+        self.call_log.start_session()
         self.state = None
         self.notes = []
         self.last_sent = None
@@ -2426,6 +2800,7 @@ def create_app():
     active = None
     retiring = None
     models = None
+    call_log = CallLog()
 
     def clear_active(session):
         nonlocal active, retiring
@@ -2505,7 +2880,7 @@ def create_app():
 
             async def connected(connection):
                 nonlocal active
-                active = Session(rt, models, connection)
+                active = Session(rt, models, connection, call_log)
                 active.on_closed = clear_active
                 models.start_warmup('connection')
                 active.run_task = asyncio.create_task(active.run(), name='friday-pipeline')

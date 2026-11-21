@@ -23,7 +23,7 @@ function fixture(id = '%1', thread = 'root-thread') {
   return {
     sessions: [
       make(id, taskName, { thread, state: 'Working' }),
-      make('%81', separateName, { helper: true, owner: id, from: { pane: id, name: 'B446', live: true } }),
+      make('%81', separateName, { helper: true, owner: id, from: { pane: id, name: taskName, live: true } }),
       make('%82', workerName, { ...child, group: 'bugs', task_role: 'Worker', state: 'Working' }),
       make('%83', 'B446 advisor', { ...child, task_role: 'Advisor' }),
       make('%84', 'B446 second advisor', { ...child, task_role: 'Second advisor' }),
@@ -32,6 +32,7 @@ function fixture(id = '%1', thread = 'root-thread') {
         approval: { id: 'approval-digest', text: 'Apply the task tree changes?', actionable: true, options: [{ id: 1, text: 'Yes, apply' }, { id: 2, text: 'No' }] } }),
       make('%87', doneName, { done: true, done_mark: true }),
       make('%88', 'B401 Sidebar fix', { group: 'bugs' }),
+      make('%90', 'Scratch', { tmux_session: '$2', label: 'scratch', group: undefined }),   // a single-tab session
     ],
     default_thread: thread,
     groups: { $1: [{ id: 'tree', name: 'Task tree', project: '' }, { id: 'bugs', name: 'Tether bugs', project: '' }] },
@@ -168,7 +169,12 @@ async function main() {
     const parent = tasks().getByRole('tab', { name: /B446 Task tree, Task, needs you, 5 helpers/ })
     assert.equal(await parent.getAttribute('aria-selected'), 'true')
     assert.equal(await parent.getAttribute('aria-controls'), await panel.getByRole('tabpanel').getAttribute('id'))
-    assert.equal(await tasks().getByRole('tab', { name: /B447 Settings, from B446/ }).count(), 1, 'Legacy helper flag does not hide a separate task')
+    assert.equal(await tasks().getByRole('tab', { name: /B447 Settings, from B446 Task tree/ }).count(), 1, 'Legacy helper flag does not hide a separate task')
+    // B474: the visible label is the source's backlog id; the full name stays in the tooltip and the accessible name.
+    for (const from of [tasks().getByRole('tab', { name: /B447 Settings/ }).locator('.task-from'), side().locator('.task-row', { hasText: separateName }).locator('.task-from')]) {
+      assert.equal((await from.innerText()).trim(), 'from B446')
+      assert.equal(await from.getAttribute('title'), `Started by ${taskName}`)
+    }
     assert.equal(await tasks().locator('[tabindex="0"]').count(), 1)
     await parent.focus()
     await parent.press('ArrowRight')
@@ -276,30 +282,50 @@ async function main() {
     assert.deepEqual(write('task-tree/answer'), { pane: '%82', thread: 'thread-%82', digest: replyDigest, text: 'The first group' })
 
     const dialog = page.locator('dialog[open].sheet').last()
-    await side().getByRole('button', { name: `Actions for ${separateName}` }).click()
+    // B474: ••• shows on hover, keyboard focus and the open row, so a mouse user points at the row first.
+    const openActions = async name => {
+      const actions = side().locator(`button[aria-label="Actions for ${name}"]`)   // getByRole skips hidden buttons
+      const row = actions.locator('xpath=..')
+      if (!await actions.isVisible()) {
+        await row.hover()
+        assert(await actions.isVisible(), `Hover shows the actions of ${name}`)
+      }
+      await actions.click()
+    }
+    await page.mouse.move(0, 0)
+    const separateActions = side().locator(`button[aria-label="Actions for ${separateName}"]`)
+    assert.equal(await separateActions.isVisible(), false, 'A row that is not open hides its ••• until hover or focus')
+    await separateActions.locator('xpath=..').locator('.task-row-main').focus()
+    assert(await separateActions.isVisible(), 'Keyboard focus on the row shows its •••')
+    const actionsBox = await separateActions.boundingBox()
+    assert(actionsBox.width >= 24 && actionsBox.height >= 24, 'The row actions button has a 24 × 24 px target')
+    await page.evaluate(() => document.activeElement?.blur())
+    assert(await side().locator('button[aria-label="Actions for stack Task tree"]').isVisible(), 'Mouse: the open stack keeps its ••• with the pointer and focus elsewhere')
+    assert.equal(await side().locator('button[aria-label="Actions for stack Tether bugs"]').isVisible(), false, 'Mouse: another stack hides its •••')
+    await openActions(separateName)
     await dialog.getByRole('button', { name: 'Move into task…' }).click()
     assert.equal(await dialog.getByRole('button', { name: /B401 Sidebar fix/ }).count(), 0)
     await Promise.all([waitWrite('task-tree/move'), dialog.getByRole('button', { name: taskName }).click()])
     assert.deepEqual(write('task-tree/move'), { pane: '%81', thread: 'thread-%81', into: '%1', into_thread: 'root-thread' })
     await dialog.waitFor({ state: 'hidden' })
-    await side().getByRole('button', { name: `Actions for ${reviewName}` }).click()
+    await openActions(reviewName)
     await dialog.getByRole('button', { name: 'Move out of task' }).waitFor()
     // A tab inside a task is a helper there and cannot be the coordinator (server: coordinator._claim).
     assert.equal(await dialog.getByRole('button', { name: /^Coordinator…/ }).count(), 0)
     await Promise.all([waitWrite('task-tree/move'), dialog.getByRole('button', { name: 'Move out of task' }).click()])
     assert.deepEqual(write('task-tree/move'), { pane: '%86', thread: 'thread-%86', into: null, into_thread: null })
     await dialog.waitFor({ state: 'hidden' })
-    const rootRow = side().getByRole('button', { name: /B446 Task tree, Task/ })
-    await Promise.all([waitWrite('task-tree/move'), side().getByRole('button', { name: /B447 Settings, from B446, Task/ }).dragTo(rootRow)])
+    const rootRow = side().getByRole('button', { name: /^B446 Task tree, Task/ })
+    await Promise.all([waitWrite('task-tree/move'), side().getByRole('button', { name: /B447 Settings, from B446 Task tree, Task/ }).dragTo(rootRow)])
     assert.deepEqual(write('task-tree/move'), { pane: '%81', thread: 'thread-%81', into: '%1', into_thread: 'root-thread' })
 
-    await side().getByRole('button', { name: `Actions for ${taskName}` }).click()
+    await openActions(taskName)
     await dialog.getByRole('button', { name: /^Coordinator…/ }).waitFor()   // the task itself may be the coordinator
     await Promise.all([waitWrite('task-tree/done'), dialog.getByRole('button', { name: 'Mark done' }).click()])
     assert.deepEqual(write('task-tree/done'), { pane: '%1', thread: 'root-thread', done: true })
     await dialog.waitFor({ state: 'hidden' })
     await side().getByRole('button', { name: 'Done 1' }).click()
-    await side().getByRole('button', { name: `Actions for ${doneName}` }).click()
+    await openActions(doneName)
     await Promise.all([waitWrite('task-tree/done'), dialog.getByRole('button', { name: 'Reopen' }).click()])
     assert.deepEqual(write('task-tree/done'), { pane: '%87', thread: 'thread-%87', done: false })
     await dialog.waitFor({ state: 'hidden' })
@@ -387,6 +413,37 @@ async function main() {
     await page.keyboard.press('Escape')
     await stackMenu.waitFor({ state: 'hidden' })
     assert.equal(writes.some(item => item.endpoint === 'groups/close'), false, 'Cancel closes nothing')
+
+    // B474 touch: ••• shows on the open row and on stack headings. Another row opens its menu by a long press.
+    const touch = await context.newCDPSession(page)
+    await touch.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 })
+    assert(await page.evaluate(() => matchMedia('(hover: none)').matches), 'Touch emulation turns hover off')
+    if (!await drawer.isVisible()) await page.getByRole('button', { name: /^Open sessions/ }).click()
+    await page.evaluate(() => document.activeElement?.blur())
+    const touchActions = name => drawer.locator(`button[aria-label="Actions for ${name}"]`)
+    assert(await touchActions(reviewName).isVisible(), 'Touch: the open row shows its •••')
+    assert.equal(await touchActions(separateName).isVisible(), false, 'Touch: another row hides its •••')
+    assert(await drawer.getByRole('button', { name: 'Actions for stack Task tree', exact: true }).isVisible(), 'Touch: the stack heading keeps its •••')
+    assert(await drawer.locator('button[aria-label="Actions for stack Tether bugs"]').isVisible(), 'Touch: a stack that is not open keeps its •••')
+    const scratchActions = drawer.locator('.session-list > li[data-id="$2"] .session-row > .task-row-actions')
+    assert(await scratchActions.count() === 1 && !await scratchActions.isVisible(), 'Touch: a closed single-tab session hides its •••')
+    await touchActions(separateName).locator('xpath=..').locator('.task-row-main').focus()
+    await page.keyboard.press('Tab')
+    await assertFocus(touchActions(separateName))
+    await page.evaluate(() => document.activeElement?.blur())
+    const heldRow = touchActions(separateName).locator('xpath=..').locator('.task-row-main')
+    await heldRow.scrollIntoViewIfNeeded()
+    const held = await heldRow.boundingBox()
+    const point = { x: held.x + held.width / 3, y: held.y + held.height / 2 }
+    await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [point] })
+    await page.locator('.touch-ghost').waitFor()
+    await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    const heldMenu = page.locator('dialog[open].sheet').last()
+    await heldMenu.getByRole('button', { name: 'Move into task…' }).waitFor()
+    await page.keyboard.press('Escape')
+    await heldMenu.waitFor({ state: 'hidden' })
+    await touch.send('Emulation.setTouchEmulationEnabled', { enabled: false })
+    await touch.detach()
 
     const reviewPane = listing.sessions.find(pane => pane.id === '%86')
     reviewPane.state = 'Idle'

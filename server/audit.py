@@ -30,7 +30,7 @@ KINDS = {
     'setting.autonomy_level': 'settings', 'setting.reviewers': 'settings',
     'setting.advisor': 'settings', 'setting.claude_advisor': 'settings',
     'setting.learning': 'settings', 'passkey.add': 'settings', 'passkey.remove': 'settings',
-    'tab.start': 'tabs', 'tab.close': 'tabs',
+    'tab.start': 'tabs', 'tab.close': 'tabs', 'tab.restart': 'tabs',
     'review.link': 'reviews', 'review.stop': 'reviews', 'review.verdict': 'reviews',
     'backlog.add': 'backlog', 'backlog.start': 'backlog', 'backlog.done': 'backlog',
     'backlog.move': 'backlog', 'backlog.remove': 'backlog',

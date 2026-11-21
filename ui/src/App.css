@@ -235,8 +235,8 @@ label.broadcast-row:hover { background: var(--hover); }
 .archived-tab-restore { flex: none; color: var(--muted); }
 /* A session with stacks: each stack heading, then its tabs one step in (as in the chat header's stack row). */
 .pane-stack-row { display: flex; align-items: center; margin-top: 2px; }
-.pane-children .pane-stack-head { flex: 1; min-width: 0; gap: 8px; min-height: 28px; font-size: 12px; font-weight: 600; color: var(--muted); }
-.pane-children .pane-stack-head.current { color: var(--text); }
+/* Stack headings (concept D): one style, small grey text with one plain count. */
+.pane-children .pane-stack-head { flex: 1; min-width: 0; gap: 8px; min-height: 28px; font-size: 12px; font-weight: 400; color: var(--muted); }
 .pane-children .pane-stack-head .group-count { margin-left: auto; font-weight: 400; font-variant-numeric: tabular-nums; }
 .pane-children :is(.pane-stack-fold, .pane-stack-actions) { flex: none; display: grid; place-items: center; width: var(--control-sm); height: var(--control-sm); min-height: 0; padding: 0; border-radius: var(--radius-sm, 6px); color: var(--muted); }
 .pane-children :is(.pane-stack-fold, .pane-stack-actions):hover { background: var(--hover); }
@@ -312,18 +312,22 @@ label.broadcast-row:hover { background: var(--hover); }
   .switch-row input:disabled::after { background: GrayText; }
 }
 /* Pane tabs under the chat header: one tab per tmux pane, + splits. */
-.pane-tabs { display: flex; gap: 4px; overflow-x: auto; padding: 6px max(12px, env(safe-area-inset-left)); border-bottom: 1px solid var(--line); scrollbar-width: none; }
-.pane-tabs button { display: flex; align-items: center; gap: 6px; flex-shrink: 0; min-height: var(--control); padding: 0 12px; border-radius: var(--radius); font-size: 13px; color: var(--muted); border: 1px solid transparent; }
-.pane-tabs button.active { background: var(--surface); border-color: var(--line); color: var(--text); }
+/* Concept D (B446, notes/b446-prototypes): the task row sits on the sidebar tone; the active task is a tab in the page color,
+   rounded on top and standing on the row's bottom line, like a browser tab. */
+.pane-tabs { display: flex; gap: 2px; overflow-x: auto; padding: 8px max(10px, env(safe-area-inset-left)) 0; border-bottom: 1px solid var(--line); background: var(--sidebar); scrollbar-width: none; }
+.pane-tabs button { display: flex; align-items: center; gap: 6px; flex-shrink: 0; min-height: var(--control); padding: 0 12px; border-radius: var(--radius) var(--radius) 0 0; font-size: 13px; color: var(--muted); border: 1px solid transparent; }
+.pane-tabs button.active { background: var(--bg); color: var(--text); }
 .pane-tabs .tab-add { padding: 0 10px; }
 .pane-tabs { position: relative; }
 .pane-tabs button { position: relative; }
-.pane-tab-pill { position: absolute; left: 0; top: 0; border-radius: var(--radius); background: var(--surface); border: 1px solid var(--line); pointer-events: none; }
+.pane-tab-pill { position: absolute; left: 0; top: 0; border-radius: var(--radius) var(--radius) 0 0; background: var(--bg); border: 1px solid transparent; pointer-events: none; }
 .pane-tabs:not(.has-pill) .pane-tab-pill { display: none; }
 .pane-tabs.has-pill button.active { background: transparent; border-color: transparent; }
 /* Agent session names can be long (reviewer-esef-phase-1-3-…): one line, cut with an ellipsis. */
-/* Advisor tabs and helper chips carry the same icon and working glow. */
+/* Advisor tabs and helper chips carry the same icon. Only the pane tabs glow while an advisor works. */
 :is(.pane-tabs, .task-chips) button > .tab-advisor { flex-shrink: 0; color: var(--advisor); }
+/* Concept D: helper-row icons are all grey. A working advisor chip has no glow (B474, decoration); its dot and 'Advising' name mark it. */
+.task-chips button > svg, .task-chips button > .tab-advisor { color: var(--muted); }
 .pane-tabs .tab-coordinator { flex-shrink: 0; color: var(--muted); }
 .coordinator-choice { flex: 1 1 auto; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; text-align: left; }
 [aria-labelledby="pane-title"] .coordinator-picker .action-list button .coordinator-choice small { flex: none; margin-left: 0; text-align: left; white-space: normal; }
@@ -332,10 +336,11 @@ label.broadcast-row:hover { background: var(--hover); }
 .coordinator-picker .action-list button[aria-disabled="true"]:not([aria-checked="true"]) { opacity: .55; cursor: default; }
 .pane-tabs button.advisor-tab .pane-tab-name { max-width: 22ch; }
 .pane-tabs button.advising { border-color: color-mix(in srgb, var(--advisor) 70%, transparent); }
-:is(.pane-tabs, .task-chips) button.advising { color: var(--text); box-shadow: 0 0 0 1px color-mix(in srgb, var(--advisor) 35%, transparent), 0 0 12px color-mix(in srgb, var(--advisor) 45%, transparent); animation: advise-glow 1.8s ease-in-out infinite alternate; }
+.task-chips button.advising { color: var(--text); }
+.pane-tabs button.advising { color: var(--text); box-shadow: 0 0 0 1px color-mix(in srgb, var(--advisor) 35%, transparent), 0 0 12px color-mix(in srgb, var(--advisor) 45%, transparent); animation: advise-glow 1.8s ease-in-out infinite alternate; }
 :is(.pane-tabs, .task-chips) button.advising .task-dot.working { border-color: var(--advisor); background: var(--advisor); }
 @keyframes advise-glow { from { box-shadow: 0 0 0 1px color-mix(in srgb, var(--advisor) 25%, transparent), 0 0 4px color-mix(in srgb, var(--advisor) 25%, transparent); } to { box-shadow: 0 0 0 1px color-mix(in srgb, var(--advisor) 55%, transparent), 0 0 14px color-mix(in srgb, var(--advisor) 55%, transparent); } }
-@media (prefers-reduced-motion: reduce) { :is(.pane-tabs, .task-chips) button.advising { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .pane-tabs button.advising { animation: none; } }
 .pane-tab-name { max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Composer + menu and stop button */
 .attach-container { position: relative; }
@@ -1504,9 +1509,9 @@ button.live-chip:active { background: var(--line); }
 .workspace .chat-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; flex: 1; margin-right: 6px; }
 .workspace .chat-title h1 { flex: 0 1 auto; min-width: 0; margin: 0; font-size: 15px; }
 .workspace .chat-title > div { flex: 0 0 auto; max-width: 100%; min-width: 0; }
-.workspace .pane-tabs { padding: 4px 12px; }
-.workspace .pane-tabs button { min-height: var(--control-sm); padding: 0 10px; border-radius: var(--radius); font-size: 12.5px; }
-.workspace .pane-tab-pill { border-radius: var(--radius); }
+.workspace .pane-tabs { padding: 4px 12px 0; }
+.workspace .pane-tabs button { min-height: var(--control-sm); padding: 0 10px; border-radius: var(--radius) var(--radius) 0 0; font-size: 12.5px; }
+.workspace .pane-tab-pill { border-radius: var(--radius) var(--radius) 0 0; }
 .workspace .chat-header[draggable="true"] { cursor: grab; }
 .workspace .chat-header[draggable="true"] :is(button, kbd) { cursor: pointer; }
 @container (max-width: 560px) {
@@ -2149,7 +2154,7 @@ button.live-chip:active { background: var(--line); }
 .suggest-list span { color: var(--muted); overflow-wrap: anywhere; }
 
 /* Groups (Groups.tsx): a row of groups above the tab strip on wide screens; on phones a switcher left of the strip. */
-.group-row { display: flex; align-items: stretch; gap: 2px; overflow-x: auto; padding: 0 max(12px, env(safe-area-inset-left)); border-bottom: 1px solid var(--line); scrollbar-width: none; }
+.group-row { display: flex; align-items: stretch; gap: 2px; overflow-x: auto; padding: 0 max(12px, env(safe-area-inset-left)); border-bottom: 1px solid var(--line); background: var(--sidebar); scrollbar-width: none; }
 .group-tab { display: flex; align-items: center; gap: 7px; flex-shrink: 0; min-height: 36px; padding: 0 12px; margin-bottom: -1px; border-bottom: 2px solid transparent; font-size: 13px; color: var(--muted); }
 .group-tab:hover { color: var(--text); }
 .group-tab.active { color: var(--text); font-weight: 600; border-bottom-color: var(--accent); }
@@ -2220,6 +2225,12 @@ button.live-chip:active { background: var(--line); }
 .undo-toast-more { display: inline-grid; place-items: center; border: 0; border-radius: var(--radius); background: none; color: var(--muted); cursor: pointer; }
 .undo-toast-more:hover { color: inherit; }
 .undo-toast :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* A restart offer (B326): the text and Dismiss on the first row, the actions on the second, so a 320 px screen fits them. */
+.undo-toast-restart { flex-wrap: wrap; width: min(440px, calc(100vw - 32px)); padding-top: 4px; }
+.undo-toast-restart .undo-toast-text { flex: 1 1 calc(100% - 56px); padding: 8px 0; }
+.undo-toast-restart .undo-toast-close { order: 1; align-self: flex-start; }
+.undo-toast-restart .undo-toast-action { order: 2; }
+.undo-toast-restart .undo-toast-more { order: 3; margin-left: auto; }
 .undo-effects { margin: 0 0 18px; padding-left: 20px; line-height: 1.5; overflow-wrap: anywhere; }
 .undo-effects li + li { margin-top: 6px; }
 .undo-confirm h2 { overflow-wrap: anywhere; }
@@ -2276,7 +2287,7 @@ button.live-chip:active { background: var(--line); }
   .thread { min-height: 25%; }
   .chat-header .chat-title { min-height: var(--control-lg); }
   .chat-header .chat-title h1 { margin-bottom: 0; line-height: 1.2; }
-  .pane-tabs { padding-block: 2px; }
+  .pane-tabs { padding-block: 2px 0; }
   .composer-area { display: flex; flex-direction: column; min-height: 0; flex-shrink: 1; max-height: 60%; padding-block: 4px; }
   .composer { display: flex; flex-direction: column; min-height: 0; padding: 4px 10px; }
   .composer-input, .composer-controls { flex-shrink: 0; }
