@@ -1222,6 +1222,9 @@ class _NoHistoryRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+HISTORY_TEXT_LIMIT = 4000  # command_history caps text and answer here
+
+
 class HistoryPoster:
     """Queue finished turns on the call thread and post them in order on a daemon."""
 
@@ -1253,9 +1256,9 @@ class HistoryPoster:
             self._turn = 0
         if who == 'user':
             self._turn += 1
-            fields = {'text': text}
+            fields = {'text': text[:HISTORY_TEXT_LIMIT]}
         else:
-            fields = {'answer': text, 'result': {'status': 'answered'}}
+            fields = {'answer': text[:HISTORY_TEXT_LIMIT], 'result': {'status': 'answered'}}
         self._offer(dict(fields, id=uuid4().hex, call=call, turn=self._turn))
 
     def _offer(self, entry):
@@ -1301,6 +1304,9 @@ class HistoryPoster:
                 status = None
             except ValueError:
                 break
+            except Exception:
+                # http.client errors such as BadStatusLine are not OSError; the thread must survive them.
+                status = None
             if status == 200:
                 return
             if status is not None and status != 404 and not 500 <= status < 600:

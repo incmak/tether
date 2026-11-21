@@ -307,7 +307,7 @@ def get(handler):
     param = lambda name, default=None: query.get(name, [default])[0]
     try:
         result = search(query=param('q', ''), channel=param('channel') or None, failed=param('failed') == '1',
-                        project=param('project'), before=param('before') or None)
+                        project=param('project') or None, before=param('before') or None)
     except ValueError:
         handler.respond(400, {'error': 'Invalid history search.'})
     except OSError:

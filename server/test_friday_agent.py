@@ -412,6 +412,28 @@ class HistoryPosterTests(unittest.TestCase):
         self.assertEqual(posts[4]['answer'], 'Second')
         self.assertNotEqual(posts[0]['id'], posts[4]['id'])
 
+    def test_http_client_errors_retry_and_the_thread_keeps_posting(self):
+        import http.client
+        self.open.side_effect = [http.client.BadStatusLine('junk'), http.client.LineTooLong('header'),
+                                 nullcontext(SimpleNamespace(status=200)), nullcontext(SimpleNamespace(status=200))]
+        self.record('user', 'First')
+        self.record('assistant', 'Second')
+        with patch.object(self.poster._stop, 'wait', return_value=False):
+            self.post_next()
+            self.post_next()
+        posts = [json.loads(args.args[0].data) for args in self.open.call_args_list]
+        self.assertEqual([p.get('text') or p.get('answer') for p in posts], ['First', 'First', 'First', 'Second'])
+
+    def test_long_turns_are_cut_to_the_store_limit_not_lost(self):
+        self.record('user', 'u' * 5000)
+        self.record('assistant', 'a' * 5000)
+        self.post_next()
+        self.post_next()
+        posts = [json.loads(args.args[0].data) for args in self.open.call_args_list]
+        self.assertEqual(len(posts[0]['text']), friday.HISTORY_TEXT_LIMIT)
+        self.assertEqual(len(posts[1]['answer']), friday.HISTORY_TEXT_LIMIT)
+        self.assertEqual(friday.HISTORY_TEXT_LIMIT, 4000)
+
     def test_drops_after_five_retryable_failures_and_drops_other_4xx_immediately(self):
         for error, attempts, delays in (
             (URLError('Network'), 5, [1, 2, 4, 8, 16]),

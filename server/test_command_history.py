@@ -291,6 +291,12 @@ class RouteTests(HistoryFixture):
                          (200, {'entries': [saved], 'next': None}))
         self.assertEqual(self.request(history.PATH + '?before=invalid', headers=self.browser, method='GET')[0], 400)
 
+    def test_browser_search_treats_blank_filters_as_no_filter(self):
+        saved = history.append(entry(project='Tether'))
+        self.assertEqual(self.request(history.PATH + '?q=&channel=&failed=&project=&before=',
+                                      headers=self.browser, method='GET'),
+                         (200, {'entries': [saved], 'next': None}))
+
     def test_browser_delete_accepts_each_operation_and_rejects_mixed_or_malformed_operations(self):
         history.append(entry(project='Tether'))
         for payload in ({'ids': ['entry-000'] * 501}, {'ids': ['bad']}, {'ids': 'entry-000'},
