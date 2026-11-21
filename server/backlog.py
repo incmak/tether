@@ -297,11 +297,11 @@ def _save_seen(text, archived):
     return True
 
 
-def _catch_up(text, *, archive=_READ, settled=True):
+def _catch_up(text, *, archive=_READ):
     """Record changes since the last audited list, and return the checked DONE.md IDs that the snapshot now holds, or
-    None when it did not advance. The caller holds the audit lock. Without the backlog lock (settled=False), a write
-    can be half done: DONE.md has an item that BACKLOG.md still holds. Such an item is not counted as archived yet, so
-    the next pass sees it leave the list for DONE.md."""
+    None when it did not advance. The caller holds the audit lock. An archive write can be half done or fail half way
+    (DONE.md has an item that BACKLOG.md still holds). Such an item is not counted as archived yet, so the next pass
+    sees it leave the list for DONE.md."""
     try:
         path = audit.folder() / _SEEN
         old_archived = None
@@ -309,7 +309,7 @@ def _catch_up(text, *, archive=_READ, settled=True):
             seen = json.loads(_read(path))
             before, old_archived = seen['text'], set(seen['archived'])
         archived = _checked_archive(_read_archive() if archive is _READ else archive)
-        if archived and not settled:
+        if archived and old_archived is not None:
             # Defer only IDs that are new to the snapshot; the snapshot keeps the IDs it already holds.
             listed = _audit_items(text)[0].keys()
             archived = {ref: row for ref, row in archived.items() if ref not in listed or ref in (old_archived or ())}
@@ -410,7 +410,7 @@ def observe():
             text = _file_text(contents)
             if len(text) > LIMIT:
                 raise OSError('The backlog is too long to observe.')
-            if _catch_up(text, archive=archive, settled=locked) is not None:
+            if _catch_up(text, archive=archive) is not None:
                 _observed_files = _seen_revision(), files
     except Exception as exc:
         audit._warn(f'could not observe the backlog ({type(exc).__name__}).')

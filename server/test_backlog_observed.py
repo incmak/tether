@@ -652,5 +652,26 @@ class BacklogObservedTests(unittest.TestCase):
                                  ('backlog.remove', 'B12 removed: Fix warnings (seen in the file)')])
 
 
+    # B303 round 7 review
+
+    def failed_archive_then_retry(self, item, retry):
+        """A sandboxed write adds the item to DONE.md, then fails before it replaces BACKLOG.md. It retries later."""
+        backlog.observe()
+        self.archive.write_text(f'## Build (moved 2026-11-21 10:00)\n- [x] {item}\n  - Done: 2026-11-21 10:00 · ok\n')
+        backlog.observe()  # the lock is free: the watcher sees the item in both files
+        self.assertEqual(self.entries(), [])
+        self.file.write_text(retry)
+        backlog.observe()
+
+    def test_failed_archive_of_a_done_item_then_retry_records_nothing(self):
+        self.failed_archive_then_retry('Old fix #B13', INITIAL.replace('- [x] Old fix #B13\n', ''))
+        self.assertEqual(self.entries(), [])
+
+    def test_failed_archive_then_a_retry_that_completes_the_item_records_done(self):
+        self.failed_archive_then_retry('Fix warnings #B12', INITIAL.replace('- [ ] Fix warnings #B12\n', ''))
+        entry, = self.entries()
+        self.assert_observed(entry, 'backlog.done', 'B12 done: Fix warnings', UNKNOWN)
+
+
 if __name__ == '__main__':
     unittest.main()
