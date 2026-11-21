@@ -321,9 +321,33 @@ def move_pane(pane, target, run=subprocess.run):
             (_ungroup, pane),
             *((_set_name, tab, tab_name) for tab, tab_name in plan.items()),
         )
-        return _moved(run, target, pane)
+        result = _moved(run, target, pane)
     except (subprocess.TimeoutExpired, RuntimeError, ValueError) as exc:
         raise RuntimeError(f'The pane moved to “{name}”, but Tether could not finish. Refresh the list.') from exc
+    restart = restart_info(run, pane, target)
+    if restart:
+        result['restart'] = restart
+    return result
+
+
+def restart_info(run, pane, session_id):
+    """{'project', 'name'} when the pane's agent started in another project than the session it is in now, else None.
+    The agent keeps its start project's folder access until it restarts (project_launch.py, B326). Read only: a
+    session with no @project yet gets one at the agent's next start, so any started project differs. A pane with no
+    @project_rev did not start through Tether. Any tmux failure gives None: the move itself is done."""
+    shown = _try_tmux(run, 'display-message', '-p', '-t', pane, '#{session_id}\t#{@project_rev}\t#{@project}\t#{session_name}')
+    fields = shown.stdout.rstrip('\n').split('\t') if shown is not None and not shown.returncode else []
+    if len(fields) != 4 or fields[0] != session_id:
+        return None
+    started = fields[1].partition('+')[0].rpartition(':')[0]
+    if not projects.ID.fullmatch(started) or started == fields[2]:
+        return None
+    pid = fields[2] if projects.ID.fullmatch(fields[2]) else ''
+    try:
+        name = projects.meta(pid)['name'] if pid else ''
+    except OSError:
+        name = ''
+    return {'project': pid, 'name': name or fields[3]}
 
 
 def _ungroup(run, pane):
@@ -462,6 +486,9 @@ def break_out(pane, run=subprocess.run):
         raise RuntimeError(f'{message} {warning}' if warning else message) from exc
     if warning:
         result['warning'] = warning
+    restart = restart_info(run, pane, session_id)
+    if restart:
+        result['restart'] = restart
     return result
 
 

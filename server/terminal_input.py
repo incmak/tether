@@ -1434,7 +1434,7 @@ def small_pane_reason(entry, run=subprocess.run):
     return SIZE_HELP
 
 
-def prompt_draft(entry, run=subprocess.run, *, _size_retry=True):
+def prompt_draft(entry, run=subprocess.run, *, read_only=False, _size_retry=True):
     # One styled snapshot binds text and attributes to the same screen redraw.
     styled = capture(entry, run, styled=True)
     screen = ANSI_SGR.sub('', styled)
@@ -1450,6 +1450,8 @@ def prompt_draft(entry, run=subprocess.run, *, _size_retry=True):
             raise PaneTooSmall(SIZE_HELP)
         reason = small_pane_reason(entry, run)
         if reason:
+            if read_only:
+                raise PaneTooSmall(reason)
             # Tether owns agent window sizes (window_size.py); a small client may have shrunk this one.
             window_size.apply(run)
             time.sleep(.1)  # Let the agent redraw its input after SIGWINCH.
@@ -1647,14 +1649,15 @@ def stop_turn(entry, run=subprocess.run, sleep=time.sleep):
     return {'restored': ''}
 
 
-def empty_prompt(entry, run=subprocess.run):
-    close_agy_panel(entry, run)
+def empty_prompt(entry, run=subprocess.run, *, read_only=False):
+    if not read_only:
+        close_agy_panel(entry, run)
     try:
-        draft = prompt_draft(entry, run)
+        draft = prompt_draft(entry, run, read_only=read_only)
     except PaneTooSmall:
         raise
     except RuntimeError as exc:
-        if 'input box' not in str(exc) or not close_info_panel(entry, run):
+        if read_only or 'input box' not in str(exc) or not close_info_panel(entry, run):
             raise
         draft = prompt_draft(entry, run)
     if any(draft):

@@ -110,7 +110,7 @@ REFUSED = {
         'live/summary',
         'menu', 'merge', 'message', 'mode', 'model', 'model-options', 'pane-icon', 'pane-icon/draw',
         'pane-name', 'pick', 'projects/backlog-start', 'prompt-action', 'quick-tab/move',
-        'quick-tab/route', 'quick-tab/start', 'rename', 'resume', 'review-link', 'review-stop',
+        'quick-tab/route', 'quick-tab/start', 'rename', 'restart-tab', 'resume', 'review-link', 'review-stop',
         'side-shell', 'side-shell/end', 'split', 'start', 'stop-task', 'subagent-stop',
         'suggest-groups', 'suggest-name', 'tab-brief', 'task-models', 'tmux-sessions', 'type', 'unqueue',
         'task-tree/answer', 'task-tree/close', 'task-tree/done', 'task-tree/move',
