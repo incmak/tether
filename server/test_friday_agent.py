@@ -659,6 +659,30 @@ class FridayRulesTests(unittest.TestCase):
                     self.assertIsNone(friday.check_tool(proposal.name, args, 'speech', answer, set(),
                                                        previous, proposal, 1))
 
+    def test_approval_question_takes_only_a_closed_list_of_answers(self):
+        # B489 review 4: send words never answer an approval; one tokenizer for "don't"; bad args never crash.
+        confirm_required = friday.APPROVAL_CONFIRM_REQUIRED
+        for decision in ('approve', 'deny'):
+            proposal = friday.SendProposal('answer_approval', 'Docs', decision, 0, heard=True)
+            question = friday.send_readback(proposal)
+            for text, expected in (('Correct yes to okay.', confirm_required), ('Correct', confirm_required),
+                                   ('Ahead', confirm_required), ('Okay, send it', confirm_required),
+                                   ("Don\u2019t, please", friday.APPROVAL_DECLINED),
+                                   ("Don\u2019t!", friday.APPROVAL_DECLINED), ('Dont', friday.APPROVAL_DECLINED),
+                                   ('Yes', None), ('Sure, go ahead.', None)):
+                with self.subTest(decision=decision, text=text):
+                    self.assertEqual(friday.check_tool('answer_approval', {'chat': 'Docs', 'decision': decision},
+                                                       'speech', text, set(), question, proposal, 1), expected)
+            for bad in ([], {}, None, 1):
+                with self.subTest(decision=decision, bad=bad):
+                    self.assertEqual(friday.check_tool('answer_approval', {'chat': 'Docs', 'decision': bad},
+                                                       'speech', 'No', set(), question, proposal, 1),
+                                     friday.APPROVAL_DECLINED)
+                    self.assertIsNotNone(friday.check_tool('answer_approval', {'chat': 'Docs', 'decision': bad},
+                                                           'speech', 'Yes', set(), question, proposal, 1))
+            self.assertTrue(friday.bare_decline(proposal, 'Nope, thanks.'))
+            self.assertFalse(friday.bare_decline(proposal, 'No, what does it want?'))
+
     def test_correct_that_and_bare_ahead_are_not_a_yes(self):
         # B489 review 2: "Just correct that" asks for a change; "Ahead." alone is not "go ahead".
         for answer in ('Just correct that', 'Correct this', 'Ahead.', 'Ahead, please',
@@ -812,8 +836,9 @@ class FridayRulesTests(unittest.TestCase):
             ('No thanks', 'Yes, approve it in No thanks.', 'approve', False),  # fail-safe: Friday asks again
             # A title that is a decision word never absorbs a separate decision.
             ('No', 'Approve. No.', 'approve', False),
-            ('Yes', 'Deny. Yes.', 'deny', False),
-            ('Go ahead', 'Deny. Go ahead.', 'deny', False),
+            # B489: to the heard question "Should I deny Yes?", consent words decide only that question.
+            ('Yes', 'Deny. Yes.', 'deny', True),
+            ('Go ahead', 'Deny. Go ahead.', 'deny', True),
             # A chat title never hides a withdrawal or a delay.
             ('It Hold off', 'Approve it. Hold off.', 'approve', False),
             ('A minute', 'Okay, in a minute.', 'approve', False),
@@ -2849,9 +2874,10 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         proposal = friday.SendProposal('answer_approval', 'docs', 'approve', 0, heard=True)
         history = [{'role': 'user', 'content': 'Approve docs'},
                    {'role': 'assistant', 'content': friday.send_readback(proposal)},
-                   {'role': 'user', 'content': 'No'}]
+                   {'role': 'user', 'content': 'No, what does it want?'}]  # not bare: the model runs
         for reply in (['Denied.'], ['Okay, I have ', 'denied it.'], ['Denied. Anything else?'],
-                      ['I rejected the request.'], ['Denied. I did not send anything.']):
+                      ['I rejected the request.'], ['Denied. I did not send anything.'],
+                      ['Denied because it was not safe.']):
             with self.subTest(reply=reply), patch('sys.stderr'):
                 _, frames = await self.tool_flow(history, [(reply, 1, [])], proposal)
                 self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], [])
@@ -5025,10 +5051,11 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                         session.llm.readback_budget.offer(session.pending_proposal)
                         if scenario == 'approval-no':
                             await speak('No.')
-                            self.assertEqual(await replies.get(), pause_reply)
+                            # A bare "No" gets the fixed reply; the model does not run (no claim to fix).
+                            self.assertEqual(await replies.get(), friday.APPROVAL_DECLINED_REPLY)
                             self.assertEqual(sends, [])
                         elif scenario == 'approval-no-call':
-                            await speak('No.')
+                            await speak('No, not now.')  # not a bare "No": the model runs and calls the tool
                             self.assertEqual(await results.get(), {'error': friday.APPROVAL_DECLINED})
                             await markers.get()
                             self.assertEqual(await replies.get(), friday.APPROVAL_DECLINED_REPLY)
@@ -5213,6 +5240,8 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                     await worker.queue_frame(EndFrame())
                 await asyncio.wait_for(asyncio.shield(running), timeout=4)
                 await session.llm._client.close()
+        if scenario == 'approval-no':
+            self.assertEqual(len(requests), 1)  # only the run that asked the question
         if scenario == 'approval-no-call':
             self.assertEqual(sends, [])
             self.assertEqual(speech.count(friday.APPROVAL_DECLINED_REPLY), 1)

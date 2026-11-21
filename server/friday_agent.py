@@ -135,7 +135,7 @@ CALL_LOG_EXCLUSION = re.compile(
     r"|leave(?:\W+\w+){0,8}\W+out|keep(?:\W+\w+){0,8}\W+private)\b", re.I)
 CALL_NOT_REQUESTED = 'The user did not ask to send the call.'
 APPROVAL_YES = re.compile(r'\b(?:approve|approved|yes|yeah|yep|ok|okay|sure|allow|go ahead)\b', re.I)
-APPROVAL_NO = re.compile(r"\b(?:deny|denied|no|nope|reject|stop|don't)\b", re.I)
+APPROVAL_NO = re.compile(r"\b(?:deny|denied|no|nope|reject|stop|don['’]?t)\b", re.I)
 # "Do not approve it" or "Not yet" decides nothing: a negation refuses answer_approval, never denies.
 APPROVAL_NEGATION = re.compile(r"\b(?:not|never)\b", re.I)
 SEND_TOOLS = ('send_to_chat', 'backlog_send')
@@ -555,10 +555,9 @@ def false_success(text):
 
 def declined_claim(text):
     """True when a reply after "no" to the approval question claims a decision Friday did not make."""
-    # Each clause on its own: "Denied. I did not send anything." still claims a denial.
-    return any(re.search(r'\b(?:approv|den(?:y|ie|ial)|reject|allow|accept|declin|sent|done|handled)\w*', clause, re.I)
-               and not re.search(r'\b(?:not|never|nothing|neither|nor)\b|n[’\']t\b', clause, re.I)
-               for clause in re.split(r'[.!?;:,\n]|\b(?:and|but|so)\b', text))
+    # No negation exemption: "Denied because it was not safe." still claims a denial. The fixed reply
+    # says the same as a correct "Nothing was approved or denied", so replacing that loses nothing.
+    return bool(re.search(r'\b(?:approved|denied|rejected|allowed|accepted|declined|sent|done|handled)\b', text, re.I))
 
 
 def has_plain(text):
@@ -642,27 +641,38 @@ def approval_answer(text):
 
 
 def answer_words(text):
-    return re.sub(r'\bdon t\b', "don't", norm(text.replace('\u2019', "'"))).split()
+    """The one tokenizer for answers to the approval question: "Don’t", "don t" and "dont" are one word."""
+    return re.sub(r"\bdon t\b|\bdont\b", "don't", norm(text.replace('\u2019', "'"))).split()
+
+
+APPROVAL_YES_WORDS = frozenset('yes yeah yep yup ok okay sure alright absolutely'.split())
+# A closed list: only these words, plus filler, answer "Should I approve docs?" or "Should I deny docs?".
+APPROVAL_CONFIRM_WORDS = {'approve': APPROVAL_YES_WORDS | {'approve', 'approved', 'allow'},
+                          'deny': APPROVAL_YES_WORDS | {'deny', 'denied', 'reject'}}
+APPROVAL_NO_WORDS = frozenset({'no', 'nope', 'stop', "don't"})
 
 
 def confirms(proposal, text):
     if proposal.name != 'answer_approval':
         return plain_yes(text)
-    if APPROVAL_NEGATION.search(text):
+    if '?' in text or APPROVAL_NEGATION.search(text) or proposal.payload not in APPROVAL_CONFIRM_WORDS:
         return False
-    words = answer_words(text)
-    # "Don't!", "Stop!" or "No, stop!" to "Should I deny docs?" can withdraw the denial: only a word
-    # without a no in it confirms. "Send it" answers a send, not an approval.
-    if set(words) & {"don't", 'no', 'nope', 'stop', 'send'}:
-        return False
-    if plain_yes(text):
-        return True
-    # An explicit "deny" or "reject" can confirm a denial.
-    return approval_answer(text) == proposal.payload
+    words = re.sub(r'\bgo ahead\b', 'yes', ' '.join(answer_words(text))).split()
+    allowed = APPROVAL_CONFIRM_WORDS[proposal.payload]
+    return any(word in allowed for word in words) and all(word in allowed | APPROVAL_FILLER for word in words)
 
 
 def declines(proposal, text):
-    return bool(APPROVAL_NO.search(text)) and (proposal.name != 'answer_approval' or not confirms(proposal, text))
+    if proposal.name != 'answer_approval':
+        return bool(APPROVAL_NO.search(text))
+    return bool(set(answer_words(text)) & (APPROVAL_NO_WORDS | {'deny', 'denied', 'reject'})) and not confirms(proposal, text)
+
+
+def bare_decline(proposal, text):
+    """A whole "No", "Nope, thanks" or "Don't" to the approval question: Friday answers without the model."""
+    words = answer_words(text)
+    return (proposal.name == 'answer_approval' and '?' not in text and bool(set(words) & APPROVAL_NO_WORDS)
+            and all(word in APPROVAL_NO_WORDS | APPROVAL_FILLER for word in words))
 
 
 def confirmed_args(name, args, last_user_text, previous_assistant, pending=None, user_turn=0):
@@ -814,6 +824,7 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
         if live_send or previous_assistant.strip().casefold().startswith(SEND_READBACK_START.casefold()):
             return 'The user answered a send question, not an approval.'
         decision = args.get('decision')
+        decision = decision if isinstance(decision, str) else None  # a list or dict is invalid, never a crash
         # "No" to "Should I approve docs?" decides nothing: it is not a denial, and Friday does not ask again.
         if (live and pending.name == name and pending.follows(previous_assistant)
                 and declines(pending, last_user_text)
@@ -821,7 +832,7 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                 # Only a question follows, never a decision; a bare "No" or "Stop" still decides nothing.
                 and not (decision in APPROVAL_READBACK_START and decision != pending.payload
                          and approval_answer(last_user_text) == decision
-                         and set(answer_words(last_user_text)) - APPROVAL_FILLER - {'no', 'nope', 'stop', "don't"})):
+                         and set(answer_words(last_user_text)) - APPROVAL_FILLER - APPROVAL_NO_WORDS)):
             return APPROVAL_DECLINED
         bound = (live and pending.name == name and pending.heard and pending.follows(previous_assistant)
                  and str(args.get('chat') or '').strip() == pending.chat.strip()
@@ -2203,6 +2214,11 @@ def runtime_types():
                     await self.speak_readback(text, marker_id, cue=cue)
                 else:
                     await self.push_frame(TTSSpeakFrame(text))
+                return
+            if run and run.declined and self.run_source == 'speech' and bare_decline(run.proposal, run.last_user_text):
+                # A bare "No" to the approval question needs no model: it decides nothing, and the
+                # model tends to claim a decision ("Denied.").
+                await self.push_frame(TTSSpeakFrame(APPROVAL_DECLINED_REPLY))
                 return
             if response and response.turn is not None:
                 self.session.llm_calls += 1

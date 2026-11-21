@@ -146,6 +146,9 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
     used = set()
     results = {**fixture.get('tool_results', {}), **case.get('tool_results', {})}
 
+    if declined and source == 'speech' and friday.bare_decline(declined, last_user_text):
+        trace['reply'] = friday.APPROVAL_DECLINED_REPLY  # the runtime does not run the model
+        return
     for _ in range(4):
         suggestions = friday.suggested_replies(messages) if source == 'speech' else ()
         trace['steps'] += 1
