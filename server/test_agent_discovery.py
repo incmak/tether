@@ -5,6 +5,7 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest.mock import Mock, call, patch
 
@@ -128,7 +129,7 @@ class AgentDiscoveryTest(unittest.TestCase):
                 result = helper_tabs.poll(body, owner, entries, run, status, reply, lambda pane: {})
                 self.assertEqual(result['reply'], 'Report')
                 self.assertEqual(helper_tabs.send_message(body, owner, entries, run, status, send, reply,
-                                                          helper_tabs.SEND_LOCK)[0], 200)
+                                                          threading.Lock())[0], 200)
                 send.assert_called_once_with(helper, 'Follow up', 'Idle')
                 with patch.object(agent_tabs.helper_close, 'close_pane') as close, \
                         patch.object(agent_tabs.undo, 'capture_safe', return_value=None), \

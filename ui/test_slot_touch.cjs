@@ -76,7 +76,7 @@ async function main() {
       return { x: box.x + box.width / 2, y: box.y + box.height / 2 }
     }
     const title = index => `.slot[data-slot="${index}"] .chat-title`
-    const labels = () => page.locator('.slot .chat-title h1').allTextContents()
+    const labels = () => page.locator('.slot .chat-title h1').allInnerTexts()
     const shot = async name => {
       if (!process.env.SHOTS) return
       mkdirSync(process.env.SHOTS, { recursive: true })
@@ -105,7 +105,7 @@ async function main() {
     assert(Math.abs(position.x - to.x) < 1 && Math.abs(position.y - to.y) < 1, 'Ghost tracks the finger')
     await shot('wide-carry')
     await input('touchEnd')
-    await page.waitForFunction(first => document.querySelector('.slot .chat-title h1').textContent !== first, before[0])
+    await page.waitForFunction(first => document.querySelector('.slot .chat-title h1').innerText !== first, before[0])
     assert.deepEqual(await labels(), [before[1], before[0], before[2]])
     await clean()
     assert.equal(await page.locator('dialog[open]').count(), 0, 'Release does not open details')
@@ -143,18 +143,21 @@ async function main() {
     await page.setViewportSize({ width: 1024, height: 768 })
     await lift(); await input('touchMove', [await point('.slot[data-slot="1"]')]); await shot('tablet-carry'); await input('touchCancel'); await clean()
     await lift(); await page.setViewportSize({ width: 390, height: 844 }); await clean(); await input('touchCancel')
-    const phoneTitle = await point('.chat-header .chat-title')
-    await input('touchStart', [phoneTitle])
-    await input('touchMove', [{ x: phoneTitle.x - 160, y: phoneTitle.y }]); await input('touchEnd')
-    await clean()
-    await page.waitForFunction(() => document.querySelector('.chat-title h1').textContent === 'Alpha')
+    for (const [dx, label] of [[-160, 'Alpha'], [160, 'Beta']]) {
+      const phoneTitle = await point('.chat-header .chat-title')
+      await input('touchStart', [phoneTitle])
+      await input('touchMove', [{ x: phoneTitle.x + dx, y: phoneTitle.y }])
+      await input('touchEnd')
+      await clean()
+      await page.waitForFunction(label => document.querySelector('.chat-title h1').innerText === label, label)
+    }
     console.log('Touch: reduced motion, tablet size, unmount cleanup and pinned-header swipe pass')
 
     await page.setViewportSize({ width: 1280, height: 900 })
     await page.locator('.slot').nth(2).waitFor()
     const mouseBefore = await labels()
     await page.locator(title(0)).dragTo(page.locator('.slot[data-slot="1"] .chat-page .chat-scroll'))
-    await page.waitForFunction(first => document.querySelector('.slot .chat-title h1').textContent !== first, mouseBefore[0])
+    await page.waitForFunction(first => document.querySelector('.slot .chat-title h1').innerText !== first, mouseBefore[0])
     assert.deepEqual(await labels(), [mouseBefore[1], mouseBefore[0], mouseBefore[2]])
     await page.locator(title(0)).focus(); await page.keyboard.press('Enter')
     await page.locator('dialog[open]').waitFor()

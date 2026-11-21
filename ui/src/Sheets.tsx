@@ -1,3 +1,5 @@
+import { TaskClose } from './TaskClose'
+import { canMoveInto, moveIntoTask, taskChildren } from './taskTree'
 import { Bone, Loading, Skeleton } from './Skeleton'
 import { useWords, count } from './words'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -199,17 +201,15 @@ export function SessionActions({ api, session, tabCount, pane, pinned, archived,
   </dialog>
 }
 
-export function PaneActions({ api, session, tabCount, archived, pane, panes, at, place, targets, onArchive, onFork, onDone, onClose, color, onColor, mainModel, startClose = false, onSelect, alwaysShow }: {
+export function PaneActions({ api, session, tabCount, archived, pane, panes, at, place, targets, onArchive, onFork, onDone, onClose, color, onColor, mainModel, startClose = false, onSelect }: {
   mainModel?: MainModel
-  /** An agent helper tab (helperTabs.ts): "Always show this tab" keeps it out of the helper filter. */
-  alwaysShow?: { on: boolean; onToggle: () => void }
   startClose?: boolean  // the × on a tab opens this sheet at the close question; Cancel then closes the sheet
   onSelect?: () => void  // "Select tabs": start choosing several tabs (the way to multi-select on touch)
   color?: string; onColor?: (color: TagColor | null) => void
   api: Api; session: Session | undefined; tabCount: number; archived: boolean; pane: Pane; panes: Pane[]; at?: Anchor; place?: Place; targets: Session[]; onArchive: () => void; onFork?: () => void; onDone: (newPane?: string, direction?: 'right' | 'down') => void; onClose: () => void
 }) {
   const words = useWords()
-  const [mode, setMode] = useState<'menu' | 'rename' | 'icon' | 'close' | 'move' | 'review' | 'coordinator' | 'group' | 'new-group'>(startClose ? 'close' : 'menu')
+  const [mode, setMode] = useState<'menu' | 'rename' | 'icon' | 'close' | 'move' | 'review' | 'coordinator' | 'group' | 'new-group' | 'task-move'>(startClose ? 'close' : 'menu')
   // The chat the Coordinator picker opened for, and the menu item that gets focus back after Back.
   const [coordinatorThread, setCoordinatorThread] = useState<string | null>(null)
   const [backFrom, setBackFrom] = useState<'coordinator' | null>(null)
@@ -217,6 +217,12 @@ export function PaneActions({ api, session, tabCount, archived, pane, panes, at,
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
   const dialog = useActionsDialog(at, () => { if (!pending) onClose() })
+  const [initialPane] = useState(pane)
+  const [hadChildren] = useState(() => taskChildren(pane, panes).length > 0)
+  const closeTree = !initialPane.task && (hadChildren || taskChildren(pane, panes).length > 0)
+  const taskTargets = panes.filter(target => canMoveInto(pane, target, panes, session?.groups))
+  const cancelClose = () => startClose ? onClose() : setMode('menu')
+  const moveTask = (target: Pane | null) => void run(async () => { await moveIntoTask(api, initialPane, target); return undefined })
   const last = tabCount <= 1
   async function run(action: () => Promise<string | undefined>, direction?: 'right' | 'down') {
     setPending(true); setError('')
@@ -230,10 +236,19 @@ export function PaneActions({ api, session, tabCount, archived, pane, panes, at,
   }
   const split = (direction: 'right' | 'down') => run(async () => (await api<{ pane: string }>('split', { session: pane.id, direction })).pane, direction)
   const title = [paneTitle(pane), shownIndex(pane)].filter(Boolean).join(' · ')
-  return <dialog {...dialog} aria-labelledby="pane-title">
-    <div className="sheet-heading"><h2 id="pane-title">{title}</h2>{!at && <button type="button" className="icon-button" aria-label="Close" disabled={pending} onClick={onClose}><X /></button>}</div>
-    <p className="sheet-sub">{words.Pane} in {session?.name ?? pane.label} · {pane.dir}</p>
-    {mode === 'move'
+  const closingTask = mode === 'close' && closeTree
+  return <dialog {...dialog} className={closingTask ? `${dialog.className} task-close-sheet` : dialog.className} aria-labelledby={closingTask ? 'task-close-title' : 'pane-title'}>
+    {!closingTask && <>
+      <div className="sheet-heading"><h2 id="pane-title">{title}</h2>{!at && <button type="button" className="icon-button" aria-label="Close" disabled={pending} onClick={onClose}><X /></button>}</div>
+      <p className="sheet-sub">{words.Pane} in {session?.name ?? pane.label} · {pane.dir}</p>
+    </>}
+    {mode === 'task-move'
+      ? <div className="action-list">
+          <p className="hint">Move {paneTitle(initialPane)} into a task in this stack.</p>
+          {taskTargets.length ? taskTargets.map(target => <button key={target.id} type="button" disabled={pending} onClick={() => moveTask(target)}><FolderInput size={18} aria-hidden="true" />{paneTitle(target)}</button>) : <p className="hint">There are no other tasks in this stack.</p>}
+          <div className="sheet-buttons"><button type="button" className="secondary" disabled={pending} onClick={() => setMode('menu')}>Back</button></div>
+        </div>
+      : mode === 'move'
       ? <SessionPicker label={`Move this ${words.pane} to`} targets={targets.filter(target => target.id !== pane.tmux_session)} pending={pending} onCancel={() => setMode('menu')}
           onPick={target => void run(async () => { await api('merge', { kind: 'pane', source: pane.id, target: target.id }); return undefined })}
           extra={!last && <button disabled={pending} onClick={() => void run(async () => { await api('merge', { kind: 'break', source: pane.id }); return undefined })}><Plus size={18} />New session</button>} />
@@ -254,16 +269,24 @@ export function PaneActions({ api, session, tabCount, archived, pane, panes, at,
       ? <CoordinatorPicker pane={pane} panes={panes} thread={coordinatorThread} pending={pending} error={error} onBack={() => { setError(''); setBackFrom('coordinator'); setMode('menu') }} onPick={(choice, take) => void run(async () => { await api('coordinator-role', { pane: pane.id, thread: coordinatorThread, mode: choice, take }); return undefined })} />
       : mode === 'icon'
       ? <IconPicker api={api} pane={pane} pending={pending} run={run} onBack={() => setMode('menu')} />
+      : closingTask
+      ? <TaskClose api={api} pane={initialPane} pending={pending} run={run} onCancel={cancelClose} />
       : mode === 'close'
       ? <div className="confirm-box" role="alertdialog" aria-labelledby="close-pane-title">
           <p id="close-pane-title"><strong>Close this {words.pane}?</strong> {last ? `It is the last ${words.pane}, so this also ends the session ${session?.name ?? ''}.` : 'This stops anything running in it.'} You cannot undo this.</p>
-          <div className="sheet-buttons"><button type="button" className="secondary" disabled={pending} onClick={() => startClose ? onClose() : setMode('menu')}>Cancel</button><button type="button" className="danger" disabled={pending} onClick={() => void run(async () => { await closeTab(api, pane); return undefined })}>{pending ? 'Closing…' : `Close ${words.pane}`}</button></div>
+          <div className="sheet-buttons"><button type="button" className="secondary" disabled={pending} onClick={cancelClose}>Cancel</button><button type="button" className="danger" disabled={pending} onClick={() => void run(async () => { await closeTab(api, initialPane); return undefined })}>{pending ? 'Closing…' : `Close ${words.pane}`}</button></div>
         </div>
       : <div className="action-list">
           {onColor && <ColorRow value={color} disabled={pending} onChange={onColor} />}
           <button disabled={pending} onClick={() => setMode('rename')}><Pencil size={18} />Rename {words.pane}</button>
           <CopyNames pane={pane} disabled={pending} onCopied={onClose} />
           <button disabled={pending} onClick={() => setMode('icon')}><Shapes size={18} />Change icon</button>
+          {pane.task && <button disabled={pending} onClick={() => moveTask(null)}><ArrowRightLeft size={18} />Move out of task</button>}
+          {pane.agent !== 'shell' && !taskChildren(pane, panes).length && !pane.coordinator && <button disabled={pending} onClick={() => setMode('task-move')}><FolderInput size={18} />Move into task…</button>}
+          {!pane.task && pane.agent !== 'shell' && <button disabled={pending || !initialPane.thread} onClick={() => void run(async () => {
+            await api('task-tree/done', { pane: initialPane.id, thread: initialPane.thread, done: !(initialPane.done || initialPane.done_mark) })
+            return undefined
+          })}><Check size={18} />{initialPane.done || initialPane.done_mark ? 'Reopen' : 'Mark done'}</button>}
           <button disabled={pending} onClick={() => setMode('move')}><ArrowRightLeft size={18} />Move to session…</button>
           {session && <button disabled={pending} onClick={() => setMode('group')}><FolderInput size={18} />Move to stack…{!!session.groups?.length && <small>{placeName(pane.group ?? '', session.groups)}</small>}</button>}
           {(pane.agent === 'claude' || pane.agent === 'codex') && <button disabled={pending} onClick={() => setMode('review')}><Eye size={18} />Link a review…</button>}
@@ -275,7 +298,6 @@ export function PaneActions({ api, session, tabCount, archived, pane, panes, at,
           {onFork && canFork(pane) && <button disabled={pending} onClick={onFork}><GitFork size={18} />New chat from this</button>}
           <hr />
           {onSelect && <button disabled={pending} onClick={() => { onSelect(); onClose() }}><ListChecks size={18} />Select {words.panes}</button>}
-          {alwaysShow && <button disabled={pending} aria-pressed={alwaysShow.on} onClick={() => { alwaysShow.onToggle(); onClose() }}><Pin size={18} />Always show this {words.pane}{alwaysShow.on && <Check size={16} aria-hidden="true" />}</button>}
           <button disabled={pending} onClick={() => { onArchive(); onClose() }}>{archived ? <ArchiveRestore size={18} /> : <Archive size={18} />}{archived ? 'Restore' : 'Archive'} {words.pane}</button>
           <button className="danger-item" disabled={pending} onClick={() => setMode('close')}><Trash2 size={18} />Close {words.pane}{words.tmux && <kbd>Ctrl-b x</kbd>}</button>
         </div>}

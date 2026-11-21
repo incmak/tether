@@ -105,11 +105,12 @@ class AuditRouteTests(unittest.TestCase):
                         patch.object(server, 'respond_approval', side_effect=lambda *args, **kwargs:
                                      terminal_input.respond_approval(*args, **kwargs, run=terminal)):
                     terminal = Mock()
-                    stale = self.handler('POST', '/mobile/api/approval', dict(payload, approval='stale'))
-                    stale.deny = Mock(return_value=False)
-                    stale.do_POST()
-                    self.assertEqual(stale.respond.call_args.args[0], 503)
-                    terminal.assert_not_called()
+                    for approval in (None, 'stale'):
+                        stale = self.handler('POST', '/mobile/api/approval', dict(payload, approval=approval))
+                        stale.deny = Mock(return_value=False)
+                        stale.do_POST()
+                        self.assertEqual(stale.respond.call_args.args[0], 503)
+                        terminal.assert_not_called()
                     handler.do_POST()
                     handler.respond.assert_called_once_with(200, {'accepted': True})
                     self.assertEqual(terminal.call_args.args[0][-1], 'Enter')

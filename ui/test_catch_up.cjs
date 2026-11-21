@@ -56,6 +56,7 @@ assert.equal(c.isQuiet(pane('%3', '$1', { finished: 800 }), seen, undefined, now
 assert.equal(c.isQuiet(pane('%1', '$1', { state: 'Working' }), seen, undefined, now, true), false)
 assert.equal(c.isQuiet(pane('%1', '$1', { tasks: ['1 shell'] }), seen, undefined, now, true), false)
 assert.equal(c.isQuiet(pane('%1', '$1', { ask: ask(100) }), seen, undefined, now, true), false)
+assert.equal(c.isQuiet(pane('%1', '$1', { escalated: true }), seen, undefined, now, true), false, 'an escalated helper waits even in Idle')
 assert.equal(c.isQuiet(pane('%1', '$1', { ask: ask(100, { snoozed_until: now + 60 }) }), seen, undefined, now, true), true, 'a snoozed ask is quiet until it wakes')
 assert.equal(c.isQuiet(pane('%1', '$1'), seen, '%1', now, true), false, 'the open tab always shows')
 

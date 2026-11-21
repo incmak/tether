@@ -616,4 +616,4 @@ class CodexSendTests(unittest.TestCase):
                 server.send_text({'agent': 'codex', 'id': '%fixture'}, message, state='Idle')
                 self.assertEqual(capture.called, expected)
                 self.assertEqual(thread.called, expected)
-                submit.assert_called_once_with(message, {'agent': 'codex', 'id': '%fixture'})
+                submit.assert_called_once_with(message, {'agent': 'codex', 'id': '%fixture'}, user=False)

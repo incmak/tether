@@ -50,7 +50,7 @@ export function finishedPanes(sessions: CatchSession[], seen: Record<string, num
  * not read, and it is not the open tab. "Active only" folds quiet tabs and sessions away.
  */
 export function isQuiet(pane: Pane, seen: Record<string, number>, selected: string | undefined, now: number, attention: boolean): boolean {
-  if (pane.id === selected || waitsOnYou(pane, now, attention)) return false
+  if (pane.id === selected || pane.escalated || waitsOnYou(pane, now, attention)) return false
   if (pane.state === 'Working' || needsYou(pane.state) || pane.tasks?.length) return false
   return !isDone(pane, seen, selected)
 }

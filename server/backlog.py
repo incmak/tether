@@ -595,6 +595,25 @@ def _audit_items(text, *, blocks=None, unnumbered_blocks=None):
     return items, unnumbered
 
 
+def done_ids():
+    """Completed items from both files. The current item wins during an archive write."""
+    archive = folder() / 'DONE.md'
+    if archive.is_symlink():
+        raise invalid('The backlog archive is a link. Tether does not open it.')
+    # Read the current list first: archive writes the destination before removing source items. Both files use the
+    # bounded, non-blocking read of the audit snapshot (B303): a pipe or a huge file never stalls a listing. The
+    # done check needs no next ID, so last-id is not read.
+    text = _file_text(_read_file(_path(), 4 * LIMIT + 1))
+    if len(text) > LIMIT:
+        raise ProjectError(413, f'The backlog is over {LIMIT:,} characters. Shorten {_path()}.')
+    current = _audit_items(text)[0]
+    contents = _read_file(archive, ARCHIVE_READ + 1)
+    if len(contents) > ARCHIVE_READ:
+        raise invalid(f'The backlog archive is over {ARCHIVE_READ:,} bytes. Tether does not read it.')
+    archived = _audit_items(_file_text(contents))[0]
+    return {ident for ident, item in (archived | current).items() if item[2] == 'done'}
+
+
 def _pane_hint(kind, block):
     if not block:
         return None

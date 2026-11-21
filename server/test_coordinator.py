@@ -1,4 +1,5 @@
 """The coordinator tab: commands and the status feed, with fake tmux options, statuses and sends."""
+import subprocess
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import contextlib
 from functools import partial
@@ -18,6 +19,7 @@ from unittest.mock import patch
 
 import agent_coordinator_cli as cli
 import coordinator
+import helper_tabs
 import history
 import paths
 
@@ -30,6 +32,14 @@ class Tmux:
 
     def __call__(self, args, **kwargs):
         assert args[0] == paths.TMUX and kwargs == dict(capture_output=True, text=True, timeout=5)
+        if args[1:4] == ['display-message', '-p', '-t'] and args[5] == '#{pane_id}\t#{@tether_helper}':
+            entry = next((entry for entry in self.world.entries if entry['id'] == args[4]), None)
+            if entry and entry.get('record') is OSError:
+                raise subprocess.TimeoutExpired(args, 5)
+            if entry and entry.get('record') is LookupError:
+                entry = None  # tmux answers, but not for this pane
+            out = f"{args[4]}\t{entry.get('record', '')}\n" if entry else ''
+            return type('Result', (), {'returncode': 0 if entry else 1, 'stdout': out})()
         unset = args[1:4] == ['set-option', '-p', '-u']
         assert unset and args[4:] == ['-t', args[5], '@tether_role'] or args[1:4] == ['set-option', '-p', '-t'] and args[5] == '@tether_role', args
         entry = next(entry for entry in self.world.entries if entry['id'] == (args[5] if unset else args[4]))
@@ -364,6 +374,40 @@ class BrowserRole(unittest.TestCase):
                 with patch.dict(self.world.entries[1], role), self.assertRaisesRegex(ValueError, 'reviewer or advisor'):
                     self.world.change_role(take=True)
         self.assertEqual(self.world.marked(), {})
+
+    def test_a_tab_inside_a_task_cannot_claim_in_either_path(self):
+        # A tab the user moved into a task has no helper flag (group_by user); the live record still refuses it.
+        moved = json.dumps({'owner_pane': '%1', 'sent_at': 1, 'kind': 'helper', 'moved_by': 'user'})
+        for field in ({'record': moved}, {'task': '%1'}):
+            with self.subTest(field=field), patch.dict(self.world.entries[1], field):
+                with self.assertRaisesRegex(ValueError, 'inside a task'):
+                    self.world.change_role(take=True)
+                with self.assertRaisesRegex(ValueError, 'inside a task'):
+                    self.world.act('%2', action='claim', take=True)
+        self.assertEqual(self.world.marked(), {})
+        self.assertEqual(self.world.sent, [])
+        own = json.dumps({'owner_pane': '%1', 'sent_at': 1, 'kind': 'own', 'moved_by': 'user'})
+        with patch.dict(self.world.entries[1], record=own):
+            self.assertEqual(self.world.change_role()['coordinator'], '%2')
+
+    def test_claim_refuses_when_the_placement_cannot_be_confirmed(self):
+        # A timed-out read, a missing pane and a record that does not parse all leave the placement unknown.
+        for record in (OSError, LookupError, '{"kind": "helper", "owner_pane": "%1"', '{"kind": "helper"}'):
+            with self.subTest(record=record), patch.dict(self.world.entries[1], record=record):
+                with self.assertRaisesRegex(ValueError, 'could not confirm'):
+                    self.world.change_role(take=True)
+                with self.assertRaisesRegex(ValueError, 'could not confirm'):
+                    self.world.act('%2', action='claim', take=True)
+        self.assertEqual(self.world.marked(), {})
+        self.assertEqual(self.world.sent, [])
+        with patch.dict(self.world.entries[1], record=''):
+            self.assertEqual(self.world.change_role()['coordinator'], '%2')
+
+    def test_every_mark_value_is_known_to_the_record_guard(self):
+        written = []
+        for mode in coordinator.MODES:
+            coordinator._set(lambda args, **_: written.append(args[-1]) or type('R', (), {'returncode': 0})(), '%2', mode)
+        self.assertEqual(sorted(written), sorted(helper_tabs.COORDINATOR_MARKS))
 
     def test_mode_change_and_release_send_nothing(self):
         self.world.act('%2', action='claim')

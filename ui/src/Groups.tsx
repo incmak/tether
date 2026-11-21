@@ -1,3 +1,4 @@
+import { taskOf } from './taskTree'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ChevronDown, FolderInput, FolderOutput, Pencil, Plus, ScrollText, Sparkles, Trash2, X } from 'lucide-react'
 import { Spinner } from './Skeleton'
@@ -15,6 +16,9 @@ import type { Place } from './groups'
 
 // The stack row remounts with each tab, like the tab strip: keep its scroll place for each session.
 const rowScroll = new Map<string, number>()
+
+const closeBucket = (pane: Pane) => (pane.state === 'Idle' || pane.agent === 'shell') && !pane.ask && !pane.escalated
+  ? 'idle' : 'working'
 
 /** What the group row needs from the app, beyond what a chat already has. */
 export interface GroupHooks {
@@ -44,7 +48,7 @@ export function GroupBar({ api, session, pane, hooks, onOpenPane, onUpdate, chil
   api: Api; session: Session; pane: Pane; hooks: GroupHooks; onOpenPane: (pane: Pane) => void; onUpdate: () => void; children?: React.ReactNode
 }) {
   const groups = session.groups
-  const current = groupOf(pane, groups)
+  const current = groupOf(taskOf(pane, session.panes), groups)
   // Each group remembers its last tab on this device, so a switch back opens it again.
   useEffect(() => { if (groups?.length) rememberTab(session.id, current, pane.id) }, [groups?.length, session.id, current, pane.id])
   const [menu, setMenu] = useState<{ place: Place; at?: Anchor } | null>(null)
@@ -181,7 +185,7 @@ function GroupSwitcher({ api, onUpdate, session, places, current, hooks, onPick,
 }
 
 /** The menu of one group: start a tab, rename, context, ungroup, close all tabs, remove. */
-function GroupMenu({ api, session, place, order, at, from, hooks, onClose, onDone }: {
+export function GroupMenu({ api, session, place, order, at, from, hooks, onClose, onDone }: {
   api: Api; session: Session; place: Place; order: string[]; at?: Anchor; from: Pane; hooks: GroupHooks; onClose: () => void; onDone: () => void
 }) {
   const group = session.groups?.find(item => item.id === place.id)
@@ -189,11 +193,17 @@ function GroupMenu({ api, session, place, order, at, from, hooks, onClose, onDon
   const [name, setName] = useState(place.name)
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
+  const [closePlan, setClosePlan] = useState<{ panes: Pane[]; archived: number; endsSession: boolean } | null>(null)
   const dialog = useActionsDialog(at, () => { if (!pending) onClose() })
   if (!group) return null
-  // Archived tabs are hidden from the strip but still in the group: close all and remove must count them.
-  const archived = hooks.hidden.filter(item => item.group === group.id)
-  const all = [...place.panes, ...archived]
+  // The close uses effective membership across the whole session, including archived tabs.
+  const visible = new Set(session.panes.map(item => item.id))
+  const hidden = hooks.hidden.filter(item => !visible.has(item.id))
+  const sessionPanes = [...session.panes, ...hidden]
+  const members = placesOf(sessionPanes, session.groups).find(item => item.id === group.id)?.panes ?? []
+  const all = closePlan?.panes ?? members
+  const archived = closePlan?.archived ?? members.filter(item => !visible.has(item.id)).length
+  const endsSession = closePlan?.endsSession ?? (members.length > 0 && members.length === sessionPanes.length)
   const count = all.length
   const tabs = `${count} ${count === 1 ? 'tab' : 'tabs'}`
   async function run(action: () => Promise<unknown>) {
@@ -212,13 +222,7 @@ function GroupMenu({ api, session, place, order, at, from, hooks, onClose, onDon
     void run(() => api('groups/reorder', { session: session.id, groups: next }))
   }
   // Agents that a close would stop in the middle of a turn, or that wait on you.
-  const busy = all.filter(item => item.state === 'Working' || needsYou(item.state))
-  const endsSession = count > 0 && count === session.panes.length + hooks.hidden.length
-  async function closeAll() {
-    // One close at a time with the existing close route, then remove the empty group (the session ends with its last tab).
-    for (const item of all) await api('session', { pane: item.id }, undefined, 'DELETE')
-    if (!endsSession) await api('groups/remove', { session: session.id, group: group!.id })
-  }
+  const busy = all.filter(item => closeBucket(item) === 'working')
   return <dialog {...dialog} aria-labelledby="group-menu-title">
     <div className="sheet-heading"><h2 id="group-menu-title">{group.name}</h2>{!at && <button type="button" className="icon-button" aria-label="Close" disabled={pending} onClick={onClose}><X /></button>}</div>
     <p className="sheet-sub">Stack in {session.name} · {count ? tabs : 'no tabs'}</p>
@@ -229,10 +233,12 @@ function GroupMenu({ api, session, place, order, at, from, hooks, onClose, onDon
           {nameError && name !== place.name && <p className="hint">{nameError}</p>}
           <div className="sheet-buttons"><button type="button" className="secondary" disabled={pending} onClick={() => setMode('menu')}>Cancel</button><button className="primary" disabled={pending || !!nameError}>{pending ? 'Saving…' : 'Save'}</button></div>
         </form>
-      : mode === 'close'
+      : mode === 'close' && closePlan
       ? <div className="confirm-box" role="alertdialog" aria-labelledby="group-close-title">
-          <p id="group-close-title"><strong>{count === 1 ? 'Close the tab' : `Close all ${tabs}`} in {group.name}?</strong> {archived.length ? `${archived.length === 1 ? '1 of them is' : `${archived.length} of them are`} archived. ` : ''}{busy.length ? `This stops ${busy.map(item => `${chatTitle(item)} (${needsYou(item.state) ? 'needs you' : 'working'})`).join(', ')}. ` : ''}{endsSession ? `${count === 1 ? 'It is the last tab' : 'They are the last tabs'}, so this also ends the session ${session.name}. ` : 'Then the empty stack is removed. '}You cannot undo this.</p>
-          <div className="sheet-buttons"><button type="button" className="secondary" disabled={pending} onClick={() => setMode('menu')}>Cancel</button><button type="button" className="danger" disabled={pending} onClick={() => void run(closeAll)}>{pending ? 'Closing…' : `Close ${tabs}`}</button></div>
+          <p id="group-close-title"><strong>{count === 1 ? 'Close the tab' : `Close all ${tabs}`} in {group.name}?</strong> {archived ? `${archived === 1 ? '1 of them is' : `${archived} of them are`} archived. ` : ''}{busy.length ? `This stops ${busy.map(item => `${chatTitle(item)} (${needsYou(item.state) || item.ask || item.escalated ? 'needs you' : 'working'})`).join(', ')}. ` : ''}{endsSession ? `${count === 1 ? 'It is the last tab' : 'They are the last tabs'}, so this also ends the session ${session.name}. ` : 'Then the empty stack is removed. '}You cannot undo this.</p>
+          <div className="sheet-buttons"><button type="button" className="secondary" disabled={pending} onClick={() => { setClosePlan(null); setMode('menu'); setError('') }}>Cancel</button><button type="button" className="danger" disabled={pending} onClick={() => void run(() => api('groups/close', {
+            session: session.id, group: group.id, panes: closePlan.panes.map(item => ({ pane: item.id, thread: item.thread ?? null, bucket: closeBucket(item) })),
+          }, undefined, undefined, 60000))}>{pending ? 'Closing…' : `Close ${tabs}`}</button></div>
         </div>
       : <div className="action-list">
           <button disabled={pending} onClick={() => { onClose(); hooks.onStart(group.id, from) }}><Plus size={18} />New tab here</button>
@@ -245,7 +251,7 @@ function GroupMenu({ api, session, place, order, at, from, hooks, onClose, onDon
           <hr />
           {count > 0 && <button disabled={pending} title={`Move ${tabs} to Unstacked. No agent stops.`} onClick={() => void run(() => api('groups/ungroup', { session: session.id, group: group.id }))}><FolderOutput size={18} />Unstack<small>{tabs} to Unstacked</small></button>}
           {count > 0
-            ? <button className="danger-item" disabled={pending} onClick={() => setMode('close')}><Trash2 size={18} />Close all tabs…</button>
+            ? <button className="danger-item" disabled={pending} onClick={() => { setClosePlan({ panes: members, archived, endsSession }); setMode('close') }}><Trash2 size={18} />Close all tabs…</button>
             : <button className="danger-item" disabled={pending} onClick={() => void run(() => api('groups/remove', { session: session.id, group: group.id }))}><Trash2 size={18} />Remove stack</button>}
         </div>}
     {mode === 'menu' && <p className="hint">{count ? 'Unstack moves the tabs to Unstacked and stops no agent. ' : ''}The stack context is kept in the project archive.</p>}
