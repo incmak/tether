@@ -181,8 +181,9 @@ ANSI_QUOTE = re.compile(r"\$'((?:[^'\\]|\\[\s\S])*)'")
 ANSI_ESCAPE = re.compile(rb'\\([0-7]{1,3}|x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|.)', re.S)
 ANSI_BYTES = dict(zip(b"""abefnrtvE\\'"?""", b"""\a\b\x1b\f\n\r\t\v\x1b\\'"?"""))
 REDIRECTION = re.compile(rf'(?P<fd>(?:[0-9]{LINE_JOIN})*)'
-                         rf'(?P<op><{LINE_JOIN}<{LINE_JOIN}<|>{LINE_JOIN}[>&]|<{LINE_JOIN}&|[<>])')
-COMPOUND_OPERATOR = re.compile(rf'&{LINE_JOIN}[&>]|\|{LINE_JOIN}[|&]|;{LINE_JOIN}[;&]')
+                         rf'(?P<op><{LINE_JOIN}<{LINE_JOIN}<|>{LINE_JOIN}[>&]|<{LINE_JOIN}&|[<>])'
+                         rf'|&{LINE_JOIN}>{LINE_JOIN}>?')
+COMPOUND_OPERATOR = re.compile(rf'&{LINE_JOIN}&|\|{LINE_JOIN}[|&]|;{LINE_JOIN}[;&]')
 FOLDER_SEPARATORS = {None, '&&', ';', '\n'}
 HEREDOC_MARK = '@@TETHER-HEREDOC-{}@@'
 HEREDOC_FOUND = re.compile(r'@@TETHER-HEREDOC-(\d+)@@')
@@ -194,9 +195,13 @@ HEREDOC = re.compile(
     rf'''<{LINE_JOIN}<(-)?[ \t]*(['"]?)([A-Za-z0-9_][A-Za-z0-9_.-]*)\2(?=[ \t\n;&|()<>]|$)([^\n]*)\n'''
     r'''(?:(.*?)\n)?(?(1)\t*)\3(?=\n|$)''', re.S)
 ASSIGNMENT = re.compile(r'[A-Za-z_][A-Za-z0-9_]*=.*', re.S)
+ASSIGNMENT_LIKE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)(?:\[.*\])?\+?=.*', re.S)
+REDIRECTION_VARIABLE = re.compile(r'\{[A-Za-z_][A-Za-z0-9_]*\}')
 WRAPPERS = {'command', 'env', 'time', 'nohup'}
+COMMAND_WRAPPERS = {'command', 'builtin', 'time', 'noglob', 'nocorrect', 'exec', 'nohup'}
 KEYWORDS = set('if then else elif fi for while until do done case esac function select time coproc ! [[ ]]'.split())
 KEYWORD_PREFIXES = {'if', 'then', 'else', 'elif', 'while', 'until', 'do', 'time', '!', '{'}
+MOVING_WORDS = {'cd', 'pushd', 'popd', 'source', 'eval', 'builtin'}
 SHELL_COMMANDS = {'eval', 'source', '.', 'exec', 'xargs', 'sh', 'bash', 'zsh'}
 GIT_VALUE_OPTIONS = {'-c', '--namespace', '--super-prefix', '--config-env', '--exec-path'}
 GIT_PLACE_OPTIONS = {'--git-dir', '--work-tree'}  # they move the repository: the folder is then not known
@@ -390,7 +395,7 @@ def _segments(tokens):
             target = tokens[index]
             index += 1
             fd = redirect['fd']
-            on_stdin = not fd.strip('0') if fd else redirect['op'].startswith('<')
+            on_stdin = not fd.strip('0') if fd else token.startswith('<')
             mark = HEREDOC_FOUND.fullmatch(target.text) if target.fill and target.bare else None
             if on_stdin:
                 stdin = int(mark[1]) if mark else None
@@ -722,6 +727,25 @@ def _cd_guard(segment):
             and [word.text for word in words] in (['exit'], ['exit', '1'], ['return']))
 
 
+def _command_word(words):
+    """Skip shell prefixes for folder and Git context checks."""
+    wrapper_options = False
+    for word in words:
+        text = word.text
+        if text in COMMAND_WRAPPERS:
+            wrapper_options = True
+        elif text == '--':
+            wrapper_options = False
+        elif wrapper_options and text.startswith('-'):
+            continue
+        elif (ASSIGNMENT_LIKE.fullmatch(text) or REDIRECTION_VARIABLE.fullmatch(text)
+              or (word.bare and text in KEYWORD_PREFIXES)):
+            wrapper_options = False
+        else:
+            return text
+    return None
+
+
 def evaluate(command, cwd=None):
     """None when the command has no `git commit`. Else {'verdict': 'pass' | 'missing' | 'unknown', 'reason': str,
     'count': the number of commits, 'folder': where git runs, or None when not known}.
@@ -763,14 +787,8 @@ def evaluate(command, cwd=None):
         first = words[0]
         uncertain = uncertain or (first.bare and first.text in KEYWORDS)
         all_plain = redirects_plain and all(word.plain for word in words)
-        command_words = words
-        while command_words:
-            word = command_words[0]
-            if not (ASSIGNMENT.fullmatch(word.text) or (word.bare and word.text in KEYWORD_PREFIXES)):
-                break
-            command_words = command_words[1:]
         cd = first.text == 'cd' or (first.text == 'builtin' and len(words) > 1 and words[1].text == 'cd')
-        if cd and command_words is words:
+        if cd:
             following = segments[number + 1][0] if number + 1 < len(segments) else None
             if following == '||' and _cd_guard(segments[number + 1]):
                 after_guard = segments[number + 2][0] if number + 2 < len(segments) else None
@@ -785,6 +803,7 @@ def evaluate(command, cwd=None):
                 folder = logical = None
             alone = alone and folder is not None
             continue
+        name = _command_word(words)
         while words and words[0].bare and words[0].text in KEYWORD_PREFIXES:
             words = words[1:]
         uncertain = uncertain or _shell_launcher(words)
@@ -803,22 +822,21 @@ def evaluate(command, cwd=None):
                     verdict, reason = 'unknown', 'folder'
                 verdicts.append((verdict, reason))
                 where = here if len(verdicts) == 1 or where == here else None
-        # A simple command cannot move the shell, except these. Any command can write a message file.
-        moving = ('cd', 'pushd', 'popd', 'source', '.', 'eval', 'builtin')  # these can move the shell; not followed
-        if command_words and (command_words[0].text in moving
-                              or (command_words[0].text == 'command' and len(command_words) > 1
-                                  and command_words[1].text in moving)):
+        # A wrapper or shell syntax we do not handle can hide a command that moves the shell.
+        if name == '.' or any(word.text in MOVING_WORDS for word in words):
             folder = logical = None
-        if first.text in ('set', 'setopt', 'unsetopt'):
+        if name in ('set', 'setopt', 'unsetopt'):
             steady = False  # later cd and glob behavior can depend on shell options
         if commit is None:
             # These commands can explicitly change the Git worktree or hooks. Keep the folder unknown for probes.
             git_context_changed = git_context_changed or (
                 any(os.path.basename(word.text) == 'git' for word in words[:-1])
                 and any(word.text == 'config' for word in words[1:]))
-            if ASSIGNMENT.fullmatch(first.text) or first.text in ('export', 'unset'):
-                git_context_changed = git_context_changed or any(
-                    GIT_CONFIG_ENV.fullmatch(word.text.split('=', 1)[0]) for word in words)
+            git_context_changed = git_context_changed or any(
+                GIT_CONFIG_ENV.fullmatch(assignment[1]) for word in words
+                if (assignment := ASSIGNMENT_LIKE.fullmatch(word.text)))
+            if name in ('export', 'unset', 'declare', 'typeset'):
+                git_context_changed = git_context_changed or any(GIT_CONFIG_ENV.fullmatch(word.text) for word in words)
         alone = False
     if not verdicts:
         return None
@@ -1241,14 +1259,7 @@ def _hook_ready(contents):
 def _defer_to_hook(tree, command, *, cwd_fallback=False):
     if tree is None:
         return False
-    hooks = _git_path(tree, '--git-path', 'hooks')
-    if hooks is None:
-        return False
-    hook = hooks / 'commit-msg'
     try:
-        contents = _owned_hook(hook) if os.access(hook, os.X_OK) else None
-        if contents is None or not _hook_ready(contents):
-            return False
         tokens = list(_tokens(command, [], for_hook=True))
         if any(isinstance(token, str) and token not in ('&&', '\n') for token in tokens):
             return False
@@ -1288,9 +1299,14 @@ def _defer_to_hook(tree, command, *, cwd_fallback=False):
                 return False
             if not message and HOOK_CONFIG_WORD.search(word.text):
                 return False
+        hooks = _git_path(tree, '--git-path', 'hooks')
+        if hooks is None:
+            return False
+        hook = hooks / 'commit-msg'
+        contents = _owned_hook(hook) if os.access(hook, os.X_OK) else None
+        return contents is not None and _hook_ready(contents)
     except (OSError, ValueError):
         return False
-    return True
 
 
 def check(data, env=os.environ, now=None):

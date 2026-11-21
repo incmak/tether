@@ -385,6 +385,44 @@ class Evaluate(unittest.TestCase):
                 found = commit_gate.evaluate(prefix + commit, cwd)
                 self.assertEqual((found['folder'], found['verdict']), (cwd, 'missing'))
 
+    def test_folder_is_unknown_after_moving_words_beyond_simple_prefixes(self):
+        bash = ('X+=1 cd ./sub', 'X[0]=1 cd ./sub', 'X[0]+=1 cd ./sub',
+                'X=1 command -p cd ./sub', 'X=1 command -- cd ./sub', 'time -p cd ./sub',
+                '{fd}</dev/null cd ./sub', '&>/dev/null cd ./sub', '&>>/dev/null cd ./sub',
+                'command -p -- . ./script', '{fd}</dev/null . ./script')
+        zsh = ('noglob cd ./sub', 'nocorrect cd ./sub', 'nocorrect noglob . ./script')
+        for shell, prefixes in (('bash', bash), ('zsh', zsh)):
+            for prefix in prefixes:
+                with self.subTest(shell=shell, prefix=prefix):
+                    found = commit_gate.evaluate(f'{prefix}; git commit -m Title', str(self.cwd))
+                    self.assertEqual((found['folder'], found['verdict']), (None, 'unknown'))
+
+    def test_prefixed_shell_options_make_following_cd_unknown(self):
+        deep = self.cwd / 'real/deep'
+        deep.mkdir(parents=True)
+        (self.cwd / 'link').symlink_to(deep, target_is_directory=True)
+        for prefix in ('X=1 set -P', 'command -p set -P', 'time -p set -P',
+                       'noglob setopt CHASE_LINKS', 'nocorrect unsetopt CHASE_LINKS'):
+            with self.subTest(prefix=prefix):
+                found = commit_gate.evaluate(f'{prefix}; cd ./link/..; git commit -m Title', str(self.cwd))
+                self.assertEqual((found['folder'], found['verdict']), (None, 'unknown'))
+
+    def test_git_context_changes_beyond_simple_prefixes_make_folder_unknown(self):
+        for prefix in ('GIT_DIR+=./sub/.git', 'GIT_DIR[0]=./sub/.git', 'GIT_DIR[0]+=./sub/.git',
+                       'command export GIT_DIR=./sub/.git', 'command -- unset GIT_DIR',
+                       'command -p declare -x GIT_DIR=./sub/.git', 'noglob typeset -x GIT_DIR=./sub/.git',
+                       'declare -x GIT_CONFIG_GLOBAL=other.config',
+                       'GIT_DIR=./sub/.git', 'export X=1 GIT_DIR=./sub/.git', 'unset GIT_DIR'):
+            with self.subTest(prefix=prefix):
+                found = commit_gate.evaluate(f'{prefix}; git commit -m Title', str(self.cwd))
+                self.assertEqual((found['folder'], found['verdict']), (None, 'unknown'))
+
+    def test_stdout_and_stderr_redirects_consume_the_target(self):
+        for operator in ('&>', '&>>', '&\\\n>\\\n>'):
+            with self.subTest(operator=operator):
+                command = f'{operator} /dev/null git commit -m Title'
+                self.assertEqual(self.verdict(command), ('missing', 'no-line'))
+
     def test_an_earlier_command_stops_the_message_file_read(self):
         (self.cwd / 'msg.txt').write_text('Old draft\n')
         self.assertEqual(commit_gate.evaluate('git commit -F msg.txt', str(self.cwd))['verdict'], 'missing')
@@ -536,19 +574,22 @@ class Evaluate(unittest.TestCase):
 
 
 class Check(Base):
-    def test_hook_deferral_refuses_an_assignment_before_literal_cd(self):
+    def test_prefixed_cd_does_not_probe_head_or_hooks_in_start_repository(self):
+        commit_gate.set_global('enforce')
         commit_gate.install_hook(self.repo)
-        sub = self.repo / 'sub'
-        sub.mkdir()
-        command = f'cd {shlex.quote(str(sub))} && git commit -m Title'
-        self.assertTrue(commit_gate._defer_to_hook(str(self.repo), command))
-        self.assertFalse(commit_gate._defer_to_hook(str(self.repo), 'X=1 ' + command))
+        (self.repo / 'sub').mkdir()
+        with mock.patch.object(commit_gate, '_head', wraps=commit_gate._head) as head, \
+                mock.patch.object(commit_gate, '_git_path', wraps=commit_gate._git_path) as git_path:
+            self.assertEqual(self.pre('X=1 cd ./sub && git commit -m Title')[1], '')
+        head.assert_not_called()
+        git_path.assert_not_called()
+        row = self.rows()[-1]
+        self.assertEqual((row['verdict'], row['reason'], row['folder']), ('unknown', 'folder', None))
 
     def test_cleanup_is_unknown_after_commands_that_can_change_config(self):
         commit = 'git commit -q --allow-empty -m "Msg\n\nVerified: none (x)"'
         write = r"printf '\n[commit]\n\tcleanup = strip\n[core]\n\tcommentChar = V\n' >> .git/config"
-        for prefix in (write, '> .git/config', 'cp other.config .git/config',
-                       'declare -x GIT_CONFIG_GLOBAL=other.config', 'git add -A'):
+        for prefix in (write, '> .git/config', 'cp other.config .git/config', 'git add -A'):
             with self.subTest(prefix=prefix):
                 result = commit_gate.evaluate(f'{prefix}; {commit}', str(self.repo))
                 self.assertEqual((result['verdict'], result['reason']), ('unknown', 'cleanup'))
