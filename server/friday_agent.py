@@ -685,8 +685,9 @@ def draft_bypass(prompt, topics=None):
         if draft := topic['draft']:
             for revision in draft['revisions']:
                 saved = norm(revision['text'])
-                # A draft shorter than one window is guarded as a whole.
-                if any(saved[i:i + 120] in text for i in range(0, max(len(saved) - 119, 1), 60)) and saved:
+                # Every 118-character window at every offset: a copy of 120 or more characters is caught even when
+                # norm() strips a space it cut at each end. A draft shorter than one window is guarded as a whole.
+                if saved and any(saved[i:i + 118] in text for i in range(max(len(saved) - 117, 1))):
                     return 'Use send_prompt for a drafted prompt.'
     return None
 

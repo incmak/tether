@@ -578,7 +578,7 @@ class FridayRulesTests(unittest.TestCase):
                 with self.subTest(tool=tool, prompt=prompt):
                     self.assertEqual(friday.check_tool(tool, {'prompt': prompt}, 'speech', 'Send it', set(),
                                                       draft_topics=topics), 'Use send_prompt for a drafted prompt.')
-            short = friday.norm(second)[:119]
+            short = friday.norm(second)[:100]
             self.assertIsNone(friday.check_tool(tool, {'prompt': short}, 'speech', 'Send it', set(),
                                                draft_topics=topics))
             with patch.object(friday.friday_notes, 'listing', side_effect=OSError):
@@ -588,6 +588,26 @@ class FridayRulesTests(unittest.TestCase):
                 self.assertEqual(friday.check_tool(tool, {'prompt': second}, 'speech', 'Send it', set()),
                                  'Use send_prompt for a drafted prompt.')
                 listing.assert_called_once_with(strict=True, scope='stored')
+
+    def test_draft_bypass_refuses_unaligned_copies_of_any_length_from_120(self):
+        draft = ('Preserve the token check and use a new endpoint for the archive. '
+                 'Document the claims in the existing guide so each caller knows what to expect. '
+                 'Inspect the old indexes and show the routes that still use them before the final review. '
+                 'Add coverage for the list and the detail endpoint.')
+        topics = [saved_draft(draft)]
+        saved = friday.norm(draft)
+        # Review B2-1: copies of 120-178 characters that start between the old 60-character steps passed.
+        cuts = [(30, 120), (30, 130), (61, 150), (1, 178), (89, 121), (137, 125)]
+        for tool in ('send_to_chat', 'new_chat'):
+            for start, size in cuts:
+                with self.subTest(tool=tool, start=start, size=size):
+                    copy = saved[start:start + size]
+                    self.assertEqual(len(copy), size)  # some cuts end on a space that norm() strips
+                    self.assertEqual(friday.check_tool(tool, {'prompt': 'Do this: ' + copy}, 'speech', 'Send it', set(),
+                                                       draft_topics=topics), 'Use send_prompt for a drafted prompt.')
+            with self.subTest(tool=tool, size=100):
+                self.assertIsNone(friday.check_tool(tool, {'prompt': saved[30:130]}, 'speech', 'Send it', set(),
+                                                    draft_topics=topics))
 
     def test_draft_bypass_guards_a_draft_shorter_than_one_window(self):
         tiny = 'Add a regression test for the archive route.'

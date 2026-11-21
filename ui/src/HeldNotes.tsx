@@ -177,7 +177,7 @@ export function HeldNotes({ api, topics, refresh, onEmpty, show }: Props) {
             </li>
           })}
         </ol>
-        {topic.draft && topic.draft.state !== 'closed' && <HeldDraft topicId={topic.id} draft={topic.draft}
+        {topic.draft && topic.draft.state !== 'closed' && <HeldDraft topicId={topic.id} title={topic.title} draft={topic.draft}
           shown={shown?.id === topic.id && shown.rev === lastRev(topic)} />}
         <button type="button" className="live-held-clear" data-key={clearKey(topic)} data-armed={armed === clearKey(topic)} disabled={busy}
           onClick={() => void remove(topicIndex)}>
