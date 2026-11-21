@@ -53,7 +53,7 @@ function InfoPanel({ info, disabled, onAction }: { info: Attention; disabled: bo
 }
 
 export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoose, onKey, onAction, onDialog, onAsk, onAskEngage, onType, onFocusReply, onPick, onOpenTerminal, permissionsTab }: { onDialog?: (action: DialogAction) => Promise<string | null>; plan?: ChatData['plan']; approval: Approval | null; attention: Attention | null; agent: string; disabled: boolean; permissionsTab?: string | null; onOpenTerminal?: () => void
-  onChoose: (kind: 'approval' | 'menu', option: Choice, approval: Approval | null, feedback?: string) => Promise<void>; onKey: (key: string) => unknown; onAction?: (action: PromptAction) => Promise<string | null>; onAsk?: (ask: AskBridge, answers: Record<string, string | string[]> | null) => Promise<string | null>; onAskEngage?: (ask: AskBridge) => Promise<number | null>; onType?: (text: string, loginUrl?: string) => Promise<boolean>; onFocusReply?: () => void; onPick?: (row: number | undefined, labels: string[] | undefined, then: PickKey, revision?: string) => Promise<unknown> }) {
+  onChoose: (kind: 'approval' | 'menu', option: Choice, approval: Approval | null, feedback?: string) => Promise<void>; onKey: (key: string) => unknown; onAction?: (action: PromptAction) => Promise<string | null>; onAsk?: (ask: AskBridge, answers: Record<string, string | string[]> | null) => Promise<string | null>; onAskEngage?: (ask: AskBridge) => Promise<number | null>; onType?: (text: string, loginUrl?: string) => Promise<boolean>; onFocusReply?: () => void; onPick?: (row: number | undefined, labels: string[] | undefined, then: PickKey, revision?: string, ticked?: boolean) => Promise<unknown> }) {
   const [feedback, setFeedback] = useState('')
   const [feedbackVoiceBusy, setFeedbackVoiceBusy] = useState(false)
   const feedbackId = useId()
@@ -77,7 +77,7 @@ export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoos
   const numberedMulti = !approval && !bridge && attention?.reason === 'menu' && multiBox
   const pickRevision = numberedMulti ? attention.menu_verified || undefined : undefined
   const tickPick = !!pickRevision && !!onPick
-  const tick = async (at: number) => { if (onPick && picked === null) await onPick(at, options.map(pickRowKey), 'Space', pickRevision) }
+  const tick = async (at: number) => { if (onPick && picked === null) await onPick(at, options.map(pickRowKey), 'Space', pickRevision, pickRevision ? !!checkedById.get(options[at]?.id) : undefined) }
   const roving = useRovingStop()
   const options = (approval ? (approval.actionable ? approval.options : undefined) : attention?.options) ?? []
   const done = async () => {

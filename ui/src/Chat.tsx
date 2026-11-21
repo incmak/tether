@@ -1079,10 +1079,10 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   const card = footer.heads_up ? `${footer.heads_up.state}|${footer.heads_up.text}` : ''
   useEffect(() => { if (cardError.current) { cardError.current = false; setSendError(''); setDraftBlocked(false) } }, [card, pane.id])
   // A list action names a row or submits the numbered question identified by its revision.
-  async function pickRow(row: number | undefined, labels: string[] | undefined, then: PickKey, revision?: string) {
+  async function pickRow(row: number | undefined, labels: string[] | undefined, then: PickKey, revision?: string, ticked?: boolean) {
     if (acting) return false
     setActing(true)
-    try { return await write('pick', { session: pane.id, thread: data?.thread ?? null, row, labels, then, heading: data?.attention ? pickHeading(data.attention) : '', revision }) } finally { setActing(false) }
+    try { return await write('pick', { session: pane.id, thread: data?.thread ?? null, row, labels, then, heading: data?.attention ? pickHeading(data.attention) : '', revision, ticked }) } finally { setActing(false) }
   }
   async function sendKey(key: string, card = false) {
     if (acting) return false

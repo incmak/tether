@@ -191,7 +191,7 @@ class HelperAnswerTests(unittest.TestCase):
         self.assertTrue(revision)
         self.assertTrue(status['ask_current']['options'][1]['checked'])
         with patch.object(terminal_input, 'verify'):
-            self.assertEqual(self.multi_pick(tick, row=1, then='Space', revision=revision)[0], 200)
+            self.assertEqual(self.multi_pick(tick, row=1, then='Space', revision=revision, ticked=True)[0], 200)
             after = menu_row(run.screen, self.entry)['attention']
             self.assertFalse(after['ask_current']['options'][1]['checked'])
             self.assertEqual(after['menu_verified'], revision)
@@ -310,9 +310,16 @@ class HelperAnswerTests(unittest.TestCase):
         self.submit_ask()
         submit = self.submit_fixture('on-submit')
         revision = menu_row(self.submit_fixture('ticked'), self.entry)['attention']['menu_verified']
-        moved = submit.replace('[✔] Search', '[ ] Search').replace('[ ] Export', '[✔] Export')
+        tick = '\x1b[38;5;114m[✔]\x1b[39m'
+        moved = submit.replace(tick + ' Search', '[ ] Search').replace('[ ] Export', tick + ' Export')
+        self.assertEqual(seen(submit, self.entry), ['Search\nFind things'])
+        self.assertEqual(seen(moved, self.entry), ['Export\nSave things'])
         self.assertEqual(menu_row(moved, self.entry)['attention']['menu_verified'], revision)
-        for labels in (['Search\nFind things'], [], None):
+        # The labels the screen shows pass the gate: the refusals below come from the ticks, not from the frame.
+        run = ScriptedTerminal(moved, [('Enter', self.submit_fixture('after-submit').replace('→ Search', '→ Export')), ('Enter', '')])
+        self.assertEqual(self.done(run, revision, labels=['Export\nSave things'])[0], 200)
+        self.assertEqual(run.writes, ['Enter', 'Enter'])
+        for labels in (['Search\nFind things'], ['Search\nFind things', 'Export\nSave things'], [], None):
             with self.subTest(labels=labels):
                 run = ScriptedTerminal(moved)
                 with patch.object(terminal_input, 'verify'):
@@ -336,7 +343,7 @@ class HelperAnswerTests(unittest.TestCase):
         run = ScriptedTerminal(submit)
         with patch.object(terminal_input, 'verify'):
             for row in (4, 5):
-                self.assertEqual(self.request_choice('pick', run, row=row, then='Space', revision=revision,
+                self.assertEqual(self.request_choice('pick', run, row=row, then='Space', revision=revision, ticked=False,
                                                      labels=['Search\nFind things', 'Export\nSave things', 'Sync\nShare things',
                                                              'Type something', 'Submit', 'Chat about this'],
                                                      heading='Which features do you want?')[0], 409)
@@ -401,6 +408,25 @@ class HelperAnswerTests(unittest.TestCase):
                 (status, _), writes = self.live_done(prefix, start, last, after, heading)
                 self.assertEqual(status, 200)
                 self.assertEqual(writes, keys)
+
+    def test_live_stale_ticks_on_next_and_submit_rows_send_no_keys(self):
+        """Claude 2.1.330, live two-question ask: Done with ticks other than the screen's is refused before any key."""
+        self.two_question_ask()
+        for name, heading in (('120-q1-00', 'Which features do you want?'), ('44-q1-03', 'Which features do you want?'),
+                              ('44-q2-02', 'Which formats do you want?')):
+            frame = self.live2(name)
+            shown = seen(frame, self.entry)
+            self.assertTrue(shown, name)
+            revision = menu_row(frame, self.entry)['attention']['menu_verified']
+            self.assertTrue(revision, name)
+            for labels in ([], shown[:-1], shown + ['Extra\nrow']):
+                with self.subTest(name=name, labels=labels):
+                    run = ScriptedTerminal(frame)
+                    with patch.object(terminal_input, 'verify'):
+                        status, _ = self.request_choice('pick', run, then='Enter', revision=revision, heading=heading,
+                                                        labels=labels)
+                    self.assertEqual(status, 409)
+                    self.assertEqual(run.writes, [])
 
     def test_done_with_nothing_ticked_sends_no_keys(self):
         """Claude 2.1.330, live: with no ticks, Next goes on and Submit shows a review that lacks this question."""
@@ -485,8 +511,41 @@ class HelperAnswerTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, '')
 
         with patch.object(terminal_input, 'verify'):
-            self.assertEqual(self.multi_pick(move, row=2, then='Space', revision=revision)[0], 409)
+            self.assertEqual(self.multi_pick(move, row=2, then='Space', revision=revision, ticked=False)[0], 409)
         self.assertEqual([command[-1] for command in run.writes], ['Down'])
+
+    def test_space_refuses_when_the_box_changed_after_the_user_looked(self):
+        """The revision names the question only: Space must also match the box state the user saw, before any key."""
+        screen = self.multi_frame()
+        revision = menu_row(screen, self.entry)['attention']['menu_verified']
+        self.assertTrue(menu_row(screen, self.entry)['attention']['ask_current']['options'][1]['checked'])
+        for row, ticked in ((1, False), (0, True), (1, None), (1, 'yes')):
+            with self.subTest(row=row, ticked=ticked):
+                run = FakeTerminal(screen)
+                body = {} if ticked is None else {'ticked': ticked}
+                with patch.object(terminal_input, 'verify'):
+                    self.assertEqual(self.multi_pick(run, row=row, then='Space', revision=revision, **body)[0], 409)
+                self.assertEqual(run.writes, [])
+        # The state the screen shows passes: the refusals above come from the box, not from the frame. The reply waits
+        # until the box flips, so the Dock's next read shows the new tick; a box that never flips asks for a check.
+        for flips, status in ((True, 200), (False, 409)):
+            with self.subTest(flips=flips):
+                run = FakeTerminal(screen)
+                original = run.__call__
+
+                def space(argv, **kwargs):
+                    result = original(argv, **kwargs)
+                    if flips and argv[1] == 'send-keys' and argv[-1] == 'Space':
+                        run.screen = run.screen.replace('[✔]', '[ ]')
+                    return result
+
+                with patch.object(terminal_input, 'verify'):
+                    code, response = self.multi_pick(space, row=1, then='Space', revision=revision, ticked=True)
+                self.assertEqual(code, status)
+                if not flips:
+                    self.assertIn('Open the terminal to check', response['error'])
+                self.assertFalse(menu_row(run.screen, self.entry)['attention']['ask_current']['options'][1]['checked'] and flips)
+                self.assertEqual([command[-1] for command in run.writes], ['Space'])
 
     def test_codex_numbered_checkboxes_are_refused_with_or_without_revision(self):
         screen = ('Select Model and Effort\n\n  1. [x] First\n› 2. [ ] Second\n\n'
@@ -495,7 +554,7 @@ class HelperAnswerTests(unittest.TestCase):
         self.assertFalse(menu_row(screen, self.entry)['attention']['menu_verified'])
         run = FakeTerminal(screen)
         with patch.object(terminal_input, 'verify'):
-            for body in ({}, {'revision': 'a' * 64}):
+            for body in ({}, {'revision': 'a' * 64, 'ticked': False}):
                 self.assertEqual(self.request_choice('pick', run, row=1, then='Space',
                                                      heading='Select Model and Effort',
                                                      labels=['[x] First', '[ ] Second'], **body)[0], 409)

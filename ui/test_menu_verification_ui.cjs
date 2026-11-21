@@ -134,7 +134,7 @@ async function main() {
       assert(await page.locator('.composer textarea').isDisabled())
       assert.equal(await dock.getByRole('button', { name: /Type your own answer|Chat about this/ }).count(), 0)
       for (const [button, pick] of [
-        [/Search/, { row: 0, labels: ['Search\nFind', 'Export\nSave', 'Sync\nShare', 'Type something', 'Chat about this'], then: 'Space' }],
+        [/Search/, { row: 0, labels: ['Search\nFind', 'Export\nSave', 'Sync\nShare', 'Type something', 'Chat about this'], then: 'Space', ticked: false }],
         [/Done \(Enter\)/, { labels: ['Export\nSave'], then: 'Enter' }],
       ]) {
         const submitting = pick.then === 'Enter'

@@ -20,6 +20,9 @@ const cases = [
   { name: 'multi-select', attention: { menu_verified: revision, ask_current: multi }, card: false },
 ]
 
+const attentionFor = current => ({ id: 'legacy-menu', reason: 'menu', text: `${question}\n❯ 1. PNG\n  2. WebP\n  3. Type something.`,
+  question, options, ...current.attention })
+
 async function main() {
   const browser = await getBrowser({ local: true })
   try {
@@ -38,8 +41,7 @@ async function main() {
           writes.push({ endpoint, body: request.postDataJSON() })
           return route.fulfill({ json: { accepted: true } })
         }
-        const attention = { id: 'legacy-menu', reason: 'menu', text: `${question}\n❯ 1. PNG\n  2. WebP\n  3. Type something.`,
-          question, options, ...current.attention }
+        const attention = attentionFor(current)
         if (endpoint === 'sessions') return route.fulfill({ json: { sessions: [{ ...pane, attention }], default_thread: pane.thread } })
         if (endpoint === 'chat') return route.fulfill({ json: { ...pane, session: pane.id, messages: [], busy: false, earlier: 0, attention } })
         return route.fulfill({ json: {} })
@@ -83,6 +85,26 @@ async function main() {
         }
         assert.equal(writes.filter(({ endpoint }) => ['key', 'type'].includes(endpoint)).length, 0)
       }
+    }
+    // One page, no reload: the controls follow each new attention value and do not keep the last state.
+    const yesNo = { name: 'yes-no', attention: { id: 'legacy-yes-no', reason: 'permission', text: 'Allow the edit? (y/n)',
+      question: undefined, options: [], menu_verified: false } }
+    await page.goto(`${origin}/mobile/chat/?session=%2521`)
+    await page.locator('#attention').waitFor()
+    const visible = selector => page.locator(selector).isVisible()
+    for (const [step, terminal, card, typing, keys] of [
+      [cases[1], true, false, false, []],
+      [cases[0], false, true, true, ['Escape']],
+      [cases[2], true, false, false, []],
+      [yesNo, false, false, true, ['Up', 'Down', 'Enter', 'Escape', 'Tab', 'y', 'n']],
+    ]) {
+      current = step
+      await page.evaluate(value => updateAttention(value), attentionFor(step))
+      assert.equal(await visible('#attention-terminal'), terminal, `${step.name}: Open terminal`)
+      assert.equal(await visible('#attention-card'), card, `${step.name}: card`)
+      assert.equal(await visible('#attention-type'), typing, `${step.name}: typing`)
+      assert.deepEqual(await page.locator('#attention-keys button:visible').evaluateAll(nodes => nodes.map(node => node.dataset.key)),
+        keys, `${step.name}: keys`)
     }
     assert.deepEqual(errors, [])
     console.log('Legacy card: verified one-choice answers post /menu with the revision; unverified and multi-select offer only the terminal, at 320 px and 1280 px.')

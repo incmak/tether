@@ -741,6 +741,19 @@ def _wait_for_picker_redraw(look, sleep):
 NO_TICKS = 'Tick at least one option, then choose Done.'
 
 
+def _wait_for_box(entry, run, sleep, revision, row, checked):
+    """Return once the box of `row` shows `checked` on the same question, so the next read of the screen (the
+    Dock's refresh) shows the tick the user made. Space was already sent: a box that does not change asks for a check."""
+    def changed():
+        menu = verified_numbered_menu(entry, capture(entry, run, styled=True))
+        if not menu or menu_digest(menu) != revision:
+            raise MenuChanged(menu_refusal(entry, check=True))
+        if bool(menu['options'][row].get('checked')) == checked:
+            return True
+    if _wait_for_picker_redraw(changed, sleep) is None:
+        raise MenuChanged(menu_refusal(entry, check=True))
+
+
 def _finish_claude_multi(entry, menu, press, run, sleep):
     index, _, _, ask_id = menu['menu_identity']
     advance = menu['control']['kind'] == 'next'
@@ -780,12 +793,16 @@ def _review_ticks_match(answer, ticks):
     return ', '.join(parts) == answer and sorted(parts) == sorted(labels)
 
 
-def picker_choose(entry, row, labels, then='Enter', run=subprocess.run, sleep=time.sleep, heading=None, *, revision=None):
+def picker_choose(entry, row, labels, then='Enter', run=subprocess.run, sleep=time.sleep, heading=None, *, revision=None,
+                  ticked=None):
     """Move the cursor of a picker to one row, then press `then`: Enter chooses the row, Space ticks it in a
     multi-select list, and Up on the first row or Down on the last row shows the rows past the screen.
 
     Done (`then` Enter, no row) submits the ticked boxes of a numbered multi-select question. Its `labels` are the
     ticked rows the user saw; the boxes on screen must be the same.
+
+    Space on a numbered multi-select question (a revision given) toggles a box, so `ticked` is the state of that box
+    the user saw. The box on screen must be in that state.
 
     `labels` is the whole list the user saw (picker_row_key of each row) and `heading` the name of that list. The list
     on screen must match both before the first key and after each move, so the row index names one entry, never a
@@ -805,6 +822,8 @@ def picker_choose(entry, row, labels, then='Enter', run=subprocess.run, sleep=ti
         raise ValueError('Choose a row first.')
     answering = then in ('Space', 'Enter')
     bound = answering and revision is not None
+    if bound and then == 'Space' and not isinstance(ticked, bool):
+        raise MenuChanged(menu_refusal(entry))
     if not bound:
         verify(entry, run)
 
@@ -826,16 +845,18 @@ def picker_choose(entry, row, labels, then='Enter', run=subprocess.run, sleep=ti
             if submit:
                 if not control:
                     raise MenuChanged(menu_refusal(entry))
-                ticked = [picker_row_key(item) for item in items if item['kind'] == 'option' and item.get('checked')]
-                if not ticked:
+                boxes = [picker_row_key(item) for item in items if item['kind'] == 'option' and item.get('checked')]
+                if not boxes:
                     # Claude would go on, or show a review with "Some questions are unanswered".
                     raise MenuChanged(NO_TICKS)
-                if sorted(ticked) != sorted(labels):
+                if sorted(boxes) != sorted(labels):
                     # The ticks changed in the terminal after the user looked: the revision names the question only.
                     raise MenuChanged(menu_refusal(entry))
                 target = len(items) - 1  # the unnumbered control sits between the free and chat rows
             elif (menu['question'] != heading or [picker_row_key(item) for item in items] != labels
-                  or items[row]['kind'] != 'option'):
+                  or items[row]['kind'] != 'option'
+                  # The ticks changed in the terminal after the user looked: Space would invert the wrong state.
+                  or then == 'Space' and bool(items[row].get('checked')) != ticked):
                 raise MenuChanged(menu_refusal(entry))
             if control:
                 items = [*items[:-1], control, items[-1]]
@@ -869,6 +890,9 @@ def picker_choose(entry, row, labels, then='Enter', run=subprocess.run, sleep=ti
         if at == target:
             if submit:
                 _finish_claude_multi(entry, menu, press, run, sleep)
+            elif bound and then == 'Space':
+                press(then)
+                _wait_for_box(entry, run, sleep, revision, row, not ticked)
             else:
                 press(then)
             return

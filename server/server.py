@@ -3626,7 +3626,8 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     with SEND_LOCK:
                         picker_choose(config, body.get('row'), body.get('labels'), then=body.get('then', 'Enter'),
-                                      heading=body.get('heading'), revision=body.get('revision'))
+                                      heading=body.get('heading'), revision=body.get('revision'),
+                                      ticked=body.get('ticked'))
                 except MenuChanged as exc:
                     self.respond(409, {'error': str(exc)})
                     return
