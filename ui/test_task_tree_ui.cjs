@@ -276,13 +276,30 @@ async function main() {
     assert.deepEqual(write('task-tree/answer'), { pane: '%82', thread: 'thread-%82', digest: replyDigest, text: 'The first group' })
 
     const dialog = page.locator('dialog[open].sheet').last()
-    await side().getByRole('button', { name: `Actions for ${separateName}` }).click()
+    // B474: ••• shows on hover, keyboard focus and the open row, so a mouse user points at the row first.
+    const openActions = async name => {
+      const actions = side().locator(`button[aria-label="Actions for ${name}"]`)   // getByRole skips hidden buttons
+      const row = actions.locator('xpath=..')
+      if (!await actions.isVisible()) {
+        await row.hover()
+        assert(await actions.isVisible(), `Hover shows the actions of ${name}`)
+      }
+      await actions.click()
+    }
+    await page.mouse.move(0, 0)
+    const separateActions = side().locator(`button[aria-label="Actions for ${separateName}"]`)
+    assert.equal(await separateActions.isVisible(), false, 'A row that is not open hides its ••• until hover or focus')
+    await separateActions.locator('xpath=..').locator('.task-row-main').focus()
+    assert(await separateActions.isVisible(), 'Keyboard focus on the row shows its •••')
+    const actionsBox = await separateActions.boundingBox()
+    assert(actionsBox.width >= 24 && actionsBox.height >= 24, 'The row actions button has a 24 × 24 px target')
+    await openActions(separateName)
     await dialog.getByRole('button', { name: 'Move into task…' }).click()
     assert.equal(await dialog.getByRole('button', { name: /B401 Sidebar fix/ }).count(), 0)
     await Promise.all([waitWrite('task-tree/move'), dialog.getByRole('button', { name: taskName }).click()])
     assert.deepEqual(write('task-tree/move'), { pane: '%81', thread: 'thread-%81', into: '%1', into_thread: 'root-thread' })
     await dialog.waitFor({ state: 'hidden' })
-    await side().getByRole('button', { name: `Actions for ${reviewName}` }).click()
+    await openActions(reviewName)
     await dialog.getByRole('button', { name: 'Move out of task' }).waitFor()
     // A tab inside a task is a helper there and cannot be the coordinator (server: coordinator._claim).
     assert.equal(await dialog.getByRole('button', { name: /^Coordinator…/ }).count(), 0)
@@ -293,13 +310,13 @@ async function main() {
     await Promise.all([waitWrite('task-tree/move'), side().getByRole('button', { name: /B447 Settings, from B446, Task/ }).dragTo(rootRow)])
     assert.deepEqual(write('task-tree/move'), { pane: '%81', thread: 'thread-%81', into: '%1', into_thread: 'root-thread' })
 
-    await side().getByRole('button', { name: `Actions for ${taskName}` }).click()
+    await openActions(taskName)
     await dialog.getByRole('button', { name: /^Coordinator…/ }).waitFor()   // the task itself may be the coordinator
     await Promise.all([waitWrite('task-tree/done'), dialog.getByRole('button', { name: 'Mark done' }).click()])
     assert.deepEqual(write('task-tree/done'), { pane: '%1', thread: 'root-thread', done: true })
     await dialog.waitFor({ state: 'hidden' })
     await side().getByRole('button', { name: 'Done 1' }).click()
-    await side().getByRole('button', { name: `Actions for ${doneName}` }).click()
+    await openActions(doneName)
     await Promise.all([waitWrite('task-tree/done'), dialog.getByRole('button', { name: 'Reopen' }).click()])
     assert.deepEqual(write('task-tree/done'), { pane: '%87', thread: 'thread-%87', done: false })
     await dialog.waitFor({ state: 'hidden' })

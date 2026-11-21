@@ -162,14 +162,18 @@ async function main() {
     const tether = page.locator(`${SIDE} .session-list > li[data-id="$1"]`)
     check('the session row counts its waiting tabs (2)', (await tether.locator('.session-main .rollup').textContent()).startsWith('2'))
     check('a session with waiting tabs is open', await tether.locator('.pane-children').count() === 1)
-    check('the stack row counts its waiting tabs (2)', await tether.locator('.pane-stack-head', { hasText: 'Release' }).locator('.rollup').textContent() === '2')
+    // B474: one plain count per stack row (its tabs); the Needs you dot and the name carry the wait.
+    const releaseHead = tether.locator('.pane-stack-head', { hasText: 'Release' })
+    check('the stack row shows one plain count and the Needs you dot', await releaseHead.locator('.rollup').count() === 0
+      && await releaseHead.locator('.group-count').count() === 1 && await releaseHead.locator('.state-dot.approval').isVisible())
     const releaseNotes = tether.getByRole('button', { name: 'Release notes, Task, needs you', exact: true })
     check('a tab whose ask waits has the Needs you dot', await releaseNotes.locator('.task-dot.needs').isVisible())
     check('the stack row says it to a screen reader', (await tether.locator('.pane-stack-head', { hasText: 'Release' }).getAttribute('aria-label')).includes('2 need you'))
     const releaseStack = tether.locator('.pane-stack', { has: page.locator('.pane-stack-head', { hasText: 'Release' }) })
     await releaseStack.locator('.pane-stack-fold').click()
     await releaseStack.locator('.pane-stack-fold[aria-expanded="false"]').waitFor()
-    check('the folded Release stack still shows its waiting count (2)', await releaseStack.locator('.pane-stack-head .rollup').textContent() === '2'
+    check('the folded Release stack still shows that tabs wait', await releaseStack.locator('.pane-stack-head .state-dot.approval').isVisible()
+      && (await releaseStack.locator('.pane-stack-head').getAttribute('aria-label')).includes('2 need you')
       && await releaseStack.locator('button[data-select-pane]').count() === 0)
     await releaseStack.locator('.pane-stack-fold').click()
     await releaseStack.locator('.pane-stack-fold[aria-expanded="true"]').waitFor()

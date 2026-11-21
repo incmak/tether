@@ -235,8 +235,8 @@ label.broadcast-row:hover { background: var(--hover); }
 .archived-tab-restore { flex: none; color: var(--muted); }
 /* A session with stacks: each stack heading, then its tabs one step in (as in the chat header's stack row). */
 .pane-stack-row { display: flex; align-items: center; margin-top: 2px; }
-.pane-children .pane-stack-head { flex: 1; min-width: 0; gap: 8px; min-height: 28px; font-size: 12px; font-weight: 600; color: var(--muted); }
-.pane-children .pane-stack-head.current { color: var(--text); }
+/* Stack headings (concept D): one style, small grey text with one plain count. */
+.pane-children .pane-stack-head { flex: 1; min-width: 0; gap: 8px; min-height: 28px; font-size: 12px; font-weight: 400; color: var(--muted); }
 .pane-children .pane-stack-head .group-count { margin-left: auto; font-weight: 400; font-variant-numeric: tabular-nums; }
 .pane-children :is(.pane-stack-fold, .pane-stack-actions) { flex: none; display: grid; place-items: center; width: var(--control-sm); height: var(--control-sm); min-height: 0; padding: 0; border-radius: var(--radius-sm, 6px); color: var(--muted); }
 .pane-children :is(.pane-stack-fold, .pane-stack-actions):hover { background: var(--hover); }
