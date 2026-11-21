@@ -1793,9 +1793,11 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                             if isinstance(now, dict) and now.get('commit') == bound and now.get('dirty') is False:
                                 link['approved_commit'] = bound
                                 link['approved_at'] = int(time.time())
-                                # B368: auto-merge merges the worktree that this clean read checked, not the tab's cwd.
-                                if isinstance(now.get('folder'), str) and now['folder']:
-                                    link['approved_folder'] = now['folder']
+                                # B368: auto-merge merges the worktree the request named, not the tab's cwd. A request
+                                # with no saved worktree names none: a clean HEAD elsewhere does not show what was read.
+                                named = link.get('review_folder')
+                                if isinstance(named, str) and named and now.get('folder') == named:
+                                    link['approved_folder'] = named
                         if uncommitted:
                             link['approved_dirty'] = bound
                         link['awaiting'] = False

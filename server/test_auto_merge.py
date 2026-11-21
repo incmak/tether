@@ -1302,12 +1302,16 @@ class Modes(Base):
         self.assertEqual(auto_merge.process(self.job(head, at=old + 3600))['outcome'], 'merged')
 
     def test_a_folder_git_cannot_read_is_logged_by_folder_and_approval(self):
-        decision = auto_merge.process({**self.job('a' * 40), 'folder': str(self.root)})
+        # With no tab folder (the check command), the log names the folder.
+        decision = auto_merge.process({**self.job('a' * 40), 'folder': str(self.root), 'tab': None})
         self.assertEqual((decision['outcome'], decision['root'], decision['head']), ('wait', str(self.root), 'a' * 40))
         other = self.root / 'elsewhere'
         other.mkdir()
-        auto_merge.process({**self.job('a' * 40), 'folder': str(other)})
+        auto_merge.process({**self.job('a' * 40), 'folder': str(other), 'tab': None})
         self.assertEqual(len(auto_merge.records()), 2)
+        # B368: with a tab, the log names the tab's repository, never the folder that failed.
+        decision = auto_merge.process({**self.job('b' * 40), 'folder': str(other)})
+        self.assertEqual((decision['outcome'], decision['root'], decision['head']), ('wait', str(self.repo), 'b' * 40))
 
     def test_a_refused_push_is_a_failure_and_nothing_is_forced(self):
         self.enforce()
@@ -1964,7 +1968,7 @@ class CrossWorktree(Base):
         evaluate.assert_not_called()
         self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['approval']))
         self.assertIn('does not name the folder it reviewed', decision['checks'][0]['text'])
-        self.assertEqual((decision['root'], decision['head']), (str(self.work), head))
+        self.assertEqual((decision['root'], decision['head']), (None, head))
         self.assertEqual(self.origin_main(), before)
 
     def test_a_gone_review_folder_is_refused(self):
@@ -1972,6 +1976,8 @@ class CrossWorktree(Base):
         gone = self.root / 'project-wt' / 'gone'
         decision = auto_merge.process({**self.job(head), 'folder': str(gone)})
         self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['git']))
+        self.assertIn('is gone', decision['checks'][0]['text'])
+        self.assertEqual(decision['root'], str(self.repo))
 
     def test_a_review_folder_in_another_repository_is_refused_before_any_fetch(self):
         head = self.change()
@@ -1979,16 +1985,94 @@ class CrossWorktree(Base):
         self.git(self.root, 'clone', '-q', str(self.origin), str(clone))
         self.git(clone, 'fetch', '-q', str(self.repo), 'work')
         self.git(clone, 'worktree', 'add', '-b', 'work', str(self.root / 'clone-wt'), head)
-        cases = ((str(self.root / 'clone-wt'), str(self.work), 'not a checkout of the tab'),
-                 (str(self.work), str(self.root / 'clone-wt'), 'not a checkout of the tab'),
-                 (str(self.work), str(self.root), "tab's own folder is not in a Git repository"))
-        for folder, tab, reason in cases:
+        cases = ((str(self.root / 'clone-wt'), str(self.work), 'not a checkout of the tab', str(self.repo)),
+                 (str(self.work), str(self.root / 'clone-wt'), 'not a checkout of the tab', str(clone)),
+                 (str(self.work), str(self.root), "tab's own folder is not in a Git repository", None))
+        for folder, tab, reason, root in cases:
             with self.subTest(reason=reason, tab=tab):
                 with mock.patch.object(auto_merge, '_fetch_target') as fetch:
                     decision = auto_merge.process({**self.job(head), 'folder': folder, 'tab': tab})
                 fetch.assert_not_called()
                 self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['git']))
                 self.assertIn(reason, decision['checks'][0]['text'])
+                # Settings reads trust from each logged root: a refused folder must not become one.
+                self.assertEqual(decision['root'], root)
+        logged = {item['root'] for item in auto_merge.records()}
+        self.assertNotIn(str(self.root / 'clone-wt'), logged)
+        with mock.patch.object(auto_merge, '_trust', return_value=None) as trust:
+            auto_merge.state()
+        self.assertNotIn(str(self.root / 'clone-wt'), [call.args[0] for call in trust.call_args_list])
+
+    def link_to(self, link, target):
+        tmp = link.with_name(link.name + '.tmp')
+        tmp.symlink_to(target)
+        tmp.replace(link)
+
+    def test_a_symlinked_review_folder_is_resolved_once(self):
+        head = self.change()
+        link = self.root / 'reviewed'
+        self.link_to(link, self.work)
+        real = auto_merge.evaluate
+        with mock.patch.object(auto_merge, 'evaluate', side_effect=real) as check:
+            decision = auto_merge.process({**self.job(head), 'folder': str(link), 'tab': str(self.repo)})
+        self.assertEqual((decision['outcome'], self.failed(decision)), ('would_merge', []))
+        _, plan = real(str(link), head, tab=str(self.repo))
+        self.assertEqual(plan['folder'], str(self.work))
+        check.assert_called_once()
+
+    def test_a_review_folder_that_moves_to_another_worktree_stops_the_push(self):
+        self.enforce()
+        head = self.change()
+        before = self.origin_main()
+        link = self.root / 'reviewed'
+        self.link_to(link, self.work)
+        # A second worktree with the same branch and commit: only the folder differs.
+        twin = self.root / 'project-wt' / 'twin'
+        self.git(self.repo, 'worktree', 'add', '-f', str(twin), 'work')
+        saved = str(link)
+        job = {**self.job(head), 'folder': saved, 'tab': str(self.repo),
+               'current': lambda: {'%1': {'%2': {'commit': head, 'at': job['approved_at'], 'folder': saved}}}}
+        real = auto_merge.evaluate
+
+        def evaluate(*args, **kwargs):
+            result = real(*args, **kwargs)
+            self.link_to(link, twin)
+            return result
+
+        with mock.patch.object(auto_merge, 'evaluate', side_effect=evaluate), \
+                mock.patch.object(auto_merge, 'RUN', wraps=subprocess.run) as run:
+            decision = auto_merge.process(job)
+        self.assertEqual(decision['outcome'], 'failed')
+        self.assertIn('another worktree', decision['error'])
+        self.assertFalse(any(call.args[0][3] == 'push' for call in run.call_args_list))
+        self.assertEqual(self.origin_main(), before)
+
+    def test_an_approval_that_changes_during_the_remote_check_stops_the_push(self):
+        self.enforce()
+        head = self.change()
+        before = self.origin_main()
+        live = {'commit': head, 'at': None, 'folder': str(self.work)}
+        job = {**self.job(head), 'tab': str(self.repo), 'current': lambda: {'%1': {'%2': dict(live)}}}
+        live['at'] = job['approved_at']
+        real = auto_merge._object_git
+        pushes = []
+
+        def object_git(scratch, *args, **kwargs):
+            result = real(scratch, *args, **kwargs)
+            if args[0] == 'commit-tree':
+                pushes.append('made')
+            if args[0] == 'ls-remote' and pushes == ['made']:
+                live['folder'] = str(self.repo)  # the approval moves during the look right before the push
+            if args[0] == 'push':
+                pushes.append(args)
+            return result
+
+        with mock.patch.object(auto_merge, '_object_git', side_effect=object_git):
+            decision = auto_merge.process(job)
+        self.assertEqual(decision['outcome'], 'failed')
+        self.assertIn('approval changed', decision['error'])
+        self.assertEqual(pushes, ['made'])
+        self.assertEqual(self.origin_main(), before)
 
 
 class Watcher(Base):

@@ -6164,8 +6164,8 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertIn(f"HEAD in this tab's worktree (`git rev-parse HEAD`) is {commit}.", text)
         self.assertNotIn('/work/a different tree', text)
         self.assertEqual(review_links._relay_source(text), 'review-feedback')
-        # B368: auto-merge gets the worktree that the clean read checked.
-        self.assertEqual(review_links.approved_commits()['%13']['%12']['folder'], '/work/a different tree')
+        # B368: the request named no worktree, so the approval names none: auto-merge waits.
+        self.assertEqual(review_links.approved_commits()['%13']['%12']['folder'], None)
 
     def test_approved_folder_is_saved_reloaded_and_replaced_with_each_approval(self):
         self.bind()
@@ -6178,6 +6178,14 @@ class ReviewLinksTests(unittest.TestCase):
         self.scope = lambda entry: {'commit': self.NEXT, 'dirty': False, 'mark': 'worktree fingerprint'}
         self.finish_review(f'APPROVED {self.NEXT}')
         self.assertEqual(review_links.approved_commits()['%13']['%12'], {'commit': self.NEXT, 'at': ANY, 'folder': None})
+
+    def test_approved_folder_is_saved_only_when_the_clean_read_names_the_requested_worktree(self):
+        self.bind()
+        self.request_review()
+        self.scope = lambda entry: {'commit': self.HASH, 'dirty': False, 'folder': '/work/other tree',
+                                    'mark': 'worktree fingerprint'}
+        self.finish_review(f'APPROVED {self.HASH}')
+        self.assertEqual(review_links.approved_commits()['%13']['%12']['folder'], None)
 
     def test_a_stored_approval_without_a_valid_folder_lists_none(self):
         link = dict(self.rows()[0], approved_commit='a' * 40, approved_at=5)

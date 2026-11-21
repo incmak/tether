@@ -1094,9 +1094,10 @@ def _trial_merge(scratch, target_sha, head):
 def evaluate(folder, approved, tab=None):
     """(decision, plan) for the branch in `folder`. Git can write objects during fetch and trial merge.
 
-    tab: the worker tab's own folder. When given, `folder` must be a checkout of the same repository (B368: one
-    `--git-common-dir`), checked before any fetch. decision: the record for the log and the Settings page.
-    plan: what merge() needs, or None when a check failed."""
+    tab: the worker tab's own folder. When given (B368), `folder` is resolved once to its real path and must be a
+    checkout of the tab's repository (one `--git-common-dir`), checked before any fetch. A refused folder is not
+    logged as `root`: Settings reads trust from each logged root. decision: the record for the log and the Settings
+    page. plan: what merge() needs, or None when a check failed."""
     decision = {'at': int(time.time()), 'folder': str(folder), 'approved': approved if isinstance(approved, str) else None,
                 'checks': [], 'areas': {}, 'outcome': 'wait'}
     checks = decision['checks']
@@ -1106,15 +1107,25 @@ def evaluate(folder, approved, tab=None):
         return bool(ok)
 
     try:
+        own_root = None
         if tab is not None:
-            common = _git_dir(folder, '--git-common-dir').resolve()
+            decision['root'] = None
             try:
                 own = _git_dir(tab, '--git-common-dir').resolve()
             except GitError as exc:
                 raise GitError(f"The tab's own folder is not in a Git repository: {exc}") from exc
-            if common != own:
-                raise GitError(f"The reviewed folder {folder} is not a checkout of the tab's repository {own}.")
+            own_root = str(own.parent if own.name == '.git' else own)
+            decision.update(root=own_root, repo=Path(own_root).name)
+            try:
+                real = Path(folder).resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise GitError(f'The reviewed folder {folder} is gone.') from exc
+            if _git_dir(real, '--git-common-dir').resolve() != own:
+                raise GitError(f"The reviewed folder {folder} is not a checkout of the tab's repository {own_root}.")
+            folder = real  # every later read uses this one path, so a moved symlink cannot switch repositories
         root = main_checkout(folder)
+        if own_root is not None and root != own_root:
+            raise GitError(f"The reviewed folder {folder} is not a checkout of the tab's repository {own_root}.")
         head = _head(folder)
         branch = _git(folder, 'symbolic-ref', '--quiet', '--short', 'HEAD', check=False).stdout.strip()
         decision.update(root=root, repo=Path(root).name, head=head, branch=branch, target=f'{REMOTE}/{TARGET}')
@@ -1258,12 +1269,13 @@ def _push_argv(url, made):
     return argv
 
 
-def _fast_forward_push(root, scratch, url, checked, made):
+def _fast_forward_push(root, scratch, url, checked, made, confirm=None):
     """Push the merge commit with a plain `git push`. No --force and no --force-with-lease, here or anywhere.
 
     Before the push: the merge commit must contain the checked main commit as its first parent, and the remote main
     must still be at that commit. A remote that moved, went back or lost the branch is "main moved". Git itself
-    refuses the push when main moved after that look to a commit the merge does not contain."""
+    refuses the push when main moved after that look to a commit the merge does not contain. confirm() runs after
+    that look, right before the push, and raises to stop it."""
     if not _hash(checked) or not _hash(made):
         raise GitError('The push needs two commit hashes.')
     if not _ancestor(scratch, checked, made):
@@ -1273,6 +1285,8 @@ def _fast_forward_push(root, scratch, url, checked, made):
     seen = _object_git(scratch, 'ls-remote', url, TARGET_REF, network=root).stdout
     if seen != f'{checked}\t{TARGET_REF}\n':
         raise MainMoved(f'{REMOTE}/{TARGET} moved after the checks. Tether pushed nothing.')
+    if confirm is not None:
+        confirm()
     try:
         _object_git(scratch, *_push_argv(url, made), network=root)
     except GitError as exc:
@@ -1313,32 +1327,41 @@ def merge(plan, reviewer, job):
         raise GitError('The merge commit does not contain the planned tree.')
     _check_push_url(root, plan['url'])
     with _mode_lock:
-        problem = _authorization_problem(read_setting(), job.get('approved_at'))
-        if problem:
-            raise NotAuthorized(problem)
-        try:
-            head = _head(folder)
-            branch = _git(folder, 'symbolic-ref', '--quiet', '--short', 'HEAD').stdout.strip()
-            checkout = _worker_checkout(folder)
-        except GitError as exc:
-            raise NotAuthorized(str(exc)) from exc
-        if checkout is None or head != plan['head'] or branch != plan['branch']:
-            raise NotAuthorized('The worker branch changed before the push.')
-        try:
-            dirty = _dirty(checkout)
-        except GitError as exc:
-            raise NotAuthorized(str(exc)) from exc
-        if dirty:
-            raise NotAuthorized(dirty)
-        current = job.get('current')
-        try:
-            live = current().get(job.get('worker'), {}).get(job.get('reviewer')) if callable(current) else None
-            matches = live == {'commit': head, 'at': job['approved_at'], 'folder': job['folder']}
-        except Exception as exc:
-            raise NotAuthorized('Could not read the current reviewer approval.') from exc
-        if not matches:
-            raise NotAuthorized('The reviewer approval changed or is no longer available.')
-        _fast_forward_push(root, scratch, plan['url'], plan['target_sha'], made)
+        def confirm():
+            problem = _authorization_problem(read_setting(), job.get('approved_at'))
+            if problem:
+                raise NotAuthorized(problem)
+            try:
+                if job.get('tab') is not None and str(Path(job['folder']).resolve(strict=True)) != str(folder):
+                    raise NotAuthorized('The reviewed folder now points to another worktree.')
+            except (OSError, RuntimeError, TypeError) as exc:
+                raise NotAuthorized('The reviewed folder is gone.') from exc
+            try:
+                head = _head(folder)
+                branch = _git(folder, 'symbolic-ref', '--quiet', '--short', 'HEAD').stdout.strip()
+                checkout = _worker_checkout(folder)
+            except GitError as exc:
+                raise NotAuthorized(str(exc)) from exc
+            if checkout is None or head != plan['head'] or branch != plan['branch']:
+                raise NotAuthorized('The worker branch changed before the push.')
+            try:
+                dirty = _dirty(checkout)
+            except GitError as exc:
+                raise NotAuthorized(str(exc)) from exc
+            if dirty:
+                raise NotAuthorized(dirty)
+            current = job.get('current')
+            try:
+                live = current().get(job.get('worker'), {}).get(job.get('reviewer')) if callable(current) else None
+                matches = live == {'commit': head, 'at': job['approved_at'], 'folder': job['folder']}
+            except Exception as exc:
+                raise NotAuthorized('Could not read the current reviewer approval.') from exc
+            if not matches:
+                raise NotAuthorized('The reviewer approval changed or is no longer available.')
+
+        # Once before the look at the remote main and once after it, right before the push.
+        confirm()
+        _fast_forward_push(root, scratch, plan['url'], plan['target_sha'], made, confirm)
     return made
 
 
@@ -1357,7 +1380,7 @@ def process(job, alert=None):
         decision, plan = evaluate(job['folder'], job.get('commit'), tab=job.get('tab'))
     else:
         # B368: the approval does not name the worktree it checked (saved before B368). Do not guess a folder.
-        decision = {'at': int(time.time()), 'folder': job.get('tab'), 'approved': job.get('commit'), 'areas': {},
+        decision = {'at': int(time.time()), 'folder': None, 'approved': job.get('commit'), 'areas': {},
                     'outcome': 'wait', 'checks': [{'key': 'approval', 'ok': False, 'text':
                     'The approval does not name the folder it reviewed. Ask the reviewer to review the commit again.'}]}
         plan = None
