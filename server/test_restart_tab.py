@@ -209,7 +209,12 @@ class RestartTests(unittest.TestCase):
                        dim + '\n  Status message: Context 42% left\n  build 1234 finished\n',
                        dim + '\n  Status message: Context 42% left\n  ? for shortcuts\n',
                        dim + '\n  ? for shortcuts\n  build 1234 finished\n',
-                       dim + '\n  unrelated row\n  GPT-6.2-Sol max · ~/project ·\n  ? for shortcuts\n']:
+                       dim + '\n  unrelated row\n  GPT-6.2-Sol max · ~/project ·\n  ? for shortcuts\n',
+                       # Review 3: a row between the model row and the hint row without Codex's two-space indent.
+                       dim + '\n  GPT-6.2-Sol max · ~/project ·\nbuild 1234 finished\n  ? for shortcuts\n',
+                       dim + '\n  GPT-6.2-Sol max · ~/project ·\n    build 1234 finished\n  ? for shortcuts\n',
+                       dim + '\n? for shortcuts\n',
+                       dim + '\n  GPT-6.2-Sol max · ~/project ·\n? for shortcuts\n']:
             with self.subTest(screen=screen):
                 self.screen = screen
                 self.assert_refused('Tether cannot verify the Codex input box, so it did not restart the tab. '

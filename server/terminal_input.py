@@ -1444,19 +1444,24 @@ def small_pane_reason(entry, run=subprocess.run):
 # Codex 0.170's footer under its input (fixtures codex_0.170.0_restart/): an optional status block that starts with the
 # model ("GPT-6.2-Sol max · ~/project ·") and wraps anywhere (a long folder path fills whole rows), then one hint row
 # ("← for agents · ? for shortcuts", with an optional "⚠ 4 warnings · f2 to view"). Every row must fit: a phrase
-# somewhere in the rows is not enough (R8).
+# somewhere in the rows is not enough (R8). Codex indents every footer row by exactly two spaces, wrapped rows too.
 CODEX_STATUS_START = re.compile(r'^[A-Za-z][\w.-]*\d[\w.-]*(?:\s+(?:minimal|low|medium|high|xhigh|extra high|max))?'
                                 r'(?:\s+(?:fast|ultrafast))?\s+·(?:\s|$)', re.I)
+CODEX_FOOTER_INDENT = re.compile(r'^  \S')
 CODEX_HINT = r'(?:\?\s+for\s+shortcuts|←\s+for\s+agents)'
 CODEX_HINT_ROW = re.compile(rf'^{CODEX_HINT}(?:\s+·\s+{CODEX_HINT})*(?:\s{{2,}}⚠\s+\d+\s+warnings?\s+·\s+f2\s+to\s+view)?$')
 
 
 def codex_input_box(lines, end):
     """True when the Codex input ends at a blank line and only Codex's own footer follows: an optional status block
-    that starts with the model row, and the hint row last."""
+    that starts with the model row, and the hint row last. Every row has Codex's two-space indent: any other row is an
+    unknown screen and refuses."""
     if end >= len(lines) or lines[end].strip():
         return False
-    rest = [line.strip() for line in lines[end + 1:] if line.strip()]
+    rows = [line.rstrip() for line in lines[end + 1:] if line.strip()]
+    if not all(CODEX_FOOTER_INDENT.match(row) for row in rows):
+        return False
+    rest = [row.strip() for row in rows]
     if not 0 < len(rest) <= 6 or not CODEX_HINT_ROW.match(rest[-1]):
         return False
     status = rest[:-1]
