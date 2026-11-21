@@ -185,6 +185,7 @@ REDIRECTION = re.compile(rf'(?P<fd>(?:[0-9]{LINE_JOIN})*)'
                          rf'|&{LINE_JOIN}>{LINE_JOIN}>?')
 COMPOUND_OPERATOR = re.compile(rf'&{LINE_JOIN}&|\|{LINE_JOIN}[|&]|;{LINE_JOIN}[;&]')
 FOLDER_SEPARATORS = {None, '&&', ';', '\n'}
+COMMAND_STARTS = FOLDER_SEPARATORS | {'||', '|', '|&'}  # a segment after ( or ) can start inside a word
 HEREDOC_MARK = '@@TETHER-HEREDOC-{}@@'
 HEREDOC_FOUND = re.compile(r'@@TETHER-HEREDOC-(\d+)@@')
 # "$(cat <<'EOF' ... EOF)": the form Claude Code uses for a commit message.
@@ -831,15 +832,17 @@ def evaluate(command, cwd=None):
                     verdict, reason = 'unknown', 'folder'
                 verdicts.append((verdict, reason))
                 where = here if len(verdicts) == 1 or where == here else None
-        # An unrecognised prefix, or shell syntax the parser does not follow (uncertain), can hide the command word.
-        possible_commands = {word.text for word in words} if position is None or uncertain else {name}
+        # An unrecognised prefix, or a segment that starts after ( or ) (as in X=$(...)suffix cd), can hide the
+        # command word. Then every word counts.
+        exact = position is not None and preceding in COMMAND_STARTS
+        possible_commands = {name} if exact else {word.text for word in words}
         if MOVING_WORDS.intersection(possible_commands):
             folder = logical = None
         if possible_commands.intersection(('set', 'setopt', 'unsetopt')):
             steady = False  # later cd and glob behavior can depend on shell options
         if commit is None and not git_context_changed:
             # These commands can explicitly change the Git worktree or hooks. Keep the folder unknown for probes.
-            if position is None or uncertain:
+            if not exact:
                 assignments, env_names = words, words
             else:
                 env_names = words[position + 1:] if name in ('export', 'unset', 'declare', 'typeset') else []

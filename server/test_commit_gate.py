@@ -401,6 +401,12 @@ class Evaluate(unittest.TestCase):
                     found = commit_gate.evaluate(f'{prefix}; git commit -m Title', str(self.cwd))
                     self.assertEqual((found['folder'], found['verdict']), (None, 'unknown'))
 
+    def test_staging_all_stays_exact_in_uncertain_commands(self):
+        for command in ('git add . && git commit -m Title # Save the change',
+                        'if git add .; then git commit -m Title; fi', 'git add . ; git commit -m Title # x'):
+            with self.subTest(command=command):
+                self.assertEqual(commit_gate.evaluate(command, str(self.cwd))['folder'], str(self.cwd))
+
     def test_command_lookup_does_not_move_the_shell(self):
         for prefix in ('command -v cd', 'command -pV pushd', 'X=1 command -v . '):
             with self.subTest(prefix=prefix):
