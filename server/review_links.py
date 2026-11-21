@@ -1960,6 +1960,9 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             if target is None:
                 target = _call(scope, _review_entry(worker, link.get('follow_up_folder')))
             target = target if isinstance(target, dict) and isinstance(target.get('commit'), str) else None
+            if target is not None and isinstance(target.get('folder'), str):
+                # B368: the repository of this folder, read now, before the request names the commit and folder.
+                target = {**target, 'repo': review_scope.repo_identity(target['folder'])}
             if target is None and was_bound:
                 now = time.time()
                 since = min(link.get('scope_since', now), now)  # a clock moved back must not stretch the wait
@@ -2062,8 +2065,8 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                 link['review_clean'] = target.get('dirty') is False
                 if isinstance(target.get('folder'), str):
                     link['review_folder'] = target['folder']
-                    if (repo := review_scope.repo_identity(target['folder'])) is not None:
-                        link['review_repo'] = repo
+                    if _is_repo(target.get('repo')):
+                        link['review_repo'] = deepcopy(target['repo'])
                 if (correction := link.get('stale_correction')) and correction['now'] in (None, target['commit']):
                     link['stale_correction'] = {**correction, 'requested': True}
             else:

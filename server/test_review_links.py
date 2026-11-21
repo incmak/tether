@@ -6237,6 +6237,20 @@ class ReviewLinksTests(unittest.TestCase):
                                  (self.NEXT, '/work/my tree', None))
                 self.assertNotIn('approved_repo', self.links()[0])
 
+    def test_the_request_saves_the_repository_read_before_delivery(self):
+        # Another repository takes the folder path while the request is delivered: the saved identity is the one
+        # read with the scope that named the commit and folder, before the send.
+        other = {**self.REPO, 'ino': self.REPO['ino'] + 1}
+        self.bind()
+        self.repos['/work/my tree'] = self.REPO
+        self.send.side_effect = lambda *args, **kwargs: self.repos.update({'/work/my tree': other})
+        self.request_review()
+        self.send.side_effect = None
+        self.assertTrue(self.send.called)
+        self.assertEqual(self.links()[0]['review_repo'], self.REPO)
+        self.finish_review(f'APPROVED {self.HASH}')
+        self.assertIsNone(review_links.approved_commits()['%13']['%12']['repo'])
+
     def test_a_request_whose_repository_cannot_be_read_saves_no_repository(self):
         self.bind()
         self.request_review()  # self.repos has no entry: the identity is unreadable

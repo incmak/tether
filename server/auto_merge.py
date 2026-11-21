@@ -397,13 +397,16 @@ def _push_url(root):
     raise GitError(f'{REMOTE} must have exactly one push URL.')
 
 
-def _fetch_target(root, scratch):
+def _fetch_target(root, scratch, verify=None):
+    """(push URL, target sha). verify: called after the URL is read and right before the first network command."""
     try:
         url = _push_url(root)
         _check_push_url(root, url)
         # Git treats a colon before the first slash as a transport or an SSH host.
         if not re.match(r'^[^/]*:', url):
             url = str(Path(root) / url)
+        if verify is not None:
+            verify()
         ref = _object_git(scratch, 'ls-remote', url, TARGET_REF, network=root).stdout
         match = re.fullmatch(r'([0-9a-f]{40})\t' + TARGET_REF + r'\n', ref)
         if match is None:
@@ -1130,6 +1133,9 @@ def evaluate(folder, approved, tab=None, repo=None):
             except GitError as exc:
                 raise GitError(f"The tab's own folder is not in a Git repository: {exc}") from exc
             own_root = str(own.parent if own.name == '.git' else own)
+            # Before the root is logged: Settings fetches from each logged root.
+            if _repo_identity(own) != repo:
+                raise GitError(f'The reviewed folder {folder} is now in another repository than the one the review saw.')
             decision.update(root=own_root, repo=Path(own_root).name)
             try:
                 real = Path(folder).resolve(strict=True)
@@ -1137,8 +1143,6 @@ def evaluate(folder, approved, tab=None, repo=None):
                 raise GitError(f'The reviewed folder {folder} is gone.') from exc
             if _git_dir(real, '--git-common-dir').resolve() != own:
                 raise GitError(f"The reviewed folder {folder} is not a checkout of the tab's repository {own_root}.")
-            if _repo_identity(own) != repo:
-                raise GitError(f'The reviewed folder {folder} is now in another repository than the one the review saw.')
             folder = real  # every later read uses this one path, so a moved symlink cannot switch repositories
         root = main_checkout(folder)
         if own_root is not None and root != own_root:
@@ -1147,7 +1151,12 @@ def evaluate(folder, approved, tab=None, repo=None):
         branch = _git(folder, 'symbolic-ref', '--quiet', '--short', 'HEAD', check=False).stdout.strip()
         decision.update(root=root, repo=Path(root).name, head=head, branch=branch, target=f'{REMOTE}/{TARGET}')
         scratch = _scratch(root)
-        url, target_sha = _fetch_target(root, scratch)
+
+        def same_repository():
+            if repo is not None and _repo_identity(_git_dir(root, '--git-common-dir').resolve()) != repo:
+                raise GitError(f'The reviewed folder {folder} is now in another repository than the one the review saw.')
+
+        url, target_sha = _fetch_target(root, scratch, same_repository) if tab is not None else _fetch_target(root, scratch)
         if _ancestor(scratch, head, target_sha):
             decision['outcome'] = 'already'
             return decision, None

@@ -1996,7 +1996,8 @@ class CrossWorktree(Base):
         self.git(clone, 'fetch', '-q', str(self.repo), 'work')
         self.git(clone, 'worktree', 'add', '-b', 'work', str(self.root / 'clone-wt'), head)
         cases = ((str(self.root / 'clone-wt'), str(self.work), 'not a checkout of the tab', str(self.repo)),
-                 (str(self.work), str(self.root / 'clone-wt'), 'not a checkout of the tab', str(clone)),
+                 # A tab in another repository is not the repository the review saw: nothing is logged as root.
+                 (str(self.work), str(self.root / 'clone-wt'), 'another repository than the one the review saw', None),
                  (str(self.work), str(self.root), "tab's own folder is not in a Git repository", None))
         for folder, tab, reason, root in cases:
             with self.subTest(reason=reason, tab=tab):
@@ -2032,6 +2033,11 @@ class CrossWorktree(Base):
         fetch.assert_not_called()
         self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['git']))
         self.assertIn('in another repository than the one the review saw', decision['checks'][0]['text'])
+        # Settings reads trust (and fetches) from each logged root: the other repository must not become one.
+        self.assertIsNone(decision['root'])
+        with mock.patch.object(auto_merge, '_trust', return_value=None) as trust:
+            auto_merge.state()
+        self.assertNotIn(str(self.work), [call.args[0] for call in trust.call_args_list])
 
     def test_a_repository_replaced_at_the_same_git_path_is_refused(self):
         # The common Git directory keeps its path but is another directory (here a copy): its inode differs.
@@ -2045,6 +2051,24 @@ class CrossWorktree(Base):
             decision = auto_merge.process(job)
         fetch.assert_not_called()
         self.assertIn('in another repository than the one the review saw', decision['checks'][0]['text'])
+
+    def test_a_repository_replaced_before_the_fetch_is_refused_without_a_network_command(self):
+        head = self.change()
+        job = {**self.job(head), 'tab': str(self.repo)}
+        real = auto_merge._scratch
+
+        def scratch(root):  # runs after the first identity check, before the fetch
+            common = self.repo / '.git'
+            common.rename(self.repo / '.git-aside')
+            shutil.copytree(self.repo / '.git-aside', common, symlinks=True)
+            return real(root)
+
+        with mock.patch.object(auto_merge, '_scratch', side_effect=scratch), \
+                mock.patch.object(auto_merge, '_object_git', wraps=auto_merge._object_git) as git:
+            decision = auto_merge.process(job)
+        self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['git']))
+        self.assertIn('in another repository than the one the review saw', decision['checks'][0]['text'])
+        self.assertFalse({'ls-remote', 'fetch'} & {call.args[1] for call in git.call_args_list})
 
     def test_a_repository_replaced_after_the_decision_stops_the_push(self):
         self.enforce()
