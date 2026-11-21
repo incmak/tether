@@ -518,19 +518,16 @@ def false_success(text):
             and not re.search(r'\bnot\b|n[’\']t|\?', text, re.I))
 
 
+def has_plain(text):
+    return any((char.isascii() and char.isdigit()) or (char.isalpha() and unicodedata.name(char, '').startswith(
+        ('LATIN ', 'FULLWIDTH LATIN '))) for char in text)
+
+
 def stray_text(text):
-    stray = False
-    for char in text:
-        if char.isdigit():
-            return False
-        if char.isalpha():
-            name = unicodedata.name(char, '')
-            if name.startswith(('LATIN ', 'FULLWIDTH LATIN ')):
-                return False
-            if name.startswith(('CJK ', 'HANGUL ', 'HIRAGANA ', 'KATAKANA', 'THAI ', 'ARABIC ',
-                                'HALFWIDTH HANGUL ', 'HALFWIDTH KATAKANA ')):
-                stray = True
-    return stray
+    return not has_plain(text) and any(
+        char.isalpha() and unicodedata.name(char, '').startswith(
+            ('CJK ', 'HANGUL ', 'HIRAGANA ', 'KATAKANA', 'THAI ', 'ARABIC ',
+             'HALFWIDTH HANGUL ', 'HALFWIDTH KATAKANA ')) for char in text)
 
 
 def norm(text):
@@ -566,6 +563,30 @@ def plain_yes(text, chat=''):
     words = words.split()
     allowed = YES_WORDS | YES_FILLER
     return any(word in YES_WORDS for word in words) and all(word in allowed for word in words)
+
+
+APPROVAL_ANSWERS = frozenset('approve approved yes yeah yep yup ok okay sure allow alright'.split())
+DENIAL_ANSWERS = frozenset('deny denied no nope reject stop'.split())
+APPROVAL_FILLER = frozenset('it that this please the request one right now thanks thank you just uh um and'.split())
+
+
+def approval_answer(text, chat=''):
+    """Return the decision in a whole utterance that answers an approval."""
+    if '?' in text:
+        return None
+    words = norm(re.sub(r"\bdon't\b", 'deny', text, flags=re.I))
+    name = norm(chat)
+    if name and name not in APPROVAL_ANSWERS | DENIAL_ANSWERS and name != 'go ahead':
+        # Keep a separator so removing a chat name cannot create "go ahead".
+        words = re.sub(rf'\b{re.escape(name)}\b', ' it ', words)
+    words = set(re.sub(r'\bgo ahead\b', 'approve', words).split())
+    if words - (APPROVAL_ANSWERS | DENIAL_ANSWERS | APPROVAL_FILLER):
+        return None
+    approve = bool(words & APPROVAL_ANSWERS)
+    deny = bool(words & DENIAL_ANSWERS)
+    if approve != deny:
+        return 'approve' if approve else 'deny'
+    return None
 
 
 def confirmed_args(name, args, last_user_text, previous_assistant, pending=None, user_turn=0):
@@ -694,10 +715,8 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
             return 'The user answered a send question, not an approval.'
         if APPROVAL_NEGATION.search(last_user_text):
             return 'The user did not give unambiguous consent for this decision.'
-        approve = bool(APPROVAL_YES.search(last_user_text))
-        deny = bool(APPROVAL_NO.search(last_user_text))
-        decision = args.get('decision')
-        if approve == deny or decision not in ('approve', 'deny') or (decision == 'approve') != approve:
+        decision = approval_answer(last_user_text, str(args.get('chat') or ''))
+        if decision is None or decision != args.get('decision'):
             return 'The user did not give unambiguous consent for this decision.'
     if name == 'send_to_chat' and re.search(
             r'\bwhat\s+(?:was|is|did)\b.*\b(?:response|reply|answer|say)\b|\bdid it (?:reply|answer|finish)\b',
@@ -1450,6 +1469,7 @@ def runtime_types():
             self._request_messages = ContextVar('friday_request_messages', default=None)
             self._last_reply = (None, ())
             self.tools_in_flight = set()
+            self.tool_batches = {}
             # An aggregated result awaiting inference, or the context frame that runs it.
             self.tool_followup = None
             self.replay_marker = None
@@ -1483,7 +1503,7 @@ def runtime_types():
                     self.session.waiting_for_read = False
                 response = SimpleNamespace(turn=turn, text=False, tool_output=False,
                                            ttfb=None, completed=False, call_count=0, buffered_text=None,
-                                           request_messages=(), context_frame=frame)
+                                           held_text=[], plain_text=False, request_messages=(), context_frame=frame)
                 token = self._active_response.set(response)
                 try:
                     await super().process_frame(frame, direction)
@@ -1525,14 +1545,50 @@ def runtime_types():
                     and frame.properties is None and frame.run_llm is None):
                 frame.properties = FridaySpokenToolResult(run_llm=False, text=ack)
 
+        async def push_response_text(self, response, frame):
+            if not response.plain_text:
+                if has_plain(frame.text):
+                    response.plain_text = True
+                elif response.held_text or stray_text(frame.text):
+                    response.held_text.append(frame)
+                    return
+            frames = [*response.held_text, frame] if response.held_text else (frame,)
+            response.held_text.clear()
+            for chunk in frames:
+                response.text |= bool(chunk.text.strip())
+                if response.buffered_text is not None:
+                    response.buffered_text.append(chunk)
+                else:
+                    await super().push_frame(chunk)
+
+        def gate_tool_followup(self, frame):
+            ident = frame.tool_call_id
+            batch = self.tool_batches.get(ident)
+            result = isinstance(frame, FunctionCallResultFrame)
+            properties = frame.properties if result else None
+            final = properties is None or properties.is_final
+            if final and batch is not None:
+                del self.tool_batches[ident]
+                batch.remove(ident)
+            if not result or frame.run_llm is not None or (properties and properties.run_llm is not None):
+                return
+            # Pipecat's group check overlooks siblings that have started but
+            # have yet to send their in-progress frame.
+            siblings_pending = batch and len(batch) > (0 if final else 1)
+            if siblings_pending or (self.tool_run and self.tool_run.readback_spoken):
+                frame.run_llm = False
+
         async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
             response = self._active_response.get()
             speech = None
             if direction == FrameDirection.DOWNSTREAM:
                 if isinstance(frame, FunctionCallsStartedFrame):
-                    self.tools_in_flight.update(call.tool_call_id for call in frame.function_calls)
+                    batch = {call.tool_call_id for call in frame.function_calls}
+                    self.tools_in_flight.update(batch)
+                    self.tool_batches.update(dict.fromkeys(batch, batch))
                 elif isinstance(frame, (FunctionCallResultFrame, FunctionCallCancelFrame)):
                     self.finish_browser_tool(frame)
+                    self.gate_tool_followup(frame)
                     if (isinstance(frame, FunctionCallResultFrame)
                             and isinstance(frame.properties, FridaySpokenToolResult)):
                         speech = frame.properties
@@ -1540,13 +1596,8 @@ def runtime_types():
                 if isinstance(frame, LLMFullResponseStartFrame):
                     frame.friday_response = response
                 elif isinstance(frame, LLMTextFrame):
-                    if stray_text(frame.text):
-                        print(f'Friday dropped stray text: {len(frame.text)} chars', file=sys.stderr, flush=True)
-                        return
-                    response.text |= bool(frame.text.strip())
-                    if response.buffered_text is not None:
-                        response.buffered_text.append(frame)
-                        return
+                    await self.push_response_text(response, frame)
+                    return
                 elif isinstance(frame, MetricsFrame) and response.ttfb is None:
                     response.ttfb = next((m.value for m in frame.data if isinstance(m, TTFBMetricsData)
                                           and m.processor == self.name and m.value > 0), None)
@@ -1652,6 +1703,12 @@ def runtime_types():
                         if (replay or frame.tool_call_id in self.tools_in_flight) and s.tts.device_voice_pending():
                             s.busy = True
                     self.tools_in_flight.discard(frame.tool_call_id)
+                    if (not self.tool_work_pending and self.tool_run and self.tool_run.readback_spoken
+                            and s.waiting_for_read):
+                        # The read-back is the reply, so no new context frame will clear the filler gate.
+                        s.waiting_for_read = False
+                        if not (s.llm_running or s.reply_open or s.bot_speaking or s.tts.device_voice_pending()):
+                            s.busy = False
                     s.wake.set()
                 if isinstance(frame, FridayToolSpeechCompleteFrame) and frame.readback_ready:
                     proposal = getattr(s, 'pending_proposal', None)
@@ -1929,6 +1986,10 @@ def runtime_types():
                 if response:
                     response.completed = True
                     self.record_llm_ttft(response)
+                    if response.held_text:
+                        chars = sum(len(frame.text) for frame in response.held_text)
+                        print(f'Friday dropped stray text: {chars} chars', file=sys.stderr, flush=True)
+                        response.held_text.clear()
                     if response.text and response.buffered_text is not None:
                         if (not run.succeeded_action
                                 and false_success(''.join(frame.text for frame in response.buffered_text))):
