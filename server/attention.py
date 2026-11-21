@@ -93,6 +93,7 @@ class Attention:
     """Live asks and dismissed prompts belong to panes. Turns read and parked reply asks belong to conversations.
 
     checked remembers the conversation and live turn-end marker for each pane with a successful reply read.
+    latest ties the transcript's latest reply occurrence to that marker.
     """
 
     def __init__(self, path=None, clock=time.time, on_urgent=urgent_ping.send, log=audit):
@@ -100,7 +101,7 @@ class Attention:
         self.on_urgent, self.log = on_urgent, log
         self.lock = threading.Lock()
         self._failed_moves = {}
-        self.checked, self.quiet = {}, {}
+        self.checked, self.latest, self.quiet = {}, {}, {}
         self._legacy_needs_save = False
         data = self._load()
         self.asks, self.seen, self.digest = data['asks'], data['seen'], data['digest']
@@ -148,6 +149,11 @@ class Attention:
             elif type(ask.get('asked_at')) not in (int, float):
                 ask['asked_at'] = ask['since']
                 self._legacy_needs_save = True
+            later = ask.get('later')
+            if not isinstance(ask.get('moved'), list):
+                # moved lists the saved rule moves of this occurrence. A rule-Later ask records at least its own.
+                ask['moved'] = [later['entry']] if isinstance(later, dict) and later.get('by') == 'rule' and later.get('entry') else []
+                self._legacy_needs_save = True
         rules = data.get('rules')
         stale = rules.get('stale') if isinstance(rules, dict) else None
         digest = data.get('digest') if isinstance(data.get('digest'), dict) else {}
@@ -188,6 +194,13 @@ class Attention:
                     pass
             return False
         return True
+
+    def _save_user(self, now):
+        """Save a user write under the state lock and roll back pruning if it fails."""
+        before = self.turns.copy(), self.parked.copy(), self.legacy.copy()
+        if not self._save(now):
+            self.turns, self.parked, self.legacy = before
+            raise AttentionError('Could not save. Try again.')
 
     @staticmethod
     def public(ask):
@@ -275,9 +288,9 @@ class Attention:
                         self.parked[previous_thread] = dict(value, parked_at=now)
                     del store[pane]
                     changed = True
-            for pane in list(self.checked):
-                if pane not in live:
-                    del self.checked[pane]
+            for pane in self.latest.keys() - live.keys():
+                del self.latest[pane]
+                self.checked.pop(pane, None)
             for ask in self.asks.values():
                 changed = self._end_snooze(ask, now) or changed
         for entry in entries:
@@ -318,11 +331,14 @@ class Attention:
             checked = self.checked.get(pane)
             if checked != marker:
                 reply, turn_id = reply_of(entry)
+                occurrence = (turn_id if turn_id is not None else finished) if reply else None
                 if reply:
                     live_turn_ended = checked and checked[0] == thread and finished is not None and finished != checked[1]
                     if turn_id is not None or live_turn_ended:
                         changed = self.note_reply(pane, thread, reply, turn_id, now, finished=finished) or changed
-                    with self.lock:
+                with self.lock:
+                    self.latest[pane] = (marker, occurrence)
+                    if reply:
                         self.checked[pane] = marker
             moved = self._stale(pane, entry, marker, now) or moved
         if changed:
@@ -340,6 +356,9 @@ class Attention:
                 or self.checked.get(pane) != marker):
             return None
         turn = ask.get('turn')
+        occurrence = ask.get('occ', turn)
+        if occurrence is None or self.latest.get(pane) != (marker, occurrence):
+            return None
         if turn is not None and self.turns.get(thread, {}).get('turn') != turn:
             return None
         if now - max(ask['asked_at'], ask.get('back_at') or 0) >= STALE:
@@ -373,7 +392,7 @@ class Attention:
                 move = None
             if move is not None:
                 before = ask.copy()
-                ask['later'] = {'at': now, 'by': 'rule', 'entry': move['id']}
+                ask.update(later={'at': now, 'by': 'rule', 'entry': move['id']}, moved=[*ask.get('moved', []), move['id']][-20:])
                 if self._save(now):
                     return True
                 self.asks[pane] = before
@@ -414,6 +433,7 @@ class Attention:
                     ask = self.asks[pane]
                 elif new_occurrence:
                     ask.update(id=secrets.token_hex(6), asked_at=now, later=None, stay=False, back_at=None)
+                    ask.pop('moved', None)
                 ask.update(kind='reply', next=urgent or text, urgent=bool(urgent), opened=False, turn=turn_id, occ=occurrence)
                 if is_new_urgent:
                     ask.update(ping_due=now + URGENT_GRACE, pinged=False)
@@ -476,6 +496,9 @@ class Attention:
                 return False if ask_id is not None else None
             if (ask.get('thread') or None) != (thread or None) or ask_id is not None and ask_id != ask['id']:
                 return False
+            before = ask.copy()
+            seen = self.seen.get(pane)
+            before_seen = seen.copy() if seen is not None else None
             later = ask.get('later')
             if action == 'handled':
                 self._forget(pane, ask)
@@ -500,15 +523,18 @@ class Attention:
                         raise AttentionError('Could not write the automation log. Try again.')
                 elif entry_id is not None:
                     return False  # A log row cannot put a manual move back in the queue.
-                before = ask.copy()
                 ask.update(stay=True, later=None)
-                if not self._save(now):
-                    self.asks[pane] = before
-                    raise AttentionError('Could not save. Try again.')
-                return self.public(ask)
             else:
                 raise ValueError('Unknown action.')
-            self._save(now)
+            try:
+                self._save_user(now)
+            except AttentionError:
+                self.asks[pane] = before
+                if before_seen is None:
+                    self.seen.pop(pane, None)
+                else:
+                    self.seen[pane] = before_seen
+                raise
             return self.public(ask)
 
     def set_rules(self, stale):
@@ -518,9 +544,12 @@ class Attention:
             old = self.rules['stale']
             if old != stale:
                 self.rules['stale'] = stale
-                self._save(self.clock())
-        if old != stale:
-            self.log.record('setting.automation', 'Changed the stale ask rule', old=old, new=stale)
+                try:
+                    self._save_user(self.clock())
+                except AttentionError:
+                    self.rules['stale'] = old
+                    raise
+                self.log.record('setting.automation', 'Changed the stale ask rule', old=old, new=stale)
         return {'stale': stale}
 
     def _query_log(self, **filters):
@@ -529,52 +558,71 @@ class Attention:
             raise OSError(page['error'])
         return page
 
+    @staticmethod
+    def _move_failed(row, asks):
+        ask = asks.get(row.get('detail', {}).get('ask'))
+        return ask is not None and row['id'] not in ask.get('moved', [])
+
     def _automation_today(self, midnight, page=None):
+        """Count moves and collect their state under the same lock as the audit reads."""
         if page is None:
             page = self._query_log(kinds=['automation'], since=midnight, limit=100)
+        asks = {ask['id']: ask for ask in (*self.parked.values(), *self.asks.values())}
         moves, undone = set(), set()
         while True:
             entries = page['entries']
             for row in entries:
                 if row['kind'] == 'auto.undo':
                     undone.add(row.get('detail', {}).get('entry'))
-                elif row['kind'] == 'auto.stale_ask' and row['at'] >= midnight:
+                elif row['kind'] == 'auto.stale_ask' and row['at'] >= midnight and not self._move_failed(row, asks):
                     moves.add(row['id'])
             before = page['next']
             if not before or entries[-1]['at'] < midnight:
                 break
             page = self._query_log(kinds=['automation'], since=midnight, limit=100, before=before)
-        with self.lock:
-            targets = {ask['id']: {'session': pane, 'thread': ask.get('thread'), 'ask': ask['id'],
-                                   'entry': ask['later']['entry']}
-                       for pane, ask in self.asks.items() if (ask.get('later') or {}).get('by') == 'rule'}
         # An Undo audit line can survive a failed save. The active rule moves in state take precedence.
-        undone.difference_update(target['entry'] for target in targets.values())
-        return len(moves - undone), undone, targets
+        undone.difference_update(ask['later']['entry'] for ask in asks.values()
+                                 if (ask.get('later') or {}).get('by') == 'rule')
+        return len(moves - undone), undone, asks
 
     def handled_today(self):
-        return self._automation_today(_local_midnight(self.clock()))[0]
+        with self.lock:
+            return self._automation_today(_local_midnight(self.clock()))[0]
 
     def automation_log(self):
-        now = self.clock()
-        today_start = _local_midnight(now)
-        page = self._query_log(kinds=['automation'], since=now - AUTOMATION_HISTORY, limit=100)
-        handled_today, undone, targets = self._automation_today(today_start, page)
-        entries = []
-        for row in page['entries']:
-            if row['kind'] == 'auto.stale_ask':
-                target = targets.get(row.get('detail', {}).get('ask'))
-                row = dict(row, undone=row['id'] in undone, undo=target if target and target['entry'] == row['id'] else None)
-            entries.append(row)
+        # Undo records its audit line and saves under this lock. Read both before it runs or both after it runs.
+        with self.lock:
+            now = self.clock()
+            today_start = _local_midnight(now)
+            page = self._query_log(kinds=['automation'], since=now - AUTOMATION_HISTORY, limit=100)
+            handled_today, undone, asks = self._automation_today(today_start, page)
+            entries = [self._move_row(row, undone, asks) if row['kind'] == 'auto.stale_ask' else row
+                       for row in page['entries']]
         return {'entries': entries, 'handled_today': handled_today, 'today_start': today_start}
+
+    def _move_row(self, row, undone, asks):
+        if self._move_failed(row, asks):
+            return dict(row, undone=False, undo=None, failed=True)
+        ask = asks.get(row.get('detail', {}).get('ask'), {})
+        pane, later = ask.get('pane'), ask.get('later') or {}
+        target = None
+        # The action route needs a live pane with a matching conversation.
+        if later.get('by') == 'rule' and later.get('entry') == row['id'] and self.asks.get(pane) is ask:
+            target = {'session': pane, 'thread': ask.get('thread'), 'ask': ask['id'], 'entry': row['id']}
+        return dict(row, undone=row['id'] in undone, undo=target)
 
     def set_digest(self, enabled, hour):
         if not isinstance(enabled, bool) or not isinstance(hour, int) or isinstance(hour, bool) or not 0 <= hour <= 23:
             raise ValueError('Choose on or off and an hour from 0 to 23.')
         now = self.clock()
         with self.lock:
+            before = self.digest.copy()
             self.digest.update(enabled=enabled, hour=hour)
-            self._save(now)
+            try:
+                self._save_user(now)
+            except AttentionError:
+                self.digest = before
+                raise
             return self.digest_settings()
 
     def digest_settings(self):
@@ -646,17 +694,18 @@ def serve(handler, body, choose, store=None):
     """Dispatch attention actions and settings. Ask actions bind to the pane, thread and optional occurrence id."""
     store = store or STORE
     action = handler.path.split('?', 1)[0][len(PREFIX) + 1:]
-    if action == 'digest':
+    if action in ('digest', 'rules'):
         try:
-            handler.respond(200, {'digest': store.set_digest(body.get('enabled'), body.get('hour'))})
+            if action == 'digest':
+                result = store.set_digest(body.get('enabled'), body.get('hour'))
+            else:
+                result = store.set_rules(body.get('stale'))
         except ValueError as exc:
             handler.respond(400, {'error': str(exc)})
-        return
-    if action == 'rules':
-        try:
-            handler.respond(200, {'rules': store.set_rules(body.get('stale'))})
-        except ValueError as exc:
-            handler.respond(400, {'error': str(exc)})
+        except AttentionError as exc:
+            handler.respond(503, {'error': str(exc)})
+        else:
+            handler.respond(200, {action: result})
         return
     if action not in ACTIONS:
         handler.respond(404, {'error': 'Not found'})

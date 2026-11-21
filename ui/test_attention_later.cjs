@@ -59,4 +59,17 @@ for (const [start, today, older] of [
   assert.deepEqual(Array.from(split.today, row => row.id), today)
   assert.deepEqual(Array.from(split.older, row => row.id), older)
 }
+
+// Finding 5: every successful write confirms a value. Only the newest write changes the switch.
+function testStaleRuleMixedResults() {
+  const optimistic = { confirmed: true, shown: true }
+  const olderSuccess = a.confirmStaleRule(optimistic, false, false)
+  assert.deepEqual({ ...olderSuccess }, { confirmed: false, shown: true })
+  assert.deepEqual({ ...a.confirmStaleRule(olderSuccess, null, true) }, { confirmed: false, shown: false })
+  assert.deepEqual({ ...a.confirmStaleRule(olderSuccess, true, true) }, { confirmed: true, shown: true })
+
+  const newerSuccess = a.confirmStaleRule({ confirmed: false, shown: false }, true, true)
+  assert.deepEqual({ ...a.confirmStaleRule(newerSuccess, false, false) }, { confirmed: false, shown: true })
+}
+testStaleRuleMixedResults()
 console.log('ok attention later')

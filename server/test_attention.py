@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -829,6 +830,28 @@ class StaleAskTest(unittest.TestCase):
         self.world.observe(self.pane)
         self.assertEqual(self.store.later_asks()[0]['id'], ask['id'])
 
+    def test_restart_moves_only_the_latest_reply_without_a_turn_id(self):
+        self.world.turn('%1', 'Previous reply', 10, turn_id=None)
+        self.world.observe(self.pane)
+        reply = 'Next: Choose?\nNeeds you: yes'
+        self.world.turn('%1', reply, 20, turn_id=None)
+        self.world.observe(self.pane)
+        ask = self.store.ask('%1', 't1')
+        self.assertIsNotNone(ask)
+        saved = self.path.read_text()
+        self.clock.now += 25 * 3600
+        for latest, finished in (('Needs you: yes', 30), ('Needs you: no', 30), (reply, None), (reply, 20)):
+            with self.subTest(latest=latest, finished=finished):
+                self.path.write_text(saved)
+                self.log = FakeLog(self.clock)
+                self.store = self.world.store = attention.Attention(self.path, self.clock, log=self.log)
+                self.world.turn('%1', latest, finished, turn_id=None)
+                self.world.observe(self.pane)
+                moved = finished == 20
+                self.assertEqual(self.store.later_asks() != [], moved)
+                self.assertEqual(self.store.ask('%1', 't1')['id'], ask['id'])
+                self.assertEqual(len(self.log.entries), int(moved))
+
     def test_snooze_return_restarts_the_stale_clock(self):
         self.start_reply()
         self.clock.now += 6 * 3600
@@ -1002,6 +1025,41 @@ class StaleAskTest(unittest.TestCase):
             self.world.observe(self.pane)
             self.assertEqual(self.log.entries, [first])
             self.assertEqual(self.store.later_asks()[0]['later']['entry'], first['id'])
+
+    def test_failed_move_does_not_count_until_its_audit_row_is_reused(self):
+        self.start_reply()
+        self.clock.now += 25 * 3600
+        with mock.patch.object(attention.os, 'replace', side_effect=OSError('denied')), mock.patch('sys.stderr', new_callable=io.StringIO):
+            self.world.observe(self.pane)
+        first, = self.log.entries
+        self.assertEqual(self.store.handled_today(), 0)
+        log = self.store.automation_log()
+        self.assertEqual(log['handled_today'], 0)
+        self.assertEqual(log['entries'], [dict(first, failed=True, undone=False, undo=None)])
+
+        self.clock.now += attention.STALE_RETRY
+        self.world.observe(self.pane)
+        self.assertEqual(self.store.handled_today(), 1)
+        log = self.store.automation_log()
+        self.assertEqual(log['handled_today'], 1)
+        self.assertEqual(log['entries'][0]['undo']['entry'], first['id'])
+        self.assertFalse(log['entries'][0].get('failed', False))
+        self.assertEqual(self.log.entries, [first])
+
+    def test_load_recovers_the_saved_move_id_for_existing_rule_later_asks(self):
+        self.start_reply()
+        self.clock.now += 25 * 3600
+        self.world.observe(self.pane)
+        move, = self.log.entries
+        self.world.observe()
+        saved = json.loads(self.path.read_text())
+        saved['parked']['t1'].pop('moved', None)
+        self.path.write_text(json.dumps(saved))
+
+        self.store = attention.Attention(self.path, self.clock, log=self.log)
+        self.assertEqual(self.store.handled_today(), 1)
+        self.assertEqual(self.store.automation_log()['entries'], [dict(move, undone=False, undo=None)])
+        self.assertEqual(self.store.parked['t1']['moved'], [move['id']])
 
     def test_legacy_live_and_parked_ids_are_repaired_and_saved(self):
         live = self.start_reply()
@@ -1182,6 +1240,28 @@ class RouteTest(unittest.TestCase):
         self.path.write_text(json.dumps({'rules': {'stale': 0}}))
         self.assertEqual(attention.Attention(self.path, self.clock, log=self.log).rules, {'stale': True})
 
+    def test_failed_rules_save_returns_503_without_changing_rules_or_audit(self):
+        with mock.patch.object(attention.os, 'replace', side_effect=OSError('denied')):
+            self.assertEqual(self.post('rules', {'stale': False}),
+                             (503, {'error': 'Could not save. Try again.'}))
+        self.assertEqual(self.get()[1]['rules'], {'stale': True})
+        self.log.record.assert_not_called()
+
+    def test_failed_other_user_writes_return_503_without_changing_state(self):
+        self.panes['%2'] = entry('%2', 't2')
+        self.store.observe(self.panes.values(), lambda e: APPROVAL if e['id'] == '%2' else {'state': 'Working'}, None)
+        self.store.turns['expired'] = {'turn': 'old', 'history': ['old'], 'at': self.clock.now - attention.RETENTION - 1}
+        before = json.dumps([self.store.asks, self.store.seen, self.store.digest, self.store.turns], sort_keys=True)
+        target = {'session': '%1', 'thread': 't1'}
+        for action, body in (
+                ('snooze', target), ('later', target), ('opened', target),
+                ('handled', target), ('handled', {'session': '%2', 'thread': 't2'}),
+                ('digest', {'enabled': True, 'hour': 7})):
+            with self.subTest(action=action, body=body):
+                with mock.patch.object(attention.os, 'replace', side_effect=OSError('denied')):
+                    self.assertEqual(self.post(action, body), (503, {'error': 'Could not save. Try again.'}))
+                self.assertEqual(json.dumps([self.store.asks, self.store.seen, self.store.digest, self.store.turns], sort_keys=True), before)
+
     def test_ask_route_rejects_stale_ids_and_reports_failed_undo(self):
         body = {'session': '%1', 'thread': 't1', 'ask': self.store.ask('%1', 't1')['id']}
         self.clock.now += 25 * 3600
@@ -1211,6 +1291,7 @@ class RouteTest(unittest.TestCase):
         first, = self.log.entries
         self.assertEqual(self.post('snooze', body)[0], 200)
         snoozed = self.store.ask('%1', 't1')
+        self.assertEqual(self.store.asks['%1']['moved'], [first['id']])
         self.assertEqual(self.post('back', dict(body, entry=first['id'])),
                          (409, {'error': 'This ask changed. Reload and try again.'}))
         self.assertEqual(self.store.ask('%1', 't1'), snoozed)
@@ -1228,6 +1309,12 @@ class RouteTest(unittest.TestCase):
                 self.assertEqual(self.store.ask('%1', 't1'), before)
         self.assertEqual(self.log.entries, [first, second])
         self.assertEqual(self.post('back', dict(body, entry=second['id']))[0], 200)
+        self.assertEqual(self.store.asks['%1']['moved'], [first['id'], second['id']])
+        # Both moves took effect: neither row reads as failed, and only the second one is undone.
+        rows = {row['id']: row for row in self.store.automation_log()['entries'] if row['kind'] == 'auto.stale_ask'}
+        self.assertNotIn('failed', rows[first['id']])
+        self.assertFalse(rows[first['id']]['undone'])
+        self.assertTrue(rows[second['id']]['undone'])
 
     def test_back_holds_the_state_lock_through_audit_and_save(self):
         self.clock.now += 25 * 3600
@@ -1271,6 +1358,67 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(self.post('back', target)[0], 200)
         self.assertEqual(self.get()[1]['handled_today'], 0)
 
+    def test_failed_undo_save_keeps_parked_move_counted_until_tab_returns(self):
+        self.clock.now += 25 * 3600
+        self.move_reply()
+        move, = self.log.entries
+        target = {'session': '%1', 'thread': 't1', 'ask': move['detail']['ask'], 'entry': move['id']}
+        with mock.patch.object(attention.os, 'replace', side_effect=OSError('denied')):
+            self.assertEqual(self.post('back', target)[0], 503)
+        self.panes.clear()
+        self.store.observe([], None, None)
+        self.assertEqual(self.store.parked['t1']['later']['entry'], move['id'])
+        self.assertEqual(self.get()[1]['handled_today'], 1)
+        _, log = self.get('/log')
+        self.assertEqual(log['handled_today'], 1)
+        self.assertEqual(log['entries'][-1], dict(move, undone=False, undo=None))
+        self.assertEqual(self.post('back', target)[0], 409)
+
+        self.panes['%2'] = entry('%2')
+        self.store.observe([self.panes['%2']], lambda e: {'state': 'Idle'}, lambda e: ('', None))
+        _, log = self.get('/log')
+        self.assertEqual(log['entries'][-1]['undo'], dict(target, session='%2'))
+
+    def test_log_and_count_reads_each_take_one_snapshot_during_undo(self):
+        self.clock.now += 25 * 3600
+        for read in ('/log', ''):
+            with self.subTest(read=read):
+                self.store.note_reply('%1', 't1', 'Needs you: yes', read + ' turn', self.clock.now - 25 * 3600)
+                self.store.observe([entry()], lambda e: {'state': 'Idle'}, lambda e: ('Needs you: yes', read + ' turn'),
+                                   version_of=lambda e: read)
+                move = self.log.entries[-1]
+                target = {'session': '%1', 'thread': 't1', 'ask': move['detail']['ask'], 'entry': move['id']}
+                started = threading.Event()
+                results = []
+
+                def undo():
+                    started.set()
+                    results.append(self.post('back', target))
+
+                worker = threading.Thread(target=undo, daemon=True)
+
+                def query(**filters):
+                    page = self.log._query(**filters)
+                    worker.start()
+                    self.assertTrue(started.wait(1))
+                    worker.join(0.05)
+                    self.assertTrue(worker.is_alive(), 'Undo ran between the audit read and the state read')
+                    return page
+
+                self.log.query.side_effect = query
+                try:
+                    status, log = self.get(read)
+                    self.assertEqual((status, log['handled_today']), (200, 1))
+                    if read:
+                        self.assertEqual(log['entries'][0], dict(move, undone=False, undo=target))
+                finally:
+                    self.log.query.side_effect = self.log._query
+                    if worker.ident is not None:
+                        worker.join(1)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual([status for status, _ in results], [200])
+                self.assertEqual(self.get()[1]['handled_today'], 0)
+
     def test_get_log_adds_undo_targets_and_counts_moves_since_local_midnight(self):
         today = self.clock.now
         midnight = datetime(2026, 11, 21).timestamp()
@@ -1287,22 +1435,24 @@ class RouteTest(unittest.TestCase):
         self.clock.now += 2
         current = self.log.record('auto.stale_ask', 'Current move', ask=ask['id'], pane='%9')
         self.store.asks['%1']['later'] = {'by': 'rule', 'at': self.clock.now, 'entry': current['id']}
+        self.store.asks['%1']['moved'] = [current['id']]
 
         status, log = self.get('/log?view=automation')
         self.assertEqual(status, 200)
         self.log.query.assert_called_once_with(kinds=['automation'], since=self.clock.now - 7 * 86400, limit=100)
-        self.assertEqual(log['handled_today'], 2)
+        self.assertEqual(log['handled_today'], 1)
         self.assertEqual(log['entries'][0]['undo'], {'session': '%1', 'thread': 't1', 'ask': ask['id'], 'entry': current['id']})
         self.assertFalse(log['entries'][0]['undone'])
         self.assertNotIn('undo', current)
         rows = {row['id']: row for row in log['entries']}
         self.assertEqual(len(rows), 5)
         self.assertTrue(rows[undone['id']]['undone'])
+        self.assertTrue(rows[formerly_current['id']]['failed'])
         for row in (undone, formerly_current, yesterday):
             self.assertIsNone(rows[row['id']]['undo'])
         status, queue = self.get()
         self.assertEqual(status, 200)
-        self.assertEqual((queue['asks'], queue['later'], queue['handled_today']), ([], self.store.later_asks(), 2))
+        self.assertEqual((queue['asks'], queue['later'], queue['handled_today']), ([], self.store.later_asks(), 1))
 
     def test_get_log_limits_rows_but_counts_all_moves_today(self):
         first = self.log.record('auto.stale_ask', 'First move')

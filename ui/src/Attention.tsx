@@ -1,14 +1,14 @@
 // Attention mode (server/attention.py): the sidebar "Waiting on you" box, the header "Open the oldest" button (a pill
 // with a bottom sheet on a phone), the Handled, Remind me tomorrow and Later chips under the last reply, the "Handled for
 // you" log with Later and Undo (B335), and the daily summary and stale ask settings.
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { ArchiveRestore, ArrowDownWideNarrow, ArrowUpNarrowWide, BellRing, Check, Clock, GalleryVerticalEnd, Hand, ListChecks, MoonStar, RotateCw, Sparkles, Undo2, X } from 'lucide-react'
 import type { WaitOrder } from './prefs'
 import type { Api, Ask, Pane } from './api'
 import { ApiError, errorText } from './api'
 import type { Reminder } from './reminders'
 import { whenLabel } from './reminders'
-import { askAction, LATE, splitToday, stillWait, useNow } from './attention'
+import { askAction, confirmStaleRule, LATE, splitToday, stillWait, useNow } from './attention'
 import type { AskAction, AttentionState, AutoEntry, AutoLog, Digest, Waiting } from './attention'
 import { useModal } from './hooks'
 import { age } from './needs'
@@ -147,11 +147,14 @@ export function AskChips({ api, pane, ask, onDone, onUpdate }: { api: Api; pane:
       window.removeEventListener('focus', markOpened)
     }
   }, [api, pane, ask])
-  const act = async (action: AskAction) => {
+  const act = async (action: AskAction, from?: HTMLButtonElement) => {
+    if (busy) return
+    const chat = from?.closest('.chat-panel')
     setBusy(true)
     try {
       const result = await askAction(api, pane, action, ask)
       onDone(`${DONE[action]} ${stillWait(result.waiting)}`)
+      chat?.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus()
       onUpdate()
     } catch (error) {
       onDone(errorText(error))
@@ -160,8 +163,8 @@ export function AskChips({ api, pane, ask, onDone, onUpdate }: { api: Api; pane:
     }
   }
   if (ask.later) return <div className="ask-chips" role="group" aria-label="This tab's ask is in Later">
-    <button type="button" className="ask-chip primary" disabled={busy} onClick={() => void act('back')}><ArchiveRestore size={15} aria-hidden="true" />Back to the queue</button>
-    <button type="button" className="ask-chip" disabled={busy} onClick={() => void act('handled')}><Check size={15} aria-hidden="true" />Handled, no reply needed</button>
+    <button type="button" className="ask-chip primary" aria-disabled={busy} onClick={event => void act('back', event.currentTarget)}><ArchiveRestore size={15} aria-hidden="true" />Back to the queue</button>
+    <button type="button" className="ask-chip" aria-disabled={busy} onClick={event => void act('handled', event.currentTarget)}><Check size={15} aria-hidden="true" />Handled, no reply needed</button>
     <span className="ask-state">{laterText(ask.later, now)} · asked {ago(ask.asked_at ?? ask.since, now)}</span>
   </div>
   return <div className="ask-chips" role="group" aria-label="This tab waits on you">
@@ -225,10 +228,15 @@ export function HandledButton({ api, later, sessions, refreshKey, onOpen, onUpda
   </>
 }
 
+const laterKey = ({ pane, ask }: Waiting) => `later:${ask.id ?? pane.id}`
+
 /** The automation log as a dialog: what Tether did by itself (with Undo), and the asks in Later (with Back to the queue). */
 function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { api: Api; later: Waiting[]; sessions: Session[]; onOpen: (pane: Pane) => void; onChanged: () => void; onClose: () => void }) {
   const modal = useModal(true, onClose)
   const heading = useRef<HTMLHeadingElement>(null)
+  const laterHeading = useRef<HTMLHeadingElement>(null)
+  const laterButtons = useRef(new Map<string, HTMLButtonElement>())
+  const focusLater = useRef<{ id: string; neighbors: string[] } | null>(null)
   const focusUndo = useRef('')
   const now = useNow()
   const [log, setLog] = useState<AutoLog | null>(null)
@@ -239,20 +247,31 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
   const load = useCallback((signal?: AbortSignal) => api<AutoLog>('attention/log', undefined, signal)
     .then(data => { setLog(data); setError('') })
     .catch(reason => { if (!signal?.aborted) setError(errorText(reason)) }), [api])
+  useLayoutEffect(() => {
+    const pending = focusLater.current
+    if (!pending || later.some(item => laterKey(item) === pending.id)) return
+    focusLater.current = null
+    const neighbor = pending.neighbors.map(id => laterButtons.current.get(id)).find(Boolean)
+    const target = neighbor ?? laterHeading.current ?? heading.current
+    target?.focus()
+  })
   useEffect(() => { heading.current?.focus() }, [])
   useEffect(() => { const controller = new AbortController(); void load(controller.signal); return () => controller.abort() }, [load])
-  const back = async (id: string, write: () => Promise<unknown>, done: string, undo?: AutoEntry) => {
+  const back = async (id: string, write: () => Promise<unknown>, done: string, source: { undo: AutoEntry } | { index: number }) => {
     if (busy) return
     setBusy(id); setRowError(null)
     try {
       await write()
-      if (undo) {
+      if ('undo' in source) {
         focusUndo.current = id
         setLog(current => current && {
           ...current,
           entries: current.entries.map(row => row.id === id ? { ...row, undone: true, undo: null } : row),
-          handled_today: undo.at >= current.today_start ? Math.max(0, current.handled_today - 1) : current.handled_today,
+          handled_today: source.undo.at >= current.today_start ? Math.max(0, current.handled_today - 1) : current.handled_today,
         })
+      } else {
+        const neighbors = [...later.slice(source.index + 1), ...later.slice(0, source.index).reverse()].map(laterKey)
+        focusLater.current = { id, neighbors }
       }
       setStatus(done)
       onChanged()
@@ -272,14 +291,14 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
       <time dateTime={new Date(entry.at * 1000).toISOString()}>{isToday ? TIME.format(new Date(entry.at * 1000)) : `${dayText(entry.at)} ${TIME.format(new Date(entry.at * 1000))}`}</time>
       <span className="handled-text">{tab && <b>{tab}</b>}<span>{entry.summary}</span>{rule && <small>{rule}</small>}</span>
       {target ? <button type="button" className="secondary sm handled-undo" aria-disabled={!!busy}
-        aria-label={`Undo: ${entry.summary}${tab ? ` on ${tab}` : ''}`} onClick={() => void back(entry.id, () => api('attention/back', target), `Put the ask on ${tab || 'the tab'} back in the queue.`, entry)}>
+        aria-label={`Undo: ${entry.summary}${tab ? ` on ${tab}` : ''}`} onClick={() => void back(entry.id, () => api('attention/back', target), `Put the ask on ${tab || 'the tab'} back in the queue.`, { undo: entry })}>
         <Undo2 size={14} aria-hidden="true" />{busy === entry.id ? 'Undoing…' : 'Undo'}</button>
         : entry.undone ? <span className="handled-undone" tabIndex={-1} ref={node => {
           if (node && focusUndo.current === entry.id) {
             node.focus()
             focusUndo.current = ''
           }
-        }}>Undone</span> : null}
+        }}>Undone</span> : entry.failed ? <span className="handled-undone">Not moved</span> : null}
       {rowError?.id === entry.id && <p className="error handled-row-error" role="alert">{rowError.text}</p>}
     </li>
   }
@@ -291,16 +310,18 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
     <p className="sheet-sub sheet-note">Tether moves an ask to Later when it waited over 24 hours on an idle tab. Undo puts it back.</p>
     <p className="visually-hidden" role="status">{status}</p>
     <section className="handled-section" aria-labelledby="handled-later">
-      <h3 id="handled-later">Later <span className="handled-count">{later.length}</span></h3>
-      {later.length ? <ul className="handled-list">{later.map(({ pane, ask }) => {
-        const name = nameOf(pane), id = `later:${ask.id ?? pane.id}`
+      <h3 id="handled-later" ref={laterHeading} tabIndex={-1}>Later <span className="handled-count">{later.length}</span></h3>
+      {later.length ? <ul className="handled-list">{later.map((item, index) => {
+        const { pane, ask } = item
+        const name = nameOf(pane), id = laterKey(item)
         return <li key={pane.id} className="handled-later-row">
           <button type="button" className="handled-open" onClick={() => onOpen(pane)} aria-label={`Open ${name}. ${ask.next}`}>
             <b>{name}</b>{ask.next && <span className="handled-next">{ask.next}</span>}
             {ask.later && <small>{laterText(ask.later, now)}</small>}
           </button>
-          <button type="button" className="secondary sm" disabled={!!busy || !ask.id} aria-label={`Back to the queue: ${name}`}
-            onClick={() => void back(id, () => askAction(api, pane, 'back', ask), `${name} is back in the queue.`)}>
+          <button type="button" className="secondary sm" aria-disabled={!!busy || !ask.id} aria-label={`Back to the queue: ${name}`}
+            ref={node => { if (node) laterButtons.current.set(id, node); else laterButtons.current.delete(id) }}
+            onClick={() => { if (ask.id) void back(id, () => askAction(api, pane, 'back', ask), `${name} is back in the queue.`, { index }) }}>
             <ArchiveRestore size={14} aria-hidden="true" />{busy === id ? 'Moving…' : 'Back to the queue'}</button>
           {rowError?.id === id && <p className="error handled-row-error" role="alert">{rowError.text}</p>}
         </li>
@@ -323,33 +344,33 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
 
 /** Settings: the stale ask rule, on by default. It is a server setting. */
 export function StaleRuleSetting({ api }: { api: Api }) {
-  const [stale, setStale] = useState<boolean | null>(null)
+  const [{ shown: stale }, setStale] = useState<{ confirmed: boolean | null; shown: boolean | null }>({ confirmed: null, shown: null })
   const [error, setError] = useState('')
-  const request = useRef<{ latest: number; confirmed: boolean | null }>({ latest: 0, confirmed: null })
+  const latest = useRef(0)
   useEffect(() => {
     const controller = new AbortController()
-    const pending = request.current
-    const id = ++pending.latest
+    const id = ++latest.current
     api<AttentionState>('attention', undefined, controller.signal).then(data => {
-      if (id !== pending.latest) return
-      pending.confirmed = data.rules?.stale ?? true
-      setStale(pending.confirmed)
-    }).catch(reason => { if (id === pending.latest) setError(errorText(reason)) })
-    return () => { ++pending.latest; controller.abort() }
+      if (id === latest.current) setStale(current => confirmStaleRule(current, data.rules?.stale ?? true, true))
+    }).catch(reason => { if (id === latest.current) setError(errorText(reason)) })
+    return () => { ++latest.current; controller.abort() }
   }, [api])
   const save = async (next: boolean) => {
-    const pending = request.current
-    const id = ++pending.latest
-    setStale(next); setError('')
+    const id = ++latest.current
+    setStale(current => ({ ...current, shown: next })); setError('')
     try {
       const result = await api<{ rules: { stale: boolean } }>('attention/rules', { stale: next })
-      if (id !== pending.latest) return
-      pending.confirmed = result.rules.stale
-      setStale(pending.confirmed)
+      const show = id === latest.current
+      setStale(current => confirmStaleRule(current, result.rules.stale, show))
     } catch (reason) {
-      if (id !== pending.latest) return
-      setStale(pending.confirmed)
+      if (id !== latest.current) return
       setError(errorText(reason))
+      let confirmed: boolean | null = null
+      try {
+        const state = await api<AttentionState>('attention')
+        confirmed = state.rules.stale
+      } catch { /* Keep the write error and fall back to the last confirmation. */ }
+      if (id === latest.current) setStale(current => confirmStaleRule(current, confirmed, true))
     }
   }
   return <div className="preferences-field attention-digest">

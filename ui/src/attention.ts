@@ -48,10 +48,16 @@ export interface AutoEntry {
   id: string; kind: string; summary: string; at: number
   detail?: Record<string, string | number | boolean | null>
   undone?: boolean
+  failed?: boolean
   undo?: { session: string; thread: string | null; ask: string; entry: string } | null
 }
 export interface AutoLog { entries: AutoEntry[]; handled_today: number; today_start: number }
 export interface AttentionState { later: Ask[]; handled_today: number | null; log_error?: boolean; rules: { stale: boolean }; digest: Digest }
+
+export function confirmStaleRule(current: { confirmed: boolean | null; shown: boolean | null }, value: boolean | null, show: boolean) {
+  const confirmed = value ?? current.confirmed
+  return { confirmed, shown: show ? confirmed : current.shown }
+}
 
 export function splitToday(entries: AutoEntry[], todayStart: number) {
   const today: AutoEntry[] = [], older: AutoEntry[] = []
