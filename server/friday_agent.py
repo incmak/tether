@@ -30,6 +30,7 @@ import json
 import math
 import os
 from pathlib import Path
+import queue
 import re
 import sys
 from tempfile import mkstemp
@@ -37,12 +38,14 @@ import threading
 import time
 from types import SimpleNamespace
 import unicodedata
+from urllib.error import HTTPError
 import urllib.request
 from uuid import uuid4
 
 try:
-    from . import friday_notes, paths, reminders
+    from . import command_history, friday_notes, paths, reminders
 except ImportError:
+    import command_history
     import friday_notes
     import paths
     import reminders
@@ -1140,8 +1143,10 @@ def is_real_user(message):
 class CallLog:
     """Keep the current call independent of the model context and WebRTC peer."""
 
-    def __init__(self, clock=time.time):
+    def __init__(self, clock=time.time, sink=None):
         self.clock = clock
+        self.sink = sink
+        self.call_id = None
         self.turns = []
         self.generation = 0
         self._messages = {}
@@ -1151,6 +1156,9 @@ class CallLog:
         if self.turns and self.clock() - self.turns[-1][0] >= CALL_GAP_SECONDS:
             self.turns.clear()
             self._messages.clear()
+            self.call_id = None
+        if self.call_id is None:
+            self.call_id = uuid4().hex
 
     def record_readback_cue(self, reply, *, generation):
         """Insert the heard cue before the assistant message that committed the read-back."""
@@ -1185,6 +1193,122 @@ class CallLog:
             turn = (self.clock(), who, text)
             self._messages[id(message)] = (message, turn)
             self.turns.append(turn)
+            if self.sink is not None:
+                try:
+                    self.sink(who, text)
+                except Exception:
+                    pass  # History must not interrupt the call.
+
+
+def history_port():
+    """The Tether server port, found the way agent_layout_cli finds it: env, then install.json, then 7683."""
+    port = os.environ.get('MOBILE_TMUX_PORT')
+    if not port:
+        try:
+            saved = json.loads((Path(os.environ.get('TETHER_INSTALL_STATE') or paths.HOME / '.config/tether/install.json'))
+                               .read_text())
+            port = saved['options']['port']
+        except (OSError, ValueError, KeyError, TypeError):
+            port = 7683
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return 7683
+    return port if 1 <= port <= 65535 else 7683
+
+
+class _NoHistoryRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+class HistoryPoster:
+    """Queue finished turns on the call thread and post them in order on a daemon."""
+
+    def __init__(self, call_id, *, opener=None):
+        self._call_id = call_id
+        self._call = None
+        self._turn = 0
+        self._queue = queue.Queue(maxsize=200)
+        self._drops_lock = threading.Lock()
+        self._dropped = 0
+        self._stop = threading.Event()
+        base = os.environ.get('TETHER_SERVER_URL') or f'http://127.0.0.1:{history_port()}'
+        self._url = base.rstrip('/') + command_history.FRIDAY_PATH
+        self._open = opener if opener is not None else urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _NoHistoryRedirect()).open
+        self._thread = threading.Thread(target=self._run, name='friday-history', daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        self._offer(None)
+
+    def put(self, who, text):
+        call = self._call_id()
+        if call != self._call:
+            self._call = call
+            self._turn = 0
+        if who == 'user':
+            self._turn += 1
+            fields = {'text': text}
+        else:
+            fields = {'answer': text, 'result': {'status': 'answered'}}
+        self._offer(dict(fields, id=uuid4().hex, call=call, turn=self._turn))
+
+    def _offer(self, entry):
+        try:
+            self._queue.put_nowait(entry)
+        except queue.Full:
+            with self._drops_lock:
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    pass
+                else:
+                    self._queue.task_done()
+                    self._dropped += 1
+                self._queue.put_nowait(entry)
+
+    def _run(self):
+        while not self._stop.is_set():
+            entry = self._queue.get()
+            try:
+                with self._drops_lock:
+                    dropped, self._dropped = self._dropped, 0
+                if dropped:
+                    print(f'Friday history dropped {dropped}', file=sys.stderr, flush=True)
+                if entry is None or self._stop.is_set():
+                    return
+                self._post(entry)
+            finally:
+                self._queue.task_done()
+
+    def _post(self, entry):
+        for attempt in range(5):
+            try:
+                body = json.dumps(entry, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+                request = urllib.request.Request(self._url, data=body, headers={'Content-Type': 'application/json'})
+                request.add_unredirected_header(command_history.FRIDAY_HEADER, command_history.friday_token())
+                with self._open(request, timeout=3) as response:
+                    status = response.status
+            except HTTPError as exc:
+                status = exc.code
+                exc.close()
+            except OSError:
+                status = None
+            except ValueError:
+                break
+            if status == 200:
+                return
+            if status is not None and status != 404 and not 500 <= status < 600:
+                break
+            # The last delay holds back the next item after five failed attempts.
+            if self._stop.wait(2 ** attempt):
+                return
+        print('Friday history dropped 1', file=sys.stderr, flush=True)
 
 
 def format_call_transcript(turns, budget=CALL_TRANSCRIPT_LIMIT):
@@ -3021,7 +3145,8 @@ def create_app():
     active = None
     retiring = None
     models = None
-    call_log = CallLog()
+    poster = HistoryPoster(lambda: call_log.call_id)
+    call_log = CallLog(sink=poster.put)
 
     def clear_active(session):
         nonlocal active, retiring
@@ -3039,9 +3164,11 @@ def create_app():
                 print(str(exc), file=sys.stderr, flush=True)
         models = await asyncio.to_thread(Models, rt, folder, brain, auth)
         models.start_warmup('worker')
+        poster.start()
         try:
             yield
         finally:
+            poster.stop()
             previous = active or retiring
             if previous:
                 await close_step(previous.close(), 'active.close()', 6.1)
