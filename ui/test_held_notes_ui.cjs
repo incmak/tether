@@ -104,6 +104,17 @@ async function main() {
     check('a failure with the same list leaves nothing armed', await armedKeys() === 0)
     check('focus returns to the tapped button', await page.evaluate(() => document.activeElement?.textContent) === 'Clear topic')
 
+    // 2c. A failed delete that empties the list closes the sheet; the old alert does not come back with a new note.
+    await open([two[1]])
+    await page.evaluate(() => { window.onDrop = () => { window.listing = []; throw new Error('Those notes changed. Look at the list again.') } })
+    await page.getByRole('button', { name: 'Remove note 1' }).click()
+    await page.getByRole('button', { name: 'Confirm: remove note 1' }).click()
+    await page.locator('.live-held-chip').waitFor({ state: 'detached' })
+    await setListing([topic('T9', 'New topic', [note('Fresh note.', 9)])])
+    await page.locator('.live-held-chip').click()
+    await page.locator('.live-held-sheet li').first().waitFor()
+    check('a reopened sheet shows no old alert', await page.locator('.live-held-problem').count() === 0)
+
     // 3. Clear topic posts the id and the note count the user saw.
     await open(two)
     await page.getByRole('button', { name: 'Clear topic' }).first().click()
