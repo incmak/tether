@@ -617,6 +617,37 @@ class ProcessTasksTests(unittest.TestCase):
             task = self.listed_tasks()['monitor1']
         self.assertEqual((task['state'], task['summary']), ('stopped', 'Stopped from Tether.'))
 
+    def test_waiting_agent_uses_the_full_monitor_command_for_liveness(self):
+        command = 'printf %s ' + 'x' * 2000 + ' end'
+        self.agent(meta={'finished': True}, records=[
+            self.record('user', 'Wait for the monitor', seconds=-125),
+            *self.task_start('monitor1', name='Monitor', command=command),
+        ])
+        self.process_children.return_value = [321]
+        process = subagents.task_process
+        self.enterContext(patch.multiple(process, _child_of=Mock(return_value=True),
+                                         _group_leader=Mock(return_value=True)))
+        self.enterContext(patch.object(process.procinfo, 'start_ticks', return_value='monitor-start'))
+        self.start_ms.side_effect = lambda ticks: (self.now - (100 if ticks == 'monitor-start' else 300)) * 1000
+        argv = self.enterContext(patch.object(process.procinfo, 'argv'))
+
+        for has_output in (False, True):
+            if has_output:
+                self.output('monitor1')
+            for live_command in (command, command + '-other'):
+                with self.subTest(has_output=has_output, matches=live_command == command):
+                    argv.return_value = [b'zsh', b'-c', f'eval {process.quoted(live_command)}'.encode()]
+                    listed = subagents.listing(self.config)
+                    agent, = listed['agents']
+                    task, = listed['tasks']
+                    self.assertEqual(task['command'], command[:2000])
+                    if live_command == command:
+                        self.assertEqual((agent['state'], task['state']), ('running', 'running'))
+                        self.assertEqual(agent['waiting'], {'shell': 0, 'monitor': 1})
+                    else:
+                        self.assertEqual(agent['state'], 'finished')
+                        self.assertNotIn('waiting', agent)
+
     def test_monitor_from_dead_process_is_stopped_without_a_process_scan(self):
         self.write(self.main, self.task_start('monitor1', name='Monitor', command='tail -f log', seconds=-400))
         with patch.object(subagents.task_process, 'running') as running:

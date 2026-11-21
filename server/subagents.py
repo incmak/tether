@@ -485,7 +485,7 @@ def _task_scan(path, previous=None, *, root):
                             command, description = inputs.get('command'), inputs.get('description')
                             data['calls'][part['id']] = {
                                 'kind': 'monitor' if part['name'] == 'Monitor' else 'shell',
-                                'command': command[:2000] if isinstance(command, str) else None,
+                                'command': command if isinstance(command, str) else None,
                                 'description': description if isinstance(description, str) else None}
                 if record['type'] != 'user':
                     continue
@@ -738,6 +738,9 @@ def _listing(config, *, limit=True, include_finished=False):
         parent = task['parent']
         if parent in shown or (parent is None or parent in current) and (
                 in_scope or include_finished or output is not None and task['state'] == 'running'):
+            # Liveness checks use the full command. Bound it for the listing response.
+            if task['command'] is not None:
+                task['command'] = task['command'][:2000]
             result['tasks'].append(task)
     result['tasks'] = result['tasks'][-40:]
     return result

@@ -389,12 +389,8 @@ def agent_bar_parts(screen):
     return prompt, footer, row_lines
 
 
-def agent_bar(screen):
-    """Read focus, rows and the main prompt draft from one visible Claude capture."""
-    parts = agent_bar_parts(screen)
-    if parts is None:
-        return None
-    prompt, footer, row_lines = parts
+def bar_rows(row_lines):
+    """Verify the whole row block and locate its selection without reading the footer."""
     parsed = []
     selected, main = [], []
     for index, line in enumerate(row_lines):
@@ -414,16 +410,28 @@ def agent_bar(screen):
         parsed.append({'kind': kind, 'value': value, 'waiting': waiting})
     if len(main) != 1 or len(selected) > 1:
         return None
+    return parsed, selected[0] if selected else None, main[0]
 
+
+def agent_bar(screen):
+    """Read focus, rows and the main prompt draft from one visible Claude capture."""
+    parts = agent_bar_parts(screen)
+    if parts is None:
+        return None
+    prompt, footer, row_lines = parts
+    rows = bar_rows(row_lines)
+    if rows is None:
+        return None
+    parsed, selected, main = rows
     actions = {_norm(part) for part in footer.split('·')}
     row_actions = actions - {STOP_ALL_ACTION, COLLAPSE_ACTION}
     action = None
     if selected == main and row_actions == {'↑/↓ to select'}:
         focus = 'row'
-    elif selected and selected != main and row_actions in ({'enter to view', 'x to stop'},
-                                                            {'enter to view', 'x to clear'}):
+    elif selected is not None and row_actions in ({'enter to view', 'x to stop'},
+                                                 {'enter to view', 'x to clear'}) and selected != main:
         focus, action = 'row', 'stop' if 'x to stop' in row_actions else 'clear'
-    elif selected or actions & (ROW_ACTIONS | ARTIFACT_ACTIONS) or '❯' in footer:
+    elif selected is not None or actions & (ROW_ACTIONS | ARTIFACT_ACTIONS) or '❯' in footer:
         return None
     else:
         last_action = _norm(footer.rsplit('·', 1)[-1])
@@ -443,8 +451,8 @@ def agent_bar(screen):
             focus = 'prompt'
         else:
             return None
-    return {'focus': focus, 'action': action, 'rows': parsed, 'selected': selected[0] if selected else None,
-            'selected_text': row_lines[selected[0]] if selected else None,
+    return {'focus': focus, 'action': action, 'rows': parsed, 'selected': selected,
+            'selected_text': row_lines[selected] if selected is not None else None,
             'draft': bool(prompt[0][1:].strip() or any(line.strip() for line in prompt[1:]))}
 
 
@@ -542,7 +550,8 @@ def stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar=N
         visible_prefix = row['value'].removesuffix('…')
         fitting = []
         for item in subagents.listing(entry, limit=False)['agents']:
-            if item['state'] != 'running' or (item.get('type') or 'general-purpose') != row['kind']:
+            # The listing can misclassify an agent whose row is still visible.
+            if (item.get('type') or 'general-purpose') != row['kind']:
                 continue
             name = rendered_description(item.get('description') or '')
             if name is None:
@@ -555,7 +564,8 @@ def stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar=N
             raise StopError(BAR_ID_ERROR)
         if len(fitting) > 1:
             raise StopError('Multiple agents share this name. Stop it in the terminal.')
-        if not fitting or fitting[0]['id'] != agent['id'] or fitting[0].get('waiting') != agent['waiting']:
+        if (not fitting or fitting[0]['id'] != agent['id'] or fitting[0]['state'] != 'running'
+                or fitting[0].get('waiting') != agent['waiting']):
             raise StopError(BAR_ID_ERROR)
         pressed['x'] = True
         pill_down = False
@@ -569,12 +579,10 @@ def stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar=N
                 screen = visible(entry, run)
                 bar = parse(screen)
                 parts = agent_bar_parts(screen)
-                if parts is None:
-                    break
-                selected_rows = sum(bool(row[1]) for line in parts[2] if (row := BAR_ROW.fullmatch(line)))
-                if selected_rows == 1 and row_escapes < 3:
+                rows = bar_rows(parts[2]) if parts is not None else None
+                if rows is not None and rows[1] is not None and row_escapes < 3:
                     row_escapes += 1
-                elif selected_rows or not pill_down or escape_sent:
+                elif not (pill_down and not escape_sent and bar is not None and bar['focus'] == 'pill'):
                     break
                 # Collapse can preserve the row cursor. Read it again before
                 # another Escape, even if the footer looks like pill focus.

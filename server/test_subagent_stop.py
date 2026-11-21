@@ -1050,6 +1050,8 @@ class AgentBarTests(unittest.TestCase):
             screen, key = frames[position]
             if args[1] == 'capture-pane':
                 self.reads.append(position)
+                if callable(screen):
+                    screen = screen()
                 return subprocess.CompletedProcess(args, 0, screen, '')
             self.assertEqual(args[1], 'send-keys')
             self.assertEqual(args[4:], [key])
@@ -1059,10 +1061,10 @@ class AgentBarTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, '', '')
 
         def listing(entry, *, limit=True):
-            state = 'stopped' if 'x' in self.keys else self.agent['state']
-            if fresh is not None and self.keys and state == 'running':
+            if fresh is not None and self.keys and 'x' not in self.keys:
                 self.assertFalse(limit)
                 fresh()
+            state = 'stopped' if 'x' in self.keys else self.agent['state']
             return {'agents': [dict(self.agent, state=state), *self.siblings], 'tasks': []}
 
         entry = {'id': '%fake-bar', 'agent': 'claude'}
@@ -1147,6 +1149,23 @@ class AgentBarTests(unittest.TestCase):
             self.drive([(selected, None)])
         self.assertEqual(self.keys, [])
 
+    def test_misclassified_finished_agent_is_selected_with_the_target_hidden(self):
+        frames = self.wide_frames()
+        # The visible row belongs to beta. Its live monitor was classified as dead.
+        self.siblings = [dict(self.agent, id='beta', state='finished', waiting=None)]
+        with self.assertRaisesRegex(stop.StopError, 'share this name'):
+            self.drive([*frames[:3], (frames[3][0], 'Escape'), frames[-1]])
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+
+    def test_inactive_same_name_agents_block_a_stop_of_the_visible_target(self):
+        selected = self.wide_frames()[3][0]
+        for state in ('finished', 'stopped', 'failed'):
+            with self.subTest(state=state):
+                self.siblings = [dict(self.agent, id='beta', state=state, waiting=None)]
+                with self.assertRaisesRegex(stop.StopError, 'share this name'):
+                    self.drive([(selected, None)])
+                self.assertEqual(self.keys, [])
+
     def test_description_port_normalizes_spacing_before_counting_columns(self):
         self.assertEqual(stop.rendered_description(' Café\t·  déjà\r\n vu\xa0 '), 'Café · déjà vu')
         self.assertEqual(stop.rendered_description('é' * 200), 'é' * 200)
@@ -1190,6 +1209,17 @@ class AgentBarTests(unittest.TestCase):
         with self.assertRaisesRegex(stop.StopError, 'Could not identify'):
             self.drive([frames[0], (pill, 'Escape'), (frames[0][0], None)])
         self.assertEqual(self.keys, ['Down', 'Escape'])
+
+    def test_pill_cleanup_checks_fresh_focus_after_refusal(self):
+        prompt, pill, *_ = self.wide_frames()
+        refused = pill[0].replace(self.NAME, 'Different agent')
+        unknown = refused.replace('enter to view tasks', 'unrecognized footer')
+        for fresh, error in ((prompt[0], 'Could not identify'), (unknown, 'agent bar did not close')):
+            with self.subTest(error=error):
+                screens = iter((refused, fresh))
+                with self.assertRaisesRegex(stop.StopError, error):
+                    self.drive([prompt, (lambda: next(screens), None)])
+                self.assertEqual(self.keys, ['Down'])
 
     def test_pill_escape_is_refused_if_this_stop_already_closed_a_tasks_panel(self):
         frames = self.wide_frames()
@@ -1352,6 +1382,16 @@ class AgentBarTests(unittest.TestCase):
                 self.drive([*frames[:3], (unknown, None)])
             self.assertEqual(self.keys, ['Down', 'Down', 'Down'])
 
+    def test_cursor_in_an_invalid_row_block_does_not_authorize_escape(self):
+        frames = self.wide_frames()
+        selected = frames[3][0]
+        for changed in (selected + '  unrelated text\n', selected.replace('  ● main\n', ''),
+                        selected + '  ● main\n'):
+            with self.subTest(changed=changed.rsplit('─\n', 1)[-1]):
+                with self.assertRaisesRegex(stop.StopError, 'agent bar did not close'):
+                    self.drive([*frames[:3], (changed, None)])
+                self.assertEqual(self.keys, ['Down', 'Down', 'Down'])
+
     def test_changed_snapshot_immediately_before_x_refuses(self):
         frames = self.wide_frames()
         frames[3:] = [(frames[3][0], 'Escape'), frames[-1]]
@@ -1393,6 +1433,13 @@ class AgentBarTests(unittest.TestCase):
         frames[3:] = [(frames[3][0], 'Escape'), frames[-1]]
         with self.assertRaisesRegex(stop.StopError, 'Could not identify'):
             self.drive(frames, fresh=lambda: self.agent.update(waiting={'shell': 2, 'monitor': 0}))
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+
+    def test_target_must_still_be_running_in_final_listing(self):
+        frames = self.wide_frames()
+        frames[3:] = [(frames[3][0], 'Escape'), frames[-1]]
+        with self.assertRaisesRegex(stop.StopError, 'Could not identify'):
+            self.drive(frames, fresh=lambda: self.agent.update(state='finished'))
         self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
 
     def test_navigation_stops_after_eight_down_keys(self):
