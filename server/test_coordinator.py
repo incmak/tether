@@ -1510,6 +1510,33 @@ class ServerSend(unittest.TestCase):
         self.stash.assert_not_called()
         self.assertFalse(self.server.SEND_LOCK.locked())
 
+    def test_receipt_save_failure_refuses_coordinator_status(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent), patch.dict(self.entry, agent=agent), self.fresh('Idle'), \
+                    patch.object(injected_prompts, '_write', side_effect=OSError('disk full')) as write, \
+                    patch.object(self.server, 'terminal_submit') as terminal:
+                with self.assertRaisesRegex(RuntimeError, 'Could not save.*prompt receipt'):
+                    self.deliver()
+                write.assert_called()
+                terminal.assert_not_called()
+                self.assertFalse(self.server.SEND_LOCK.locked())
+
+    def test_receipt_save_failure_refuses_rules_before_marking_coordinator(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent), patch.object(injected_prompts, '_write', side_effect=OSError('disk full')):
+                world = World()
+                target, previous, *_ = world.entries
+                target.update(agent=agent, thread='sample')
+                previous['coordinator'] = 'needs'
+                with patch.object(world, 'send', wraps=world.send) as send, \
+                        patch.object(world, 'tmux', wraps=world.tmux) as tmux:
+                    with self.assertRaisesRegex(RuntimeError, 'Could not save.*prompt receipt'):
+                        world.change_role('%1', 'sample', take=True)
+                    send.assert_not_called()
+                    tmux.assert_not_called()
+                self.assertEqual(world.marked(), {'%2': 'needs'})
+                self.assertFalse(world.lock.locked())
+
     def test_only_an_idle_coordinator_gets_the_update(self):
         for state, sent in (('Working', False), ('Approval', False), ('Unknown', False), ('Idle', True)):
             with self.subTest(state=state), self.fresh(state), \

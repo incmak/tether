@@ -1,4 +1,4 @@
-"""Bind successful Tether sends to native user records, once per transcript."""
+"""Bind Tether deliveries to native user records, once per transcript."""
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
@@ -20,12 +20,17 @@ import shell_log
 ROOT = paths.CACHE / 'injected'
 PENDING_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 DELIVERY_LINE = re.compile(r'\r?\n\r?\n\[Tether id ([0-9a-f]{16})\][ \t\r\n]*\Z')
+UNKNOWN_RECEIPT = 'unknown-receipt'
 _lock = threading.Lock()
 _sending = [threading.Lock() for _ in range(32)]
 
 
 class ReceiptsUnreadable(Exception):
     """The available data cannot establish who sent a prompt."""
+
+
+class ReceiptNotSaved(RuntimeError):
+    """The prompt was refused before it reached the terminal."""
 
 
 def _transcript(entry):
@@ -132,8 +137,6 @@ def anchor(entry):
         return {'at': at, 'offset': info.st_size, 'file': [info.st_dev, info.st_ino]}
     except FileNotFoundError:
         return {'at': at, 'offset': 0, 'file': None}
-    except OSError:
-        return None
 
 
 def _text(text):
@@ -154,24 +157,26 @@ def strip_delivery_id(text):
     return _split_delivery(text)[0]
 
 
+def has_delivery_id(text):
+    """Whether the native prompt ends with a Tether delivery line."""
+    return DELIVERY_LINE.search(text) is not None
+
+
 def _record(path, text, kind, *, before, delivery_id, tabs):
     file = _file(path)
     metadata = {'prompt': kind, **({'tabs': tabs} if kind == 'status' else {})}
     with _lock:
-        try:
-            data = _read(file)
-            scanned = data.get('scanned')
-            if scanned and (scanned['file'] != before['file'] or scanned['offset'] > before['offset']):
-                data.pop('scanned')  # This anchor was not covered by the saved scan.
-            receipt = dict(before, delivery_id=delivery_id, hash=_hash(_text(text)), metadata=metadata)
-            _write(file, dict(data, transcript=str(path), receipts=[*data.get('receipts', ()), receipt]))
-        except (OSError, ReceiptsUnreadable) as exc:
-            logging.warning('Could not save Tether prompt receipt: %s', exc)
+        data = _read(file)
+        scanned = data.get('scanned')
+        if scanned and (scanned['file'] != before['file'] or scanned['offset'] > before['offset']):
+            data.pop('scanned')  # This anchor was not covered by the saved scan.
+        receipt = dict(before, delivery_id=delivery_id, hash=_hash(_text(text)), metadata=metadata)
+        _write(file, dict(data, transcript=str(path), receipts=[*data.get('receipts', ()), receipt]))
 
 
 @contextmanager
 def track_send(entry, text, kind, *, tabs=None):
-    """Yield the wire text and keep readers out until the successful send is recorded."""
+    """Save a pending receipt before yielding the wire text."""
     path = _transcript(entry)
     if path is None:
         yield text
@@ -182,13 +187,14 @@ def track_send(entry, text, kind, *, tabs=None):
             _resolve(path, entry['agent'])
         except ReceiptsUnreadable:
             pass  # Retry the old receipts later. An unread transcript can still receive a new prompt.
-        before = anchor(entry)
-        if before is None:
-            yield text
-            return
         delivery_id = secrets.token_hex(8)
+        try:
+            before = anchor(entry)
+            _record(path, text, kind, before=before, delivery_id=delivery_id, tabs=tabs)
+        except (OSError, ReceiptsUnreadable) as exc:
+            raise ReceiptNotSaved('Could not save the Tether prompt receipt. Try again.') from exc
+        # Keep the receipt pending on send failure. The text may have partly reached the pane.
         yield f'{text}\n\n[Tether id {delivery_id}]'
-        _record(path, text, kind, before=before, delivery_id=delivery_id, tabs=tabs)
 
 
 def revision(entry):
@@ -229,24 +235,26 @@ def _candidate(agent, offset, record):
     return identifier, (m['text'] for m in messages if m['role'] == 'user' and not m.get('kind'))
 
 
+def _receipt_offset(receipt, identity):
+    # An anchor belongs to its original file. In a replacement, match the ID and hash from the start.
+    return receipt['offset'] if receipt['file'] in (None, identity) else 0
+
+
 def _bind(path, agent, pending, bound, scanned):
     """Scan the unread suffix of the transcript for pending deliveries."""
     from history import records
 
-    try:
-        stream = path.open('rb')
-    except FileNotFoundError:
-        return None, 0, {}, None, False
-    with stream:
+    with path.open('rb') as stream:
         info = os.fstat(stream.fileno())
         identity = [info.st_dev, info.st_ino]
         end = info.st_size
-        pending = {key: r for key, r in pending.items() if r['offset'] <= end and r['file'] in (None, identity)}
-        if not pending:
+        starts = {key: _receipt_offset(r, identity) for key, r in pending.items()}
+        starts = {key: start for key, start in starts.items() if start <= end}
+        if not starts:
             return identity, end, {}, None, False
         used = {key for key, r in bound.items() if r.get('file') in (None, identity)}
         matches = {}
-        offset = min(r['offset'] for r in pending.values())
+        offset = min(starts.values())
         if scanned and scanned['file'] == identity and offset <= scanned['offset'] <= end:
             offset = scanned['offset']
         elif offset:
@@ -267,19 +275,16 @@ def _bind(path, agent, pending, bound, scanned):
                 for text in texts:
                     prompt, delivery_id = _split_delivery(_text(text))
                     match = pending.get(delivery_id)
-                    if match and match['offset'] <= start and match['hash'] == _hash(prompt):
+                    if match and delivery_id in starts and starts[delivery_id] <= start and match['hash'] == _hash(prompt):
                         matches[delivery_id] = dict(match, id=identifier, file=identity)
                         used.add(identifier)
-                        del pending[delivery_id]
+                        del starts[delivery_id]
                         break
             except (ValueError, AttributeError, TypeError):
                 continue
-            if not pending:
+            if not starts:
                 break
-    try:
-        current = path.stat()
-    except FileNotFoundError:
-        return None, 0, {}, None, False
+    current = path.stat()
     if [current.st_dev, current.st_ino] != identity or current.st_size < offset:
         raise ReceiptsUnreadable('Transcript changed during the receipt scan')
     return identity, current.st_size, matches, {'file': identity, 'offset': offset}, offset == end == current.st_size
@@ -296,48 +301,58 @@ def _resolve(path, agent, *, cleanup=False):
     receipts = data.get('receipts', ())
     bound = {r['id']: r for r in receipts if 'id' in r}
     pending = _pending(receipts)
-    if not pending and not cleanup:
+    if not pending and not cleanup and 'missing_since' not in data:
         return bound
     previous = data.get('scanned')
+    identity, size = None, 0
+    matches, scanned, covered = {}, None, False
     try:
-        if pending:
-            identity, size, matches, scanned, covered = _bind(path, agent, pending, bound, previous)
-        else:  # Startup can retire bound receipts for a deleted transcript without reading it.
+        if cleanup or 'missing_since' in data:
+            # Only startup can retire old receipts for an absent transcript. Any read can see it return.
             try:
                 info = path.stat()
-                identity = [info.st_dev, info.st_ino]
-                size = info.st_size
             except FileNotFoundError:
-                identity, size = None, 0
-            matches, scanned, covered = {}, None, False
+                pass
+            else:
+                identity, size = [info.st_dev, info.st_ino], info.st_size
+        if pending and (not cleanup or identity is not None):
+            identity, size, matches, scanned, covered = _bind(path, agent, pending, bound, previous)
     except OSError as exc:
         raise ReceiptsUnreadable(str(exc)) from exc
 
     now = time.time_ns() // 1_000_000
     with _lock:
         current = _read(file)
+        missing_since = None if identity is not None else current.get('missing_since', now if cleanup else None)
+        # A transcript is gone only after the age cap of continuous absence, not after one failed startup check.
+        gone = cleanup and identity is None and now - missing_since > PENDING_MAX_AGE_MS
         kept = []
         for receipt in current.get('receipts', ()):
             delivery_id = receipt.get('delivery_id')
             if 'id' in receipt:
-                if bound.get(receipt['id']) != receipt or identity is not None:
+                if bound.get(receipt['id']) != receipt or not (gone and now - receipt['at'] > PENDING_MAX_AGE_MS):
                     kept.append(receipt)  # A bound record id stays valid while a transcript exists at this path.
             elif delivery_id:
                 if pending.get(delivery_id) != receipt:
                     kept.append(receipt)
                 elif delivery_id in matches:
                     kept.append(matches[delivery_id])
-                elif receipt['file'] in (None, identity) and not (
-                        covered and receipt['offset'] <= size and now - receipt['at'] > PENDING_MAX_AGE_MS):
+                elif not ((gone or identity is not None and covered and _receipt_offset(receipt, identity) <= size)
+                          and now - receipt['at'] > PENDING_MAX_AGE_MS):
                     kept.append(receipt)
         updated = dict(current, receipts=kept)
+        if missing_since is None:
+            updated.pop('missing_since', None)
+        else:
+            updated['missing_since'] = missing_since
         cursor = current.get('scanned')
-        if cursor and cursor == previous and (cursor['file'] != identity or cursor['offset'] > size):
+        if identity is not None and cursor and cursor == previous and (
+                cursor['file'] != identity or cursor['offset'] > size):
             updated.pop('scanned')
             cursor = None
         if scanned and (cursor is None or cursor['file'] == identity and cursor['offset'] < scanned['offset']):
             cursor = updated['scanned'] = scanned
-        if cursor and any(r != pending.get(key) and r['offset'] < cursor['offset']
+        if cursor and any(r != pending.get(key) and _receipt_offset(r, cursor['file']) < cursor['offset']
                           for key, r in _pending(kept).items()):
             updated.pop('scanned')  # A receipt added after the snapshot needs its own anchor covered.
         try:
@@ -357,6 +372,15 @@ def bindings(entry):
         return {}
     with _send_lock(path):
         return _resolve(path, entry['agent'])
+
+
+def bound_receipt(entry, record):
+    """Read the receipt for this exact native prompt record, if one binds."""
+    identifier = record.get('uuid') if entry.get('agent') == 'claude' else None
+    if entry.get('agent') == 'codex' and type(record.get('_offset')) is int:
+        identifier = codex_id(record['_offset'], record.get('timestamp'))
+    bound = bindings(entry)
+    return bound.get(identifier) if isinstance(identifier, str) else None
 
 
 def mark(entry, messages):

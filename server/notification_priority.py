@@ -1,4 +1,4 @@
-"""Pure notification classification from a bounded transcript and final reply."""
+"""Notification classification from a bounded transcript and final reply."""
 from datetime import datetime
 import re
 import codex_messages
@@ -37,14 +37,14 @@ def _timestamp(record):
 
 
 def turn_source(agent, records, *, identify=None, distinguish_missing=False, with_time=False, latest_turn=False,
-                require_receipts=False):
+                require_receipts=False, entry=None):
     """Find the delivered prompt before the latest assistant record.
 
     Tool results and debug copies are not prompts. Claude sidechains belong to another agent.
     Codex and Antigravity currently expose no reliable background-origin flag.
     With latest_turn, any prompt after the latest assistant record gives 'unknown': that turn has no
     reply yet, so the prompt before that record belongs to an earlier turn.
-    Unreadable receipts use the background fallback unless the caller must defer its decision.
+    Notifications use the background fallback for unbound delivery ids and unreadable receipts.
     """
     finished_at = None
 
@@ -53,13 +53,19 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
 
     def prompt_source(record, text, background=False):
         source = 'background' if background else None
-        if not background and identify is not None:
+        if not background:
             try:
-                source = identify(record, text)
+                if identify is not None:
+                    source = identify(record, text)
+                elif entry is not None and injected_prompts.has_delivery_id(text):
+                    if injected_prompts.bound_receipt(entry, record) is None:
+                        source = injected_prompts.UNKNOWN_RECEIPT
             except injected_prompts.ReceiptsUnreadable:
                 if require_receipts:
                     raise
                 source = 'background'
+        if source == injected_prompts.UNKNOWN_RECEIPT and not require_receipts:
+            source = 'background'
         return result(source or 'user', record)
 
     if agent == 'antigravity':
@@ -134,7 +140,7 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
             elif latest_turn and not assistant_seen and kind == 'USER_INPUT':
                 return result('unknown')
             elif assistant_seen and kind == 'USER_INPUT':
-                if identify is not None and (prompt := transcript_message(record, 0, lambda text: text)):
+                if (identify is not None or entry is not None) and (prompt := transcript_message(record, 0, lambda text: text)):
                     return prompt_source(record, prompt['text'])
                 return result('user')
         if is_assistant:
@@ -198,13 +204,13 @@ def status_line(reply):
     return status, lines
 
 
-def classify(kind, agent, records, reply):
+def classify(kind, agent, records, reply, *, entry=None):
     """Return (priority, preview text). Only a final status line overrides text guesses."""
     status, lines = status_line(reply)
     preview = '\n'.join(lines).rstrip()
     if kind in ('approval', 'input') or status == 'yes':
         return 'urgent', preview
-    level = 'low' if turn_source(agent, records) == 'background' else 'important'
+    level = 'low' if turn_source(agent, records, entry=entry) == 'background' else 'important'
     if status is None:
         plain = re.sub(r'[*`]', '', preview).strip()
         if plain.endswith('?'):

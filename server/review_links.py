@@ -1140,9 +1140,11 @@ def _idle_source(link, cap, turn_read):
                 and ['review-correction', feedback['sent_at']] in pending)
     fresh = finished_at is None or finished_at > cap.get('review_turn_at', float('-inf'))
     clipped = source in ('unknown', 'unknown-background')
+    unbound = source == injected_prompts.UNKNOWN_RECEIPT
     # Use the prompt's time when visible. An earlier queued prompt can finish after a later send.
     turn_at = started_at if started_at is not None else finished_at
-    if fresh and (observed or finished_at is not None or not clipped):
+    # An unbound delivery id says nothing about which queued relay, if any, ran.
+    if not unbound and fresh and (observed or finished_at is not None or not clipped):
         if source == 'user' and started_at is not None:
             # A later user prompt can finish between ticks, after the marked turn already ran.
             pending = [marker for marker in pending if isinstance(marker, str) or marker[1] >= started_at]
@@ -1176,7 +1178,7 @@ def _idle_source(link, cap, turn_read):
         elif after_send and (feedback['phase'] == 'working' or source == 'user' and started_at is not None):
             cap.pop('feedback_turn')
             # The correction's turn ended unmatched (Antigravity has no prompt time). Its marker must not outlive it.
-            if (stuck := ['review-correction', sent_at]) in cap.get('review_prompts', ()):
+            if not unbound and (stuck := ['review-correction', sent_at]) in cap.get('review_prompts', ()):
                 cap['review_prompts'] = [marker for marker in cap['review_prompts'] if marker != stuck]
                 if not cap['review_prompts']:
                     cap.pop('review_prompts')
@@ -1231,20 +1233,16 @@ CORRECTION_WAIT = 'Wait for the next review.'
 
 
 def prompt_source(entry, record, text):
-    """Classify a native prompt with the same provenance and cutover as chat."""
-    if not injected_prompts.keeps_receipts(entry):
-        return _relay_source(text)  # Antigravity or an unsettled conversation: no receipt can exist
-    identifier = record.get('uuid') if entry.get('agent') == 'claude' else None
-    if entry.get('agent') == 'codex' and type(record.get('_offset')) is int:
-        identifier = injected_prompts.codex_id(record['_offset'], record.get('timestamp'))
-    bindings = injected_prompts.bindings(entry)
-    receipt = bindings.get(identifier) if isinstance(identifier, str) else None
+    """Classify a native prompt for callers that decide who started a turn."""
+    receipt = injected_prompts.bound_receipt(entry, record)
     if receipt is not None:
         return (_relay_source(text) if receipt['metadata']['prompt'] == 'review' else None) or 'tether'
-    timestamp = record.get('created_at' if entry.get('agent') == 'antigravity' else 'timestamp')
-    if injected_prompts.is_legacy(timestamp, injected_prompts.cutover_ms()):
-        return _relay_source(text)
-    return None
+    if injected_prompts.has_delivery_id(text):
+        return injected_prompts.UNKNOWN_RECEIPT
+    if injected_prompts.keeps_receipts(entry) and not injected_prompts.is_legacy(
+            record.get('timestamp'), injected_prompts.cutover_ms()):
+        return None
+    return _relay_source(text)
 
 
 def _relay_source(text):
@@ -1748,6 +1746,10 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             for key in ('wait_ticks', 'idle_ticks', 'pending_idle_ticks', 'reviewer_before', 'reviewer_seen_working',
                         'retries', 'request_id', 'send_reply', 'verify_ticks'):
                 link.pop(key, None)
+        return link
+    if state == 'Idle' and source == injected_prompts.UNKNOWN_RECEIPT:
+        # This completion cannot start a review. A later turn can still do so.
+        link['seen_working'] = False
         return link
     if state == 'Working':
         if link['worker'] not in awaiting and not correction_turn:

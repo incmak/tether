@@ -1,5 +1,6 @@
 """Mobile transcript and message bridge to one existing Codex CLI thread."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from datetime import datetime
 from functools import partial
 import gzip
@@ -1379,7 +1380,7 @@ def _transcript_tail_records(entry, tail_bytes, *, whole=False, with_offset=Fals
 
 
 def notification_context(entry):
-    records = notification_records(entry)
+    records = notification_records(entry, with_offset=True)
     return notification_reply(entry, records), records
 
 
@@ -1631,32 +1632,34 @@ def review_send(config, message, state=None, *, receipt=False):
     """Deliver a review around a quiet Claude draft, preserving ordinary send guards."""
     _require_writable(config)
     config = dict(config, _review=True)
-    stashed = stash_quiet_draft(config) if config.get('agent') == 'claude' else None
-    try:
-        if receipt:
-            with SEND_LOCK, injected_prompts.track_send(config, message, 'review') as delivery:
-                result = send_text(config, delivery, state, held=True)
-        else:
-            result = send_text(config, message, state)
-    except Exception as exc:
+    lock = SEND_LOCK if receipt else nullcontext()
+    prompt = injected_prompts.track_send(config, message, 'review') if receipt else nullcontext(message)
+    with lock, prompt as delivery:
+        stashed = stash_quiet_draft(config) if config.get('agent') == 'claude' else None
         try:
-            if 'reached the agent input' in str(exc):
-                terminal_clear_draft(config)
+            if receipt:
+                result = send_text(config, delivery, state, held=True)
             else:
-                clear_unsent(config, message)
-        except (RuntimeError, OSError, subprocess.SubprocessError):
-            pass
-        if stashed:
+                result = send_text(config, delivery, state)
+        except Exception as exc:
             try:
-                if not any(prompt_draft(config)):
-                    verify(config)
-                    subprocess.run([paths.TMUX, 'send-keys', '-t', config['id'], 'C-s'],
-                                   check=True, capture_output=True, timeout=5)
+                if 'reached the agent input' in str(exc):
+                    terminal_clear_draft(config)
+                else:
+                    clear_unsent(config, message)
             except (RuntimeError, OSError, subprocess.SubprocessError):
                 pass
-        if isinstance(exc, (OSError, subprocess.SubprocessError)):
-            raise RuntimeError('Could not deliver the review message.') from exc
-        raise
+            if stashed:
+                try:
+                    if not any(prompt_draft(config)):
+                        verify(config)
+                        subprocess.run([paths.TMUX, 'send-keys', '-t', config['id'], 'C-s'],
+                                       check=True, capture_output=True, timeout=5)
+                except (RuntimeError, OSError, subprocess.SubprocessError):
+                    pass
+            if isinstance(exc, (OSError, subprocess.SubprocessError)):
+                raise RuntimeError('Could not deliver the review message.') from exc
+            raise
     if stashed:
         restore_check(config, stashed)
     return result

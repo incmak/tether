@@ -374,7 +374,7 @@ class Notifier:
                     reply = self.reply(entry)
             except Exception:  # A broken transcript must not prevent delivery.
                 pass
-        priority, preview = classify(kind, entry.get('agent'), records, reply)
+        priority, preview = classify(kind, entry.get('agent'), records, reply, entry=entry)
         if kind == 'done' and priority == 'important' and self.finished_low(entry):
             priority = 'low'
         if priority != 'urgent' and self.quiet(entry):

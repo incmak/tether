@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+from uuid import uuid4
 
 import injected_prompts
 import push
@@ -183,6 +184,34 @@ class DeliveryTests(unittest.TestCase):
         notifier.observe(entry, {'state': 'Approval'})
         self.assertEqual(send.call_args.args[0]['priority'], 'urgent')
 
+    def test_finished_notification_uses_background_for_an_unbound_delivery_id(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(injected_prompts, 'ROOT', Path(folder) / 'receipts'):
+            send = Mock()
+            notifier = push.Notifier(send, settle=0, minimum_work=0, clock=lambda: 100,
+                                     context=server.notification_context,
+                                     delivery=lambda: dict(push.DEFAULT_DELIVERY, low='silent'))
+            for agent, native in (('claude', claude), ('codex', codex)):
+                with self.subTest(agent=agent):
+                    transcript = Path(folder) / f'{agent}.jsonl'
+                    entry = {'id': '%7', 'agent': agent, 'transcript': str(transcript)}
+
+                    def finish(prompt):
+                        records = [native('user', prompt, uuid=str(uuid4()), timestamp='2026-01-01T00:00:01Z'),
+                                   native('assistant', 'Done.', timestamp='2026-01-01T00:00:02Z')]
+                        with transcript.open('a') as stream:
+                            stream.writelines(json.dumps(record) + '\n' for record in records)
+                        send.reset_mock()
+                        notifier.observe(entry, {'state': 'Working'})
+                        notifier.observe(entry, {'state': 'Idle'})
+                        send.assert_called_once()
+                        return send.call_args.args[0]['priority']
+
+                    with injected_prompts.track_send(entry, 'Status update', 'status', tabs=[]) as delivery:
+                        pass
+                    self.assertEqual(finish(delivery), 'important')
+                    self.assertEqual(finish(delivery), 'low')  # A copy has a different transcript record id.
+                    self.assertEqual(finish('Plain prompt'), 'important')
+
     def test_parent_stage_lowers_finished_priority_and_preserves_urgent_prompts(self):
         with tempfile.TemporaryDirectory() as folder:
             store = Path(folder) / 'review-links.json'
@@ -225,7 +254,7 @@ class DeliveryTests(unittest.TestCase):
             original = server.notification_records
             with patch.object(server, 'notification_records', wraps=original) as read:
                 reply, records = server.notification_context(entry)
-            read.assert_called_once_with(entry)
+            read.assert_called_once_with(entry, with_offset=True)
             self.assertEqual(classify('done', 'claude', records, reply), ('low', 'Done.'))
 
     def test_persistence_and_migration(self):
