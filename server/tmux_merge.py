@@ -9,7 +9,9 @@ import subprocess
 import sys
 import time
 
+import coordinator
 import groups
+import helper_tabs
 import paths
 import projects
 import side_shells
@@ -19,6 +21,7 @@ SESSION = re.compile(r'\$[0-9]+')
 GONE = 'That session or pane is gone. Refresh the list and try again.'
 BREAKOUT_MARKER = '@tether_breakout'
 BREAKOUT_IDS = re.compile(r'(\$[0-9]+)\t(%[0-9]+)')
+ROLE_FIELDS = '#{pane_id}\t#{@tether_role}'
 
 
 def _tmux(run, *args, command=None):
@@ -97,6 +100,32 @@ def _names(run, session_id):
     return dict(line.split('\t', 1) for line in result.stdout.splitlines() if '\t' in line)
 
 
+def pane_role(run, pane):
+    result = _tmux(run, 'display-message', '-p', '-t', pane, ROLE_FIELDS)
+    found, _, role = result.stdout.rstrip('\n').partition('\t')
+    if result.returncode or found != pane:
+        raise ValueError(GONE)
+    return role
+
+
+def coordinator_panes(run, session_id):
+    result = _tmux(run, 'list-panes', '-s', '-t', session_id + ':', '-F', ROLE_FIELDS)
+    _check(result, GONE)
+    return {pane for pane, _, role in (line.partition('\t') for line in result.stdout.splitlines())
+            if role in helper_tabs.COORDINATOR_MARKS}
+
+
+def coordinator_to_clear(run, pane, target):
+    """The pane's mark when a different pane in the destination already serves as coordinator."""
+    role = pane_role(run, pane)
+    return role if role in helper_tabs.COORDINATOR_MARKS and coordinator_panes(run, target) - {pane} else ''
+
+
+def _clear_coordinator(run, pane):
+    if pane_role(run, pane) in helper_tabs.COORDINATOR_MARKS:
+        coordinator._set(run, pane, None)
+
+
 def _name_plan(run, source, target, panes):
     """Names for the moving panes that have no Tether name: the session they leave ('alpha', then 'alpha 2', ...),
     never a name already used in either session. tmux's own numbered session names ('3') carry no name, so they give none."""
@@ -172,6 +201,8 @@ def merge_session(source, target, run=subprocess.run, keep=None):
     if source == target:
         raise ValueError('Drop the session on a different session.')
     kept, dropped = _project_plan(run, source, target, keep)
+    source_coordinators = coordinator_panes(run, source)
+    target_coordinators = coordinator_panes(run, target) if source_coordinators else set()
     windows = _tmux(run, 'list-windows', '-t', source + ':', '-F', '#{window_id}')
     _check(windows, GONE)
     plan = _name_plan(run, source, target, list(_names(run, source)))
@@ -188,6 +219,9 @@ def merge_session(source, target, run=subprocess.run, keep=None):
                 raise RuntimeError('Only part of the session moved. Check both sessions.')
             _check(moved, 'Could not move the window.')
     try:
+        if target_coordinators:
+            for pane in sorted(source_coordinators - target_coordinators):
+                _clear_coordinator(run, pane)
         _apply_names(run, plan)
         _apply_project(run, target, kept, dropped)
         return _moved(run, target, None)
@@ -201,6 +235,7 @@ def move_pane(pane, target, run=subprocess.run):
     target, name = _session(run, target)
     if source == target:
         raise ValueError('The pane is already in that session.')
+    clear_coordinator = coordinator_to_clear(run, pane, target)
     plan = _name_plan(run, source, target, [pane])
     moved = _try_tmux(run, 'break-pane', '-d', '-s', pane, '-t', target + ':')
     if moved is None or moved.returncode:
@@ -210,6 +245,9 @@ def move_pane(pane, target, run=subprocess.run):
         if current != target:
             _check(moved, 'Could not move the pane.')
     try:
+        if clear_coordinator:
+            _clear_coordinator(run, pane)
+        _drop_root(run, source, pane)
         _ungroup(run, pane)
         _apply_names(run, plan)
         return _moved(run, target, pane)
@@ -220,6 +258,22 @@ def move_pane(pane, target, run=subprocess.run):
 def _ungroup(run, pane):
     """A pane that leaves its session goes to Unstacked: groups belong to one session (groups.py)."""
     _check(_try_tmux(run, 'set-option', '-p', '-u', '-t', pane, '@group'), 'Could not clear the pane group.')
+
+
+def _drop_root(run, session_id, pane):
+    """A stack can name the departing pane as its root even if the pane is in Unstacked."""
+    with groups.LOCK():
+        try:
+            stacks = groups.read(session_id, run)
+        except groups.GroupError as exc:
+            if exc.status == 404:  # The session disappears when its last pane moves.
+                return
+            raise
+        rooted = [stack for stack in stacks if stack.get('root') == pane]
+        if rooted:
+            for stack in rooted:
+                del stack['root']
+            groups.write(session_id, stacks, run)
 
 
 def _free_name(run, wanted=''):
@@ -330,6 +384,7 @@ def break_out(pane, run=subprocess.run):
     elif not removed:
         warning = 'The pane moved, but its new session kept an extra shell tab. Close it from the sidebar.'
     try:
+        _drop_root(run, source, pane)
         _ungroup(run, pane)
         result = _moved(run, session_id, pane)
     except (subprocess.TimeoutExpired, RuntimeError, ValueError) as exc:

@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+import groups
 import paths
 import projects
 import side_shells
@@ -109,6 +110,7 @@ class FakeTmux:
         fields = {'session_id': session, 'session_name': self.names.get(session, ''), 'window_id': window,
                   'pane_id': pane, 'pane_current_path': '/tmp', '@chat_name': self.pane_names.get(pane, ''),
                   '@project': self.projects.get(session, ''), '@tether_breakout': self.markers.get(pane, '')}
+        fields.update({'@groups': '', '@tether_role': ''})
         return '\t'.join(fields[field[2:-1]] for field in fmt.split('\t'))
 
     def remove_pane(self, pane):
@@ -683,6 +685,114 @@ class TmuxMergeTests(unittest.TestCase):
         self.assertEqual(result, {'session': self.b, 'name': 'beta', 'pane': pane})
         self.assertIn(pane, self.panes(self.b))
         self.assertNotIn(pane, self.panes(self.a))
+
+    def roles(self, session):
+        shown = self.tmux('list-panes', '-s', '-t', session + ':', '-F', '#{pane_id}\t#{@tether_role}')
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        return dict(line.split('\t') for line in shown.stdout.splitlines())
+
+    def test_move_pane_clears_only_a_duplicate_coordinator_mark(self):
+        resident, = self.panes(self.b)
+        self.tmux('set-option', '-p', '-t', resident, '@tether_role', 'coordinator-off')
+        for pane, role in zip(self.panes(self.a), ('coordinator', 'coordinator-needs', 'coordinator-off')):
+            with self.subTest(role=role):
+                self.tmux('set-option', '-p', '-t', pane, '@tether_role', role)
+                tmux_merge.move_pane(pane, self.b, self.run_tmux)
+                self.assertEqual(self.roles(self.b)[pane], '')
+                self.assertEqual(self.roles(self.b)[resident], 'coordinator-off')
+
+    def test_move_pane_keeps_the_only_coordinator_mark(self):
+        pane = self.panes(self.a)[0]
+        self.tmux('set-option', '-p', '-t', pane, '@tether_role', 'coordinator-needs')
+        tmux_merge.move_pane(pane, self.b, self.run_tmux)
+        self.assertEqual(self.roles(self.b)[pane], 'coordinator-needs')
+
+    def test_move_pane_keeps_helper_roles(self):
+        resident, = self.panes(self.b)
+        self.tmux('set-option', '-p', '-t', resident, '@tether_role', 'coordinator')
+        for pane, role in zip(self.panes(self.a), ('reviewer', 'advisor')):
+            with self.subTest(role=role):
+                self.tmux('set-option', '-p', '-t', pane, '@tether_role', role)
+                tmux_merge.move_pane(pane, self.b, self.run_tmux)
+                self.assertEqual(self.roles(self.b)[pane], role)
+        self.assertEqual(self.roles(self.b)[resident], 'coordinator')
+
+    def test_move_pane_preserves_a_role_changed_during_the_move(self):
+        pane = self.panes(self.a)[0]
+        resident, = self.panes(self.b)
+        for tab in (pane, resident):
+            self.tmux('set-option', '-p', '-t', tab, '@tether_role', 'coordinator')
+
+        def run(argv, **kwargs):
+            result = self.run_tmux(argv, **kwargs)
+            if argv[1] == 'break-pane':
+                self.tmux('set-option', '-p', '-t', pane, '@tether_role', 'reviewer')
+            return result
+
+        tmux_merge.move_pane(pane, self.b, run)
+        self.assertEqual(self.roles(self.b)[pane], 'reviewer')
+
+    def test_merge_session_keeps_only_the_target_coordinator(self):
+        pane, reviewer, other = self.panes(self.a)
+        resident, = self.panes(self.b)
+        for tab, role in ((pane, 'coordinator'), (reviewer, 'reviewer'), (resident, 'coordinator-needs')):
+            self.tmux('set-option', '-p', '-t', tab, '@tether_role', role)
+        tmux_merge.merge_session(self.a, self.b, self.run_tmux)
+        self.assertEqual(self.roles(self.b), {resident: 'coordinator-needs', pane: '', reviewer: 'reviewer', other: ''})
+
+    def test_merge_session_keeps_the_only_coordinator(self):
+        pane = self.panes(self.a)[0]
+        self.tmux('set-option', '-p', '-t', pane, '@tether_role', 'coordinator-off')
+        tmux_merge.merge_session(self.a, self.b, self.run_tmux)
+        self.assertEqual(self.roles(self.b)[pane], 'coordinator-off')
+
+    def check_departing_roots(self, kind, *, unstacked=False):
+        run = self.run_tmux
+        pane, member, other = self.panes(self.a)
+        stack = groups.create(self.a, 'Stack', run, pane=pane, auto=True, root=pane)
+        groups.move(self.a, member, stack['id'], run)
+        also_rooted = groups.create(self.a, 'Also rooted', run, auto=True, root=pane)
+        unrelated = groups.create(self.a, 'Other root', run, pane=other, auto=True, root=other)
+        self.tmux('set-option', '-p', '-t', pane, '@tether_role', 'coordinator-off')
+        if unstacked:
+            groups.move(self.a, pane, '', run, by_user=True)
+            self.assertEqual(groups.group_of_pane(pane, run), (self.a, None))
+
+        moved = tmux_merge.merge(kind, pane, self.b if kind == 'pane' else None, run)
+
+        self.assertEqual(moved['pane'], pane)
+        self.assertEqual(self.roles(moved['session'])[pane], 'coordinator-off')
+        stack.pop('root')
+        also_rooted.pop('root')
+        found = groups.read(self.a, run)
+        self.assertEqual(found, [stack, also_rooted, unrelated])
+        self.assertEqual(groups.group_of_pane(member, run), (self.a, stack))
+
+    def test_move_pane_clears_departing_roots(self):
+        self.check_departing_roots('pane')
+
+    def test_break_out_clears_departing_roots(self):
+        self.check_departing_roots('break')
+
+    def test_move_pane_clears_a_root_in_unstacked(self):
+        self.check_departing_roots('pane', unstacked=True)
+
+    def test_break_out_clears_a_root_in_unstacked(self):
+        self.check_departing_roots('break', unstacked=True)
+
+    def test_move_reports_a_stack_lock_failure_after_the_pane_moves(self):
+        pane = self.panes(self.a)[0]
+        with mock.patch.object(groups, 'LOCK', side_effect=groups.GroupError(503, groups.LOCK_FAILED)):
+            with self.assertRaisesRegex(RuntimeError, 'The pane moved to “beta”, but Tether could not finish'):
+                tmux_merge.move_pane(pane, self.b, self.run_tmux)
+        self.assertIn(pane, self.panes(self.b))
+
+    def test_move_last_pane_closes_source_with_a_stack_root(self):
+        pane, = self.panes(self.b)
+        groups.create(self.b, 'Stack', self.run_tmux, pane=pane, auto=True, root=pane)
+        result = tmux_merge.move_pane(pane, self.a, self.run_tmux)
+        self.assertEqual(result, {'session': self.a, 'name': 'alpha', 'pane': pane})
+        self.assertEqual(self.sessions(), ['alpha'])
 
     def test_break_out_makes_a_new_session_with_only_that_pane(self):
         pane = self.panes(self.a)[0]
