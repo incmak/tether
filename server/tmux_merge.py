@@ -218,6 +218,21 @@ def _window_panes(run, session_id):
     return out
 
 
+def _windows(run, session_id):
+    """The window ids of a session, or None when tmux did not answer."""
+    result = _try_tmux(run, 'list-windows', '-t', session_id + ':', '-F', '#{window_id}')
+    return None if result is None or result.returncode else set(result.stdout.split())
+
+
+def _window_left(run, window, source, target):
+    """True when the window is gone from source and is in target, False when not, None when tmux did not answer.
+    A window linked into both sessions has not left the source."""
+    left, there = _windows(run, source), _windows(run, target)
+    if there is None or (left is None and _session_open(run, source) is not False):
+        return None  # a source that closed has no windows left
+    return window not in (left or set()) and window in there
+
+
 def _merge_cleanup(run, source, moved, coordinators, plan):
     """moved: the panes of the windows whose move the merge confirmed. A later tmux read cannot change it."""
     if moved:
@@ -248,19 +263,24 @@ def merge_session(source, target, run=subprocess.run, keep=None):
     coordinators = source_coordinators - target_coordinators if target_coordinators else set()
     groups.merge_into(source, target, run)  # before the move, so no moved pane points to a missing group
     confirmed = set()  # panes of the windows whose move is confirmed
+    pending = None     # the window whose move is in flight
     try:
         for moved_count, window in enumerate(windows.stdout.split()):
+            pending = window
             moved = _try_tmux(run, 'move-window', '-d', '-s', window, '-t', target + ':')
             if moved is None or moved.returncode:
-                current = _target_session(run, window, gone='')
-                if current is None:
+                left = _window_left(run, window, source, target)
+                if left is None:
                     raise RuntimeError('Could not confirm the move. Refresh the list.')
-                if current != target:
+                if not left:
                     if moved_count:
                         raise RuntimeError('Only part of the session moved. Check both sessions.')
                     _check(moved, 'Could not move the window.')
             confirmed |= window_panes.get(window, set())
+            pending = None
     except CLEANUP_ERRORS as exc:
+        if pending is not None and _window_left(run, pending, source, target):
+            confirmed |= window_panes.get(pending, set())  # it moved, though the first check could not say so
         try:
             _merge_cleanup(run, source, confirmed, coordinators, plan)
         except CLEANUP_ERRORS as cleanup_error:

@@ -524,7 +524,8 @@ class TmuxMergeRecoveryTests(unittest.TestCase):
         self.fake.fail('move-window', applied=True)
 
         def run(argv, **kwargs):
-            if argv[1] == 'display-message' and '#{window_id}\t#{session_id}' in argv:
+            # The check after the move reads the window lists of both sessions (tmux_merge._window_left).
+            if argv[1] == 'list-windows' and any(call[1] == 'move-window' for call in self.fake.calls):
                 raise subprocess.TimeoutExpired(argv, 5)
             return self.fake.run(argv, **kwargs)
 
@@ -791,6 +792,48 @@ class TmuxMergeTests(unittest.TestCase):
             tmux_merge.merge_session(self.a, self.b, run)
         roots = {g['id']: g.get('root') for g in groups.read(self.a, self.run_tmux)}
         self.assertEqual(roots[stack['id']], linked)
+
+    def test_failed_move_of_a_window_linked_into_the_target_keeps_its_root(self):
+        first, _ = self.tmux('list-windows', '-t', self.a + ':', '-F', '#{window_id}').stdout.split()
+        linked = self.tmux('list-panes', '-t', first, '-F', '#{pane_id}').stdout.split()[0]
+        self.assertEqual(self.tmux('link-window', '-s', first, '-t', self.b + ':').returncode, 0)
+        stack = groups.create(self.a, 'Linked', self.run_tmux, auto=True, root=linked)
+
+        def run(argv, **kwargs):
+            if argv[1] == 'move-window' and argv[argv.index('-s') + 1] == first:
+                return subprocess.CompletedProcess(argv, 1, '', 'Could not move the first window.')
+            return self.run_tmux(argv, **kwargs)
+
+        with self.assertRaisesRegex(RuntimeError, 'Could not move the first window'):
+            tmux_merge.merge_session(self.a, self.b, run)
+        roots = {g['id']: g.get('root') for g in groups.read(self.a, self.run_tmux)}
+        self.assertEqual(roots[stack['id']], linked)
+
+    def test_merge_cleans_up_a_move_that_landed_before_its_timeout(self):
+        first, _ = self.tmux('list-windows', '-t', self.a + ':', '-F', '#{window_id}').stdout.split()
+        pane = self.tmux('list-panes', '-t', first, '-F', '#{pane_id}').stdout.split()[0]
+        resident, = self.panes(self.b)
+        for tab in (pane, resident):
+            self.tmux('set-option', '-p', '-t', tab, '@tether_role', 'coordinator')
+        stack = groups.create(self.a, 'Root', self.run_tmux, auto=True, root=pane)
+        state = {'moved': False, 'checks': 0}
+
+        def run(argv, **kwargs):
+            if argv[1] == 'move-window' and not state['moved']:
+                state['moved'] = True
+                self.run_tmux(argv, **kwargs)  # the move lands, but the reply times out
+                raise subprocess.TimeoutExpired(argv, 5)
+            if state['moved'] and argv[1] == 'list-windows' and state['checks'] == 0:
+                state['checks'] += 1
+                raise subprocess.TimeoutExpired(argv, 5)  # the first check also times out
+            return self.run_tmux(argv, **kwargs)
+
+        with self.assertRaisesRegex(RuntimeError, 'Could not confirm the move'):
+            tmux_merge.merge_session(self.a, self.b, run)
+        self.assertEqual(self.roles(self.b)[resident], 'coordinator')
+        self.assertEqual(self.roles(self.b)[pane], '')
+        roots = {g['id']: g.get('root') for g in groups.read(self.a, self.run_tmux)}
+        self.assertIsNone(roots.get(stack['id']))
 
     def test_merge_cleans_up_when_a_later_target_listing_fails(self):
         pane = self.panes(self.a)[0]
