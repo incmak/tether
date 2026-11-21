@@ -4943,6 +4943,81 @@ class ReviewLinksTests(unittest.TestCase):
                     self.assertNotIn('paused', self.links()[0])
                     self.assertTrue(self.links()[0]['awaiting'])
 
+    def test_unreadable_receipts_or_transcript_leave_paused_review_untouched(self):
+        summary = review_links.PARENT_SUMMARY + '\n\nCheck the rows.\n\n' + review_links.PARENT_SUMMARY_END
+        for failure in ('receipts', 'invalid JSON', 'scanner', 'tail'):
+            with self.subTest(failure=failure):
+                self.stopped_review_prompt('claude', 3)
+                transcript = self.file.parent / f'{failure}.jsonl'
+                self.worker['transcript'] = str(transcript)
+                now = datetime.now(timezone.utc).isoformat()
+                with injected_prompts.track_send(self.worker, summary, 'review') as delivery:
+                    write_records(transcript, [dict(claude('user', delivery), uuid=THREAD, timestamp=now),
+                                               dict(claude('assistant', 'Read.'), timestamp=now)])
+                receipt = injected_prompts._file(transcript)
+                before = receipt.read_bytes()
+                target = receipt if failure in ('receipts', 'invalid JSON') else transcript
+                path_open = Path.open
+
+                def open_path(path, *args, **kwargs):
+                    if path == target:
+                        raise PermissionError('read temporarily unavailable')
+                    return path_open(path, *args, **kwargs)
+
+                if failure == 'invalid JSON':
+                    receipt.write_text('{')
+                    unavailable = nullcontext()
+                elif failure == 'tail':
+                    unavailable = patch.object(server, 'open', side_effect=PermissionError('tail unavailable'),
+                                                create=True)
+                else:
+                    unavailable = patch.object(Path, 'open', open_path)
+
+                errors = []
+
+                def read_turn(entry):
+                    try:
+                        return server.review_turn_source(entry)
+                    except Exception as exc:
+                        errors.append(exc)
+                        raise
+
+                self.turn_source = read_turn
+                self.observe(**{'%13': 'Working'})
+                saved = self.file.read_bytes()
+                self.alert.reset_mock()
+                with unavailable:
+                    self.observe(**{'%13': 'Idle'})
+                    self.assertEqual(self.file.read_bytes(), saved)
+                    self.assertEqual((self.links()[0]['paused'], self.links()[0]['rounds']), (True, 3))
+                    self.send.assert_not_called()
+                    self.alert.assert_not_called()
+                    error, = errors
+                    self.assertIsInstance(error, injected_prompts.ReceiptsUnreadable)
+                if failure == 'invalid JSON':
+                    receipt.write_bytes(before)
+                self.assertEqual(self.turn_source(self.worker)[0], 'review-summary')
+                self.observe()
+                self.assertEqual((self.links()[0]['paused'], self.links()[0]['rounds']), (True, 3))
+                self.send.assert_not_called()
+
+    def test_unreadable_between_ticks_turn_leaves_upgrade_pause_untouched(self):
+        self.stopped_review_prompt('claude', 3)
+        rows = self.rows()
+        for row in rows:
+            if row.get('cap'):
+                row.update(paused='upgrade', upgrade_at=time.time())
+            else:
+                row['seen_working'] = True
+        self.file.write_text(json.dumps(rows))
+        self.turn_source = Mock(side_effect=OSError('turn unavailable'))
+        self.alert.reset_mock()
+        self.observe()
+        self.assertEqual(self.rows(), rows)
+        self.assertEqual(self.links()[0]['paused'], 'upgrade')
+        self.send.assert_not_called()
+        self.alert.assert_not_called()
+
     def test_background_turns_do_not_restart_or_reset_rounds(self):
         # A Monitor event, a finished background shell or a scheduled job is not a new task from Mak.
         self.turn_source = Mock(return_value='background')

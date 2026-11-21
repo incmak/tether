@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
+import injected_prompts
 import push
 import review_links
 import server
@@ -27,6 +28,15 @@ ASSISTANT = claude('assistant', 'Done.')
 
 
 class ClassifierTests(unittest.TestCase):
+    def test_unreadable_prompt_provenance_uses_background_source(self):
+        def unavailable(_record, _text):
+            raise injected_prompts.ReceiptsUnreadable('receipt unavailable')
+
+        for agent, records in [('claude', [claude('user', 'Relay'), ASSISTANT]),
+                               ('codex', [codex('user', 'Relay'), codex('assistant', 'Done.')])]:
+            with self.subTest(agent=agent):
+                self.assertEqual(turn_source(agent, records, identify=unavailable), 'background')
+
     def test_rules_table(self):
         for agent, records in [
             ('claude', [claude('user', 'Fix it'), ASSISTANT]),

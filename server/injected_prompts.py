@@ -24,6 +24,10 @@ _lock = threading.Lock()
 _sending = [threading.Lock() for _ in range(32)]
 
 
+class ReceiptsUnreadable(Exception):
+    """The available data cannot establish who sent a prompt."""
+
+
 def _transcript(entry):
     path = entry.get('transcript')
     if entry.get('agent') not in ('claude', 'codex') or not path or entry.get('pending_conversation') or entry.get('ambiguous'):
@@ -47,9 +51,13 @@ def _send_lock(path):
 def _read(file):
     try:
         data = json.loads(file.read_text())
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return {}
+    except (OSError, ValueError, RecursionError) as exc:
+        raise ReceiptsUnreadable(str(exc)) from exc
+    if not isinstance(data, dict):
+        raise ReceiptsUnreadable('Receipt data must be a JSON object')
+    return data
 
 
 def _write(file, data, *, once=False):
@@ -75,29 +83,17 @@ def initialize():
         file = paths.CACHE / 'injected-since.json'
         if not file.exists():
             _write(file, {'since_ms': time.time_ns() // 1_000_000}, once=True)
-        with _lock:
-            now = time.time_ns() // 1_000_000
-            for file in ROOT.glob('*.json'):
-                data = _read(file)
-                path = data.get('transcript')
+        for file in ROOT.glob('*.json'):
+            try:
+                with _lock:
+                    path = _read(file).get('transcript')
                 if not isinstance(path, str):
                     continue
-                receipts = data.get('receipts', [])
                 path = Path(path)
-                try:
-                    path.stat()
-                except FileNotFoundError:
-                    # A send can precede creation of its transcript. Keep its zero anchor.
-                    kept = [r for r in receipts if 'id' not in r and r.get('delivery_id') and r['file'] is None]
-                    changed = len(kept) != len(receipts)
-                except OSError:
-                    continue
-                else:
-                    kept, _, changed = _resolve(path, None, receipts, now)
-                if not kept:
-                    file.unlink(missing_ok=True)
-                elif changed:
-                    _write(file, dict(data, receipts=kept))
+                with _send_lock(path):
+                    _resolve(path, None, cleanup=True)
+            except ReceiptsUnreadable as exc:
+                logging.warning('Could not initialize Tether prompt receipts: %s', exc)
     except OSError as exc:
         logging.warning('Could not initialize Tether prompt receipts: %s', exc.strerror)
 
@@ -158,16 +154,19 @@ def strip_delivery_id(text):
     return _split_delivery(text)[0]
 
 
-def _record(path, text, kind, *, agent, before, delivery_id, tabs):
+def _record(path, text, kind, *, before, delivery_id, tabs):
     file = _file(path)
     metadata = {'prompt': kind, **({'tabs': tabs} if kind == 'status' else {})}
     with _lock:
         try:
-            receipts, _, _ = _resolve(path, agent, _read(file).get('receipts', []), before['at'])
-            receipts.append(dict(before, delivery_id=delivery_id, hash=_hash(_text(text)), metadata=metadata))
-            _write(file, {'transcript': str(path), 'receipts': receipts})
-        except OSError as exc:
-            logging.warning('Could not save Tether prompt receipt: %s', exc.strerror)
+            data = _read(file)
+            scanned = data.get('scanned')
+            if scanned and (scanned['file'] != before['file'] or scanned['offset'] > before['offset']):
+                data.pop('scanned')  # This anchor was not covered by the saved scan.
+            receipt = dict(before, delivery_id=delivery_id, hash=_hash(_text(text)), metadata=metadata)
+            _write(file, dict(data, transcript=str(path), receipts=[*data.get('receipts', ()), receipt]))
+        except (OSError, ReceiptsUnreadable) as exc:
+            logging.warning('Could not save Tether prompt receipt: %s', exc)
 
 
 @contextmanager
@@ -178,13 +177,18 @@ def track_send(entry, text, kind, *, tabs=None):
         yield text
         return
     with _send_lock(path):
+        try:
+            # Resolve earlier sends before taking the new anchor. Its record may arrive during the send.
+            _resolve(path, entry['agent'])
+        except ReceiptsUnreadable:
+            pass  # Retry the old receipts later. An unread transcript can still receive a new prompt.
         before = anchor(entry)
         if before is None:
             yield text
             return
         delivery_id = secrets.token_hex(8)
         yield f'{text}\n\n[Tether id {delivery_id}]'
-        _record(path, text, kind, agent=entry['agent'], before=before, delivery_id=delivery_id, tabs=tabs)
+        _record(path, text, kind, before=before, delivery_id=delivery_id, tabs=tabs)
 
 
 def revision(entry):
@@ -225,52 +229,125 @@ def _candidate(agent, offset, record):
     return identifier, (m['text'] for m in messages if m['role'] == 'user' and not m.get('kind'))
 
 
-def _bind(path, agent, pending, bound):
-    """Read at the earliest unbound send, including records outside the chat window."""
-    with path.open('rb') as stream:
+def _bind(path, agent, pending, bound, scanned):
+    """Scan the unread suffix of the transcript for pending deliveries."""
+    from history import records
+
+    try:
+        stream = path.open('rb')
+    except FileNotFoundError:
+        return None, 0, {}, None, False
+    with stream:
         info = os.fstat(stream.fileno())
         identity = [info.st_dev, info.st_ino]
-        pending = {r['delivery_id']: r for r in pending if r['offset'] <= info.st_size and r['file'] in (None, identity)}
+        end = info.st_size
+        pending = {key: r for key, r in pending.items() if r['offset'] <= end and r['file'] in (None, identity)}
         if not pending:
-            return
+            return identity, end, {}, None, False
+        used = {key for key, r in bound.items() if r.get('file') in (None, identity)}
+        matches = {}
         offset = min(r['offset'] for r in pending.values())
-        if offset:
+        if scanned and scanned['file'] == identity and offset <= scanned['offset'] <= end:
+            offset = scanned['offset']
+        elif offset:
             stream.seek(offset - 1)
             if stream.read(1) != b'\n':
-                stream.readline()  # the anchor can fall inside a record already being written
-        while pending and stream.tell() < info.st_size:
-            start = stream.tell()
-            line = stream.readline(info.st_size - start)
-            if not line.endswith(b'\n'):
-                break  # Do not bind an unfinished native record.
+                prefix = stream.readline(end - offset)
+                if not prefix.endswith(b'\n'):
+                    return identity, end, {}, None, False
+                offset += len(prefix)  # The anchor fell inside a record that started before the send.
+        for start, record, _, length in records(stream, offset, end):
+            offset = start + length
+            if not isinstance(record, dict):
+                continue
             try:
-                record = json.loads(line)
                 identifier, texts = _candidate(agent, start, record)
-                if not identifier or identifier in bound:
+                if not identifier or identifier in used:
                     continue
                 for text in texts:
                     prompt, delivery_id = _split_delivery(_text(text))
                     match = pending.get(delivery_id)
                     if match and match['offset'] <= start and match['hash'] == _hash(prompt):
-                        match['id'] = identifier
-                        bound[identifier] = match
+                        matches[delivery_id] = dict(match, id=identifier, file=identity)
+                        used.add(identifier)
                         del pending[delivery_id]
                         break
             except (ValueError, AttributeError, TypeError):
                 continue
+            if not pending:
+                break
+    try:
+        current = path.stat()
+    except FileNotFoundError:
+        return None, 0, {}, None, False
+    if [current.st_dev, current.st_ino] != identity or current.st_size < offset:
+        raise ReceiptsUnreadable('Transcript changed during the receipt scan')
+    return identity, current.st_size, matches, {'file': identity, 'offset': offset}, offset == end == current.st_size
 
 
-def _resolve(path, agent, receipts, now):
+def _pending(receipts):
+    return {r['delivery_id']: r for r in receipts if 'id' not in r and r.get('delivery_id')}
+
+
+def _resolve(path, agent, *, cleanup=False):
+    file = _file(path)
+    with _lock:
+        data = _read(file)
+    receipts = data.get('receipts', ())
     bound = {r['id']: r for r in receipts if 'id' in r}
-    pending = [r for r in receipts if 'id' not in r and r.get('delivery_id')]
-    previous = len(bound)
-    if pending:
+    pending = _pending(receipts)
+    if not pending and not cleanup:
+        return bound
+    previous = data.get('scanned')
+    try:
+        if pending:
+            identity, size, matches, scanned, covered = _bind(path, agent, pending, bound, previous)
+        else:  # Startup can retire bound receipts for a deleted transcript without reading it.
+            try:
+                info = path.stat()
+                identity = [info.st_dev, info.st_ino]
+                size = info.st_size
+            except FileNotFoundError:
+                identity, size = None, 0
+            matches, scanned, covered = {}, None, False
+    except OSError as exc:
+        raise ReceiptsUnreadable(str(exc)) from exc
+
+    now = time.time_ns() // 1_000_000
+    with _lock:
+        current = _read(file)
+        kept = []
+        for receipt in current.get('receipts', ()):
+            delivery_id = receipt.get('delivery_id')
+            if 'id' in receipt:
+                if bound.get(receipt['id']) != receipt or identity is not None:
+                    kept.append(receipt)  # A bound record id stays valid while a transcript exists at this path.
+            elif delivery_id:
+                if pending.get(delivery_id) != receipt:
+                    kept.append(receipt)
+                elif delivery_id in matches:
+                    kept.append(matches[delivery_id])
+                elif receipt['file'] in (None, identity) and not (
+                        covered and receipt['offset'] <= size and now - receipt['at'] > PENDING_MAX_AGE_MS):
+                    kept.append(receipt)
+        updated = dict(current, receipts=kept)
+        cursor = current.get('scanned')
+        if cursor and cursor == previous and (cursor['file'] != identity or cursor['offset'] > size):
+            updated.pop('scanned')
+            cursor = None
+        if scanned and (cursor is None or cursor['file'] == identity and cursor['offset'] < scanned['offset']):
+            cursor = updated['scanned'] = scanned
+        if cursor and any(r != pending.get(key) and r['offset'] < cursor['offset']
+                          for key, r in _pending(kept).items()):
+            updated.pop('scanned')  # A receipt added after the snapshot needs its own anchor covered.
         try:
-            _bind(path, agent, pending, bound)
-        except OSError:
-            return receipts, bound, len(bound) != previous  # An unread delivery may still bind later.
-    kept = [r for r in receipts if 'id' in r or r.get('delivery_id') and now - r['at'] <= PENDING_MAX_AGE_MS]
-    return kept, bound, len(kept) != len(receipts) or len(bound) != previous
+            if cleanup and not kept:
+                file.unlink(missing_ok=True)
+            elif updated != current:
+                _write(file, updated)
+        except OSError as exc:
+            logging.warning('Could not persist Tether prompt bindings: %s', exc)
+    return {r['id']: r for r in kept if 'id' in r}
 
 
 def bindings(entry):
@@ -278,22 +355,17 @@ def bindings(entry):
     path = _transcript(entry)
     if path is None:
         return {}
-    file = _file(path)
-    with _send_lock(path), _lock:
-        data = _read(file)
-        kept, bound, changed = _resolve(path, entry['agent'], data.get('receipts', []), time.time_ns() // 1_000_000)
-        if changed:
-            try:
-                _write(file, dict(data, receipts=kept))
-            except OSError as exc:
-                logging.warning('Could not persist Tether prompt bindings: %s', exc.strerror)
-        return bound
+    with _send_lock(path):
+        return _resolve(path, entry['agent'])
 
 
 def mark(entry, messages):
     """Decorate user records without changing the cached transcript."""
-    bound = bindings(entry)
-    cutover = cutover_ms()
+    try:
+        bound = bindings(entry)
+        cutover = cutover_ms()
+    except ReceiptsUnreadable:
+        bound, cutover = {}, None  # The next view can reuse the raw chat and retry the receipt.
     if not bound and cutover is None and not any('_record_id' in message for message in messages):
         return messages
     result = []

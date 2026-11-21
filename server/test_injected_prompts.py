@@ -258,6 +258,126 @@ class InjectedPromptTests(unittest.TestCase):
                 marked, = self.messages(entry)
                 self.assertEqual((marked.get('source'), marked['text']), ('tether', 'Delivered promptly'))
 
+    def test_old_delivery_binds_to_final_json_with_or_without_newline(self):
+        summary = review_links.PARENT_SUMMARY + '\n\nCheck the rows.\n\n' + review_links.PARENT_SUMMARY_END
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                entry = self.entry(agent)
+                self.append(entry, 'An earlier prompt')
+                self.send(entry, summary)
+                path = entry['transcript']
+                path.write_bytes(path.read_bytes().removesuffix(b'\n'))
+                self.now += 8 * 24 * 60 * 60
+                raw = self.raw(entry)[-1]
+                record = server.notification_records(entry, with_offset=True)[-1]
+                self.assertEqual(review_links.prompt_source(entry, record, raw['text']), 'review-summary')
+                self.assertEqual(set(injected_prompts.bindings(entry)), {raw['_record_id']})
+                self.assertEqual(self.sources(entry), [None, 'tether'])
+                with path.open('ab') as transcript:
+                    transcript.write(b'\n')
+                self.append(entry, 'Reviewed.', assistant=True)
+                self.assertEqual(server.review_turn_source(entry)[0], 'review-summary')
+                self.assertEqual(self.sources(entry), [None, 'tether', None])
+
+    def test_old_pending_delivery_survives_partial_json_until_it_is_readable(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                entry = self.entry(agent)
+                self.append(entry, 'An earlier prompt')
+                self.send(entry, 'Late delivery')
+                path = entry['transcript']
+                complete = path.read_bytes()
+                path.write_bytes(complete[:-8])
+                self.now += 8 * 24 * 60 * 60
+                self.assertEqual(self.sources(entry), [None])
+                receipt = injected_prompts._file(path)
+                pending, = json.loads(receipt.read_text())['receipts']
+                self.assertNotIn('id', pending)
+                with path.open('ab') as transcript:
+                    transcript.write(complete[-8:])
+                self.assertEqual(self.sources(entry), [None, 'tether'])
+
+    def test_pending_delivery_is_retired_when_its_transcript_is_replaced(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                entry = self.entry(agent)
+                self.append(entry, 'An earlier prompt')
+                with injected_prompts.track_send(entry, 'Delayed delivery', 'review') as delivery:
+                    pass
+                path = entry['transcript']
+                path.rename(path.with_suffix('.old'))
+                self.append(entry, delivery)
+                self.assertEqual(self.sources(entry), [None])
+                receipt = injected_prompts._file(path)
+                self.assertEqual(json.loads(receipt.read_text())['receipts'], [])
+
+    def test_bound_delivery_survives_a_copied_transcript(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                entry = self.entry(agent)
+                with injected_prompts.track_send(entry, 'Bound delivery', 'review') as delivery:
+                    pass
+                self.append(entry, delivery)
+                pending = injected_prompts._file(entry['transcript'])
+                with injected_prompts.track_send(entry, 'Never delivered', 'review'):
+                    pass  # a pending receipt makes the next read scan and merge
+                bound = set(injected_prompts.bindings(entry))
+                self.assertEqual(len(bound), 1)
+                path = entry['transcript']
+                copy = path.with_suffix('.copy')
+                copy.write_bytes(path.read_bytes())
+                copy.replace(path)  # a copy or move gives the same records a new inode
+                self.assertEqual(set(injected_prompts.bindings(entry)), bound)
+                self.assertTrue(pending.exists())
+
+    def test_pending_binding_reads_only_new_transcript_bytes(self):
+        path = self.chat['transcript']
+        with injected_prompts.track_send(self.chat, 'Delayed delivery', 'review') as delivery:
+            pass
+        for _ in range(24):
+            self.append(self.chat, 'x' * 100_000, assistant=True)
+        path_open = Path.open
+        reads = []
+        opens = []
+
+        def open_path(file, *args, **kwargs):
+            stream = path_open(file, *args, **kwargs)
+            if file != path:
+                return stream
+            opens.append(file)
+            wrapped = Mock(wraps=stream)
+            wrapped.__enter__ = Mock(return_value=wrapped)
+            wrapped.__exit__ = Mock(side_effect=stream.__exit__)
+
+            def read(method, size):
+                data = method(size)
+                reads.append((len(data), injected_prompts._lock.locked()))
+                return data
+
+            wrapped.read.side_effect = lambda size=-1: read(stream.read, size)
+            wrapped.readline.side_effect = lambda size=-1: read(stream.readline, size)
+            return wrapped
+
+        with patch.object(Path, 'open', open_path):
+            self.assertEqual(injected_prompts.bindings(self.chat), {})
+            first_reads = reads.copy()
+            reads.clear()
+            self.assertEqual(injected_prompts.bindings(self.chat), {})
+            self.assertEqual(sum(size for size, _ in reads), 0)
+            self.assertGreater(sum(size for size, _ in first_reads), 2 * 1024 * 1024)
+            self.assertFalse(any(locked for _, locked in first_reads))
+            info = path.stat()
+            receipt = injected_prompts._file(path)
+            self.assertEqual(json.loads(receipt.read_text())['scanned'],
+                             {'file': [info.st_dev, info.st_ino], 'offset': info.st_size})
+            self.append(self.chat, delivery)
+            reads.clear()
+            self.assertEqual(len(injected_prompts.bindings(self.chat)), 1)
+            self.assertLess(sum(size for size, _ in reads), 1024)
+            opens.clear()
+            self.assertEqual(len(injected_prompts.bindings(self.chat)), 1)
+            self.assertEqual(opens, [])
+
     def test_new_send_binds_old_delivery_before_pruning_undelivered_receipts(self):
         for agent in ('claude', 'codex'):
             with self.subTest(agent=agent):
@@ -296,11 +416,50 @@ class InjectedPromptTests(unittest.TestCase):
     def test_unreadable_transcript_defers_age_pruning(self):
         self.send(self.chat, 'Old delivery')
         self.now += 8 * 24 * 60 * 60
-        with patch.object(injected_prompts, '_bind', side_effect=PermissionError):
-            self.assertEqual(injected_prompts.bindings(self.chat), {})
+        raw = self.raw(self.chat)
+        path_open = Path.open
+
+        def open_path(file, *args, **kwargs):
+            if file == self.chat['transcript'] and args == ('rb',):
+                raise PermissionError('transcript unavailable')
+            return path_open(file, *args, **kwargs)
+
+        with patch.object(Path, 'open', open_path):
+            with self.assertRaises(injected_prompts.ReceiptsUnreadable):
+                injected_prompts.bindings(self.chat)
+            self.assertIsNone(injected_prompts.mark(self.chat, raw)[0].get('source'))
             self.send(self.chat, 'Another delivery')
+            receipt = injected_prompts._file(self.chat['transcript'])
+            before = receipt.read_bytes()
             injected_prompts.initialize()
+            self.assertEqual(receipt.read_bytes(), before)
         self.assertEqual(self.sources(), ['tether', 'tether'])
+
+    def test_unreadable_receipts_allow_chat_and_previews_to_recover(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                entry = self.entry(agent)
+                self.send(entry, 'Relay started this chat')
+                self.append(entry, 'Actual user request')
+                path = entry['transcript']
+                if agent == 'codex':
+                    with sqlite3.connect(self.folder / 'state_1.sqlite') as db:
+                        db.execute('CREATE TABLE threads (id TEXT, rollout_path TEXT, first_user_message TEXT)')
+                        db.execute('INSERT INTO threads VALUES (?, ?, ?)', (CHAT_ID, str(path), 'Relay started this chat'))
+                receipt = injected_prompts._file(path)
+                saved = receipt.read_bytes()
+                receipt.write_text('{')
+                with patch.object(history.paths, 'CODEX', self.folder):
+                    def preview():
+                        return (history.preview(path, path.stat()) if agent == 'claude'
+                                else history.find_chat(CHAT_ID, 'codex'))
+
+                    self.assertEqual(self.sources(entry), [None, None])
+                    self.assertTrue(preview()['text'].startswith('Relay started this chat'))
+                    self.assertNotIn(path, history._previews)
+                    receipt.write_bytes(saved)
+                    self.assertEqual(self.sources(entry), ['tether', None])
+                    self.assertEqual(preview()['text'], 'Actual user request')
 
     def test_binding_does_not_use_the_native_timestamp(self):
         with injected_prompts.track_send(self.chat, 'Clock skew', 'review') as delivery:

@@ -40,6 +40,25 @@ def keep_tail(state):
         state['dropped'] += excess
 
 
+def records(stream, start, end=None):
+    """Yield byte offsets, decoded records, newline flags and byte lengths."""
+    stream.seek(start)
+    offset = start
+    while end is None or offset < end:
+        line = stream.readline() if end is None else stream.readline(end - offset)
+        if not line:
+            break
+        complete = line.endswith(b'\n')
+        try:
+            record = json.loads(line)
+        except ValueError:
+            if not complete:
+                break  # Pick up a record still being written on the next read.
+            record = None
+        yield offset, record, complete, len(line)
+        offset += len(line)
+
+
 def advance(path, cached, fresh, consume, trim, *, info=None, with_offset=False):
     """Advance a caller-owned parser record under the path lock. Return None if stat fails."""
     if info is None:
@@ -56,21 +75,9 @@ def advance(path, cached, fresh, consume, trim, *, info=None, with_offset=False)
             stream.seek(cached['offset'])
             if cached.pop('unterminated', False) and stream.read(1) == b'\n':
                 cached['offset'] += 1  # the newline that finished a record already consumed
-            stream.seek(cached['offset'])
             since_trim = 0
-            while True:
-                line = stream.readline()
-                if not line:
-                    break
-                complete = line.endswith(b'\n')
-                try:
-                    record = json.loads(line)
-                except ValueError:
-                    if not complete:
-                        break  # a record still being written is picked up on the next call
-                    record = None
-                offset = cached['offset']
-                cached['offset'] += len(line)
+            for offset, record, complete, length in records(stream, cached['offset']):
+                cached['offset'] += length
                 index, cached['index'] = cached['index'], cached['index'] + 1
                 cached['unterminated'] = not complete
                 if record is not None:
@@ -170,22 +177,20 @@ def user_title(entry, limit=80, *, bound=()):
 
 def _head_records(path):
     with path.open('rb') as stream:
-        while line := stream.readline():
-            offset = stream.tell() - len(line)
-            try:
-                entry = json.loads(line)
-            except ValueError:
-                continue
+        for offset, entry, _, _ in records(stream, 0):
             if isinstance(entry, dict):
                 yield offset, entry
 
 
 def preview(path, info):
-    bound = injected_prompts.bindings({'transcript': path, 'agent': 'claude'})
-    signature = (info.st_mtime_ns, info.st_size, frozenset(bound))
+    try:
+        bound = injected_prompts.bindings({'transcript': path, 'agent': 'claude'})
+        signature = (info.st_mtime_ns, info.st_size, frozenset(bound))
+    except injected_prompts.ReceiptsUnreadable:
+        bound, signature = {}, None
     with _preview_lock:
         cached = _previews.get(path)
-        if cached and cached[0] == signature:
+        if signature is not None and cached and cached[0] == signature:
             return dict(cached[1])
         with open(path, 'rb') as stream:
             head = stream.read(PREVIEW_BYTES)
@@ -230,7 +235,8 @@ def preview(path, info):
                 title = custom_title
         result = {'id': path.stem, 'title': title or first_user[:80] or path.stem, 'text': first_user, 'cwd': cwd,
                   'time': datetime.fromtimestamp(info.st_mtime, timezone.utc).isoformat()}
-        _previews[path] = (signature, result)
+        if signature is not None:
+            _previews[path] = (signature, result)
         return dict(result)
 
 
@@ -289,14 +295,14 @@ def _codex_chats():
                 rollout = row.get('rollout_path')
                 changed = None
                 if isinstance(rollout, str) and rollout:
-                    bound = injected_prompts.bindings({'transcript': rollout, 'agent': 'codex'})
-                    if bound:
-                        try:
+                    try:
+                        bound = injected_prompts.bindings({'transcript': rollout, 'agent': 'codex'})
+                        if bound:
                             path = Path(rollout)
                             info = path.stat()
                             changed = _codex_relay_title(path, (info.st_ino, info.st_size, info.st_mtime_ns), frozenset(bound))
-                        except OSError:
-                            pass
+                    except (OSError, injected_prompts.ReceiptsUnreadable):
+                        pass
                 if changed is not None:
                     text = changed
                 titles = (row.get('name'), row.get('title'), text) if changed is None else (row.get('name'), text, identifier)

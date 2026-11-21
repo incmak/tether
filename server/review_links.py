@@ -1237,7 +1237,8 @@ def prompt_source(entry, record, text):
     identifier = record.get('uuid') if entry.get('agent') == 'claude' else None
     if entry.get('agent') == 'codex' and type(record.get('_offset')) is int:
         identifier = injected_prompts.codex_id(record['_offset'], record.get('timestamp'))
-    receipt = injected_prompts.bindings(entry).get(identifier) if isinstance(identifier, str) else None
+    bindings = injected_prompts.bindings(entry)
+    receipt = bindings.get(identifier) if isinstance(identifier, str) else None
     if receipt is not None:
         return (_relay_source(text) if receipt['metadata']['prompt'] == 'review' else None) or 'tether'
     timestamp = record.get('created_at' if entry.get('agent') == 'antigravity' else 'timestamp')
@@ -1410,6 +1411,9 @@ def _turn_ended_on_limit(worker):
 def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clear, delivery,
           work_mark, review_reply, stalled_replies, turn_source, turn_reads, sources, level, parent, reply_effect,
           scope=None, commit=None, fresh=None, folder=None):
+    key = _cap_key(link)
+    if key in turn_reads and turn_reads[key] is None:
+        raise injected_prompts.ReceiptsUnreadable('Review turn source unavailable this tick')
     worker = entries.get(link['worker'])
     reviewer = entries.get(link['reviewer'])
     if link['reviewer_thread'] is None:
@@ -1434,7 +1438,6 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
     link.pop('lost_ticks', None)
     link.pop('lost_reason', None)
     state = status(worker)['state']
-    key = _cap_key(link)
     turn = key, cap.get('cap_reset')
     # Only the correction's own pending turn is not a work turn. A marker left by another turn must not block reviews.
     correction_turn = ((feedback := cap.get('feedback_turn')) is not None
@@ -1446,8 +1449,8 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
     if state == 'Idle' and (between_ticks or 'restart' in cap or link['seen_working'] or link.get('approved_turn')
                             or cap.get('review_prompts') or cap.get('feedback_turn') or turn in sources):
         if key not in turn_reads:
-            read = (_call(turn_source, worker) if between_ticks else
-                    turn_source(worker) if turn_source is not None else 'user')
+            turn_reads[key] = None  # Defer every link for this cap if the read fails.
+            read = turn_source(worker) if turn_source is not None else (None if between_ticks else 'user')
             turn_reads[key] = read if isinstance(read, tuple) else (read, None, None)
         if upgrade_paused:
             # A parent stamps the cap before it sends the prompt. The store has it once its turn is readable.
@@ -2007,13 +2010,15 @@ def _apply_step(old, updated, snapshot, cap, entries, delivery):
             _release(key, delivery)
 
 
-def _claim_upgrade_alerts(rows, entries):
+def _claim_upgrade_alerts(rows, entries, unavailable):
     """Return the alerts to send, and whether a deferral changed the rows."""
     alerts, deferred = [], False
     for cap in rows:
         if not _is_cap(cap) or cap.get('paused') != UPGRADE_PAUSE or cap.get('upgrade_alerted'):
             continue
         key = _cap_key(cap)
+        if key in unavailable:
+            continue
         worker = entries.get(key[0])
         current = helper_tabs._thread(worker) if worker is not None else None
         if key[1] is None:
@@ -2053,9 +2058,8 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
             bound = False
             for worker in bindable & by_pane.keys():
                 bound |= _bind_worker(rows, worker, helper_tabs._thread(by_pane[worker]))
-            upgrade_alerts, deferred = _claim_upgrade_alerts(rows, by_pane) if alert is not None else ([], False)
-            if bound or deferred or upgrade_alerts or any(_is_cap(row) and row.get('pending_adoption')
-                                             and _cap_key(row) not in _feedback_in_flight for row in rows):
+            if bound or any(_is_cap(row) and row.get('pending_adoption')
+                            and _cap_key(row) not in _feedback_in_flight for row in rows):
                 _write(rows)
         links = [row for row in rows if _is_link(row)]
         upgrade_paused = {_cap_key(row) for row in rows if _is_cap(row) and row.get('paused') == UPGRADE_PAUSE}
@@ -2072,18 +2076,6 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
                     return False
                 return True
             return False
-
-        for key, upgrade_at, message in upgrade_alerts:
-            # Success means the callback returned. Push delivery runs in a daemon thread and is not tracked here.
-            if notify(key, message):
-                with _lock:
-                    stored_rows = _read()
-                    stored = _cap_for(stored_rows, key)
-                    if (stored is not None and stored.get('paused') == UPGRADE_PAUSE
-                            and stored.get('upgrade_at') == upgrade_at):
-                        stored['upgrade_alerted'] = True
-                        _write(stored_rows)
-                        _cap_for(rows, key)['upgrade_alerted'] = True
 
         stalled_replies = {}
         turn_reads = {}
@@ -2148,9 +2140,26 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
                              f'“{name}”: Tether could not find the reviewer reply. '
                              f'Ask the reviewer again, or send its latest reply. Latest reply: “{preview}”'),
                        review={'worker': key[0], 'reviewer': reviewer, 'id': updated['stalled']})
+        unavailable = {key for key, read in turn_reads.items() if read is None}
         with _lock:
-            caps = [row for row in _read() if _is_cap(row)]
+            rows = _read()
+            caps = [row for row in rows if _is_cap(row)]
+            upgrade_alerts, deferred = _claim_upgrade_alerts(rows, by_pane, unavailable) if alert is not None else ([], False)
+            if deferred or upgrade_alerts:
+                _write(rows)
+        for key, upgrade_at, message in upgrade_alerts:
+            # Success means the callback returned. Push delivery runs in a daemon thread and is not tracked here.
+            if notify(key, message):
+                with _lock:
+                    stored_rows = _read()
+                    stored = _cap_for(stored_rows, key)
+                    if (stored is not None and stored.get('paused') == UPGRADE_PAUSE
+                            and stored.get('upgrade_at') == upgrade_at):
+                        stored['upgrade_alerted'] = True
+                        _write(stored_rows)
         for cap in caps:
+            if _cap_key(cap) in unavailable:
+                continue
             try:
                 notify(_cap_key(cap), _step_parent(cap, by_pane, status, send, clear))
             except Exception:

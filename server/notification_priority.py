@@ -3,6 +3,7 @@ from datetime import datetime
 import re
 import codex_messages
 from antigravity import transcript_message
+import injected_prompts
 
 from agents import task_notice, tidy_user_text
 
@@ -35,13 +36,15 @@ def _timestamp(record):
     return None
 
 
-def turn_source(agent, records, *, identify=None, distinguish_missing=False, with_time=False, latest_turn=False):
+def turn_source(agent, records, *, identify=None, distinguish_missing=False, with_time=False, latest_turn=False,
+                require_receipts=False):
     """Find the delivered prompt before the latest assistant record.
 
     Tool results and debug copies are not prompts. Claude sidechains belong to another agent.
     Codex and Antigravity currently expose no reliable background-origin flag.
     With latest_turn, any prompt after the latest assistant record gives 'unknown': that turn has no
     reply yet, so the prompt before that record belongs to an earlier turn.
+    Unreadable receipts use the background fallback unless the caller must defer its decision.
     """
     finished_at = None
 
@@ -49,7 +52,15 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
         return (source, _timestamp(record) if record is not None else None, finished_at) if with_time else source
 
     def prompt_source(record, text, background=False):
-        return result('background' if background else (identify(record, text) if identify else None) or 'user', record)
+        source = 'background' if background else None
+        if not background and identify is not None:
+            try:
+                source = identify(record, text)
+            except injected_prompts.ReceiptsUnreadable:
+                if require_receipts:
+                    raise
+                source = 'background'
+        return result(source or 'user', record)
 
     if agent == 'antigravity':
         # Exports update old steps out of order. Keep each step's newest version.
