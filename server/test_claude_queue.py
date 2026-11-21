@@ -1,5 +1,6 @@
 """Claude's pending inputs follow the transcript queue without becoming chat messages."""
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import tempfile
@@ -11,6 +12,7 @@ import server
 
 
 TIME = '2026-11-21T09:00:00Z'
+SAMPLED = datetime(2026, 11, 21, 9, 0, 1, tzinfo=timezone.utc).timestamp()
 NOTICE = '  <task-notification><summary>Done</summary></task-notification>'
 PEER = '<cross-session-message from-name="Claude">Check the job.</cross-session-message>'
 PEER_PREFIX = 'Another Claude session sent a message:\n'
@@ -20,8 +22,8 @@ def operation(name, **fields):
     return dict(type='queue-operation', operation=name, **fields)
 
 
-def enqueue(text, **fields):
-    return operation('enqueue', content=text, timestamp=TIME, **fields)
+def enqueue(text, timestamp=TIME, **fields):
+    return operation('enqueue', content=text, timestamp=timestamp, **fields)
 
 
 def user(content, **fields):
@@ -203,6 +205,7 @@ class ClaudeQueueTests(unittest.TestCase):
                     self.assertEqual(data['messages'], [])
 
     def test_payload_hides_stale_entries_on_the_next_turn(self):
+        self.enterContext(patch.object(server.time, 'time', return_value=SAMPLED))
         self.append(enqueue('A'))
         first = self.snapshot()
         queued_a = {'id': 0, 'text': 'A', 'time': TIME}
@@ -226,6 +229,38 @@ class ClaudeQueueTests(unittest.TestCase):
             self.assertEqual(server.chat_payload(self.entry)['queued'], [])
             self.assertEqual(server.STALE_QUEUE[self.entry['transcript']], {1})
 
+    def test_idle_does_not_mark_an_enqueue_after_the_status_sample_stale(self):
+        self.append(enqueue('Older'))
+        status = self.payload_status()
+        clock = self.enterContext(patch.object(server.time, 'time', return_value=SAMPLED))
+        new_time = '2026-11-21T14:30:02+05:30'
+
+        def enqueue_during_status(_):
+            self.append(enqueue('Newer', timestamp=new_time))
+            clock.return_value = SAMPLED + 2
+            return {'state': 'Idle', 'approval': None}
+
+        status.side_effect = enqueue_during_status
+        self.assertEqual(server.chat_payload(self.entry)['queued'], [])
+        status.side_effect = None
+        status.return_value = {'state': 'Working', 'approval': None}
+        self.assertEqual(server.chat_payload(self.entry)['queued'], [
+            {'id': 1, 'text': 'Newer', 'time': new_time},
+        ])
+
+    def test_idle_preserves_entries_without_a_time_strictly_before_the_sample(self):
+        self.enterContext(patch.object(server.time, 'time', return_value=SAMPLED))
+        self.append(operation('enqueue', content='Missing'),
+                    enqueue('Invalid', timestamp='invalid'),
+                    enqueue('No offset', timestamp='2026-11-21T09:00:00'),
+                    enqueue('Equal', timestamp='2026-11-21T09:00:01.000Z'))
+        status = self.payload_status()
+        status.return_value = {'state': 'Idle', 'approval': None}
+        self.assertEqual(server.chat_payload(self.entry)['queued'], [])
+        status.return_value = {'state': 'Working', 'approval': None}
+        queued = server.chat_payload(self.entry)['queued']
+        self.assertEqual([item['text'] for item in queued], ['Missing', 'Invalid', 'No offset', 'Equal'])
+
     def test_unknown_hides_the_queue_without_marking_entries_stale(self):
         self.append(enqueue('A'))
         status = self.payload_status()
@@ -237,6 +272,7 @@ class ClaudeQueueTests(unittest.TestCase):
                 self.assertNotIn(self.entry['transcript'], server.STALE_QUEUE)
 
     def test_idle_marks_even_entries_outside_the_display_cap_stale(self):
+        self.enterContext(patch.object(server.time, 'time', return_value=SAMPLED))
         self.append(*(enqueue(str(index)) for index in range(51)))
         status = self.payload_status()
         status.return_value = {'state': 'Idle', 'approval': None}
@@ -257,9 +293,10 @@ class ClaudeQueueTests(unittest.TestCase):
         ])
 
     def test_stale_cache_evicts_the_oldest_transcript_and_skips_missing_paths(self):
+        self.enterContext(patch.object(server.time, 'time', return_value=SAMPLED))
         server.STALE_QUEUE.update({f'transcript-{index}': {0} for index in range(200)})
         with patch.object(server, 'live_status', return_value={'state': 'Idle', 'approval': None}), \
-             patch.object(server, 'snapshot', return_value={'messages': [], 'queued': [{'id': 0}]}), \
+             patch.object(server, 'snapshot', return_value={'messages': [], 'queued': [{'id': 0, 'time': TIME}]}), \
              patch.object(server.shell_log, 'merge', side_effect=lambda _, messages: messages):
             server.chat_payload(dict(self.entry, transcript=None))
             self.assertIn('transcript-0', server.STALE_QUEUE)

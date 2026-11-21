@@ -25,9 +25,10 @@ assert.deepEqual(shown(['again', 'again'], ['again']), ['again'])
 assert.deepEqual(shown(['again', 'again'], ['again', 'again']), [])
 // Whitespace and "! ls" vs "!ls" count as the same text.
 assert.deepEqual(shown(['! ls  -la', 'other'], ['!ls -la']), ['other'])
-// The server tidies a long local text: the 80-character key still matches the entry's start.
-const long = `${'Please check the deploy log. '.repeat(4)}[pasted block]`
-assert.deepEqual(shown([`${long.slice(0, 100)} (tidied)`, 'Friday sent this'], [long]), ['Friday sent this'])
+// Two long prompts that share their first 80 characters: only the same text hides an entry (round 3 review cases).
+const start = 'Please check the deploy log for the share page and the files page, then list every error '
+assert.deepEqual(shown([`${start}from Friday`], [`${start}from this tab`]), [`${start}from Friday`])
+assert.deepEqual(shown([`${start}a`, `${start}b`], [`${start}b`]), [`${start}a`])
 // Nothing local: every entry shows. Nothing queued: nothing shows.
 assert.deepEqual(shown(['a', 'b'], []), ['a', 'b'])
 assert.deepEqual(shown([], ['a']), [])
