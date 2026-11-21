@@ -92,7 +92,7 @@ REFUSED = {
         'share/list', 'share/raw/{}', 'share/thumb/{}', 'share/uploads', 'share/uploads/{}', 'tool-image',
         # Optional panels and detail views have no fixture contract. The verify
         # browser relay answers the chat stream with 204 so the UI polls instead.
-        'activity', 'activity/export', 'attention', 'audit', 'auto-merge', 'autonomy', 'autonomy/setup',
+        'activity', 'activity/export', 'attention', 'attention/log', 'audit', 'auto-merge', 'autonomy', 'autonomy/setup',
         'claude-advisor', 'codex-level', 'codex-provider', 'commit-gate', 'groups/context',
         'history', 'history/hidden', 'live', 'projects/advisor-entry', 'projects/advisor-log',
         'projects/note', 'search', 'side-shells', 'stream', 'subagent', 'subagent-task', 'subagent-tool', 'tool',
@@ -104,8 +104,8 @@ REFUSED = {
     'PATCH': {'live/offer'},
     'POST': {
         # These can type into, start, stop, or reconfigure a terminal or agent.
-        'approval', 'ask-answer', 'ask-engage', 'attention/digest', 'attention/handled',
-        'attention/opened', 'attention/snooze', 'auto-resume', 'broadcast', 'clear-draft',
+        'approval', 'ask-answer', 'ask-engage', 'attention/back', 'attention/digest', 'attention/handled',
+        'attention/later', 'attention/opened', 'attention/rules', 'attention/snooze', 'auto-resume', 'broadcast', 'clear-draft',
         'continue', 'continue-preview', 'coordinator-role', 'delegate', 'dialog', 'fork', 'groups/close', 'key',
         'live/summary',
         'menu', 'merge', 'message', 'mode', 'model', 'model-options', 'pane-icon', 'pane-icon/draw',

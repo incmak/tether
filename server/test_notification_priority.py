@@ -1,5 +1,6 @@
 """Fixture-only tests: classification, delivery, persistence and API guards."""
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
+from datetime import datetime
 import io
 import json
 from pathlib import Path
@@ -26,6 +27,10 @@ def codex(role, text, **fields):
 
 BACKGROUND = claude('user', '<task-notification><event>[Monitor expired after 30m]</event></task-notification>')
 ASSISTANT = claude('assistant', 'Done.')
+COMPACT_BOUNDARY = {'type': 'system', 'subtype': 'compact_boundary'}
+COMPACT_SUMMARY = claude('user', 'This session is being continued from a previous conversation that ran out of context.',
+                         isCompactSummary=True, isVisibleInTranscriptOnly=True, turnOrigin='human',
+                         timestamp='2026-11-21T01:54:32Z')
 
 
 class ClassifierTests(unittest.TestCase):
@@ -119,6 +124,23 @@ class ClassifierTests(unittest.TestCase):
         self.assertEqual(turn_source('claude', [BACKGROUND, ASSISTANT, hook, ASSISTANT], identify=identify), 'background')
         self.assertEqual(turn_source('claude', [hook, ASSISTANT], identify=identify), 'background')  # a clipped tail
 
+    def test_compact_summary_after_latest_reply_does_not_start_a_turn(self):
+        for flag in ('isCompactSummary', 'isAutoCompactSummary'):
+            with self.subTest(flag=flag):
+                summary = dict(COMPACT_SUMMARY)
+                del summary['isCompactSummary']
+                summary[flag] = True
+                records = [BACKGROUND, ASSISTANT, COMPACT_BOUNDARY, summary]
+                self.assertEqual(turn_source('claude', records, latest_turn=True), 'background')
+                self.assertEqual(turn_source('claude', [*records, ASSISTANT]), 'background')
+
+    def test_manual_compact_keeps_the_persons_prompt(self):
+        requested_at = '2026-11-21T01:54:30Z'
+        command = claude('user', '<command-name>/compact</command-name>', timestamp=requested_at)
+        records = [BACKGROUND, ASSISTANT, command, COMPACT_BOUNDARY, COMPACT_SUMMARY, ASSISTANT]
+        self.assertEqual(turn_source('claude', records, with_time=True),
+                         ('user', datetime.fromisoformat(requested_at.replace('Z', '+00:00')).timestamp(), None))
+
     def test_latest_turn_refuses_a_prompt_without_a_reply(self):
         earlier = [claude('user', 'Earlier task.'), ASSISTANT]
         for records, expected in (
@@ -132,7 +154,8 @@ class ClassifierTests(unittest.TestCase):
         codex_earlier = [codex('user', 'Earlier task.'), codex('assistant', 'Done.')]
         for last, expected in ((codex('user', 'New task.'), 'unknown'),
                                ({'type': 'event_msg', 'payload': {'type': 'user_message', 'message': 'New.'}}, 'unknown'),
-                               ({'type': 'response_item', 'payload': {'type': 'function_call_output', 'output': 'x'}}, 'user')):
+                               ({'type': 'response_item', 'payload': {'type': 'function_call_output', 'output': 'x'}}, 'user'),
+                               ({'type': 'compacted', 'payload': {'message': 'Earlier context.'}}, 'user')):
             with self.subTest(last=last):
                 self.assertEqual(turn_source('codex', codex_earlier + [last], latest_turn=True), expected)
 

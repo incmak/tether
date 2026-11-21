@@ -26,6 +26,10 @@ def claude_background(record, content):
                 re.match(r'^\s*<(?:system-reminder|hook-output|scheduled-task|cron-trigger|loop-prompt)\b', content))
 
 
+def _claude_compact_summary(record):
+    return bool(record.get('isCompactSummary') or record.get('isAutoCompactSummary'))
+
+
 def _timestamp(record):
     try:
         stamp = datetime.fromisoformat(record['timestamp'].replace('Z', '+00:00'))
@@ -104,7 +108,7 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
                     return result('unknown')
                 continue
             if kind == 'user':
-                if record.get('isAutoCompactSummary'):
+                if _claude_compact_summary(record):
                     continue  # A compact summary does not start a new turn.
                 content = text_content(message.get('content'))
                 # Tool-result-only user records are continuations of the same turn.
@@ -196,7 +200,7 @@ def _claude_turn_start(record, kind):
 
 
 def _claude_prompt(record, kind):
-    if kind == 'user' and not record.get('isAutoCompactSummary'):
+    if kind == 'user' and not _claude_compact_summary(record):
         message = record.get('message') if isinstance(record.get('message'), dict) else {}
         content = text_content(message.get('content'))
     elif kind == 'attachment' and isinstance(record.get('attachment'), dict) \
