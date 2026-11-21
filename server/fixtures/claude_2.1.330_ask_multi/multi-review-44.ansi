@@ -1,0 +1,40 @@
+
+           [1mClaude Code[0m [38;5;246mv2.1.330[39m
+[38;5;174m ▐[48;5;16m▛███▛█[39m[49m   [38;5;246mOpus 5.5 with medium effort[39m
+[38;5;174m▝▜[48;5;16m█████[49m█▀[39m  [38;5;246mClaude Ultra[39m
+[38;5;174m ▝▝   ▝▝ [39m  [38;5;246m/…/scratchpad/r8-cwd[39m
+
+
+[38;5;246m[48;5;237m❯ [38;5;231mThis is a throwaway test tab. Do no other[39m
+  [38;5;231mwork. Call the AskUserQuestion tool once[39m
+  [38;5;231mwith exactly one question: header [39m
+  [38;5;231m'Features', question 'Which features do [39m
+  [38;5;231myou want?', multiSelect true, options [39m
+  [38;5;231m'Search' (description 'Find things'), [39m
+  [38;5;231m'Export' (description 'Save things') and [39m
+  [38;5;231m'Sync' (description 'Share things'). [39m
+  [38;5;231mAfter I answer, call AskUserQuestion [39m
+  [38;5;231magain with the exact same question. After[39m
+  [38;5;231mthe second answer, reply 'done' and [39m
+  [38;5;231mstop.[39m
+
+[38;5;246m[49m●[39m Answered Claude's questions:
+[38;5;246m  ⎿  · Which features do you want? → Search[39m
+
+[38;5;246m────────────────────────────────────────────
+[39m←  ☒ Features [38;5;16m[48;5;153m ✔ Submit [38;5;246m[49m →[39m
+
+[1m[38;5;231mReview your answers[0m
+
+ ● Which features do you want?
+   [38;5;114m→ Search[39m
+
+[38;5;153m❯[39m [38;5;246m1. [38;5;153mSubmit answers[39m
+  [38;5;246m2. [39mCancel
+
+
+
+
+
+
+

@@ -245,9 +245,30 @@ class BackendTests(unittest.TestCase):
                                                         'set-option', '-p', '-t', '%12', '-u', '@chat_name_at', ';',
                                                         'set-option', '-p', '-t', '%12', '@chat_name_by', 'cleared', ';', 'set-option', '-p', '-t', '%12', '-u', '@chat_name_auto'])
         self.run.reset_mock()
-        for body in ({'pane': '$1', 'name': 'x'}, {'pane': '%12', 'name': 'x' * 41}, {'pane': '%12', 'name': 'a\nb'}, {'pane': '%12'}):
+        for body in ({'pane': '$1', 'name': 'x'}, {'pane': '%12', 'name': 'x' * 41}, {'pane': '%12', 'name': 'a\nb'},
+                     {'pane': '%12'}, {'pane': '%12', 'name': 'x', 'keep_session': 'yes'}):
             self.assertEqual(self.request('/mobile/api/pane-name', body)[0], 400)
         self.run.assert_not_called()
+
+    def test_pane_name_can_preserve_a_one_pane_session(self):
+        entry = {'id': '%12', 'tmux_session': '$7', 'label': 'Friday chats', 'agent': 'claude'}
+        self.entries.return_value = [entry]
+        with patch.object(server, 'rename_agent', return_value='') as agent:
+            self.assertEqual(server.name_together('%12', 'api', from_session=False, keep_session=True), '')
+            self.run.assert_not_called()
+            agent.assert_called_once_with(entry, 'api')
+
+            agent.reset_mock()
+            self.assertEqual(server.name_together('%12', 'api', from_session=False), '')
+            self.run.assert_called_once_with([paths.TMUX, 'rename-session', '-t', '%12', 'api'], capture_output=True, timeout=5)
+            agent.assert_called_once_with(entry, 'api')
+
+            self.run.reset_mock()
+            agent.reset_mock()
+            body = {'pane': '%12', 'name': 'api', 'keep_session': True}
+            self.assertEqual(self.request('/mobile/api/pane-name', body), (200, {'pane': '%12', 'name': 'api'}))
+            self.assertFalse(any(call.args[0][1] == 'rename-session' for call in self.run.call_args_list))
+            agent.assert_called_once_with(entry, 'api')
 
     def test_pane_icon_sets_and_clears_a_tmux_pane_option(self):
         self.run.reset_mock()

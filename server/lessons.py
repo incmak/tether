@@ -196,7 +196,7 @@ def _words(text):
 
 
 def _audit_lesson(kind, verb, pid, row):
-    audit.record(kind, f'{verb} lesson: {row["text"][:120]}', project=projects.audit_name(pid))
+    audit.record(kind, f'{verb} lesson: {audit.clip(row["text"], 120)}', project=projects.audit_name(pid))
 
 
 def add(pid, text, kind, source, agent, force_new=False, quote='', tab='', pane='', evict=True):

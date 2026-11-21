@@ -595,6 +595,25 @@ def _audit_items(text, *, blocks=None, unnumbered_blocks=None):
     return items, unnumbered
 
 
+def done_ids():
+    """Completed items from both files. The current item wins during an archive write."""
+    archive = folder() / 'DONE.md'
+    if archive.is_symlink():
+        raise invalid('The backlog archive is a link. Tether does not open it.')
+    # Read the current list first: archive writes the destination before removing source items. Both files use the
+    # bounded, non-blocking read of the audit snapshot (B303): a pipe or a huge file never stalls a listing. The
+    # done check needs no next ID, so last-id is not read.
+    text = _file_text(_read_file(_path(), 4 * LIMIT + 1))
+    if len(text) > LIMIT:
+        raise ProjectError(413, f'The backlog is over {LIMIT:,} characters. Shorten {_path()}.')
+    current = _audit_items(text)[0]
+    contents = _read_file(archive, ARCHIVE_READ + 1)
+    if len(contents) > ARCHIVE_READ:
+        raise invalid(f'The backlog archive is over {ARCHIVE_READ:,} bytes. Tether does not read it.')
+    archived = _audit_items(_file_text(contents))[0]
+    return {ident for ident, item in (archived | current).items() if item[2] == 'done'}
+
+
 def _pane_hint(kind, block):
     if not block:
         return None
@@ -675,7 +694,7 @@ def _audit_changes(before, after, *, observed=False, archived=None, old_archived
                 if ref not in previous and at is not None:
                     previous[ref] = rows.pop(at)
     for ref, (project, title, stage, doing) in current.items():
-        short = title[:80]
+        short = audit.clip(title, 80)
         block = blocks.get(ref, ())
         if ref not in previous:
             record('backlog.add', f'{ref} added: {short}', project=project, block=block)
@@ -698,23 +717,23 @@ def _audit_changes(before, after, *, observed=False, archived=None, old_archived
         if ref in current:
             continue
         if ref not in new_archived:  # an entry the snapshot already held does not vouch for this removal
-            record('backlog.remove', f'{ref} removed: {title[:80]}', project=project)
+            record('backlog.remove', f'{ref} removed: {audit.clip(title, 80)}', project=project)
         elif stage != 'done':
-            record('backlog.done', f'{ref} done: {title[:80]}', project=project, block=archived[ref][1])
+            record('backlog.done', f'{ref} done: {audit.clip(title, 80)}', project=project, block=archived[ref][1])
     for ref in sorted(new_archived - previous.keys() - current.keys()):
         (project, title, _, _), block = archived[ref]
         project = ARCHIVE_STAMP.sub('', project or '')
         project = None if project == 'Inbox' else project
-        record('backlog.add', f'{ref} added: {title[:80]}', project=project, block=block)
-        record('backlog.done', f'{ref} done: {title[:80]}', project=project, block=block)
+        record('backlog.add', f'{ref} added: {audit.clip(title, 80)}', project=project, block=block)
+        record('backlog.done', f'{ref} done: {audit.clip(title, 80)}', project=project, block=block)
     if observed:
         for row, count in added_unnumbered.items():
             project, title, _, _ = row
             for block in unnumbered_blocks[row][-count:]:
-                record('backlog.add', f'Added backlog item: {title[:80]}', project=project, block=block)
+                record('backlog.add', f'Added backlog item: {audit.clip(title, 80)}', project=project, block=block)
     for rows in by_title.values():
         for project, title, _, _ in rows:
-            record('backlog.remove', f'Removed backlog item: {title[:80]}', project=project)
+            record('backlog.remove', f'Removed backlog item: {audit.clip(title, 80)}', project=project)
     return succeeded
 
 

@@ -113,7 +113,7 @@ async function main() {
     await tab('Login review').click({ modifiers: ['ControlOrMeta'] })
     check('Ctrl/Cmd+click keeps the open tab and adds the clicked one', await picked() === 2 && await tab('Login fix').getAttribute('aria-selected') === 'true')
     check('the bar shows the count', await bar.isVisible() && (await bar.innerText()).includes('2 tabs selected'))
-    check('a chosen tab says so to screen readers', (await tab('Login review').innerText()).includes('selected'))
+    check('a chosen tab says so to screen readers', await strip.getByRole('tab', { name: /Login review.*selected/ }).count() === 1)
     await tab('Docs pass').click({ modifiers: ['Shift'] })
     check('Shift+click picks the range from the last pick', await picked() === 2 && await tab('Login review').evaluate(el => el.classList.contains('picked')) && await tab('Docs pass').evaluate(el => el.classList.contains('picked')))
     await tab('Loose tab').click({ modifiers: ['Shift'] })

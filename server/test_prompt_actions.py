@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
-import tempfile
 import threading
 import time
 import unittest
@@ -16,6 +15,7 @@ import prompt_actions as actions
 import push
 import server
 import terminal_input as terminal
+from test_tmux_isolation import private_tmux
 
 
 ENTRY = {'id': '%8', 'agent': 'codex', 'owner_pid': 123, 'process_start': '42',
@@ -390,37 +390,38 @@ class IntegrationTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('tmux'), 'tmux is unavailable')
     def test_private_socket_page_keys_are_terminal_sequences(self):
-        # The pane process has a 10-second timeout. The only tmux server touched
-        # is this private socket, which is always stopped in finally.
-        with tempfile.TemporaryDirectory(prefix='p1-') as folder:
-            socket, output = str(Path(folder) / 's'), Path(folder) / 'keys'
-            script = Path(folder) / 'reader.py'
-            painted = '\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H' + frame().rstrip('\n').replace('\n', '\r\n')
-            script.write_text('import os,tty\nfrom pathlib import Path\ntty.setraw(0)\n'
-                              + 'os.write(1, ' + repr(painted.encode()) + ')\n'
-                              + 'Path("ready").touch()\ndata=b""\nwhile len(data)<8:\n data+=os.read(0,8-len(data))\nPath("keys").write_bytes(data)\n')
-            def tmux(*args):
-                return subprocess.run(['tmux', '-S', socket, '-f', '/dev/null', *args], check=True, capture_output=True, text=True, timeout=5, stdin=subprocess.DEVNULL)
-            try:
-                pane = tmux('new-session', '-d', '-x', '40', '-y', '10', '-c', folder, '-P', '-F', '#{pane_id}', 'timeout 10s python3 reader.py').stdout.strip()
-                deadline = time.monotonic() + 5
-                while not (Path(folder) / 'ready').exists() and time.monotonic() < deadline:
-                    time.sleep(.02)
-                self.assertTrue((Path(folder) / 'ready').exists())
-                capture = tmux('capture-pane', '-p', '-e', '-t', pane).stdout
-                meta = tuple(tmux('display-message', '-p', '-t', pane, actions.META).stdout.strip().split('\t'))
-                found = actions.Ledger().observe(dict(ENTRY, id=pane), capture, meta)
-                self.assertIsNotNone(found)
-                self.assertEqual([a['key'] for a in found['actions']], ['PgUp', 'PgDn', 'Tab', 'z'])
-                self.assertTrue(all(a['enabled'] for a in found['actions']))
-                for key in ('PPage', 'NPage'):
-                    tmux('send-keys', '-t', pane, key)
-                deadline = time.monotonic() + 5
-                while not output.exists() and time.monotonic() < deadline:
-                    time.sleep(.02)
-                self.assertEqual(output.read_bytes(), b'\x1b[5~\x1b[6~')
-            finally:
-                subprocess.run(['tmux', '-S', socket, 'kill-server'], capture_output=True, timeout=5, stdin=subprocess.DEVNULL)
+        # The pane process has a 10-second timeout.
+        private = private_tmux(self, 'p1-')
+        folder = private.folder
+        output = Path(folder) / 'keys'
+        script = Path(folder) / 'reader.py'
+        painted = '\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H' + frame().rstrip('\n').replace('\n', '\r\n')
+        script.write_text('import os,tty\nfrom pathlib import Path\ntty.setraw(0)\n'
+                          + 'os.write(1, ' + repr(painted.encode()) + ')\n'
+                          + 'Path("ready").touch()\ndata=b""\nwhile len(data)<8:\n data+=os.read(0,8-len(data))\nPath("keys").write_bytes(data)\n')
+
+        def tmux(*args):
+            result = private.tmux(*args)
+            result.check_returncode()
+            return result
+
+        pane = tmux('new-session', '-d', '-x', '40', '-y', '10', '-c', folder, '-P', '-F', '#{pane_id}', 'timeout 10s python3 reader.py').stdout.strip()
+        deadline = time.monotonic() + 5
+        while not (Path(folder) / 'ready').exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        self.assertTrue((Path(folder) / 'ready').exists())
+        capture = tmux('capture-pane', '-p', '-e', '-t', pane).stdout
+        meta = tuple(tmux('display-message', '-p', '-t', pane, actions.META).stdout.strip().split('\t'))
+        found = actions.Ledger().observe(dict(ENTRY, id=pane), capture, meta)
+        self.assertIsNotNone(found)
+        self.assertEqual([a['key'] for a in found['actions']], ['PgUp', 'PgDn', 'Tab', 'z'])
+        self.assertTrue(all(a['enabled'] for a in found['actions']))
+        for key in ('PPage', 'NPage'):
+            tmux('send-keys', '-t', pane, key)
+        deadline = time.monotonic() + 5
+        while not output.exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        self.assertEqual(output.read_bytes(), b'\x1b[5~\x1b[6~')
 
 
 if __name__ == '__main__':

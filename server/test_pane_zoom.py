@@ -2,6 +2,7 @@
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import os
+import time
 from pathlib import Path
 import select
 import signal
@@ -13,6 +14,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import pane_view
+from test_tmux_isolation import private_tmux
 
 
 class ZoomExit(unittest.TestCase):
@@ -96,13 +98,15 @@ class IsolatedZoom(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
-        self.socket = str(Path(self.folder.name) / 's')
-        self.env = {key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE')}
-        self.env.update(HOME=self.folder.name, CLAUDE_CONFIG_DIR=self.folder.name + '/claude',
-                        CODEX_HOME=self.folder.name + '/codex')
+        env = dict(HOME=self.folder.name, CLAUDE_CONFIG_DIR=self.folder.name + '/claude',
+                   CODEX_HOME=self.folder.name + '/codex')
+        self.private = private_tmux(self, 'tzoom-', env)
+        self.socket = self.private.socket
+        self.env = self.private.env
+        self.tmux = self.private.tmux
         self.binary = shutil.which('tmux')
         self.tmux('new-session', '-d', '-s', 'zoom-test', '-x', '120', '-y', '40').check_returncode()
-        self.addCleanup(self.tmux, 'kill-server')
+        self.addCleanup(self.stop_server)
         self.pane = self.tmux('display-message', '-p', '-t', 'zoom-test', '#{pane_id}').stdout.strip()
         self.home = self.tmux('display-message', '-p', '-t', self.pane, '#{window_id}').stdout.strip()
         self.tmux('split-window', '-h', '-t', self.pane).check_returncode()
@@ -113,9 +117,21 @@ class IsolatedZoom(unittest.TestCase):
             replacement.start()
             self.addCleanup(replacement.stop)
 
-    def tmux(self, *args):
-        return subprocess.run([self.binary, '-f', '/dev/null', '-S', self.socket, *args],
-                              env=self.env, capture_output=True, text=True, timeout=5)
+    def stop_server(self):
+        # kill-server returns before the pane shells exit, and a shell can still write into HOME (the
+        # temporary folder) while the folder cleanup runs. Wait until every pane process has gone.
+        listed = self.tmux('list-panes', '-a', '-F', '#{pane_pid}').stdout.split()
+        self.tmux('kill-server')
+        deadline = time.monotonic() + 5
+        for pid in map(int, listed):
+            while True:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                if time.monotonic() > deadline:
+                    self.fail(f'tmux pane process {pid} did not exit after kill-server')
+                os.sched_yield()
 
     def dimensions(self):
         return self.tmux('display-message', '-p', '-t', self.pane, '#{window_width} #{window_height}').stdout.strip()
@@ -148,7 +164,7 @@ from pathlib import Path
 import pane_view
 binary, socket, cache = sys.argv[1:]
 pane_view.tmux = lambda *args: subprocess.run(
-    [binary, '-S', socket, *args], capture_output=True, text=True, timeout=5)
+    [binary, '-N', '-S', socket, '-f', '/dev/null', *args], capture_output=True, text=True, timeout=5)
 pane_view.paths.CACHE = Path(cache)
 pane_view.zoom_repair_all()
 '''
@@ -260,7 +276,7 @@ from pathlib import Path
 import pane_view
 binary, socket, cache, pane = sys.argv[1:]
 def tmux(*args):
-    return subprocess.run([binary, '-f', '/dev/null', '-S', socket, *args],
+    return subprocess.run([binary, '-N', '-f', '/dev/null', '-S', socket, *args],
                           capture_output=True, text=True, timeout=5)
 pane_view.tmux = tmux
 pane_view.paths.CACHE = Path(cache)
@@ -444,7 +460,8 @@ pane_view.zoom_leave(view)
         self.assertEqual(self.home_layout(), before)
 
     def test_control_client_ignores_size_for_whole_zoom(self):
-        client = subprocess.Popen([self.binary, '-S', self.socket, '-C', 'attach-session', '-f', 'ignore-size', '-t', 'zoom-test'],
+        client = subprocess.Popen([self.binary, '-N', '-S', self.socket, '-f', '/dev/null',
+                                   '-C', 'attach-session', '-f', 'ignore-size', '-t', 'zoom-test'],
                                   env=self.env, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             # Establish the fake client's size before arranging the fixture. Explicit

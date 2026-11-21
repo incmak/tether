@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import server
+import undo_store
 
 from test_helper_tabs import HELPER, OTHER, OWNER, UNCONFIRMED_HELPER, Tmux
 
@@ -20,15 +21,17 @@ class CloseTabTest(unittest.TestCase):
         self.killed = []
         self.listed = [{'id': '%1', 'thread': 'chat-a', 'pane_name': 'Audit Log'}, {'id': '%2', 'thread': None}]
         self.kill_fails = False
+        self.on_kill = lambda _: None
+        self.snapshot = self.session_snapshot = None
         directory = self.enterContext(tempfile.TemporaryDirectory())
         self.review_file = Path(directory) / 'review-links.json'
         self.enterContext(patch.object(server.review_links, 'FILE', self.review_file))
 
     def run_tmux(self, argv, **_):
         if argv[1] == 'list-sessions':
-            return subprocess.CompletedProcess(argv, 0, '$1\n', '')
+            return subprocess.CompletedProcess(argv, 0, '' if '$1' in self.killed else '$1\n', '')
         if argv[1] == 'list-panes':
-            panes = '%1\n%2\n'
+            panes = ''.join(pane + '\n' for pane in ('%1', '%2') if pane not in self.killed)
             if '-s' in argv and '#{==:#{window_linked_sessions},1}' not in argv:
                 panes += '%3\n'  # shared with a session that stays open
             return subprocess.CompletedProcess(argv, 0, panes, '')
@@ -36,6 +39,9 @@ class CloseTabTest(unittest.TestCase):
             if self.kill_fails:
                 raise subprocess.CalledProcessError(1, argv)
             self.killed.append(argv[-1])
+            self.on_kill(argv[-1])
+        if argv[-1] == '#{pid}:#{start_time}':
+            return subprocess.CompletedProcess(argv, 0, '10:20\n', '')
         return subprocess.CompletedProcess(argv, 0, '', '')
 
     def close(self, payload, path='/mobile/api/session'):
@@ -51,15 +57,38 @@ class CloseTabTest(unittest.TestCase):
         with patch.object(server.subprocess, 'run', self.run_tmux), \
                 patch.object(server, 'sessions', lambda: self.listed), \
                 patch.object(server, 'forget_sessions') as forget, \
-                patch.object(server.undo, 'capture_safe', return_value=None), \
-                patch.object(server.undo, 'record_tab_close'), \
-                patch.object(server.undo, 'capture_session_safe', return_value=None), \
-                patch.object(server.undo, 'record_session_close'), \
+                patch.object(server.undo, 'capture_safe', return_value=self.snapshot), \
+                patch.object(server.undo, 'capture_session_safe', return_value=self.session_snapshot), \
                 patch.object(server.auto_resume, 'forget_pane'), \
                 patch.object(server.auto_resume, 'forget_session'), \
-                patch.object(server.groups, 'closing', lambda pane: contextlib.nullcontext()):
+                patch.object(server.groups, 'closing', lambda pane, run: contextlib.nullcontext()):
             handler.do_DELETE()
         return handler.respond.call_args.args, forget
+
+    def test_single_tab_and_session_close_keep_the_step_when_tmux_loses_the_acknowledgement(self):
+        def timeout(_):
+            step, = undo_store.entries()
+            self.assertTrue(step['actions'][0]['pending'])
+            raise subprocess.TimeoutExpired('kill', 5)
+
+        self.on_kill = timeout
+        self.snapshot = {'pane': '%1', 'name': 'Audit Log', 'server': '10:20', 'options': {}, 'session_options': {}}
+        self.session_snapshot = {'session_id': '$1', 'name': 'Fixture', 'tabs': [self.snapshot]}
+        for path, body, title, kind in (
+            ('/mobile/api/session', {'pane': '%1', 'thread': 'chat-a'}, 'Audit Log', 'tab.close'),
+            ('/mobile/api/tmux-sessions', {'session': '$1'}, 'Fixture', 'session.close'),
+        ):
+            with self.subTest(path=path), tempfile.TemporaryDirectory() as folder, \
+                    patch.object(undo_store, '_ENABLED', True), \
+                    patch.object(undo_store, '_path', return_value=Path(folder) / 'history.json'):
+                self.killed.clear()
+                (status, reply), _ = self.close(body, path)
+                self.assertEqual(status, 503)
+                self.assertEqual(reply['closed'], [title])
+                step, = undo_store.entries()
+                self.assertEqual(reply['undo'], step['id'])
+                self.assertEqual(step['actions'][0]['kind'], kind)
+                self.assertNotIn('pending', step['actions'][0])
 
     def test_audit_records_one_close_with_device_and_skips_failed_kill(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(server.paths, 'CONFIG', Path(folder)):
@@ -107,6 +136,7 @@ class CloseTabTest(unittest.TestCase):
                                       ('/mobile/api/tmux-sessions', {'session': '$1'}, {'%1', '%2'})):
             for kill_fails in (True, False):
                 with self.subTest(path=path, kill_fails=kill_fails):
+                    self.killed.clear()
                     self.kill_fails = kill_fails
                     saved = [dict(worker=pane, worker_thread='old-chat', saved_at=time.time(), rounds=3, paused=True)
                              for pane in ('%1', '%2', '%3')]
@@ -129,13 +159,27 @@ class CloseHelperTabTest(unittest.TestCase):
         self.run.options['%13'] = json.dumps(self.record)
         self.kill = self.enterContext(patch.object(server.agent_tabs.helper_close, 'close_pane'))
         self.capture = self.enterContext(patch.object(server.undo, 'capture_safe', return_value=None))
-        self.enterContext(patch.object(server.undo, 'record_tab_close'))
         self.enterContext(patch.object(server.audit, 'record'))
         self.enterContext(contextlib.redirect_stderr(io.StringIO()))
 
     def close(self):
         return server.agent_tabs.close_tab({'pane': '%13'}, self.owner, self.entries, self.run,
                                            lambda entry: {'state': 'Idle'})
+
+    def test_agent_close_keeps_undo_when_the_helper_is_gone_after_a_timeout(self):
+        self.capture.return_value = {'pane': '%13', 'name': 'Helper', 'server': '10:20',
+                                     'options': {}, 'session_options': {}}
+        self.kill.side_effect = subprocess.TimeoutExpired('kill-pane', 5)
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(undo_store, '_ENABLED', True), \
+                patch.object(undo_store, '_path', return_value=Path(folder) / 'history.json'), \
+                patch.object(server.undo, 'kill_outcome', return_value=True):
+            with self.assertRaises(server.undo.CloseInterrupted) as error:
+                self.close()
+            step, = undo_store.entries()
+        self.assertEqual(error.exception.undo, step['id'])
+        self.assertEqual(error.exception.members[0][0], '%13')
+        self.assertNotIn('pending', step['actions'][0])
 
     def assert_pane_untouched(self):
         self.capture.assert_not_called()

@@ -311,8 +311,8 @@ export function useModal(open: boolean, close: () => void, drawer?: { onInterrup
 
 /** A screen point a menu opens from: the pointer for a right-click, or the button that opened it. */
 export type Anchor = { x: number; y: number }
-export const anchorOf = (event: React.MouseEvent): Anchor => {
-  if (event.clientX || event.clientY) return { x: event.clientX, y: event.clientY }
+export const anchorOf = (event: React.MouseEvent | React.KeyboardEvent): Anchor => {
+  if ('clientX' in event && (event.clientX || event.clientY)) return { x: event.clientX, y: event.clientY }
   const box = event.currentTarget.getBoundingClientRect()  // keyboard: no pointer position
   return { x: box.left, y: box.bottom + 4 }
 }

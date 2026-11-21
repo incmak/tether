@@ -168,6 +168,14 @@ class Attention:
             ask = self.asks.get(pane)
             return self.public(ask) if ask and (ask.get('thread') or None) == (thread or None) else None
 
+    def reply_identity(self, pane, thread):
+        """The open reply ask and its transcript turn, read together."""
+        with self.lock:
+            ask = self.asks.get(pane)
+            if ask and ask['kind'] == 'reply' and ask.get('thread') == thread and ask.get('turn') is not None:
+                return self.public(ask), ask['turn']
+        return None, None
+
     def waiting(self):
         """Asks that show now (not snoozed), oldest first."""
         now = self.clock()

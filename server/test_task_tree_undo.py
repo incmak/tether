@@ -1,0 +1,559 @@
+"""Task-tree undo uses the history store and a mock tmux runner."""
+import unittest_isolated  # noqa: F401
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from subprocess import CompletedProcess, TimeoutExpired
+from unittest.mock import Mock, patch
+
+import auto_resume
+import helper_tabs
+import paths
+import prefs_sync
+import review_links
+import undo
+import undo_store
+
+
+def thread(number):
+    return f'00000000-0000-0000-0000-{number:012d}'
+
+
+def helper(owner, owner_thread, *, root=None, root_thread=None, moved=False):
+    record = {'kind': 'helper', 'owner_pane': owner, 'owner_thread': owner_thread,
+              'home_pane': owner, 'home_thread': owner_thread,
+              'root_pane': root or owner, 'root_thread': root_thread or owner_thread, 'sent_at': 0}
+    if moved:
+        record['moved_by'] = 'user'
+    return record
+
+
+class TaskTreeUndoTests(unittest.TestCase):
+    def setUp(self):
+        temporary = self.enterContext(tempfile.TemporaryDirectory())
+        root = Path(temporary)
+        self.folder = temporary
+        self.enterContext(patch.object(paths, 'CACHE', root / 'cache'))
+        self.enterContext(patch.object(paths, 'TETHER', root / 'tether'))
+        self.enterContext(patch.object(prefs_sync, 'FILE', root / 'prefs.json'))
+        self.enterContext(patch.object(review_links, 'FILE', root / 'review-links.json'))
+        self.enterContext(patch.object(undo_store, '_server', return_value='1:2'))
+        self.enterContext(patch.object(undo_store, '_ENABLED', True))
+        self.entries = {}
+        self.records = {}
+        self.roles = {}   # @tether_role, as coordinator._set writes it
+        self.server_id = '1:2'
+        self.runner = Mock(side_effect=self.tmux)
+        self.fresh = Mock(side_effect=lambda: list(self.entries.values()))
+        self.env = undo.Env(run=self.runner, entries=lambda: self.entries.values(), fresh=self.fresh)
+        self.capture_tab = undo.capture
+
+    def entry(self, pane, conversation, name='', session='$1'):
+        return {'id': pane, 'thread': thread(conversation), 'tmux_session': session,
+                'pane_name': name or f'Tab {pane}', 'agent': 'codex', 'codex_binding': 'open'}
+
+    def put(self, entry, record=None):
+        self.entries[entry['id']] = entry
+        self.records[entry['id']] = record
+
+    def tmux(self, command, **_):
+        if command[-1] == '#{pane_id}\t#{@tether_helper}':
+            pane = command[4]
+            value = self.records.get(pane)
+            raw = json.dumps(value) if value else ''
+            return CompletedProcess(command, 0 if pane in self.entries else 1, stdout=f'{pane}\t{raw}\n')
+        if command[-1] == '#{pane_id}\t#{@tether_role}':
+            pane = command[4]
+            return CompletedProcess(command, 0 if pane in self.entries else 1,
+                                    stdout=f'{pane}\t{self.roles.get(pane, "")}\n')
+        if command[1:4] == ['display-message', '-p', '#{pid}:#{start_time}']:
+            if self.server_id is None:
+                return CompletedProcess(command, 1, stdout='', stderr='no server running')
+            return CompletedProcess(command, 0, stdout=f'{self.server_id}\n')
+        if command[1:3] == ['list-panes', '-a']:
+            if self.server_id is None:
+                return CompletedProcess(command, 1)
+            if command[-1] == '#{pane_id}':
+                return CompletedProcess(command, 0, stdout='\n'.join(self.entries))
+            lines = ['\t'.join((pane, '', '', json.dumps(self.records[pane]) if self.records[pane] else '',
+                                entry['tmux_session'], '', '', ''))
+                     for pane, entry in self.entries.items()]
+            return CompletedProcess(command, 0, stdout='\n'.join(lines))
+        if command[1:4] == ['set-option', '-p', '-t']:
+            pane = command[4]
+            if command[5:] == ['-u', helper_tabs.OPTION]:
+                self.records[pane] = None
+            else:
+                self.assertEqual(command[5], helper_tabs.OPTION)
+                self.records[pane] = json.loads(command[6])
+            return CompletedProcess(command, 0)
+        self.fail(f'Unexpected tmux command {command!r}')
+
+    def test_move_undo_clears_an_option_that_did_not_exist_and_redo_restores_it(self):
+        self.put(self.entry('%1', 1))
+        child = self.entry('%2', 2)
+        new = helper('%1', thread(1), moved=True)
+        self.put(child, new)
+        with undo_store.acting('user'), undo_store.step():
+            undo.record_task_tree_move(child, None, new)
+        saved, = undo_store.entries()
+        self.assertEqual(saved['who'], {'by': 'user'})
+        self.assertEqual(len(saved['actions']), 1)
+        self.assertEqual(undo.run('undo', saved['id'], self.env)['state'], 'undone')
+        self.assertIsNone(self.records['%2'])
+        self.assertEqual(undo.run('redo', saved['id'], self.env)['state'], 'done')
+        self.assertEqual(self.records['%2'], new)
+
+    def test_move_undo_and_redo_never_place_a_coordinator_in_a_task(self):
+        self.put(self.entry('%1', 1))
+        placed = helper('%1', thread(1), moved=True)
+        own = dict(placed, kind='own')
+        child = self.entry('%2', 2)
+        for direction, before, after in (('undo', placed, own), ('redo', own, placed)):
+            with self.subTest(direction=direction):
+                self.put(child, after)   # the move just wrote `after`
+                with undo_store.acting('user'), undo_store.step():
+                    undo.record_task_tree_move(child, before, after)
+                saved = undo_store.entries()[-1]
+                if direction == 'redo':
+                    self.assertEqual(undo.run('undo', saved['id'], self.env)['state'], 'undone')
+                self.put(dict(child, coordinator='needs'), self.records['%2'])
+                self.roles['%2'] = 'coordinator-needs'
+                kept = self.records['%2']
+                writes = len([c for c in self.runner.call_args_list if c.args[0][1] == 'set-option'])
+                with self.assertRaisesRegex(undo.Refused, 'is now the coordinator'):
+                    undo.run(direction, saved['id'], self.env)
+                self.assertEqual(self.records['%2'], kept)
+                self.assertEqual(len([c for c in self.runner.call_args_list if c.args[0][1] == 'set-option']), writes)
+                self.roles.pop('%2')
+                self.put(child, kept)
+
+    def test_move_refuses_a_changed_conversation_or_placement(self):
+        self.put(self.entry('%1', 1))
+        child = self.entry('%2', 2)
+        new = helper('%1', thread(1), moved=True)
+        self.put(child, new)
+        undo.record_task_tree_move(child, None, new)
+        self.env.entries = lambda: [child]  # the list the page saw is stale
+        self.put(self.entry('%2', 3), new)
+        with self.assertRaisesRegex(undo.Refused, 'changed conversations'):
+            undo.run('undo', None, self.env)
+        self.assertTrue(self.fresh.called)
+        self.put(child, dict(new, sent_at=1))
+        with self.assertRaisesRegex(undo.Refused, 'changed task placement'):
+            undo.run('undo', None, self.env)
+        self.assertEqual(self.records['%2']['sent_at'], 1)
+        self.assertFalse(any(call.args[0][1] == 'set-option' for call in self.runner.call_args_list))
+
+    def test_move_undo_and_redo_preserve_new_helper_binding_and_delivery(self):
+        self.put(self.entry('%1', 1))
+        child = self.entry('%2', 2)
+        old = helper('%1', thread(1), moved=True)
+        detached = {key: old[key] for key in ('owner_pane', 'owner_thread', 'sent_at', 'moved_by')}
+        detached['kind'] = 'own'
+        self.put(child, dict(detached, helper_thread=thread(2)))
+        undo.record_task_tree_move(child, old, detached)
+
+        self.assertEqual(undo.run('undo', None, self.env)['state'], 'undone')
+        self.assertEqual(self.records['%2'], dict(old, helper_thread=thread(2)))
+
+        self.records['%2'].update(sent_at=45, before='latest-reply')
+        self.assertEqual(undo.run('redo', None, self.env)['state'], 'done')
+        self.assertEqual(self.records['%2'], dict(detached, helper_thread=thread(2), sent_at=45, before='latest-reply'))
+
+    def test_undo_move_refuses_a_stale_home_or_a_new_loop(self):
+        child = self.entry('%2', 2)
+        old = helper('%1', thread(1), moved=True)
+        detached = {'kind': 'own', 'owner_pane': '%1', 'owner_thread': thread(1), 'sent_at': 0}
+        self.put(child, detached)
+        self.put(self.entry('%1', 3))
+        undo.record_task_tree_move(child, old, detached)
+        with self.assertRaisesRegex(undo.Refused, 'task for tab %2 closed or changed conversations'):
+            undo.run('undo', None, self.env)
+        self.put(self.entry('%1', 1), helper('%2', thread(2), moved=True))
+        with self.assertRaisesRegex(undo.Refused, 'task loop'):
+            undo.run('undo', None, self.env)
+        self.assertEqual(self.records['%2'], detached)
+
+    def test_move_redo_refuses_a_tab_that_started_its_own_helper(self):
+        self.put(self.entry('%1', 1))
+        child = self.entry('%2', 2)
+        new = helper('%1', thread(1), moved=True)
+        self.put(child, new)
+        undo.record_task_tree_move(child, None, new)
+        undo.run('undo', None, self.env)
+        self.put(self.entry('%3', 3), helper('%2', thread(2)))
+        with self.assertRaisesRegex(undo.Refused, 'now has helpers'):
+            undo.run('redo', None, self.env)
+        self.assertIsNone(self.records['%2'])
+
+    def capture(self, entry):
+        pane = entry['id']
+        return {'pane': pane, 'agent': entry['agent'], 'thread': entry['thread'], 'name': entry['pane_name'],
+                'session': 'task', 'session_id': entry['tmux_session'], 'folder': self.folder,
+                'options': {}, 'session_options': {}, 'order': [int(pane[1:]), 0], 'server': self.server_id}
+
+    def mock_reopen(self, *, kept):
+        self.next_pane = 9
+        self.killed = []
+        self.reopen_anchor = []
+        self.enterContext(patch.object(undo, 'note_released', side_effect=lambda tab, _: tab))
+        self.enterContext(patch.object(undo, '_reopen_check'))
+        self.enterContext(patch.object(undo, '_check_reopen_target'))
+        self.enterContext(patch.object(undo, '_check_released'))
+        self.enterContext(patch.object(undo, '_restack_released'))
+        self.enterContext(patch.object(undo, '_need_pane', side_effect=lambda pane, *args: (
+            self.entries[pane]['tmux_session'], '', '')))
+        self.enterContext(patch.object(undo, '_target_session', return_value='$1' if kept else None))
+        self.enterContext(patch.object(undo, '_reopen', side_effect=self.reopen))
+        self.enterContext(patch.object(undo, '_close', side_effect=self.close))
+
+    def real_capture(self, entry):
+        fields = ['Task', entry['tmux_session'], self.folder, entry['id'][1:], '0'] + [''] * (
+            len(auto_resume.OPTIONS) + len(auto_resume.SESSION_OPTIONS))
+        with patch.object(auto_resume, 'saved_tab', return_value=None), patch.object(undo, '_show', return_value=fields):
+            return self.capture_tab(entry['id'], self.runner, entry)
+
+    def seed_review(self):
+        link = {'worker': '%2', 'worker_thread': thread(2), 'reviewer': '%3', 'reviewer_thread': thread(3),
+                'name': 'Worker', 'created': 1, 'seen_working': True, 'agent': 'codex'}
+        cap = {'cap': True, 'worker': '%2', 'worker_thread': thread(2), 'name': 'Worker', 'paused': True,
+               'counts': {f'%3:{thread(3)}': {'rounds': 3, 'empty_rounds': 1}},
+               'restart': {'counts': {f'%3:{thread(3)}': {'rounds': 1}}, 'paused': True},
+               'parent_stage': {'pane': '%1', 'thread': thread(1), 'notice': 'Review paused', 'sent': True}}
+        review_links._write([link, cap])
+
+    def assert_review(self, worker, reviewer, parent):
+        rows = review_links._read()
+        self.assertEqual(len(rows), 2, 'Undo restores the link and the cap')
+        link, cap = rows
+        self.assertEqual((link['worker'], link['worker_thread']), (worker, thread(2)))
+        self.assertEqual((link['reviewer'], link['reviewer_thread']), (reviewer, thread(3)))
+        self.assertEqual(link['created'], 1)
+        self.assertTrue(cap['paused'])
+        self.assertEqual(cap['worker'], worker)
+        self.assertEqual(cap['counts'], {f'{reviewer}:{thread(3)}': {'rounds': 3, 'empty_rounds': 1}})
+        self.assertEqual(cap['restart']['counts'], {f'{reviewer}:{thread(3)}': {'rounds': 1}})
+        self.assertEqual(cap['parent_stage']['pane'], parent)
+
+    def closed_tree(self, *, kept=True, root_record=None, reviews=False):
+        self.root = self.entry('%1', 1, 'Main')
+        self.worker = self.entry('%2', 2, 'Worker')
+        self.review = self.entry('%3', 3, 'Review')
+        self.review_record = helper('%2', thread(2), root='%1', root_thread=thread(1))
+        self.worker_record = helper('%1', thread(1))
+        self.detached = {'kind': 'own', 'owner_pane': '%2', 'owner_thread': thread(2),
+                         'moved_by': 'user', 'sent_at': 0}
+        self.mock_reopen(kept=kept)
+        if reviews:
+            self.seed_review()
+        snapshot = self.real_capture if reviews else self.capture
+        closed = [(snapshot(self.worker), self.worker_record), (snapshot(self.root), root_record)]
+        kept_changes = []
+        if kept:
+            self.put(self.review, self.detached)
+            kept_changes.append((self.review, self.review_record, self.detached))
+        elif reviews:
+            closed.insert(0, (snapshot(self.review), self.review_record))
+        for tab, _ in closed:
+            review_links.close(tab['pane'])
+        undo.record_task_tree_close(closed, kept_changes, self.runner)
+        self.enterContext(patch.object(undo, 'capture', side_effect=lambda pane, run, entry: snapshot(entry)))
+
+    def reopen(self, tab, _, after=None):
+        if self.server_id is None:
+            self.server_id = '2:3'
+        self.next_pane += 1
+        pane = f'%{self.next_pane}'
+        session = self.entries[after]['tmux_session'] if after else '$1' if self.entries else '$2'
+        self.put(self.entry(pane, int(tab['thread'][-12:]), tab['name'], session))
+        self.reopen_anchor.append(after)
+        return pane
+
+    def close(self, pane, env):
+        self.killed.append(pane)
+        del self.entries[pane], self.records[pane]
+        review_links.close(pane)
+        env.forget()
+
+    def act(self, direction):
+        plan = undo.run(direction, None, self.env)
+        self.assertEqual(plan['status'], 'confirm')
+        return undo.run(direction, plan['id'], self.env, plan['token'])
+
+    def test_one_close_step_reopens_the_tree_and_redo_uses_reopened_ids(self):
+        self.closed_tree()
+        saved, = undo_store.entries()
+        self.assertEqual(saved['label'], 'Closed task `Main`')
+        self.assertEqual(len(saved['actions']), 1)
+        self.assertEqual(self.act('undo')['state'], 'undone')
+        self.assertEqual(self.records['%11'], helper('%10', thread(1)))
+        self.assertEqual(self.records['%3'], helper('%11', thread(2), root='%10', root_thread=thread(1)))
+        self.assertEqual(self.act('redo')['state'], 'done')
+        self.assertEqual(self.killed, ['%11', '%10'])
+        self.assertEqual(self.records['%3'], dict(self.detached, owner_pane='%11'))
+        self.assertEqual(self.act('undo')['state'], 'undone')
+        self.assertEqual(self.records['%3'], helper('%13', thread(2), root='%12', root_thread=thread(1)))
+
+    def test_close_of_a_whole_session_reopens_children_in_the_new_session(self):
+        self.closed_tree(kept=False)
+        self.act('undo')
+        self.assertEqual(self.reopen_anchor, [None, '%10'])
+        self.assertEqual({entry['tmux_session'] for entry in self.entries.values()}, {'$2'})
+        self.assertEqual(self.records['%11'], helper('%10', thread(1)))
+
+    def test_grouped_close_undo_restores_review_for_the_kept_reviewer(self):
+        self.closed_tree(reviews=True)
+        self.assertEqual(review_links._read(), [])
+        self.assertEqual(self.act('undo')['state'], 'undone')
+        self.assert_review('%11', '%3', '%10')
+
+    def test_grouped_close_undo_remaps_both_review_participants(self):
+        self.closed_tree(kept=False, reviews=True)
+        self.assertEqual(review_links._read(), [])
+        self.assertEqual(self.act('undo')['state'], 'undone')
+        self.assert_review('%11', '%12', '%10')
+        self.assertEqual(self.act('redo')['state'], 'done')
+        self.assertEqual(review_links._read(), [])
+        self.assertEqual(self.act('undo')['state'], 'undone')
+        self.assert_review('%14', '%15', '%13')
+
+    def test_single_tab_close_undo_restores_the_worker_or_reviewer(self):
+        for closed, worker, reviewer in (('%2', '%10', '%3'), ('%3', '%2', '%10')):
+            with self.subTest(closed=closed):
+                self.seed_review()
+                self.put(self.entry('%1', 1))
+                self.put(self.entry('%2', 2))
+                self.put(self.entry('%3', 3))
+                with tempfile.TemporaryDirectory() as temporary, patch.object(paths, 'TETHER', Path(temporary)):
+                    self.mock_reopen(kept=True)
+                    saved = self.real_capture(self.entries[closed])
+                    self.close(closed, self.env)
+                    undo.record_tab_close(saved, self.runner)
+                    self.assertEqual(review_links.reviewed_by(), {})
+                    self.assertEqual(self.act('undo')['state'], 'undone')
+                    self.assert_review(worker, reviewer, '%1')
+
+    def test_reopening_a_reviewer_preserves_a_surviving_workers_new_review_cap(self):
+        self.seed_review()
+        self.put(self.entry('%1', 1))
+        self.put(self.entry('%2', 2))
+        self.put(self.entry('%3', 3))
+        self.put(self.entry('%4', 4))
+        self.mock_reopen(kept=True)
+        saved = self.real_capture(self.entries['%3'])
+        self.close('%3', self.env)
+        undo.record_tab_close(saved, self.runner)
+        review_links.add(worker='%2', worker_thread=thread(2), reviewer='%4', reviewer_thread=thread(4),
+                         name='Worker', agent='codex', reset=True)
+        later = review_links._read()
+        result = self.act('undo')
+        self.assertEqual(result['state'], 'undone')
+        self.assertTrue(any('review state' in warning for warning in result.get('warnings', [])))
+        self.assertEqual(review_links._read(), later)
+
+    def test_reopening_a_reviewer_returns_counts_that_close_transferred_to_its_peer(self):
+        self.seed_review()
+        for number in (1, 2, 3, 4):
+            self.put(self.entry(f'%{number}', number))
+        rows = review_links._read()
+        rows.append(dict(rows[0], reviewer='%4', reviewer_thread=thread(4)))
+        review_links._write(rows)
+        self.mock_reopen(kept=True)
+        saved = self.real_capture(self.entries['%3'])
+        self.close('%3', self.env)
+        undo.record_tab_close(saved, self.runner)
+        cap = review_links._read()[-1]
+        self.assertEqual(cap['counts'], {f'%4:{thread(4)}': {'rounds': 3, 'empty_rounds': 1}})
+        self.assertEqual(self.act('undo')['state'], 'undone')
+        remaining = set(review_links.reviewed_by()['%2'])
+        self.assertEqual(remaining, {'%4', '%10'})
+        cap = review_links._read()[-1]
+        self.assertEqual(cap['counts'], {f'%10:{thread(3)}': {'rounds': 3, 'empty_rounds': 1}})
+        self.assertEqual(cap['restart']['counts'], {f'%10:{thread(3)}': {'rounds': 1}})
+        self.assertTrue(cap['paused'])
+
+    def test_close_of_the_last_session_can_restart_tmux(self):
+        self.closed_tree(kept=False)
+        self.server_id = None
+        self.assertEqual(self.act('undo')['state'], 'undone')
+        self.assertEqual(self.records['%11'], helper('%10', thread(1)))
+        self.assertEqual(self.act('redo')['state'], 'done')
+
+    def test_a_new_tmux_server_blocks_reuse_of_the_old_pane_ids(self):
+        self.closed_tree(kept=False)
+        self.server_id = '2:3'
+        with self.assertRaisesRegex(undo.Refused, 'tmux restarted'):
+            undo.run('undo', None, self.env)
+        self.assertEqual(self.entries, {})
+
+    def test_offline_undo_refuses_an_unbound_external_opener(self):
+        self.closed_tree(kept=False, root_record={'kind': 'own', 'owner_pane': '%10', 'sent_at': 0})
+        self.server_id = None
+        with self.assertRaisesRegex(undo.Refused, 'cannot confirm an old relationship'):
+            undo.run('undo', None, self.env)
+        self.assertEqual(self.entries, {})
+
+    def test_close_undo_refuses_when_a_kept_child_changed_conversations(self):
+        self.closed_tree()
+        self.put(self.entry('%3', 33), self.detached)
+        with self.assertRaisesRegex(undo.Refused, 'Tab %3 changed conversations'):
+            undo.run('undo', None, self.env)
+        self.assertEqual(self.reopen_anchor, [])
+
+    def test_close_redo_refuses_when_a_new_child_joined(self):
+        self.closed_tree()
+        self.act('undo')
+        self.put(self.entry('%15', 15), helper('%10', thread(1)))
+        with self.assertRaisesRegex(undo.Refused, 'Tab %15 joined the task'):
+            undo.run('redo', None, self.env)
+        self.assertEqual(self.killed, [])
+
+    def test_partial_redo_can_resume_without_closing_a_tab_twice(self):
+        self.closed_tree()
+        self.act('undo')
+        original_close = self.close
+
+        def interrupted(pane, env):
+            if pane == '%10':
+                raise OSError('The last close failed.')
+            original_close(pane, env)
+
+        with patch.object(undo, '_close', side_effect=interrupted):
+            with self.assertRaisesRegex(undo.Refused, 'Only part'):
+                self.act('redo')
+        self.assertEqual(self.killed, ['%11'])
+        self.assertEqual(self.records['%3'], dict(self.detached, owner_pane='%11'))
+        self.assertEqual(self.act('redo')['state'], 'done')
+        self.assertEqual(self.killed, ['%11', '%10'])
+        self.assertEqual(self.act('undo')['state'], 'undone')
+
+    def assert_partial_redo_can_undo(self, *, unknown):
+        self.closed_tree()
+        self.act('undo')
+        checkpoint = []
+
+        def interrupted(pane, env):
+            checkpoint.append(undo_store.entries()[-1])
+            self.close(pane, env)
+            if unknown:
+                self.server_id = 'unreachable'
+            raise TimeoutExpired('tmux', 5)
+
+        with patch.object(undo, '_close', side_effect=interrupted):
+            with self.assertRaisesRegex(undo.Refused, 'Only part'):
+                self.act('redo')
+        self.assertEqual(checkpoint[0]['redo_close']['pending']['target'], '%11')
+        self.assertEqual(self.killed, ['%11'])
+        self.assertIn('%10', self.entries)
+        if unknown:
+            with self.assertRaisesRegex(undo.Refused, 'could not confirm'):
+                undo.run('undo', checkpoint[0]['id'], self.env)
+            self.server_id = '1:2'
+        self.assertEqual(self.act('undo')['state'], 'undone')
+        self.assertEqual(self.records['%12'], helper('%10', thread(1)))
+        self.assertEqual(self.records['%3'], helper('%12', thread(2), root='%10', root_thread=thread(1)))
+        self.assertEqual(self.killed, ['%11'])
+
+    def test_partial_redo_can_undo_a_kill_that_took_effect_before_timeout(self):
+        self.assert_partial_redo_can_undo(unknown=False)
+
+    def test_redo_error_with_a_live_first_target_preserves_the_step(self):
+        self.closed_tree(kept=False)
+        self.act('undo')
+        original = undo_store.entries()
+        with (patch.object(undo, '_close', side_effect=OSError('The first close failed.')),
+              self.assertRaisesRegex(undo.Refused, 'first close failed')):
+            self.act('redo')
+        self.assertEqual(undo_store.entries(), original)
+        self.assertEqual(undo.next_target('redo'), original[0]['id'])
+        self.assertEqual(self.killed, [])
+        self.assertEqual(self.act('redo')['state'], 'done')
+
+    def test_partial_redo_keeps_undo_while_the_kill_outcome_is_unknown(self):
+        self.assert_partial_redo_can_undo(unknown=True)
+
+    def test_unknown_redo_with_a_live_target_can_resume_without_phantom_undo(self):
+        self.closed_tree(kept=False)
+        self.act('undo')
+        original = undo_store.entries()[0]
+
+        def interrupted(pane, env):
+            self.server_id = 'unreachable'
+            raise TimeoutExpired('tmux', 5)
+
+        with patch.object(undo, '_close', side_effect=interrupted):
+            with self.assertRaises(undo.Refused):
+                self.act('redo')
+        self.assertEqual(self.killed, [])
+        self.assertEqual(undo.history(self.env, check=False)['next_undo'], original['id'])
+        self.server_id = '1:2'
+        history = undo.history(self.env)
+        self.assertIsNone(history['next_undo'])
+        self.assertEqual(history['next_redo'], original['id'])
+        self.assertEqual(undo_store.entries(), [original])
+        self.assertEqual(self.act('redo')['state'], 'done')
+        self.assertEqual(self.killed, ['%11', '%10'])
+
+    def test_pending_task_close_keeps_only_the_tabs_that_closed(self):
+        self.closed_tree(kept=False)
+        self.put(self.root)
+
+        def stage(found):
+            found[0]['actions'][0]['closed'][-1]['pending'] = True
+
+        undo_store.edit(stage)
+        with self.assertRaisesRegex(undo.Refused, 'The tab did not close. Nothing to undo.'):
+            undo.run('undo', None, self.env)
+        kept, = undo_store.entries()[0]['actions'][0]['closed']
+        self.assertEqual(kept['tab']['pane'], '%2')
+        self.assertEqual(self.act('undo')['state'], 'undone')
+        self.assertEqual(self.records['%10'], self.worker_record)
+        self.assertIn('%1', self.entries)
+
+    def test_failed_reopen_rolls_back_the_other_reopened_tab(self):
+        self.closed_tree()
+        original_reopen = self.reopen
+
+        def interrupted(tab, env, after=None):
+            if tab['name'] == 'Worker':
+                raise OSError('Could not reopen Worker.')
+            return original_reopen(tab, env, after)
+
+        with patch.object(undo, '_reopen', side_effect=interrupted):
+            with self.assertRaisesRegex(undo.Refused, 'Could not reopen Worker'):
+                self.act('undo')
+        self.assertEqual(self.killed, ['%10'])
+        self.assertEqual(self.records, {'%3': self.detached})
+        self.assertEqual(self.act('undo')['state'], 'undone')
+
+    def test_capture_checks_the_saved_conversation_against_the_live_tab(self):
+        entry = self.entry('%2', 2)
+        fields = ['Task', '$1', os.fspath(self.folder), '1', '0'] + [''] * (
+            len(auto_resume.OPTIONS) + len(auto_resume.SESSION_OPTIONS))
+        for old_thread, agent in ((thread(1), 'codex'), (thread(2), 'claude')):
+            with self.subTest(thread=old_thread, agent=agent):
+                saved = {'thread': old_thread, 'agent': agent, 'folder': '/stale'}
+                with patch.object(auto_resume, 'saved_tab', return_value=saved), patch.object(
+                        undo, '_show', return_value=fields):
+                    tab = undo.capture('%2', self.runner, entry)
+                self.assertEqual(tab['thread'], thread(2))
+                self.assertEqual(tab['agent'], 'codex')
+                self.assertEqual(tab['folder'], self.folder)
+
+    def test_saved_default_chat_is_not_a_live_tab_that_blocks_undo(self):
+        tab = self.capture(self.entry('%2', 2))
+        env = undo.Env(run=self.runner, entries=lambda: [{'id': 'saved', 'thread': thread(2)}])
+        with patch('history.find_chat', return_value={'id': thread(2)}):
+            undo._reopen_check(tab, env)
+
+    def test_reopen_retains_an_explicit_placement_in_unstacked(self):
+        tab = self.capture(self.entry('%2', 2))
+        tab['options'] = {'@group_by': 'user'}
+        self.assertEqual(undo._options_for(tab, existing=True)['options'], {'@group_by': 'user'})
+
+
+if __name__ == '__main__':
+    unittest.main()

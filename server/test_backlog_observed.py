@@ -29,7 +29,7 @@ class BacklogObservedTests(unittest.TestCase):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.object(paths, 'TETHER', root / 'tether'))
         self.enterContext(mock.patch.object(paths, 'CONFIG', root / 'config'))
-        self.enterContext(mock.patch.object(audit, '_tab_name', return_value=None))
+        self.enterContext(mock.patch.object(audit, '_tab_name', return_value=(None, None)))
         backlog.folder().mkdir(parents=True)
         self.file = backlog.folder() / 'BACKLOG.md'
         self.file.write_text(INITIAL)
@@ -90,6 +90,18 @@ class BacklogObservedTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertEqual(agent_audit_cli.main(['list', '--json']), 0)
         self.assertEqual(json.loads(out.getvalue())['entries'], [entry])
+
+    def test_observed_long_title_keeps_its_ellipsis_before_the_marker(self):
+        # B316: the title is cut at a word with "…"; the observation marker follows the cut title.
+        backlog.observe()
+        title = 'Keep the reviewer tab after a restart and show the verdict to the worker before reporting the result'
+        with self.sandbox():
+            self.cli_add(title)
+        backlog.observe()
+        entry, = self.entries()
+        short = audit.clip(title, 80)
+        self.assertEqual(short, 'Keep the reviewer tab after a restart and show the verdict to the worker…')
+        self.assert_observed(entry, 'backlog.add', f'B14 added: {short}', AGENT)
 
     def test_start_then_done_before_observe_coalesces_to_done(self):
         backlog.observe()

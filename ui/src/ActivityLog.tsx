@@ -13,7 +13,7 @@ export type AuditSource = 'ui' | 'agent-cli' | 'cli' | 'hook' | 'server' | 'unkn
 type Scalar = string | number | boolean | null
 export interface AuditEntry {
   id: string; at: number; kind: string; summary: string
-  actor: { source: AuditSource; device?: string; tab?: string; pane?: string }
+  actor: { source: AuditSource; device?: string; tab?: string; pane?: string; agent?: string }
   project?: string; old?: Scalar; new?: Scalar; undo?: boolean; detail?: Record<string, Scalar>
 }
 interface Facets { kinds: { id: string; group: string; count: number }[]; projects: string[]; actors: string[] }
@@ -28,11 +28,15 @@ const GROUP_OF: Record<string, string> = { setting: 'settings', passkey: 'settin
 const groupLabel = (kind: string) => AUDIT_GROUPS.find(([id]) => id === GROUP_OF[kind.split('.')[0]])?.[1] ?? 'Other'
 const ANY = ''
 const PAGE = 50
+const AGENT_LABELS = new Map([['claude', 'Claude tab'], ['codex', 'Codex tab'], ['antigravity', 'Antigravity tab']])
 
 /** Who did it, in words: the tab for an agent, the device for the app. Never only a colour or an icon. */
 function actorText(actor: AuditEntry['actor']) {
-  const { source, device, tab, pane } = actor
-  if (source === 'agent-cli' || source === 'hook') return `${tab || pane || 'An agent'}${source === 'hook' ? ' · hook' : ''}`
+  const { source, device, tab, pane, agent } = actor
+  if (source === 'agent-cli' || source === 'hook' || pane) {
+    const label = tab || device || (agent && AGENT_LABELS.get(agent)) || 'An agent tab'
+    return `${label}${source === 'hook' ? ' · hook' : ''}`
+  }
   if (source === 'ui') return device || 'Tether app'
   if (source === 'cli') return 'Command line'
   if (source === 'server') return tab || 'Tether'  // a review verdict names the reviewer tab

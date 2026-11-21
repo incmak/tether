@@ -1,3 +1,6 @@
+import { TaskChips } from './TaskChips'
+import { TaskNeeds } from './TaskNeeds'
+import { taskChildren, taskOf } from './taskTree'
 import { RetryButton } from './Retry'
 import type { TabPickControls } from './tabSelection'
 import { takeBootChat } from './boot'
@@ -6,10 +9,10 @@ import { terminalText } from './terminalText'
 import { ShellOutput } from './ShellOutput'
 import { ContinueWith } from './ContinueWith'
 import { shellCommand } from './shellCommand'
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useWords } from './words'
-import { ArrowDown, Ban, CalendarClock, Paperclip, Plus, ArrowLeftRight, Blocks, GitFork, Check, ChevronDown, ChevronRight, Clock3, Columns2, CornerDownRight, Gauge, Info, Layers, Maximize2, Menu, MessageSquare, Minimize2, MoreHorizontal, PanelTop, Pencil, Pin, PinOff, Redo2, RefreshCw, RotateCcw, Rows2, Search, Server, Settings2, Shield, ShieldAlert, SquareTerminal, Target, Terminal, TriangleAlert, Undo2, WifiOff, X, Zap } from 'lucide-react'
+import { ArrowDown, Ban, CalendarClock, Paperclip, ArrowLeftRight, Blocks, GitFork, Check, ChevronDown, ChevronRight, Clock3, Columns2, CornerDownRight, Gauge, Info, Layers, Maximize2, Menu, MessageSquare, Minimize2, MoreHorizontal, PanelTop, Pencil, Pin, PinOff, Redo2, RefreshCw, RotateCcw, Rows2, Search, Server, Settings2, Shield, ShieldAlert, SquareTerminal, Target, Terminal, TriangleAlert, Undo2, WifiOff, X, Zap } from 'lucide-react'
 import { requestUndo, useUndoNext } from './undoState'
 import { MineBar, MINE_BAR_SPACE, startedLabel } from './MineBar'
 import { AssistantRuntimeProvider, ThreadPrimitive, useExternalStoreRuntime } from '@assistant-ui/react'
@@ -280,6 +283,7 @@ function useSteadyPreview(text: string | undefined) {
 export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api, onMenu, onUpdate, draft, setDraft, onOpenPane, onSessionActions, onPaneActions, onSplit, onFork, onContinued, onReorder, micOk, chime, readAloud, handsFree, slot, running = 0, sidePin, allPanes, headerExtra, askBar, groupHooks, onDropGroup, onBacklogAdd, tabPick }: ChatProps) {
   const agentBrowser = useAgentBrowser(api)
   const words = useWords()
+  const tabPanelId = useId()
   const browserAsk = agentBrowser?.asks.find(item => item.pane === pane.id) ?? null
   const host = useHost()
   const panelRef = useRef<HTMLElement>(null)
@@ -330,6 +334,10 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   const [term, setTermState] = useState(() => terminalPanes.has(pane.id))
   // The chat box unmounts while the terminal shows. On the way back, go to the saved place (or the bottom) again.
   const setTerm = (on: boolean) => { if (on) { terminalPanes.add(pane.id); restore.current = scrollByPane.get(pane.id) ?? null } else terminalPanes.delete(pane.id); setTermState(on) }
+  const openTerminal = () => {
+    setTerm(true)
+    requestAnimationFrame(() => panelRef.current?.querySelector<HTMLButtonElement>('.terminal-toggle')?.focus())
+  }
   const [jump, setJump] = useState(false)
   const viewport = useRef<HTMLDivElement>(null)
   const page = useRef<HTMLDivElement>(null)  // everything under the tabs: it slides as one card on a side swipe
@@ -348,7 +356,9 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   // In a session with groups, the strip, the swipe and the prefetch use the open tab's group only.
   const view = useMemo(() => session?.groups?.length ? { ...session, panes: groupPanes(session.panes, session.groups, pane) } : session, [session, pane])
   const grouped = !!session?.groups?.length
-  const groupName = grouped ? placeName(groupOf(pane, session?.groups), session?.groups) : ''
+  const task = taskOf(pane, session?.panes ?? allPanes)
+  const children = taskChildren(task, session?.panes ?? allPanes)
+  const groupName = placeName(groupOf(task, session?.groups), session?.groups)
   const panes = view?.panes ?? []
   const ready = data !== undefined
   const [, setPrefetched] = useState(0)
@@ -841,7 +851,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     try { await api(path, body); await refresh(); onUpdate(); return true }
     catch (error) {
       if (error instanceof ApiError && error.status === 409) {
-        await refresh(); setToast('The thread changed. Review the chat, then try again.')
+        await refresh(); setToast(path === 'pick' ? errorText(error) : 'The thread changed. Review the chat, then try again.')
       } else { lastFailure.current = error; setSendError(errorText(error)); setDraftBlocked(error instanceof ApiError && error.draft) }
       return false
     }
@@ -881,13 +891,15 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     } finally { setActing(false) }
   }
   // While Claude asks a question, the message box answers it through its own-answer row (checked on the server).
-  const ownAnswer = !data?.approval && data?.attention?.reason === 'menu' ? data.attention.options?.find(option => option.free) : undefined
+  const menuBlocksComposer = !data?.approval && (data?.attention?.menu_verified === false || data?.attention?.ask_current?.multi === true)
+  const menuRevision = data?.attention?.menu_verified || undefined
+  const ownAnswer = !menuBlocksComposer && !data?.approval && data?.attention?.reason === 'menu' ? data.attention.options?.find(option => option.free) : undefined
   async function send(text: string, retryOf?: Pending) {
     text = terminalText(text)
     setPending(list => list.some(item => item.terminal) ? list.filter(item => !item.terminal) : list)
     // Claude shows these as a terminal panel that a phone sees only a slice of. Show Tether's own sheet instead, as T3 Code does.
     if (!retryOf && activePane.agent === 'claude' && /^\/(usage|cost|stats|status)$/.test(text.trim())) { setPlanSheet(true); return true }
-    if (ownAnswer && !retryOf) return write('menu', { session: pane.id, thread: data?.thread ?? null, choice: ownAnswer.id, answer: text })
+    if (ownAnswer && !retryOf) return write('menu', { session: pane.id, thread: data?.thread ?? null, choice: ownAnswer.id, answer: text, revision: menuRevision })
     const key = squash(text).slice(0, 80)
     // The send must go out even when the delivery check cannot read the chat.
     let images: ReturnType<typeof codexSendEvidence>
@@ -1066,11 +1078,11 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   // A card key that Claude did not take leaves its error under the message box. Clear it when the card changes or closes.
   const card = footer.heads_up ? `${footer.heads_up.state}|${footer.heads_up.text}` : ''
   useEffect(() => { if (cardError.current) { cardError.current = false; setSendError(''); setDraftBlocked(false) } }, [card, pane.id])
-  // A tap on a row of the agent's list: the server moves the cursor there, checks the row, then presses one key.
-  async function pickRow(row: number, labels: string[], then: PickKey) {
+  // A list action names a row or submits the numbered question identified by its revision.
+  async function pickRow(row: number | undefined, labels: string[] | undefined, then: PickKey, revision?: string, ticked?: boolean) {
     if (acting) return false
     setActing(true)
-    try { return await write('pick', { session: pane.id, thread: data?.thread ?? null, row, labels, then, heading: data?.attention ? pickHeading(data.attention) : '' }) } finally { setActing(false) }
+    try { return await write('pick', { session: pane.id, thread: data?.thread ?? null, row, labels, then, heading: data?.attention ? pickHeading(data.attention) : '', revision, ticked }) } finally { setActing(false) }
   }
   async function sendKey(key: string, card = false) {
     if (acting) return false
@@ -1121,14 +1133,14 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     setActing(true)
     try { if (await write('clear-draft', { session: pane.id, thread: data?.thread ?? null })) setToast('Cleared the input box in the terminal.') } finally { setActing(false) }
   }
-  // An approval goes through the checked route (it confirms the cursor before Enter); a plain menu takes the option's number key.
+  // Both routes verify the cursor before sending Enter.
   async function choose(kind: 'approval' | 'menu', option: Choice, approval: Approval | null, feedback?: string) {
     if (acting) return
     setActing(true)
     try {
       if (kind === 'approval' && approval?.id) await write('approval', { session: pane.id, thread: data?.thread ?? null, approval: approval.id, choice: option.id, feedback })
       // Arrows plus Enter, checked on the screen: a digit key types text when the cursor sits on the own-answer row.
-      else await write('menu', { session: pane.id, thread: data?.thread ?? null, choice: option.id, label: option.text })
+      else await write('menu', { session: pane.id, thread: data?.thread ?? null, choice: option.id, label: option.text, revision: menuRevision })
     } finally { setActing(false) }
   }
   async function start(agent: 'claude' | 'codex') {
@@ -1180,12 +1192,11 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   useLayoutEffect(() => { tellRef.current = (text, thread) => thread !== data?.thread || !writable || ownAnswer || data?.approval ? Promise.resolve(false) : send(text) })
   const tell = useCallback((text: string, thread: string) => tellRef.current(text, thread), [])
   const feedback = useReplyFeedback(api, activePane.agent === 'shell' ? null : data?.thread, writable ? tell : undefined)
-  return <AssistantRuntimeProvider runtime={runtime}><MediaOpener.Provider value={openMedia}><TabOpener.Provider value={tabOpener}><FilePane.Provider value={activePane.id}><PreviewOpener.Provider value={previewActions}><ReplyFeedbackProvider value={feedback}><section ref={panelRef} className={activePane.agent === 'shell' && !term ? 'chat-panel shell-page' : 'chat-panel'} aria-label={`Chat with ${pane.label}`} data-pane={activePane.id} {...fileDrop}>
+  return <AssistantRuntimeProvider runtime={runtime}><MediaOpener.Provider value={openMedia}><TabOpener.Provider value={tabOpener}><FilePane.Provider value={activePane.id}><PreviewOpener.Provider value={previewActions}><ReplyFeedbackProvider value={feedback}><section ref={panelRef} className={activePane.agent === 'shell' && !term ? 'chat-panel shell-page' : 'chat-panel'} aria-label={`Chat with ${pane.label}`} data-pane={activePane.id} data-task-tree={children.length ? '' : undefined} {...fileDrop}>
     <div className="visually-hidden" role="status">{newestNote ? `${commandOf(newestNote.text)} ran in the terminal. It left no chat output.` : ''}</div>
     {dropping !== null && <div className={dropping ? 'chat-drop refused' : 'chat-drop'} aria-hidden="true">{dropping ? <><Ban size={22} />{dropping}</> : <><Paperclip size={22} />Drop to attach to {chatTitle(pane, session)}</>}</div>}
-    <header ref={headerRef} className="chat-header" draggable={!!slot?.onDragStart} onPointerDown={event => { headerFromTouch.current = event.pointerType === 'touch'; headerDragged.current = false }} onDragStart={event => { if (headerFromTouch.current || headerTouch.current) event.preventDefault(); else slot?.onDragStart?.(event) }} onTouchStart={headerStart} onTouchMove={headerMove} onTouchEnd={headerEnd} onTouchCancel={event => headerEnd(event, true)} onClickCapture={event => { if (headerDragged.current && event.detail !== 0) { event.preventDefault(); event.stopPropagation() } }}><button className="icon-button mobile-menu" onClick={onMenu} aria-label={running ? `Open sessions. ${running} agents running or waiting` : 'Open sessions'}><Menu />{running > 0 && <span className="menu-count" aria-hidden="true">{running}</span>}</button>{slot && <kbd className="slot-badge" title={`Focus this slot: Alt+${slot.index + 1}`}>⌥{slot.index + 1}</kbd>}<button ref={headerTitle} type="button" className="chat-title" aria-label="Session details" onClick={() => setInfo(true)}><h1>{chatTitle(pane, session)}</h1><div>{grouped && session && <><bdi className="group-crumb" title={`${session.name} › ${groupName}`}>{session.name} › {groupName}</bdi><span className="header-separator">·</span></>}<AgentIcon agent={activePane.agent} icon={activePane.pane_icon} /><span className="agent-word">{agentNames[activePane.agent]}</span>{activePane.agent === 'codex' && pane.codex_profile && <span className="provider-badge" title={`Runs on codex -p ${pane.codex_profile}`}>{profileName(pane.codex_profile)}</span>}<span className="header-separator agent-word">·</span><State state={state} />{context && <><span className="header-separator">·</span><span className={Number(context) >= 80 ? 'context-high' : ''}>{context}%<span className="context-word"> context</span></span></>}{activePane.worktree && <><span className="header-separator">·</span><WorktreeMark branch={activePane.worktree} /></>}{activePane.dir && !activePane.worktree && <><span className="header-separator">·</span><bdi className="header-folder" dir="ltr" title={activePane.dir} aria-label={`Directory: ${activePane.dir}`}>{activePane.dir.split('/').filter(Boolean).pop() || '/'}</bdi></>}{started && <span className="header-started" title={`Chat started ${started}`} aria-label={`Started ${started}`}><Clock3 size={12} aria-hidden="true" />{started}</span>}{sidePin?.pinned && <PinMark pin={sidePin} />}</div></button>
+    <header ref={headerRef} className="chat-header" draggable={!!slot?.onDragStart} onPointerDown={event => { headerFromTouch.current = event.pointerType === 'touch'; headerDragged.current = false }} onDragStart={event => { if (headerFromTouch.current || headerTouch.current) event.preventDefault(); else slot?.onDragStart?.(event) }} onTouchStart={headerStart} onTouchMove={headerMove} onTouchEnd={headerEnd} onTouchCancel={event => headerEnd(event, true)} onClickCapture={event => { if (headerDragged.current && event.detail !== 0) { event.preventDefault(); event.stopPropagation() } }}><button className="icon-button mobile-menu" onClick={onMenu} aria-label={running ? `Open sessions. ${running} agents running or waiting` : 'Open sessions'}><Menu />{running > 0 && <span className="menu-count" aria-hidden="true">{running}</span>}</button>{slot && <kbd className="slot-badge" title={`Focus this slot: Alt+${slot.index + 1}`}>⌥{slot.index + 1}</kbd>}<button ref={headerTitle} type="button" className="chat-title" aria-label="Session details" onClick={() => setInfo(true)}><span className="task-phone-stack">{groupName}</span><h1><span className="task-desktop-title">{chatTitle(pane, session)}</span><span className="task-phone-title">{chatTitle(task, session)}</span></h1><div>{grouped && session && <><bdi className="group-crumb" title={`${session.name} › ${groupName}`}>{session.name} › {groupName}</bdi><span className="header-separator">·</span></>}<AgentIcon agent={activePane.agent} icon={activePane.pane_icon} /><span className="agent-word">{agentNames[activePane.agent]}</span>{activePane.agent === 'codex' && pane.codex_profile && <span className="provider-badge" title={`Runs on codex -p ${pane.codex_profile}`}>{profileName(pane.codex_profile)}</span>}<span className="header-separator agent-word">·</span><State state={state} />{context && <><span className="header-separator">·</span><span className={Number(context) >= 80 ? 'context-high' : ''}>{context}%<span className="context-word"> context</span></span></>}{activePane.worktree && <><span className="header-separator">·</span><WorktreeMark branch={activePane.worktree} /></>}{activePane.dir && !activePane.worktree && <><span className="header-separator">·</span><bdi className="header-folder" dir="ltr" title={activePane.dir} aria-label={`Directory: ${activePane.dir}`}>{activePane.dir.split('/').filter(Boolean).pop() || '/'}</bdi></>}{started && <span className="header-started" title={`Chat started ${started}`} aria-label={`Started ${started}`}><Clock3 size={12} aria-hidden="true" />{started}</span>}{sidePin?.pinned && <PinMark pin={sidePin} />}</div></button>
       {headerExtra}
-      {grouped && panes.length <= 1 && <button type="button" className="icon-button group-new-tab" aria-label={`New tab in ${groupName}`} title={`New tab in ${groupName}`} onClick={() => onSplit('right')}><Plus size={20} /></button>}
       <ReviewLinks api={api} pane={pane} panes={allPanes} onOpen={onOpenPane} onChanged={onUpdate} onToast={setToast} />
       {sidePin && activePane.agent !== 'shell' && <button type="button" className="icon-button side-pin-toggle" aria-pressed={sidePin.pinned} aria-label={sidePin.pinned ? 'Unpin from side tab' : 'Pin to side tab'} title={sidePin.pinned ? 'Unpin from side tab' : 'Pin to side tab'} onClick={sidePin.onToggle}>{sidePin.pinned ? <PinOff size={20} /> : <Pin size={20} />}</button>}
       <button type="button" className="icon-button search-toggle" aria-label="Search this chat" title="Search this chat" disabled={!data} onClick={() => setSearching(true)}><Search size={20} /></button>
@@ -1196,15 +1207,16 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     </header>
     {session && view && (grouped && groupHooks
       ? <GroupBar api={api} session={session} pane={pane} hooks={groupHooks} onOpenPane={onOpenPane} onUpdate={onUpdate}>
-          {(panes.length > 1 || !!view.helperFolds?.some(fold => fold.key.startsWith('@') || view.panes.some(item => item.id === fold.key))) && <PaneTabs ref={tabs} session={view} pane={pane} onOpenPane={onOpenPane} onPaneActions={onPaneActions} onSplit={onSplit} onReorder={onReorder} onDropGroup={onDropGroup} pick={tabPick} api={api} onUpdate={onUpdate} micOk={micOk} chime={chime} onNotice={setToast} />}
+          <PaneTabs ref={tabs} panelId={term ? undefined : tabPanelId} session={view} pane={task} onOpenPane={onOpenPane} onPaneActions={onPaneActions} onSplit={onSplit} onReorder={onReorder} onDropGroup={onDropGroup} pick={tabPick} api={api} onUpdate={onUpdate} micOk={micOk} chime={chime} onNotice={setToast} />
         </GroupBar>
-      : <PaneTabs ref={tabs} session={session} pane={pane} onOpenPane={onOpenPane} onPaneActions={onPaneActions} onSplit={onSplit} onReorder={onReorder} onDropGroup={onDropGroup} pick={tabPick} api={api} onUpdate={onUpdate} micOk={micOk} chime={chime} onNotice={setToast} />)}
-    <OpenedBy pane={pane} panes={allPanes} onOpen={onOpenPane} />
+      : <PaneTabs ref={tabs} panelId={term ? undefined : tabPanelId} session={session} pane={task} onOpenPane={onOpenPane} onPaneActions={onPaneActions} onSplit={onSplit} onReorder={onReorder} onDropGroup={onDropGroup} pick={tabPick} api={api} onUpdate={onUpdate} micOk={micOk} chime={chime} onNotice={setToast} />)}
+    {children.length > 0 && <TaskChips panelId={term ? undefined : tabPanelId} task={task} children={children} pane={pane} onOpen={onOpenPane} onActions={onPaneActions} />}
+    {!pane.task && <OpenedBy pane={pane} panes={allPanes} onOpen={onOpenPane} />}
     {term && data?.attention?.askBridge && <AskBar agent={agentNames[activePane.agent]} disabled={!writable || acting} onOpen={() => setTerm(false)} onTerminal={() => askAnswer(data.attention!.askBridge!, null)} />}
     {term ? <LiveTerminal paneId={activePane.id} onChat={() => setTerm(false)} /> : <>
     {(offline || (error && data)) && <div className="reconnect-banner" role="status"><WifiOff size={15} /><span>{offline ? 'You are offline. Tether reconnects when the network is back.' : `Cannot reach ${host}. Reconnecting…`}</span><RetryButton label="Retry now" className="" onRetry={refresh} /></div>}
     {data && activePane.agent === 'shell' && <div className="start-options"><button disabled={!writable || acting} onClick={() => void start('claude')}>Start Claude<ChevronRight size={16} /></button><button disabled={!writable || acting} onClick={() => void start('codex')}><span>Start Codex<FoundryTag api={api} /></span><ChevronRight size={16} /></button></div>}
-    <div className="chat-pager"><div className="chat-page" ref={page}>
+    <div className="chat-pager" id={tabPanelId} role={session ? 'tabpanel' : undefined} aria-label={session ? chatTitle(pane, session) : undefined}><div className="chat-page" ref={page}>
     <ThreadPrimitive.Root className={opening ? 'thread opening' : 'thread'}><div className="chat-scroll" ref={viewport} onTouchStart={swipeStart} onTouchMove={event => { pullMove(event); swipeMove(event) }} onTouchEnd={swipeEnd} onTouchCancel={swipeCancel} onScroll={() => {
       const view = viewport.current
       if (view && hold.current && Date.now() < hold.current.until && Math.abs(view.scrollTop - hold.current.top) > 2) return
@@ -1243,7 +1255,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     {state === 'Stopped' && <div className="working-line" role="status"><span className="state-dot" aria-hidden="true" /><span><strong>Stopped by a restart</strong><small>Send a message to continue.</small></span></div>}
     {state === 'Working' && <div className="working-line" role="status"><WorkGlyph /><span><span className="working-head"><strong className="work-verb">{footer.spinner?.verb ?? 'Working…'}<span className="work-glint" aria-hidden="true"><span>{footer.spinner?.verb ?? 'Working…'}</span></span></strong>{footer.spinner?.detail ? <small>{footer.spinner.detail}</small> : workingSince && <Elapsed since={workingSince.at} />}</span>{footer.running && <span className="running-tool"><Terminal size={13} /><span><span className="running-title">{footer.running.title}{footer.running.elapsed && <small> · {footer.running.elapsed}</small>}</span>{footer.running.command && footer.running.command !== footer.running.title && <code>{footer.running.command}</code>}</span></span>}{footer.denied && <button type="button" className="running-tool denied-tool" disabled={!writable || acting} title="Open /permissions, tab Recently blocked" onClick={() => void openPermissions('Recently blocked')}><ShieldAlert size={13} /><span>{footer.denied.text}{footer.denied.reason && <small>{footer.denied.reason}</small>}</span><span className="denied-review">Review</span></button>}</span></div>}
     <StatusStack priorityKey={data?.approval ? `approval:${(data.approval as Approval).id}` : data?.attention ? `attention:${data.attention.id}` : data?.plan ? `plan:${data.plan.id}` : footer.heads_up ? 'heads' : browserAsk ? `browser-ask:${browserAsk.id}` : ''} chips={(footer.goal || !!footer.tasks?.length || !!footer.crons?.length || (footer.suggestion && !draft.trim() && state !== 'Working')) ? <>{(footer.goal || !!footer.tasks?.length || !!footer.crons?.length) ? <div className="live-chips">{footer.goal && <button type="button" className="live-chip" aria-haspopup="dialog" onClick={() => setLiveSheet('goal')}><Target size={14} />{footer.goal_status ? `Goal · ${goalStatusLabel(footer.goal_status)}` : `Goal active${footer.goal !== 'active' ? ` · ${footer.goal}` : ''}`}<ChevronRight size={13} /></button>}{footer.tasks?.map(task => <button type="button" key={task} className="live-chip" aria-haspopup="dialog" onClick={() => setLiveSheet('tasks')}><Layers size={14} /><span className="live-chip-text">{taskLabel(task, footer.task_details)}</span><ChevronRight size={13} /></button>)}{!!footer.crons?.length && <button type="button" className="live-chip" aria-haspopup="dialog" title={cronSummary(footer.crons)} onClick={() => setLiveSheet('crons')}><CalendarClock size={14} /><span className="live-chip-text">{cronsLabel(footer.crons)}</span><ChevronRight size={13} /></button>}</div> : null}{(footer.suggestion && !draft.trim() && state !== 'Working' ? <button type="button" className="prompt-suggestion" title="Use this suggested prompt" onClick={() => setDraft(footer.suggestion ?? '')}><CornerDownRight size={15} /><span>{footer.suggestion}</span></button> : null)}</> : null} items={[
-      { id: 'action', label: data?.plan ? 'Review plan' : data?.approval ? `${agentNames[activePane.agent]} needs permission` : data?.attention?.reason === 'permissions' ? 'Permissions' : data?.attention?.reason === 'side' ? 'Side question' : data?.attention?.reason === 'dialog' ? data.attention.dialog?.title ?? 'Dialog' : data?.attention?.reason === 'panel' || data?.attention?.reason === 'info' ? `${agentNames[activePane.agent]} panel open` : `${agentNames[activePane.agent]} needs attention`, active: !!(data?.approval || data?.attention || data?.plan), content: <>{data && (data.approval != null || data.attention || data.plan) && <ChoiceDock key={(data.approval as Approval | null)?.id ?? data.attention?.id ?? 'choice'} approval={data.approval as Approval | null} attention={data.attention ?? null} plan={data.plan} agent={agentNames[activePane.agent]} disabled={!writable || acting} onChoose={choose} onKey={key => sendKey(key)} permissionsTab={permissionsTab} onAction={action => promptAction(data.attention!, action)} onDialog={action => dialogAction(data.attention!, action)} onPick={pickRow} onAsk={askAnswer} onAskEngage={askEngage} onType={(text, loginUrl) => write('type', { session: activePane.id, thread: data?.thread ?? null, text, enter: true, ...loginUrl ? { login_url: loginUrl } : {} })} />}</> },
+      { id: 'action', label: data?.plan ? 'Review plan' : data?.approval ? `${agentNames[activePane.agent]} needs permission` : data?.attention?.reason === 'permissions' ? 'Permissions' : data?.attention?.reason === 'side' ? 'Side question' : data?.attention?.reason === 'dialog' ? data.attention.dialog?.title ?? 'Dialog' : data?.attention?.reason === 'panel' || data?.attention?.reason === 'info' ? `${agentNames[activePane.agent]} panel open` : `${agentNames[activePane.agent]} needs attention`, active: !!(data?.approval || data?.attention || data?.plan), content: <>{data && (data.approval != null || data.attention || data.plan) && <ChoiceDock key={(data.approval as Approval | null)?.id ?? data.attention?.id ?? 'choice'} approval={data.approval as Approval | null} attention={data.attention ?? null} plan={data.plan} agent={agentNames[activePane.agent]} disabled={!writable || acting} onChoose={choose} onKey={key => sendKey(key)} onOpenTerminal={openTerminal} permissionsTab={permissionsTab} onAction={action => promptAction(data.attention!, action)} onDialog={action => dialogAction(data.attention!, action)} onPick={pickRow} onAsk={askAnswer} onAskEngage={askEngage} onType={(text, loginUrl) => write('type', { session: activePane.id, thread: data?.thread ?? null, text, enter: true, ...loginUrl ? { login_url: loginUrl } : {} })} />}</> },
       { id: 'heads', label: '✦ Heads up', active: !!footer.heads_up, content: <>{footer.heads_up && <HeadsUp card={footer.heads_up} disabled={!writable || acting} onKey={headsUpKey} onChat={note => { setDraft(note); requestAnimationFrame(() => { const box = panelRef.current?.querySelector<HTMLTextAreaElement>('.composer textarea'); box?.focus(); box?.setSelectionRange(box.value.length, box.value.length) }) }} />}</> },
       { id: 'agents', label: `${background.length} agents running`, active: background.length > 0, content: <>{background.length > 0 && <div className="agents-strip"><ul>{background.map((agent, index) => <li key={index}><strong>{agent.name}</strong><span>{agent.task}</span><small>{agent.detail}</small></li>)}</ul></div>}</> },
       { id: 'queue', label: queueLabel, active: queued.length > 0, content: <>      {queued.map(item => item.failed ? <div key={item.id} className="user-message pending-message failed-message"><span>{item.text}</span><small role="alert">{item.offline ? <><WifiOff size={12} />Not sent</> : <span className="failed-reason">Not sent: {item.failed}</span>}
@@ -1260,8 +1272,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
             <span className="terminal-note-text"><SquareTerminal size={12} aria-hidden="true" />Ran in the terminal. No chat output.</span>
             <button type="button" className="failed-action" aria-label={`Open terminal to see ${command}`} onClick={() => {
               dismiss()
-              setTerm(true)
-              requestAnimationFrame(() => panelRef.current?.querySelector<HTMLButtonElement>('.terminal-toggle')?.focus())
+              openTerminal()
             }}><SquareTerminal size={13} aria-hidden="true" />Open terminal</button>
             <button type="button" aria-label={`Dismiss note: ${command} ran in the terminal`} onClick={dismiss}><X size={12} aria-hidden="true" /></button>
           </small>
@@ -1311,6 +1322,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     {planSheet && <PlanUsage api={api} onClose={() => setPlanSheet(false)} />}
     {continueSheet && <ContinueWith api={api} pane={activePane} thread={data?.thread ?? null} idle={state === 'Idle' || state === 'Stopped'} onClose={() => setContinueSheet(false)} onCreated={id => { setContinueSheet(false); onContinued(id) }} />}
     {modelSheet && <ModelSheet onContinue={() => { setModelSheet(false); setContinueSheet(true) }} api={api} pane={activePane} thread={data?.thread ?? null} currentLabel={model} currentEffort={footer.effort} advisor={footer.advisor} onClose={() => setModelSheet(false)} onDone={message => { setModelSheet(false); setToast(message); readFooter.current() }} />}
+    {pane.id === task.id && <TaskNeeds api={api} task={task} children={children} onOpen={onOpenPane} onUpdate={onUpdate} />}
     <Composer onTerminalEscape={() => void sendKey('Escape')} options={activePane.agent === 'shell' ? undefined : <span className="composer-pills">
       <button type="button" className="pill" aria-label={`Model and effort${advisorAlert ? `. Advisor ${footer.advisor?.name} is not attached` : ''}${tierLabel}`} disabled={!writable || state === 'Working'} onClick={() => setModelSheet(true)}>
         {advisorAlert && <TriangleAlert size={13} className="pill-warning" aria-hidden="true" />}
@@ -1323,7 +1335,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
       {activePane.agent === 'codex' && (footer.context || !!footer.windows?.length || creditsLabel(footer.credits)) && <button type="button" className="pill" aria-label="Usage and credits" aria-haspopup="dialog" onClick={() => setUsageSheet(true)}><Gauge size={13} />Usage</button>}
       {activePane.agent === 'claude' && (footer.observed || footer.status || footer.mode) && <span className="mode-container" onKeyDown={event => { if (modeMenu && event.key === 'Escape') { event.stopPropagation(); setModeMenu(false); modeButton.current?.focus() } }}><button ref={modeButton} type="button" className="pill" aria-label={`Mode: ${MODES[currentMode]}. Change mode`} aria-expanded={modeMenu} disabled={!writable || !!modeBusy} onClick={() => setModeMenu(!modeMenu)}><Gauge size={13} /><span className="pill-text">{modeBusy ? `${MODES[modeBusy]}…` : MODES[currentMode]}</span></button>
         {modeMenu && <div className="attach-menu mode-menu" role="menu">{Object.entries(MODES).map(([key, label]) => <button key={key} role="menuitemradio" aria-checked={key === currentMode} type="button" onClick={() => void chooseMode(key)}>{label}{key === currentMode && <Check size={16} />}</button>)}</div>}</span>}
-    </span>} api={api} pane={activePane} thread={data?.thread ?? null} disabled={!data || !writable} onSend={send} error={sendError} errorAction={draftBlocked ? <button type="button" disabled={acting} onClick={() => void clearAgentInput()}>Clear {agentNames[activePane.agent]}’s input</button> : null} draft={draft} setDraft={setDraft} working={state === 'Working'} onStop={() => void stop()} micOk={micOk} chime={chime} handsFree={handsFree && readAloud} listenRequest={listenRequest} sent={sentPrompts} onTools={() => setTools(true)} hint={ownAnswer ? `Answer ${agentNames[activePane.agent]}’s question` : undefined} />
+    </span>} api={api} pane={activePane} thread={data?.thread ?? null} disabled={!data || !writable || menuBlocksComposer} onSend={send} error={sendError} errorAction={draftBlocked ? <button type="button" disabled={acting} onClick={() => void clearAgentInput()}>Clear {agentNames[activePane.agent]}’s input</button> : null} draft={draft} setDraft={setDraft} working={state === 'Working'} onStop={() => void stop()} micOk={micOk} chime={chime} handsFree={handsFree && readAloud} listenRequest={listenRequest} sent={sentPrompts} onTools={() => setTools(true)} hint={ownAnswer ? `Answer ${agentNames[activePane.agent]}’s question` : undefined} />
     </div>{nextPane && <ChatPeek id={nextPane.id} data={chatCache.get(nextPane.id)} api={api} side={1} peekRef={peekNext} />}{previousPane && <ChatPeek id={previousPane.id} data={chatCache.get(previousPane.id)} api={api} side={-1} peekRef={peekPrevious} />}</div>
     </>}
     <ImageViewer image={opened} close={() => setOpened(null)} onShow={showInFiles(opened && !opened.error ? opened.name : null, () => setOpened(null))} />
