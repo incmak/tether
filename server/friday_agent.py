@@ -551,15 +551,13 @@ YES_FILLER = frozenset('do it that this go right now thanks thank sounds good gr
                        'uh um and just so then all s to the chat session tab'.split())  # "you" only in "thank you"
 
 
-def plain_yes(text, chat=''):
+def plain_yes(text):
     if '?' in text:
         return False  # "That's correct?" asks; it does not consent.
     # "You sure" (STT drops the "?") asks too; "you" is a yes word only in "thank you".
+    # A chat title is free text ("Hold Off", "Tomorrow"): it never stands in for words of a yes, so
+    # "Yes, send it to docs" gets a fresh "Yes or no?" (fail-safe).
     words = f' {norm(text)} '.replace(' thank you ', ' thanks ')
-    # The chat name counts only as one whole phrase right after "to" ("send it to docs"): a title such
-    # as "Hold Off" or "Can we have…" never turns other words into a yes.
-    for name in {norm(chat), norm(clean_chat(chat))} - {''}:
-        words = words.replace(f' to {name} ', ' to ')
     words = words.split()
     allowed = YES_WORDS | YES_FILLER
     return any(word in YES_WORDS for word in words) and all(word in allowed for word in words)
@@ -602,7 +600,7 @@ def confirmed_args(name, args, last_user_text, previous_assistant, pending=None,
     if name not in SEND_TOOLS or not isinstance(args, dict) or pending is None:
         return args
     chat = str(args.get('chat', '')).strip()
-    if not (plain_yes(last_user_text, chat) and pending.live(user_turn)
+    if not (plain_yes(last_user_text) and pending.live(user_turn)
             and pending.heard and pending.follows(previous_assistant)
             and name == pending.name and chat.casefold() == pending.chat.strip().casefold()):
         return args
@@ -732,7 +730,7 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
         # A yes confirms the one send Friday proposed: the same tool and chat, and the read-back text exactly.
         proposal_matches = (has_proposal and name == pending.name and chat == pending.chat.strip().casefold()
                             and binds(payload, pending.payload))
-        yes = plain_yes(last_user_text, chat)
+        yes = plain_yes(last_user_text)
         if suggestions:
             normalized_payload = norm(payload)
             normalized_speech = norm(last_user_text)
@@ -1847,7 +1845,7 @@ def runtime_types():
                         self.readback_budget.reset(proposal)
                         declined = True
                     elif not proposal.heard:
-                        replay = plain_yes(self.last_user_text, proposal.chat)
+                        replay = plain_yes(self.last_user_text)
                         if not replay:
                             self.session.pending_proposal = proposal = None
                 self.tool_run = SimpleNamespace(source=self.run_source,

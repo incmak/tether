@@ -584,6 +584,13 @@ class FridayRulesTests(unittest.TestCase):
             ('A minute', 'Okay, in a minute.', 'approve', False),
             ('Wait', 'Approve. Wait.', 'approve', False),
             ('Later today', 'Yes, approve it later today.', 'approve', False),
+            ('Later', 'Approve later.', 'approve', False),
+            # Still decide.
+            ('docs', 'Approve', 'approve', True),
+            ('docs', 'Yes approve it', 'approve', True),
+            ('docs', 'Deny', 'deny', True),
+            ('docs', 'No', 'deny', True),
+            ('docs', 'Go ahead', 'approve', True),
             # "Don't" alone denies; a negated command decides nothing.
             ('docs', "Don't deny.", 'deny', False),
             ('docs', "Don't stop.", 'deny', False),
@@ -799,15 +806,15 @@ class FridayRulesTests(unittest.TestCase):
         for answer in ('Yes, but later.', 'Okay, once the tests pass.', 'Sure, but make it D.',
                        'Yes, please do not send it yet.', 'Yes, why not ask deploy instead.'):
             with self.subTest(answer=answer):
-                self.assertFalse(friday.plain_yes(answer, 'docs'))
+                self.assertFalse(friday.plain_yes(answer))
                 args = friday.confirmed_args('send_to_chat', {'chat': 'docs', 'prompt': 'Keep option C.'},
                                              answer, readback, proposal, 5)
                 self.assertIsNotNone(friday.check_tool('send_to_chat', args, 'speech', answer, set(),
                                                        readback, proposal, 5))
-        for answer in ('Yes.', 'Yes, please do.', 'Okay, go ahead.', 'Sure, send it to docs.', 'Yeah, do it. Thanks.'):
+        for answer in ('Yes.', 'Yes, please do.', 'Okay, go ahead.', 'Yes please send it.', 'Yeah, do it. Thanks.'):
             for previous, pending in ((readback, proposal), ('Should I tell docs to keep option C?', None)):
                 with self.subTest(answer=answer, previous=previous):
-                    self.assertTrue(friday.plain_yes(answer, 'docs'))
+                    self.assertTrue(friday.plain_yes(answer))
                     args = friday.confirmed_args('send_to_chat', {'chat': 'docs', 'prompt': 'Archive the draft.'},
                                                  answer, previous, pending, 5)
                     # Friday's own words bind nothing: the model's text stays, and the guard reads it back.
@@ -827,7 +834,7 @@ class FridayRulesTests(unittest.TestCase):
         args = {'chat': 'docs', 'prompt': 'Keep option C.'}
         for answer in ("That's correct?", 'Yes?', 'Okay, go ahead?'):
             with self.subTest(answer=answer):
-                self.assertFalse(friday.plain_yes(answer, 'docs'))
+                self.assertFalse(friday.plain_yes(answer))
                 self.assertIsNotNone(friday.check_tool('send_to_chat', args, 'speech', answer, set(),
                                                        readback, proposal, 5))
 
@@ -877,8 +884,8 @@ class FridayRulesTests(unittest.TestCase):
     def test_a_question_without_its_mark_is_not_a_yes(self):
         for answer in ('You sure', 'you sure then', 'Okay you'):
             with self.subTest(answer=answer):
-                self.assertFalse(friday.plain_yes(answer, 'docs'))
-        self.assertTrue(friday.plain_yes('Yes, thank you.', 'docs'))
+                self.assertFalse(friday.plain_yes(answer))
+        self.assertTrue(friday.plain_yes('Yes, thank you.'))
 
     def test_a_question_that_names_the_chat_makes_the_next_turn_an_answer(self):
         previous = 'Would you like me to ping docs about option C?'
@@ -943,11 +950,19 @@ class FridayRulesTests(unittest.TestCase):
                                            'Yes.', set(), 'Should I send the approval checklist to docs?'),
                          'The user answered a send question, not an approval.')
         proposal = friday.SendProposal('send_to_chat', 'Hold Off', 'Ship it.', 4, heard=True)
-        self.assertFalse(friday.plain_yes('Yes, hold off.', 'Hold Off'))
+        self.assertFalse(friday.plain_yes('Yes, hold off.'))
         self.assertEqual(friday.check_tool('send_to_chat', {'chat': 'Hold Off', 'prompt': 'Ship it.'}, 'speech',
                                            'Yes, hold off.', set(), friday.send_readback(proposal), proposal, 5),
                          refusal)
-        self.assertTrue(friday.plain_yes('Yes, send it to Hold Off.', 'Hold Off'))
+        # A chat title is free text: it never stands in for words of a yes. Friday asks "Yes or no?" again.
+        for chat, answer in (('Hold Off', 'Yes, send it to Hold Off.'), ('docs', 'Sure, send it to docs.'),
+                             ('Tomorrow', 'Yes, send it to tomorrow')):
+            with self.subTest(chat=chat, answer=answer):
+                self.assertFalse(friday.plain_yes(answer))
+                proposal = friday.SendProposal('send_to_chat', chat, 'Ship it.', 4, heard=True)
+                self.assertEqual(friday.check_tool('send_to_chat', {'chat': chat, 'prompt': 'Ship it.'}, 'speech',
+                                                   answer, set(), friday.send_readback(proposal), proposal, 5),
+                                 friday.READBACK_REQUIRED)
 
     def test_friday_own_words_never_confirm_a_send(self):
         # 20 Nov advisor decision: only the server's stored proposal binds a yes. Parsing Friday's
