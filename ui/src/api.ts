@@ -140,10 +140,15 @@ export interface ToolArtifact { url: string; path: string; title: string }
 export interface ToolSummary { id: string; name: string; title: string; is_error: boolean; status: 'pending' | 'complete'; images?: number; description?: string; started?: string; ended?: string; artifact?: ToolArtifact }
 export interface ToolDetail extends ToolSummary { detail: string; format: 'text' | 'diff'; truncated: boolean }
 export interface AdvisorCall { id: string; model?: string; status: 'pending' | 'answered' | 'error' | 'unknown'; error?: string; result_type?: string; started?: string; ended?: string }
+export type StatusTab = { pane: string; session: string; thread: string | null }
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant'
   text: string
+  source?: 'tether'
+  legacy?: true
+  prompt?: 'status' | 'rules' | 'review'
+  tabs?: StatusTab[]
   kind?: 'actions' | 'advisor' | 'terminal' | 'notice' | 'peer' | 'watch' | 'side'
   quiet?: string
   watch?: string
@@ -210,6 +215,13 @@ const cleanAdvisor = (item: unknown) => {
   return rest
 }
 const isStringList = (item: unknown) => Array.isArray(item) && item.every(entry => typeof entry === 'string')
+function isStatusTabs(item: unknown): item is StatusTab[] {
+  if (!Array.isArray(item)) return false
+  for (const tab of item) {
+    if (!isObject(tab) || !hasStrings(tab, ['pane', 'session']) || (tab.thread !== null && typeof tab.thread !== 'string')) return false
+  }
+  return true
+}
 /** The message itself when every field it has is the right type; a copy without the wrong fields when it has a role and
  *  text; else null. Bad tools drop out of the tool list, and bad members out of the member list. */
 const cleanMessage = (item: unknown): ChatMessage | null => {
@@ -217,6 +229,10 @@ const cleanMessage = (item: unknown): ChatMessage | null => {
   let copy: Record<string, unknown> | null = null
   const set = (key: string, value: unknown) => { copy ??= { ...item }; if (value === undefined) delete copy[key]; else copy[key] = value }
   for (const [key, type] of Object.entries(MESSAGE_FIELDS)) if (item[key] !== undefined && typeof item[key] !== type) set(key, undefined)
+  if (item.source !== undefined && item.source !== 'tether') set('source', undefined)
+  if (item.legacy !== undefined && item.legacy !== true) set('legacy', undefined)
+  if (item.prompt !== undefined && item.prompt !== 'status' && item.prompt !== 'rules' && item.prompt !== 'review') set('prompt', undefined)
+  if (item.tabs !== undefined && !isStatusTabs(item.tabs)) set('tabs', undefined)
   const advisor = cleanAdvisor(item.advisor)
   if (advisor !== item.advisor) set('advisor', advisor)
   if (item.tools !== undefined) {

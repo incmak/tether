@@ -10,6 +10,7 @@ Feed.observe runs in the server monitor. When a tab finishes a turn, fails, or w
 the coordinator one short status message, so the coordinator can tell the user without polling. It sends only while the
 coordinator is idle, joins updates that come close together, and keeps them when the send fails.
 """
+from contextlib import nullcontext
 import hashlib
 import hmac
 import json
@@ -26,6 +27,7 @@ import auth
 import codex_messages
 import helper_tabs
 import history
+import injected_prompts
 import needs
 import paths
 import push
@@ -165,7 +167,7 @@ PLACEMENT_UNKNOWN = ('Tether could not confirm that this tab is outside every ta
 IN_TASK = 'A tab inside a task cannot be the coordinator. Move it out of its task first.'
 
 
-def _change_mark(body, caller, entries, run, *, on_claim=None):
+def _change_mark(body, caller, entries, run, *, send_rules=None):
     """Change the mark using fresh entries while the caller holds the lock."""
     action = body['action']
     found = marks(entries)
@@ -184,7 +186,7 @@ def _change_mark(body, caller, entries, run, *, on_claim=None):
     # Hold the record lock from the placement check to the mark: a move, sort or Undo cannot place the tab in a task
     # in between (write_record checks the mark under the same lock).
     with helper_tabs.record_lock():
-        return _claim(body, caller, entries, run, mine, on_claim)
+        return _claim(body, caller, entries, run, mine, send_rules)
 
 
 def _check_outside_task(pane, run):
@@ -204,7 +206,7 @@ def _check_outside_task(pane, run):
         raise ValueError(IN_TASK)
 
 
-def _claim(body, caller, entries, run, mine, on_claim):
+def _claim(body, caller, entries, run, mine, send_rules):
     pane = caller['id']
     mode = _mode(body, mine[1] if mine else 'all')
     if mine is None and (caller.get('role') or caller.get('helper')):
@@ -215,31 +217,36 @@ def _claim(body, caller, entries, run, mine, on_claim):
         _check_outside_task(pane, run)
     other = next((entry for entry in entries if entry['id'] != pane and entry.get('coordinator') in MODES
                   and entry.get('tmux_session') == caller.get('tmux_session')), None)
-    replaced = None
-    if other is not None:
-        if body.get('take') is not True:
-            raise ValueError(f'The tab `{name_of(other)}` ({other["id"]}) is the coordinator of this session. '
-                             'Run release there, or claim --take when the user asked for the change.')
-        _set(run, other['id'], None)
-        replaced = other['id']
-    marked = False
-    try:
-        _set(run, pane, mode)
-        marked = True
-        if on_claim is not None:
-            on_claim()
-    except Exception as exc:
-        prior_marks = [(pane, mine[1] if mine else None)] if marked else []
+    if other is not None and body.get('take') is not True:
+        raise ValueError(f'The tab `{name_of(other)}` ({other["id"]}) is the coordinator of this session. '
+                         'Run release there, or claim --take when the user asked for the change.')
+    rules_text = rules()
+    prompt = nullcontext()
+    if send_rules is not None:
+        text = '[Tether] The user made this tab the coordinator of this session in Tether.\n' + rules_text
+        prompt = injected_prompts.track_send(caller, text, 'rules')
+    replaced = other['id'] if other is not None else None
+    with prompt as delivery:
         if replaced is not None:
-            prior_marks.append((replaced, other['coordinator']))
-        for prior_pane, prior_mode in prior_marks:
-            try:
-                _set(run, prior_pane, prior_mode)
-            except RuntimeError as rollback:
-                exc.add_note(f'{rollback} Pane {prior_pane} did not restore its previous mark.')
-        raise
-    reply = {'coordinator': pane, 'events': mode, 'rules': rules()}
-    if replaced is not None and on_claim is not None:
+            _set(run, replaced, None)
+        marked = False
+        try:
+            _set(run, pane, mode)
+            marked = True
+            if send_rules is not None:
+                send_rules(delivery)
+        except Exception as exc:
+            prior_marks = [(pane, mine[1] if mine else None)] if marked else []
+            if replaced is not None:
+                prior_marks.append((replaced, other['coordinator']))
+            for prior_pane, prior_mode in prior_marks:
+                try:
+                    _set(run, prior_pane, prior_mode)
+                except RuntimeError as rollback:
+                    exc.add_note(f'{rollback} Pane {prior_pane} did not restore its previous mark.')
+            raise
+    reply = {'coordinator': pane, 'events': mode, 'rules': rules_text}
+    if replaced is not None and send_rules is not None:
         reply['replaced'] = replaced
     return reply
 
@@ -263,12 +270,8 @@ def browser_role(body, *, fresh, lock, run, status, send):
         new_claim = mode is not None and target.get('coordinator') not in MODES
         if new_claim:
             state = _send_state(target, status)   # refuse before any mark changes; a Working tab gets a held send
-
-            def notify():
-                send(target, '[Tether] The user made this tab the coordinator of this session in Tether.\n' + rules(), state)
-
             changed = _change_mark({'action': 'claim', 'events': mode, 'take': body.get('take')},
-                                   target, entries, run, on_claim=notify)
+                                   target, entries, run, send_rules=lambda delivery: send(target, delivery, state))
         elif target.get('coordinator') in MODES:
             changed = _change_mark({'action': 'release' if mode is None else 'events', 'events': mode},
                                    target, entries, run)
@@ -362,8 +365,10 @@ def message(events, mode):
              f'coordinator rules, run `{cli()} claim`.']
     words = {'done': 'finished', 'asks': 'finished and asks the user', 'needs': 'waits on the user', 'failed': 'failed'}
     for event in events:
-        text = f': {event["text"]}' if event['text'] else ''
-        lines.append(f'- `{event["name"]}` ({event["pane"]}) {words[event["kind"]]}{text}')
+        name = re.sub(r'\r\n|[\r\n\u2028\u2029]', ' ', event['name'].replace('`', "'"))
+        text = ' '.join(event['text'].split())
+        detail = f': {text}' if text else ''
+        lines.append(f'- `{name}` ({event["pane"]}) {words[event["kind"]]}{detail}')
     return '\n'.join(lines)
 
 
@@ -535,7 +540,13 @@ def deliver(pane, queue, events, *, lock, fresh, fresh_status, latest_outcome, s
             return None
         if live:
             # terminal_submit refuses a draft in the input.
-            submit_locked(message(live, mode), coordinator)
+            text = message(live, mode)
+            tabs = [
+                {'pane': event['pane'], 'session': event['session'], 'thread': by_pane[event['pane']].get('thread')}
+                for event in live
+            ]
+            with injected_prompts.track_send(coordinator, text, 'status', tabs=tabs) as delivery:
+                submit_locked(delivery, coordinator)
         return live, held
     finally:
         lock.release()

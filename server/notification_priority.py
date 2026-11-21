@@ -1,10 +1,11 @@
-"""Pure notification classification from a bounded transcript and final reply."""
+"""Notification classification from a bounded transcript and final reply."""
 from datetime import datetime
 import re
 import codex_messages
 from antigravity import transcript_message
+import injected_prompts
 
-from agents import task_notice
+from agents import task_notice, tidy_user_text
 
 
 def text_content(content):
@@ -35,27 +36,49 @@ def _timestamp(record):
     return None
 
 
-def turn_source(agent, records, *, identify=None, distinguish_missing=False, with_time=False, latest_turn=False, latest_user=False):
+def turn_source(agent, records, *, identify=None, distinguish_missing=False, with_time=False, latest_turn=False,
+                latest_user=False, require_receipts=False, entry=None):
     """Find the delivered prompt before the latest assistant record.
 
     Tool results and debug copies are not prompts. Claude sidechains belong to another agent.
     Codex and Antigravity currently expose no reliable background-origin flag.
     With latest_turn, any prompt after the latest assistant record gives 'unknown': that turn has no
     reply yet, so the prompt before that record belongs to an earlier turn.
-    With latest_user, scan past automated turns and call identify with the prompt and its timestamp.
+    With latest_user, scan past automated turns and return the latest prompt that identify leaves to the user.
+    identify(record, text) gets the native record, so it can read the prompt's receipt and timestamp.
+    An unreadable receipt stops the scan. A strict caller gets the read error instead of an unknown source.
     """
     finished_at = None
+    unknown = []  # latest_user, strict: the newest prompt whose sender is unknown
 
     def result(source, record=None):
         return (source, _timestamp(record) if record is not None else None, finished_at) if with_time else source
 
     def prompt_source(record, text, background=False):
-        if background:
+        source = 'background' if background else None
+        if not background:
+            try:
+                if identify is not None:
+                    source = identify(record, text)
+                elif entry is not None:
+                    if injected_prompts.bound_receipt(entry, record) is not None:
+                        source = 'tether'
+                    elif injected_prompts.has_delivery_id(text):
+                        source = injected_prompts.UNKNOWN_RECEIPT
+            except injected_prompts.ReceiptsUnreadable:
+                if require_receipts:
+                    raise
+                return result(injected_prompts.UNKNOWN_RECEIPT, record)
+        if source == injected_prompts.UNKNOWN_RECEIPT and latest_user and require_receipts:
+            # Never skip a prompt that may be the person's. Keep scanning for a proven user prompt before it.
+            if not unknown:
+                unknown.append(_timestamp(record))
+            return None
+        if unknown and latest_user and (source or 'user') == 'user':
+            raise injected_prompts.ProvenanceUnknown(unknown[0], _timestamp(record) or 0)
+        if source == injected_prompts.UNKNOWN_RECEIPT and not require_receipts:
             source = 'background'
-        elif identify is not None:
-            source = (identify(text, _timestamp(record)) if latest_user else identify(text)) or 'user'
-        else:
-            source = 'user'
+        source = source or 'user'
         return result(source, record) if not latest_user or source == 'user' else None
 
     if agent == 'antigravity':
@@ -87,7 +110,7 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
                 # Tool-result-only user records are continuations of the same turn.
                 if not content.strip():
                     continue
-                if found := prompt_source(record, content, claude_background(record, content)):
+                if found := prompt_source(record, tidy_user_text(content), claude_background(record, content)):
                     return found
                 continue
             if kind == 'attachment':
@@ -98,7 +121,7 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
                     prompt = attachment.get('prompt')
                     if not isinstance(prompt, str) or not prompt.strip():
                         continue
-                    if found := prompt_source(record, prompt, claude_background(record, prompt)):
+                    if found := prompt_source(record, tidy_user_text(prompt), claude_background(record, prompt)):
                         return found
                     continue
                 if attachment.get('type') == 'hook_blocking_error' and identify is not None:
@@ -116,8 +139,9 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
                     is_assistant = True
                 elif assistant_seen and payload.get('role') == 'user':
                     content = text_content(payload.get('content'))
-                    if any(part.get('_user') for part in codex_messages.parts(payload)):
-                        if found := prompt_source(record, content):
+                    user_parts = [part['text'] for part in codex_messages.parts(payload) if part.get('_user')]
+                    if user_parts:
+                        if found := prompt_source(record, '\n'.join(user_parts)):
                             return found
                         continue
                     # AGENTS instructions are injected context, not a fresh prompt.
@@ -139,15 +163,19 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
             elif latest_turn and not assistant_seen and kind == 'USER_INPUT':
                 return result('unknown')
             elif assistant_seen and kind == 'USER_INPUT':
-                if identify is not None and (prompt := transcript_message(record, 0, lambda text: text)):
+                if (identify is not None or entry is not None) and (prompt := transcript_message(record, 0, lambda text: text)):
                     if found := prompt_source(record, prompt['text']):
                         return found
                     continue
+                if unknown and latest_user:
+                    raise injected_prompts.ProvenanceUnknown(unknown[0], _timestamp(record) or 0)
                 return result('user', record if latest_user else None)
         if is_assistant:
             if with_time and not assistant_seen and finished_at is None:
                 finished_at = _timestamp(record)
             assistant_seen = True
+    if unknown:
+        raise injected_prompts.ProvenanceUnknown(unknown[0])
     if distinguish_missing:
         return result('unknown-background' if hook_blocked else 'unknown')
     return result('background' if hook_blocked else 'user')
@@ -205,13 +233,21 @@ def status_line(reply):
     return status, lines
 
 
-def classify(kind, agent, records, reply):
-    """Return (priority, preview text). Only a final status line overrides text guesses."""
+def classify(kind, agent, records, reply, *, entry=None, source_unknown=False):
+    """Return (priority, preview text). Only a final status line overrides text guesses.
+
+    source_unknown: the prompt source could not be read. It counts as background, never as the person's turn.
+    """
     status, lines = status_line(reply)
     preview = '\n'.join(lines).rstrip()
     if kind in ('approval', 'input') or status == 'yes':
         return 'urgent', preview
-    level = 'low' if turn_source(agent, records) == 'background' else 'important'
+    try:
+        source = injected_prompts.UNKNOWN_RECEIPT if source_unknown else turn_source(
+            agent, records, entry=entry, require_receipts=True)
+    except injected_prompts.ReceiptsUnreadable:
+        source = injected_prompts.UNKNOWN_RECEIPT
+    level = 'low' if source in ('background', injected_prompts.UNKNOWN_RECEIPT) else 'important'
     if status is None:
         plain = re.sub(r'[*`]', '', preview).strip()
         if plain.endswith('?'):

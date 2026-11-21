@@ -145,7 +145,7 @@ function WebLink({ href = '', children, ...props }: React.ComponentProps<'a'>) {
 }
 
 // A link, not a button: it flows and wraps with the text around it. Enter and Space both open it.
-function FileLink({ open, label, children }: { open: () => void; label?: string; children: React.ReactNode }) {
+export function FileLink({ open, label, children }: { open: () => void; label?: string; children: React.ReactNode }) {
   return <a href="#" role="button" className="file-link" aria-label={label}
     onClick={event => { event.preventDefault(); open() }}
     onKeyDown={event => { if (event.key === ' ') { event.preventDefault(); open() } }}>

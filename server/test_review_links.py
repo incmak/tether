@@ -19,9 +19,11 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import ANY, Mock, patch
+from uuid import uuid4
 
 import audit
 import helper_close
+import injected_prompts
 import review_links
 import review_scope
 import server
@@ -57,6 +59,11 @@ def write_records(path, records, mode='w'):
         transcript.writelines(json.dumps(record) + '\n' for record in records)
 
 
+def legacy_prompt(record):
+    key = 'created_at' if record.get('type') == 'USER_INPUT' else 'timestamp'
+    return dict(record, **{key: datetime.now(timezone.utc).isoformat()})
+
+
 def guard_subprocess(test):
     for name in ('run', 'Popen'):
         process = test.enterContext(patch.object(
@@ -86,10 +93,17 @@ class ReviewLinksTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.file = Path(temporary.name) / 'cache' / 'review-links.json'
         self.enterContext(patch.object(review_links, 'FILE', self.file))
+        receipts = Path(temporary.name) / 'receipts'
+        self.enterContext(patch.object(injected_prompts.paths, 'CACHE', receipts))
+        self.enterContext(patch.object(injected_prompts, 'ROOT', receipts / 'injected'))
+        # Existing mock sends have no receipts. Timed historical fixtures precede the cutover.
+        injected_prompts._write(receipts / 'injected-since.json', {'since_ms': 4_102_444_800_000})
         self.enterContext(patch.object(review_links, '_last_sent', {}))
         self.enterContext(patch.object(review_links, '_feedback_in_flight', {}))
         self.clock = self.enterContext(own_time(review_links, monotonic=Mock(return_value=1000)))
-        self.worker = dict(id='%13', agent='codex', thread=WORKER_THREAD, transcript='/project/worker.jsonl')
+        transcript = Path(temporary.name) / 'worker.jsonl'
+        transcript.touch()
+        self.worker = dict(id='%13', agent='codex', thread=WORKER_THREAD, transcript=str(transcript))
         self.reviewer = dict(id='%12', agent='claude', thread=THREAD, writable=True)
         self.states = {'%13': 'Idle', '%12': 'Idle'}
         self.status = Mock(side_effect=lambda entry: {'state': self.states[entry['id']]})
@@ -954,14 +968,14 @@ class ReviewLinksTests(unittest.TestCase):
             'Review its work: check the changes and the claims, then list what is wrong or missing. '
             'Start your reply with APPROVED if nothing is. Tether sends your reply to that tab. '
             f'Review id: {request_id}. '
-            'Its last reply:\n\nI fixed it.\n\nTranscript: /project/worker.jsonl', 'Idle')
+            f'Its last reply:\n\nI fixed it.\n\nTranscript: {self.worker["transcript"]}', 'Idle')
         pattern = (r'^\[Tether review\] The (\S+) tab “([^”]*)” \((%\d+)\) finished a turn\.'
                    r'[\s\S]*?Its last reply:\s*([\s\S]*?)\s*Transcript: (\S*)'
                    r'( This is the last round: your reply stays here\.)?\s*$')
         match = re.match(pattern, self.send.call_args.args[1])
         self.assertIsNotNone(match)
         self.assertEqual(match.groups()[:5],
-                         ('Codex', 'Fix the bug', '%13', 'I fixed it.', '/project/worker.jsonl'))
+                         ('Codex', 'Fix the bug', '%13', 'I fixed it.', self.worker['transcript']))
         self.assertFalse(self.links()[0]['seen_working'])
         self.assertTrue(self.links()[0]['awaiting'])
         self.assertFalse(self.links()[0]['reviewer_seen_working'])
@@ -1594,7 +1608,7 @@ class ReviewLinksTests(unittest.TestCase):
                 if not summary_finished:
                     summary = next(call.args[1] for call in reversed(self.send.call_args_list)
                                    if call.args[0] == self.worker)
-                    records = [codex('user', summary), codex('assistant', 'Open findings.')]
+                    records = [legacy_prompt(codex('user', summary)), codex('assistant', 'Open findings.')]
                     self.turn_source = server.review_turn_source
                     with patch.object(server, 'notification_records', return_value=records):
                         self.request_review()
@@ -1648,7 +1662,7 @@ class ReviewLinksTests(unittest.TestCase):
         parent = self.add_parent()
         self.fail_to_limit()
         summary = next(call.args[1] for call in reversed(self.send.call_args_list) if call.args[0] == self.worker)
-        records = [codex('user', summary), codex('assistant', 'Open findings.')]
+        records = [legacy_prompt(codex('user', summary)), codex('assistant', 'Open findings.')]
         self.turn_source = server.review_turn_source
         self.enterContext(patch.object(server, 'notification_records', return_value=records))
         self.observe(**{'%13': 'Working'})
@@ -1689,9 +1703,9 @@ class ReviewLinksTests(unittest.TestCase):
                 summary = next(call.args[1] for call in reversed(self.send.call_args_list)
                                if call.args[0] == self.worker)
                 if agent == 'claude':
-                    records = [{'type': 'attachment', 'attachment': {'type': 'queued_command', 'prompt': summary}}]
+                    records = [legacy_prompt({'type': 'attachment', 'attachment': {'type': 'queued_command', 'prompt': summary}})]
                 else:
-                    records = [{'type': 'event_msg', 'payload': {'type': 'user_message', 'message': summary}}]
+                    records = [legacy_prompt({'type': 'event_msg', 'payload': {'type': 'user_message', 'message': summary}})]
                     self.work_mark.return_value = 'changed tree'
                 self.turn_source = server.review_turn_source
                 with patch.object(server, 'notification_records', return_value=records):
@@ -1715,7 +1729,7 @@ class ReviewLinksTests(unittest.TestCase):
         parent = self.add_parent()
         self.fail_to_limit()
         summary = next(call.args[1] for call in reversed(self.send.call_args_list) if call.args[0] == self.worker)
-        records = [codex('user', summary)]
+        records = [legacy_prompt(codex('user', summary))]
         self.turn_source = server.review_turn_source
         self.states['%13'] = 'Working'
         review_links.agent_prompt('%13', parent['id'], parent['thread'])
@@ -1740,7 +1754,7 @@ class ReviewLinksTests(unittest.TestCase):
                 self.worker['agent'] = agent
                 self.fail_to_limit()
                 summary = self.send.call_args.args[1]
-                records = [message('user', summary)]
+                records = [legacy_prompt(message('user', summary))]
                 self.turn_source = server.review_turn_source
                 with patch.object(server, 'notification_records', return_value=records):
                     self.observe(**{'%13': 'Working'})
@@ -3686,12 +3700,12 @@ class ReviewLinksTests(unittest.TestCase):
         self.turn_source = server.review_turn_source
         return stop
 
-    def write_worker_turn(self, prompt, output_size=0, *, hook_blocked=False):
+    def write_worker_turn(self, prompt, output_size=0, *, hook_blocked=False, mode='w'):
         agent = self.worker['agent']
         now = int(time.time())
         started_at, finished_at = now + 1, now + 2
         if agent == 'antigravity':
-            records = [dict(type='USER_INPUT', step_index=1, content=f'<USER_REQUEST>{prompt}</USER_REQUEST>')]
+            records = [legacy_prompt(dict(type='USER_INPUT', step_index=1, content=f'<USER_REQUEST>{prompt}</USER_REQUEST>'))]
             if output_size:
                 records.append(dict(type='PLANNER_RESPONSE', step_index=2, content='x' * output_size))
             records.append(dict(type='AGENT_RESPONSE', step_index=3, content='Done.'))
@@ -3705,8 +3719,10 @@ class ReviewLinksTests(unittest.TestCase):
                 records.append(dict(type='attachment', attachment={'type': 'hook_blocking_error'}))
             records.append(message('assistant', 'Done.'))
             records[0]['timestamp'] = datetime.fromtimestamp(started_at, timezone.utc).isoformat()
+            if agent == 'claude':
+                records[0]['uuid'] = str(uuid4())
             records[-1]['timestamp'] = datetime.fromtimestamp(finished_at, timezone.utc).isoformat()
-        write_records(Path(self.worker['transcript']), records)
+        write_records(Path(self.worker['transcript']), records, mode)
         if output_size:
             # The normal notification reader starts inside the large output record.
             self.assertEqual(server.notification_records(self.worker), records[2:])
@@ -3904,7 +3920,7 @@ class ReviewLinksTests(unittest.TestCase):
         legacy.pop('feedback_turn', None)
         self.file.write_text(json.dumps([legacy]))
         self.turn_source = server.review_turn_source
-        records = [codex('user', stop), codex('assistant', 'Open findings.')]
+        records = [legacy_prompt(codex('user', stop)), codex('assistant', 'Open findings.')]
         self.send.reset_mock()
         with patch.object(server, 'notification_records', return_value=records):
             self.request_review()
@@ -4606,7 +4622,7 @@ class ReviewLinksTests(unittest.TestCase):
             self.observe(**{'%11': 'Idle'})
             self.assertTrue(self.links()[1]['paused'])
             prefixed = '[Working directory changed to /work. Run commands and resolve relative paths there.] ' + notice
-            records.extend([{'type': 'attachment', 'attachment': {'type': 'queued_command', 'prompt': prefixed}},
+            records.extend([legacy_prompt({'type': 'attachment', 'attachment': {'type': 'queued_command', 'prompt': prefixed}}),
                             ASSISTANT])
             self.observe(**{'%11': 'Working'})
             self.observe(**{'%11': 'Idle'})
@@ -4702,7 +4718,7 @@ class ReviewLinksTests(unittest.TestCase):
                 self.observe()  # Mak's earlier prompt finished after Tether sent the notice
                 self.assertIn('review_prompts', self.links()[1])
                 write_records(transcript, [
-                    message('user', notice),
+                    dict(message('user', notice), timestamp='1970-01-01T00:16:40.750Z'),
                     dict(message('assistant', 'Read.'), timestamp='1970-01-01T00:16:41Z'),
                 ], 'a')
                 if short_mak:
@@ -4904,6 +4920,268 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertEqual(self.send.call_args.args[0], self.reviewer)
         self.assertTrue(self.links()[0]['awaiting'])
         self.turn_source.assert_called_with(self.worker)
+
+    def test_persons_summary_paste_resumes_paused_review_but_bound_relay_does_not(self):
+        summary = review_links.PARENT_SUMMARY + '\n\nCheck the rows.\n\n' + review_links.PARENT_SUMMARY_END
+        for agent, native in (('claude', claude), ('codex', codex)):
+            with self.subTest(agent=agent):
+                transcript = self.file.parent / f'{agent}.jsonl'
+                self.stopped_review_prompt(agent, 3)
+                self.worker['transcript'] = str(transcript)
+                now = int(time.time())
+                stamp = lambda seconds: datetime.fromtimestamp(now + seconds, timezone.utc).isoformat()
+                with patch.object(injected_prompts.paths, 'CACHE', self.file.parent / 'post-cutover'), \
+                        patch.object(injected_prompts, 'ROOT', self.file.parent / agent), \
+                        own_time(injected_prompts, time_ns=lambda: now * 1_000_000_000):
+                    injected_prompts.initialize()
+                    with injected_prompts.track_send(self.worker, summary, 'review') as delivery:
+                        write_records(transcript, [dict(native('user', delivery), uuid=THREAD, timestamp=stamp(1)),
+                                                   dict(native('assistant', 'Read.'), timestamp=stamp(2))])
+                    self.assertEqual(self.turn_source(self.worker)[0], 'review-summary')
+                    self.request_review()
+                    self.assertTrue(self.links()[0]['paused'])
+                    self.send.assert_not_called()
+                    write_records(transcript, [dict(native('user', summary), uuid=WORKER_THREAD, timestamp=stamp(3)),
+                                               dict(native('assistant', 'Read again.'), timestamp=stamp(4))], 'a')
+                    self.assertEqual(self.turn_source(self.worker)[0], 'user')
+                    self.request_review()
+                    self.assertNotIn('paused', self.links()[0])
+                    self.assertTrue(self.links()[0]['awaiting'])
+
+    def paused_receipt_relay(self, agent, case='relay'):
+        self.stopped_review_prompt(agent, review_links.MAX_ROUNDS)
+        path = self.file.parent / f'paused-{agent}-{case}.jsonl'
+        self.worker['transcript'] = str(path)
+        injected_prompts._write(injected_prompts.paths.CACHE / 'injected-since.json', {'since_ms': 0})
+        summary = review_links.PARENT_SUMMARY + 'Check the rows.\n\n' + review_links.PARENT_SUMMARY_END
+        return path, summary, injected_prompts._file(path)
+
+    def assert_paused_relay_tick(self, *, deferred=False, source='review-summary'):
+        self.observe(**{'%13': 'Working'})
+        before = next(row for row in self.rows() if row.get('cap'))
+        self.turn_source = Mock(wraps=server.review_turn_source)
+        self.observe(**{'%13': 'Idle'})
+        self.turn_source.assert_called_once_with(self.worker)
+        after = next(row for row in self.rows() if row.get('cap'))
+        self.assertEqual((after.get('paused'), after['counts']), (True, before['counts']))
+        self.send.assert_not_called()
+        if deferred:
+            self.assertEqual(after, before)
+            with self.assertRaises(injected_prompts.ReceiptsUnreadable):
+                server.review_turn_source(self.worker)
+        else:
+            self.assertEqual(server.review_turn_source(self.worker)[0], source)
+
+    def test_receipt_save_refuses_review_send_and_keeps_pause(self):
+        for agent, error in product(('claude', 'codex'), (OSError, injected_prompts.ReceiptsUnreadable)):
+            with self.subTest(agent=agent, error=error.__name__):
+                path, summary, receipt = self.paused_receipt_relay(agent)
+                write_records(path, [])
+                with injected_prompts.track_send(self.worker, summary, 'review') as delivery:
+                    self.write_worker_turn(delivery)
+                receipt.unlink()  # The replay models a prior relay whose receipt was lost.
+                send = lambda *args: server.review_send(*args, receipt=True)
+                with patch.object(injected_prompts, '_write', side_effect=error('receipt unavailable')), \
+                        patch.object(server, 'stash_quiet_draft', return_value=None) as stash, \
+                        patch.object(server, 'terminal_submit') as terminal, \
+                        patch.object(server, 'clear_unsent') as clear, \
+                        patch.object(server.shell_log, 'folder_note', return_value=''), \
+                        patch.object(server, 'agent_folder', return_value='/srv/project'):
+                    refused = not review_links._send_message(self.worker, summary, 'Idle', send, lambda _: True)
+                    self.assert_paused_relay_tick(source='unknown-receipt')
+                    self.assertTrue(refused)
+                    stash.assert_not_called()
+                    terminal.assert_not_called()
+                    clear.assert_not_called()
+
+    def test_scan_missing_transcript_defers_paused_review_and_binds_on_recovery(self):
+        for agent, operation in product(('claude', 'codex'), ('open', 'stat')):
+            with self.subTest(agent=agent, operation=operation):
+                path, summary, receipt = self.paused_receipt_relay(agent, operation)
+                self.write_worker_turn('Prior prompt')
+                with injected_prompts.track_send(self.worker, summary, 'review') as delivery:
+                    pass
+                self.assertEqual(injected_prompts.bindings(self.worker), {})
+                self.write_worker_turn(delivery, mode='a')
+                before = receipt.read_bytes()
+                original = getattr(Path, operation)
+
+                def missing(file, *args, **kwargs):
+                    if file == path:
+                        raise FileNotFoundError('transcript temporarily unavailable')
+                    return original(file, *args, **kwargs)
+
+                with patch.object(Path, operation, missing):
+                    self.assert_paused_relay_tick(deferred=True)
+                    self.assertEqual(receipt.read_bytes(), before)
+                self.assert_paused_relay_tick()
+                self.assertEqual(len(injected_prompts.bindings(self.worker)), 1)
+
+    def test_replaced_transcript_binds_relay_and_keeps_pause(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                path, summary, _ = self.paused_receipt_relay(agent)
+                self.write_worker_turn('Prior prompt')
+                with injected_prompts.track_send(self.worker, summary, 'review') as delivery:
+                    self.write_worker_turn(delivery, mode='a')
+                copy = path.with_suffix('.copy')
+                copy.write_bytes(path.read_bytes())
+                self.assertNotEqual(copy.stat().st_ino, path.stat().st_ino)
+                copy.replace(path)
+                self.assert_paused_relay_tick()
+                self.assertEqual(len(injected_prompts.bindings(self.worker)), 1)
+
+    def test_aged_out_receipt_keeps_paused_review_paused(self):
+        for agent, native in (('claude', claude), ('codex', codex)):
+            with self.subTest(agent=agent):
+                path, summary, receipt = self.paused_receipt_relay(agent)
+                self.write_worker_turn('Prior prompt')
+                now = time.time_ns()
+                with own_time(injected_prompts, time_ns=lambda: now):
+                    with injected_prompts.track_send(self.worker, summary, 'review') as delivery:
+                        pass
+                    self.write_worker_turn('Unrelated turn', mode='a')
+                    now += 8 * 24 * 60 * 60 * 1_000_000_000
+                    self.assertEqual(injected_prompts.bindings(self.worker), {})
+                    self.assertEqual(json.loads(receipt.read_text())['receipts'], [])
+                    _, finished_at = self.write_worker_turn(delivery, mode='a')
+                    self.assert_paused_relay_tick(source='unknown-receipt')
+                    self.assert_stopped_review(review_links.MAX_ROUNDS)
+                    self.assertFalse(self.links()[0]['seen_working'])
+
+                    stamp = lambda seconds: datetime.fromtimestamp(finished_at + seconds, timezone.utc).isoformat()
+                    write_records(path, [dict(native('user', 'Please try again.'), uuid=THREAD, timestamp=stamp(1)),
+                                         dict(native('assistant', 'Done.'), timestamp=stamp(2))], 'a')
+                    self.request_review()
+                    self.send.assert_called_once()
+                    self.assertTrue(self.links()[0]['awaiting'])
+                    self.assertNotIn('paused', self.links()[0])
+
+    def test_persons_raw_relay_paste_with_delivery_id_keeps_review_paused(self):
+        for agent, kind in product(('claude', 'codex'), ('review-summary', 'review-correction')):
+            with self.subTest(agent=agent, marker=kind):
+                _, summary, _ = self.paused_receipt_relay(agent, kind)
+                rows = self.rows()
+                cap = next(row for row in rows if row.get('cap'))
+                marker = [kind, cap['feedback_turn']['sent_at']]
+                cap['review_prompts'] = [marker]
+                self.file.write_text(json.dumps(rows))
+
+                self.write_worker_turn(summary + '\n\n[Tether id 0123456789abcdef]')
+                self.assertEqual(injected_prompts.bindings(self.worker), {})
+                self.assert_paused_relay_tick(source='unknown-receipt')
+                self.assertEqual(self.links()[0]['review_prompts'], [marker])
+                self.assert_stopped_review(review_links.MAX_ROUNDS)
+
+    def test_unbound_delivery_id_skips_review_until_a_new_turn(self):
+        self.worker['transcript'] = str(self.file.parent / 'active-review.jsonl')
+        self.turn_source = server.review_turn_source
+        self.write_worker_turn('Status update\n\n[Tether id 0123456789abcdef]')
+        self.request_review()
+        self.observe()
+        self.send.assert_not_called()
+        self.assertFalse(self.links()[0]['seen_working'])
+
+        self.write_worker_turn('Please review my changes.', mode='a')
+        self.request_review()
+        self.send.assert_called_once()
+        self.assertTrue(self.links()[0]['awaiting'])
+
+    def test_binding_write_error_preserves_receipt_and_pause(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                _, summary, receipt = self.paused_receipt_relay(agent)
+                with injected_prompts.track_send(self.worker, summary, 'review') as delivery:
+                    self.write_worker_turn(delivery)
+                before = receipt.read_bytes()
+                with patch.object(injected_prompts, '_write', side_effect=OSError('disk full')) as write:
+                    self.assert_paused_relay_tick()
+                    write.assert_called()
+                    self.assertEqual(receipt.read_bytes(), before)
+                self.assertEqual(len(injected_prompts.bindings(self.worker)), 1)
+
+    def test_unreadable_receipts_or_transcript_leave_paused_review_untouched(self):
+        summary = review_links.PARENT_SUMMARY + '\n\nCheck the rows.\n\n' + review_links.PARENT_SUMMARY_END
+        for failure in ('receipts', 'invalid JSON', 'scanner', 'tail', 'missing tail'):
+            with self.subTest(failure=failure):
+                self.stopped_review_prompt('claude', 3)
+                transcript = self.file.parent / f'{failure}.jsonl'
+                self.worker['transcript'] = str(transcript)
+                now = datetime.now(timezone.utc).isoformat()
+                with injected_prompts.track_send(self.worker, summary, 'review') as delivery:
+                    write_records(transcript, [dict(claude('user', delivery), uuid=THREAD, timestamp=now),
+                                               dict(claude('assistant', 'Read.'), timestamp=now)])
+                receipt = injected_prompts._file(transcript)
+                before = receipt.read_bytes()
+                target = receipt if failure in ('receipts', 'invalid JSON') else transcript
+                path_open = Path.open
+
+                def open_path(path, *args, **kwargs):
+                    if path == target:
+                        raise PermissionError('read temporarily unavailable')
+                    return path_open(path, *args, **kwargs)
+
+                if failure == 'invalid JSON':
+                    receipt.write_text('{')
+                    unavailable = nullcontext()
+                elif failure in ('tail', 'missing tail'):
+                    error = (FileNotFoundError if failure == 'missing tail' else PermissionError)('tail unavailable')
+
+                    def open_tail(*args, **kwargs):
+                        nonlocal error
+                        if error is not None:
+                            raised, error = error, None
+                            raise raised
+                        return open(*args, **kwargs)
+
+                    unavailable = patch.object(server, 'open', open_tail, create=True)
+                else:
+                    unavailable = patch.object(Path, 'open', open_path)
+
+                errors = []
+
+                def read_turn(entry):
+                    try:
+                        return server.review_turn_source(entry)
+                    except Exception as exc:
+                        errors.append(exc)
+                        raise
+
+                self.turn_source = read_turn
+                self.observe(**{'%13': 'Working'})
+                saved = self.file.read_bytes()
+                self.alert.reset_mock()
+                with unavailable:
+                    self.observe(**{'%13': 'Idle'})
+                    self.assertEqual(self.file.read_bytes(), saved)
+                    self.assertEqual((self.links()[0]['paused'], self.links()[0]['rounds']), (True, 3))
+                    self.send.assert_not_called()
+                    self.alert.assert_not_called()
+                    error, = errors
+                    self.assertIsInstance(error, injected_prompts.ReceiptsUnreadable)
+                if failure == 'invalid JSON':
+                    receipt.write_bytes(before)
+                self.assertEqual(self.turn_source(self.worker)[0], 'review-summary')
+                self.observe()
+                self.assertEqual((self.links()[0]['paused'], self.links()[0]['rounds']), (True, 3))
+                self.send.assert_not_called()
+
+    def test_unreadable_between_ticks_turn_leaves_upgrade_pause_untouched(self):
+        self.stopped_review_prompt('claude', 3)
+        rows = self.rows()
+        for row in rows:
+            if row.get('cap'):
+                row.update(paused='upgrade', upgrade_at=time.time())
+            else:
+                row['seen_working'] = True
+        self.file.write_text(json.dumps(rows))
+        self.turn_source = Mock(side_effect=OSError('turn unavailable'))
+        self.alert.reset_mock()
+        self.observe()
+        self.assertEqual(self.rows(), rows)
+        self.assertEqual(self.links()[0]['paused'], 'upgrade')
+        self.send.assert_not_called()
+        self.alert.assert_not_called()
 
     def test_background_turns_do_not_restart_or_reset_rounds(self):
         # A Monitor event, a finished background shell or a scheduled job is not a new task from Mak.
@@ -5662,7 +5940,7 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertEqual(self.links()[0]['review_commit'], self.HASH)
         self.assertTrue(self.links()[0]['review_clean'])
         self.assertEqual(re.match(REVIEW_REQUEST, text).groups()[:5],
-                         ('Codex', 'Fix the bug', '%13', 'I fixed it.', '/project/worker.jsonl'))
+                         ('Codex', 'Fix the bug', '%13', 'I fixed it.', self.worker['transcript']))
 
     def test_request_lists_checklist_rows_and_still_matches_the_review_card(self):
         self.bind(checklist={'status': 'hit', 'rows': [
@@ -5678,7 +5956,7 @@ class ReviewLinksTests(unittest.TestCase):
                       'This diff changes the UI (1 file(s), for example ui/index.html). ', text)
         self.assertIn('check them against the claims.\nIts last reply:', text)
         self.assertEqual(re.match(REVIEW_REQUEST, text).groups()[:5],
-                         ('Codex', 'Fix the bug', '%13', 'I fixed it.', '/project/worker.jsonl'))
+                         ('Codex', 'Fix the bug', '%13', 'I fixed it.', self.worker['transcript']))
 
     def test_request_explains_unknown_ui_paths_and_omits_empty_or_missing_lists(self):
         sentence = ('Tether could not list the changed UI files. Check the diff for UI changes yourself; '
@@ -5710,7 +5988,7 @@ class ReviewLinksTests(unittest.TestCase):
                 self.assertIn(f'ui/src/App{replaced}.tsx', text)
                 self.assertTrue(all(character not in text for character in characters))
                 self.assertEqual(re.match(REVIEW_REQUEST, text).groups()[:5],
-                                 ('Codex', 'Fix the bug', '%13', 'I fixed it.', '/project/worker.jsonl'))
+                                 ('Codex', 'Fix the bug', '%13', 'I fixed it.', self.worker['transcript']))
                 run = Mock(side_effect=RuntimeError('Reached mocked tmux'))
                 with self.assertRaisesRegex(RuntimeError, 'Reached mocked tmux'):
                     terminal_input.submit(self.reviewer, text, run=run)
@@ -5811,7 +6089,7 @@ class ReviewLinksTests(unittest.TestCase):
                     'If HEAD is different or you cannot read it, do not act on this approval. '
                     'Stop and wait for the next review. If HEAD is that hash, do the next step your instructions '
                     'give for an approved review, then stop.', 'Idle')
-                self.assertEqual(review_links.prompt_source(self.send.call_args.args[1]), 'review-feedback')
+                self.assertEqual(review_links._relay_source(self.send.call_args.args[1]), 'review-feedback')
                 link = self.links()[0]
                 self.assertEqual((link['approved_commit'], link['approved_at']), (self.HASH, 1700000000))
                 self.assertEqual(review_links.approved_commits(),
@@ -5827,7 +6105,7 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertIn(f'for commit {commit}:', text)
         self.assertIn(f"HEAD in this tab's worktree (`git rev-parse HEAD`) is {commit}.", text)
         self.assertNotIn('/work/a different tree', text)
-        self.assertEqual(review_links.prompt_source(text), 'review-feedback')
+        self.assertEqual(review_links._relay_source(text), 'review-feedback')
 
     def test_approval_of_uncommitted_work_is_forwarded_but_not_recorded_as_an_approved_commit(self):
         self.bind()
@@ -5841,7 +6119,7 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertIn(f'(%12) for commit {self.HASH} and its uncommitted changes:', text)
         self.assertIn('Tether asks the reviewer to confirm that commit.', text)
         self.assertNotIn('rev-parse HEAD', text)
-        self.assertEqual(review_links.prompt_source(text), 'review-feedback')
+        self.assertEqual(review_links._relay_source(text), 'review-feedback')
         self.assertNotIn('approved_commit', self.links()[0])
         self.assertEqual(review_links.approved_commits(), {})
 
@@ -6068,7 +6346,7 @@ class ReviewLinksTests(unittest.TestCase):
             '“Fix the bug”: 3 approvals in a row could not be verified for the current commit. '
             'Tether could not read the tab\'s commit for the latest approval. Answer in that tab to restart reviews.',
             '%13')
-        self.turn_source = lambda entry: (review_links.prompt_source(text), None, None)
+        self.turn_source = lambda entry: (review_links._relay_source(text), None, None)
         self.observe(**{'%13': 'Working'})
         self.observe(**{'%13': 'Idle'})
         self.assertEqual(self.links()[0]['stale_rounds'], review_links.MAX_ROUNDS)
@@ -6113,6 +6391,7 @@ class ReviewLinksTests(unittest.TestCase):
                         dict(type='USER_INPUT', step_index=1, content=f'<USER_REQUEST>{text}</USER_REQUEST>'),
                         dict(type='AGENT_RESPONSE', step_index=2, content='Done'),
                     ]
+                records[0] = legacy_prompt(records[0])
                 with patch.object(server, 'notification_records', return_value=records):
                     self.assertEqual(server.review_turn_source(entry)[0], 'review-correction')
                     self.turn_source = server.review_turn_source
@@ -7171,12 +7450,15 @@ class ServerWatcherTests(unittest.TestCase):
             with self.assertRaises(StopIteration):
                 server.monitor_notices()
         self.assertEqual(observe.call_count, 2)
-        observe.assert_called_with(entries, server.shared_status, server.review_send, server.last_reply,
+        observe.assert_called_with(entries, server.shared_status, ANY, server.last_reply,
                                    alert=server.review_alert, work_mark=server.review_work_mark,
                                    review_reply=server.review_reply, turn_source=server.review_turn_source,
                                    level=server.review_level, parent=ANY,
                                    scope=server.review_scope_of, commit=server.review_commit,
                                    fresh=server.fresh_status, folder=server.review_folder)
+        send = observe.call_args.args[2]
+        self.assertIs(send.func, server.review_send)
+        self.assertEqual(send.keywords, {'receipt': True})
         with patch.object(server, 'review_parent') as parent:
             observe.call_args.kwargs['parent'](entries[0])
             parent.assert_called_once_with(entries[0], entries)
@@ -7191,7 +7473,7 @@ class ServerWatcherTests(unittest.TestCase):
             with self.assertRaises(StopIteration):
                 server.monitor_notices()
         self.assertEqual(sessions.call_count, 2)
-        observe.assert_called_once_with(entries, server.shared_status, server.review_send, server.last_reply,
+        observe.assert_called_once_with(entries, server.shared_status, ANY, server.last_reply,
                                         alert=server.review_alert, work_mark=server.review_work_mark,
                                         review_reply=server.review_reply, turn_source=server.review_turn_source,
                                         level=server.review_level, parent=ANY,

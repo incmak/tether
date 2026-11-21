@@ -1,0 +1,37 @@
+{
+  "cases": [
+    {
+      "events": [{"name": "Compiler", "pane": "%1", "kind": "done", "text": "Build passes."}],
+      "mode": "all",
+      "text": "[Tether status] 1 tab update. Tell the user what changed and what needs them, in one or two lines per tab. Reports are set to \"all\". If you do not have the coordinator rules, run `python3 /opt/tether/server/agent_coordinator_cli.py claim`.\n- `Compiler` (%1) finished: Build passes."
+    },
+    {
+      "events": [
+        {"name": "Compiler", "pane": "%1", "kind": "done", "text": "Build passes."},
+        {"name": "Review", "pane": "%7", "kind": "asks", "text": "Pick a label: A or B."},
+        {"name": "Docs", "pane": "%15", "kind": "needs", "text": "Confirm the title."},
+        {"name": "Tests", "pane": "%20", "kind": "failed", "text": "Rate limit reached."}
+      ],
+      "mode": "needs",
+      "text": "[Tether status] 4 tab updates. Tell the user what changed and what needs them, in one or two lines per tab. Reports are set to \"needs\". If you do not have the coordinator rules, run `python3 /opt/tether/server/agent_coordinator_cli.py claim`.\n- `Compiler` (%1) finished: Build passes.\n- `Review` (%7) finished and asks the user: Pick a label: A or B.\n- `Docs` (%15) waits on the user: Confirm the title.\n- `Tests` (%20) failed: Rate limit reached."
+    },
+    {
+      "events": [{"name": "Compiler", "pane": "%1", "kind": "done", "text": ""}],
+      "mode": "off",
+      "text": "[Tether status] 1 tab update. Tell the user what changed and what needs them, in one or two lines per tab. Reports are set to \"off\". If you do not have the coordinator rules, run `python3 /opt/tether/server/agent_coordinator_cli.py claim`.\n- `Compiler` (%1) finished"
+    },
+    {
+      "events": [{"name": "Tests", "pane": "%20", "kind": "failed", "text": " First check failed.\n\n Second check\tpassed.  "}],
+      "mode": "all",
+      "text": "[Tether status] 1 tab update. Tell the user what changed and what needs them, in one or two lines per tab. Reports are set to \"all\". If you do not have the coordinator rules, run `python3 /opt/tether/server/agent_coordinator_cli.py claim`.\n- `Tests` (%20) failed: First check failed. Second check passed."
+    },
+    {
+      "events": [
+        {"name": "Review `UI`\npass", "pane": "%7", "kind": "asks", "text": "Choose a label.\r\nConfirm the title."},
+        {"name": "Docs\r\nnotes `v2`", "pane": "%15", "kind": "needs", "text": " \t\n "}
+      ],
+      "mode": "needs",
+      "text": "[Tether status] 2 tab updates. Tell the user what changed and what needs them, in one or two lines per tab. Reports are set to \"needs\". If you do not have the coordinator rules, run `python3 /opt/tether/server/agent_coordinator_cli.py claim`.\n- `Review 'UI' pass` (%7) finished and asks the user: Choose a label. Confirm the title.\n- `Docs notes 'v2'` (%15) waits on the user"
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 """Mobile transcript and message bridge to one existing Codex CLI thread."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from datetime import datetime
 from functools import partial
 import gzip
@@ -28,6 +29,7 @@ import audit
 import codex_messages
 import continuations
 import coordinator
+import injected_prompts
 import pane_icons
 import antigravity
 from antigravity import snapshot as antigravity_snapshot, transcript_message as antigravity_message, window_active
@@ -292,16 +294,17 @@ REVIEW_SOURCE_TAIL_BYTES = 8 * 1024 * 1024
 def review_turn_source(entry):
     """Return the source and transcript times of the latest turn for the review watcher."""
     def classify(records, **options):
-        return notification_priority.turn_source(entry.get('agent'), records,
-                                                 identify=lambda text: review_links.prompt_source(continuations.unwrap(text)),
-                                                 distinguish_missing=True, with_time=True, **options)
+        identify = partial(review_links.prompt_source, entry)
+        return notification_priority.turn_source(entry.get('agent'), records, identify=identify,
+                                                 distinguish_missing=True, with_time=True, require_receipts=True,
+                                                 **options)
 
-    result = classify(notification_records(entry))
+    result = classify(notification_records(entry, with_offset=True, require_read=True))
     if entry.get('agent') == 'antigravity':
         if result[0] in ('user', 'unknown', 'unknown-background'):
             # Exports rewrite old steps out of order, so a tail can bring back an older prompt.
             # Only the whole export shows which prompt is newest.
-            records, whole = _transcript_tail_records(entry, REVIEW_SOURCE_TAIL_BYTES, whole=True)
+            records, whole = _transcript_tail_records(entry, REVIEW_SOURCE_TAIL_BYTES, whole=True, require_read=True)
             if whole:
                 result = classify(records, latest_turn=True)
             elif result[0] == 'user':
@@ -309,7 +312,8 @@ def review_turn_source(entry):
     elif result[0] in ('unknown', 'unknown-background'):
         # latest_turn: a prompt after the latest reply starts a turn with no reply yet.
         # The wider tail must not credit an earlier turn's prompt to it.
-        result = classify(_transcript_tail_records(entry, REVIEW_SOURCE_TAIL_BYTES), latest_turn=True)
+        result = classify(_transcript_tail_records(entry, REVIEW_SOURCE_TAIL_BYTES, with_offset=True, require_read=True),
+                          latest_turn=True)
     return result
 
 
@@ -544,11 +548,17 @@ def task_close_sweep(entries):
         with WATCHING_LOCK:
             for pane in TASK_VIEW_AT.keys() - tree.options.keys():
                 TASK_VIEW_AT.pop(pane, None)
-        task_tree_close.clear_obsolete_marks(tree, SEND_LOCK, task_user_prompt_at)
+        unreadable = task_tree_close.clear_obsolete_marks(tree, SEND_LOCK, task_user_prompt_at)
+
+        def read_prompt(entry):
+            if entry['id'] in unreadable:
+                raise injected_prompts.ReceiptsUnreadable('Task prompt source unavailable this tick')
+            return task_user_prompt_at(entry)
+
         TASK_CLOSER.observe(tree, live_task_tree, enabled=lambda: prefs_sync.load()['prefs'].get('task_auto_close') is True,
                             lock=SEND_LOCK, activity=task_activity, viewed=task_view,
                             draft=lambda entry: _web_draft(entry['id']).strip() or any(prompt_draft(entry, subprocess.run)),
-                            changed=forget_sessions, user_prompt_at=task_user_prompt_at)
+                            changed=forget_sessions, user_prompt_at=read_prompt)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
         TASK_CLOSER.reset()
         print(f'task close sweep failed: {exc}', file=sys.stderr)
@@ -579,7 +589,7 @@ def monitor_notices():
             time.sleep(2)
             continue
         _observe_push(entries)
-        review_links.observe(entries, shared_status, review_send, last_reply,
+        review_links.observe(entries, shared_status, partial(review_send, receipt=True), last_reply,
                              alert=review_alert, work_mark=review_work_mark, review_reply=review_reply,
                              turn_source=review_turn_source, level=review_level,
                              parent=lambda entry: review_parent(entry, entries),
@@ -885,9 +895,11 @@ def session_row(entry):
 def brief_messages(entry):
     """The chat for a tab brief, from the transcript only (no screen capture): user prompts and text replies."""
     if entry.get('agent') == 'claude':
-        return claude_snapshot(entry, display_text)['messages']
-    path = Path(entry.get('transcript') or '')
-    return history.read(path, codex_state, codex_consume)['messages'] if path.is_file() else []
+        messages = claude_snapshot(entry, display_text)['messages']
+    else:
+        path = Path(entry.get('transcript') or '')
+        messages = history.read(path, codex_state, codex_consume, with_offset=True)['messages'] if path.is_file() else []
+    return injected_prompts.mark(entry, messages)
 
 
 def brief_enabled():
@@ -1034,7 +1046,7 @@ def settings_time(stamp):
         return None
 
 
-def codex_consume(state, index, entry):
+def codex_consume(state, index, entry, *, offset=None):
     """Fold one rollout record into the chat messages, busy flag and latest usage figures."""
     messages = state['messages']
     payload = entry.get('payload', {})
@@ -1137,8 +1149,11 @@ def codex_consume(state, index, entry):
         text = continuations.unwrap(part['text']) if explicit_user else display_text(part['text'])
         if not text.strip() or (not explicit_user and text.startswith('# AGENTS.md instructions')):
             continue
-        messages.append(dict(part, id=str(index) if at == 0 else f'{index}.{at}', text=text,
-                             time=entry.get('timestamp'), phase=payload.get('phase')))
+        message = dict(part, id=str(index) if at == 0 else f'{index}.{at}', text=text,
+                       time=entry.get('timestamp'), phase=payload.get('phase'))
+        if offset is not None and role == 'user' and not part.get('kind'):
+            message['_record_id'] = injected_prompts.codex_id(offset, entry.get('timestamp'))
+        messages.append(message)
 
 
 def claude_cwd(entry):
@@ -1408,12 +1423,12 @@ def codex_metrics(config, reported_usage, model='', effort='', credits=None, *, 
 NOTIFICATION_TAIL_BYTES = 256 * 1024
 
 
-def notification_records(entry):
+def notification_records(entry, *, with_offset=False, require_read=False):
     """Read a bounded tail without tmux or history cache locks."""
-    return _transcript_tail_records(entry, NOTIFICATION_TAIL_BYTES)
+    return _transcript_tail_records(entry, NOTIFICATION_TAIL_BYTES, with_offset=with_offset, require_read=require_read)
 
 
-def _transcript_tail_records(entry, tail_bytes, *, whole=False):
+def _transcript_tail_records(entry, tail_bytes, *, whole=False, with_offset=False, require_read=False):
     """Read the last tail_bytes. With whole, also return whether the read started at the file start."""
     records, start = [], None
     if entry.get('agent') in ('claude', 'codex', 'antigravity') and not entry.get('ambiguous'):
@@ -1423,16 +1438,23 @@ def _transcript_tail_records(entry, tail_bytes, *, whole=False):
                 start = max(0, size - tail_bytes)
                 stream.seek(start)
                 tail = stream.read(tail_bytes)
+            offset = start
             if start:
-                tail = tail.partition(b'\n')[2]  # discard a record clipped by the byte limit
-            for line in tail.splitlines():
+                prefix, newline, tail = tail.partition(b'\n')  # discard a record clipped by the byte limit
+                offset += len(prefix) + len(newline)
+            for line in tail.splitlines(keepends=True):
                 try:
                     record = json.loads(line)
                 except (ValueError, UnicodeError):
-                    continue
+                    record = None
                 if isinstance(record, dict):
+                    if with_offset and entry['agent'] == 'codex':
+                        record['_offset'] = offset
                     records.append(record)
-        except (OSError, KeyError, ValueError):
+                offset += len(line)
+        except (OSError, KeyError, ValueError) as exc:
+            if require_read and isinstance(exc, OSError):
+                raise injected_prompts.ReceiptsUnreadable(str(exc)) from exc
             records, start = [], None
     return (records, start == 0) if whole else records
 
@@ -1442,24 +1464,30 @@ def task_user_prompt_at(entry):
     pane, thread = entry['id'], entry.get('thread')
     recent = TASK_AUTOMATED.get((pane, thread), ())
 
-    def source(text, timestamp):
-        text = continuations.unwrap(text)
-        if review := review_links.prompt_source(text):
+    def source(record, text):
+        # An unbound delivery id has unknown provenance. A read error defers the whole check.
+        if review := review_links.prompt_source(entry, record, text):
             return review
+        timestamp = notification_priority._timestamp(record)
         if timestamp is not None and recent:
-            digest = helper_tabs.digest(text.strip())
+            digest = helper_tabs.digest(continuations.unwrap(text).strip())
             if any(saved == digest and start <= timestamp <= end for saved, start, end in recent):
                 return 'tether'
 
-    _, at, _ = notification_priority.turn_source(
-        entry.get('agent'), notification_records(entry), identify=source,
-        distinguish_missing=True, with_time=True, latest_user=True)
     user_thread, sent = TASK_USER_AT.get(pane, (None, 0))
-    return max(at or 0, sent if user_thread == thread else 0)
+    sent = sent if user_thread == thread else 0
+    try:
+        _, at, _ = notification_priority.turn_source(
+            entry.get('agent'), notification_records(entry, with_offset=True, require_read=True), identify=source,
+            distinguish_missing=True, with_time=True, latest_user=True, require_receipts=True)
+    except injected_prompts.ProvenanceUnknown as exc:
+        exc.user_at = max(exc.user_at, sent)
+        raise
+    return max(at or 0, sent)
 
 
 def notification_context(entry):
-    records = notification_records(entry)
+    records = notification_records(entry, with_offset=True, require_read=True)
     return notification_reply(entry, records), records
 
 
@@ -1556,7 +1584,7 @@ def snapshot(config=None):
         metrics = codex_metrics(config, None)
         return {'messages': terminal_replies.merge(config, merge_quota_notices(dict(config, agent='codex'), [])), 'busy': False, 'thread': config['thread'], 'usage': metrics, 'footer': codex_footer(config, metrics),
                 'agent': 'codex', 'writable': config.get('writable', True), 'session': config.get('id')}
-    state = history.read(path, codex_state, codex_consume)
+    state = history.read(path, codex_state, codex_consume, with_offset=True)
     messages, busy = state['messages'], state['busy']
     try:
         cleared = fresh_codex_screen(capture(config))
@@ -1568,6 +1596,12 @@ def snapshot(config=None):
                             tier=state.get('tier', ''))
     return {'messages': terminal_replies.merge(config, merge_quota_notices(dict(config, agent='codex'), activity.group_actions(activity.merge(list(messages))))), 'dropped': state['dropped'], 'busy': busy, 'thread': config['thread'], 'usage': metrics,
             'agent': 'codex', 'writable': config.get('writable', True), 'session': config.get('id'), 'footer': codex_footer(config, metrics)}
+
+
+def marked_snapshot(entry):
+    data = snapshot(entry)
+    messages = data.get('messages')
+    return dict(data, messages=injected_prompts.mark(entry, messages)) if isinstance(messages, list) else data
 
 
 def last_reply(entry):
@@ -1662,14 +1696,18 @@ def review_reply(entry, request_id):
 
 def submit(message, config=None, *, user=False):
     config = config or settings()
-    if not config.get('writable', True):
-        raise RuntimeError('Messaging is unavailable for this session. Use Termius.')
     with SEND_LOCK:
         submit_locked(message, config, user=user)
 
 
+def _require_writable(config):
+    if not config.get('writable', True):
+        raise RuntimeError('Messaging is unavailable for this session. Use Termius.')
+
+
 def submit_locked(message, config, *, user=False):
     """submit for a caller that holds SEND_LOCK already."""
+    _require_writable(config)
     wrapped, marker = continuations.prepare(config, message)
     if marker:
         continuations.stage(config, wrapped, marker)
@@ -1723,31 +1761,36 @@ def send_text(config, message, state=None, *, held=False, user=False):
     return 'queued' if state == 'Working' else 'submitted'
 
 
-def review_send(config, message, state=None, *, held=False):
+def review_send(config, message, state=None, *, receipt=False, held=False):
     """Deliver a review around a quiet Claude draft, preserving ordinary send guards."""
+    _require_writable(config)
     config = dict(config, _review=True)
-    stashed = stash_quiet_draft(config) if config.get('agent') == 'claude' else None
-    try:
-        result = send_text(config, message, state, held=held)
-    except Exception as exc:
+    # held: the caller holds SEND_LOCK already. A receipt needs the lock from its save to the send.
+    lock = SEND_LOCK if receipt and not held else nullcontext()
+    prompt = injected_prompts.track_send(config, message, 'review') if receipt else nullcontext(message)
+    with lock, prompt as delivery:
+        stashed = stash_quiet_draft(config) if config.get('agent') == 'claude' else None
         try:
-            if 'reached the agent input' in str(exc):
-                terminal_clear_draft(config)
-            else:
-                clear_unsent(config, message)
-        except (RuntimeError, OSError, subprocess.SubprocessError):
-            pass
-        if stashed:
+            result = send_text(config, delivery, state, held=receipt or held)
+        except Exception as exc:
             try:
-                if not any(prompt_draft(config)):
-                    verify(config)
-                    subprocess.run([paths.TMUX, 'send-keys', '-t', config['id'], 'C-s'],
-                                   check=True, capture_output=True, timeout=5)
+                if 'reached the agent input' in str(exc):
+                    terminal_clear_draft(config)
+                else:
+                    clear_unsent(config, message)
             except (RuntimeError, OSError, subprocess.SubprocessError):
                 pass
-        if isinstance(exc, (OSError, subprocess.SubprocessError)):
-            raise RuntimeError('Could not deliver the review message.') from exc
-        raise
+            if stashed:
+                try:
+                    if not any(prompt_draft(config)):
+                        verify(config)
+                        subprocess.run([paths.TMUX, 'send-keys', '-t', config['id'], 'C-s'],
+                                       check=True, capture_output=True, timeout=5)
+                except (RuntimeError, OSError, subprocess.SubprocessError):
+                    pass
+            if isinstance(exc, (OSError, subprocess.SubprocessError)):
+                raise RuntimeError('Could not deliver the review message.') from exc
+            raise
     if stashed:
         restore_check(config, stashed)
     return result
@@ -1821,7 +1864,7 @@ def chat_payload(config, shell_mode=False, limit=DEFAULT_WINDOW, preview=False):
     before = change_signature(config) if preview else None
     shell = config['agent'] == 'shell' and shell_mode
     state = {'state': 'Shell', 'approval': None} if shell else auto_resume.overlay(config, live_status(config))
-    data = shell_snapshot(config) if shell else snapshot(config)
+    data = shell_snapshot(config) if shell else marked_snapshot(config)
     if not shell and isinstance(data.get('messages'), list):
         data = dict(data, messages=shell_log.merge(config['id'], data['messages']))
     if data.get('busy') and state['state'] == 'Idle':
@@ -1865,23 +1908,29 @@ def find_messages(messages, query, limit=60):
     found = []
     for index in range(len(messages) - 1, -1, -1):
         message = messages[index]
+        if message.get('source') == injected_prompts.UNKNOWN_RECEIPT:
+            continue  # Search labels results by speaker.
         text = str(message.get('text') or '')
         lower = text.lower()
         if all(word in lower for word in words):
             at = lower.find(words[0])
             start = max(0, at - 60)
             snippet = ' '.join(text[start:at + len(words[0]) + 120].split())
-            found.append({'id': message.get('id'), 'role': message.get('role'), 'kind': message.get('kind'), 'time': message.get('time'),
-                          'from_end': len(messages) - index, 'snippet': ('…' if start else '') + snippet})
+            match = {'id': message.get('id'), 'role': message.get('role'), 'kind': message.get('kind'), 'time': message.get('time'),
+                     'from_end': len(messages) - index, 'snippet': ('…' if start else '') + snippet}
+            if message.get('source') == 'tether':
+                match['source'] = 'tether'
+            found.append(match)
     return {'matches': found[:limit], 'total': len(found)}
 
 
 def search_payload(config, query, shell_mode=False):
     shell = config['agent'] == 'shell' and shell_mode
-    data = shell_snapshot(config) if shell else snapshot(config)
+    data = shell_snapshot(config) if shell else marked_snapshot(config)
     messages = data.get('messages')
     if not shell and isinstance(messages, list):
         messages = shell_log.merge(config['id'], messages)
+        messages = continuations.decorate(config, dict(data, messages=messages))['messages']
     return dict(find_messages(messages, query), max_limit=MAX_WINDOW)
 
 
@@ -1894,7 +1943,7 @@ def change_signature(config):
             parts.append((info.st_ino, info.st_mtime_ns, info.st_size))
         except (OSError, TypeError):
             parts.append(None)
-    return tuple(parts)
+    return (*parts, injected_prompts.revision(config))
 
 
 CHAT_UI_ROOT = Path(os.environ.get('TMUX_CHAT_DIST', str(Path(__file__).resolve().parent.parent / 'ui' / 'dist')))
@@ -2473,7 +2522,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = footer.parse(screen) if config['agent'] == 'claude' else {}
                 result = claude_hooks.overlay(config, result, screen_read_at=screen_read_at)
                 if config['agent'] == 'codex' and not config.get('ambiguous'):
-                    state = history.read(config['transcript'], codex_state, codex_consume)
+                    state = history.read(config['transcript'], codex_state, codex_consume, with_offset=True)
                     result = codex_footer(config, codex_metrics(config, state['usage'], state['model'], state.get('effort', ''),
                                                                 state.get('credits'), tier=state.get('tier', '')))
                     live = claude_hooks.codex_live(config)
@@ -2975,7 +3024,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(200, {'ok': True})
                 return
             if self.path == agent_tabs.PATH:
-                agent_tabs.serve(self, body, sessions=sessions, fresh=fresh_sessions, folder=agent_folder, snapshot=snapshot,
+                agent_tabs.serve(self, body, sessions=sessions, fresh=fresh_sessions, folder=agent_folder, snapshot=marked_snapshot,
                                  last_reply=last_reply, run=subprocess.run, lock=SEND_LOCK,
                                  status=shared_status, send=partial(review_send, held=True), timeline=timeline)
                 return
@@ -3357,7 +3406,7 @@ class Handler(BaseHTTPRequestHandler):
                             self.respond(200, {'pane': existing})
                             return
                     state = live_status(entry)['state']
-                    data = continuations.decorate(entry, snapshot(entry))
+                    data = continuations.decorate(entry, marked_snapshot(entry))
                     if data.get('busy'):
                         state = 'Working'
                     continuations.validate(entry, body, state)
@@ -3413,7 +3462,7 @@ class Handler(BaseHTTPRequestHandler):
                         if stack or 'group' in body:
                             place['group'] = stack['id'] if stack else body['group']
                         pane, name = delegate.start(entry, body, folder if folder and os.path.isdir(folder) else str(paths.HOME),
-                                                    run=subprocess.run, recent=lambda: snapshot(entry).get('messages') or [],
+                                                    run=subprocess.run, recent=lambda: marked_snapshot(entry).get('messages') or [],
                                                     by_user=True, **place)
                     except Exception:
                         if stack:
@@ -3928,6 +3977,7 @@ def start_office_origin(host):
 
 if __name__ == '__main__':
     undo_store.enable()
+    injected_prompts.initialize()
     audit.prune()
     import share_api
     share_api.get_store()  # Reconcile private storage before accepting requests.

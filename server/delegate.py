@@ -12,6 +12,7 @@ from uuid import uuid4
 import codex_provider
 import helper_close
 import helper_tabs
+import injected_prompts
 import model_catalog
 import paths
 import review_links
@@ -130,6 +131,8 @@ def brief(messages):
     """The last few user and assistant texts, each cut short, oldest first. Tool output is left out."""
     picked, total = [], 0
     for message in reversed(messages or []):
+        if isinstance(message, dict) and message.get('source') in ('tether', injected_prompts.UNKNOWN_RECEIPT):
+            continue
         text = message.get('text') if isinstance(message, dict) else None
         role = message.get('role') if isinstance(message, dict) else None
         if role not in ('user', 'assistant') or not isinstance(text, str) or not text.strip():

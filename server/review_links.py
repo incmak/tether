@@ -22,9 +22,12 @@ import unicodedata
 
 import agents
 import audit
+import continuations
 import helper_tabs
+import injected_prompts
 import paths
 import review_scope
+import shell_log
 from terminal_input import DraftError
 
 FILE = paths.CACHE / 'review-links.json'
@@ -1241,9 +1244,11 @@ def _idle_source(link, cap, turn_read):
                 and ['review-correction', feedback['sent_at']] in pending)
     fresh = finished_at is None or finished_at > cap.get('review_turn_at', float('-inf'))
     clipped = source in ('unknown', 'unknown-background')
+    unbound = source == injected_prompts.UNKNOWN_RECEIPT
     # Use the prompt's time when visible. An earlier queued prompt can finish after a later send.
     turn_at = started_at if started_at is not None else finished_at
-    if fresh and (observed or finished_at is not None or not clipped):
+    # An unbound delivery id says nothing about which queued relay, if any, ran.
+    if not unbound and fresh and (observed or finished_at is not None or not clipped):
         if source == 'user' and started_at is not None:
             # A later user prompt can finish between ticks, after the marked turn already ran.
             pending = [marker for marker in pending if isinstance(marker, str) or marker[1] >= started_at]
@@ -1277,7 +1282,7 @@ def _idle_source(link, cap, turn_read):
         elif after_send and (feedback['phase'] == 'working' or source == 'user' and started_at is not None):
             cap.pop('feedback_turn')
             # The correction's turn ended unmatched (Antigravity has no prompt time). Its marker must not outlive it.
-            if (stuck := ['review-correction', sent_at]) in cap.get('review_prompts', ()):
+            if not unbound and (stuck := ['review-correction', sent_at]) in cap.get('review_prompts', ()):
                 cap['review_prompts'] = [marker for marker in cap['review_prompts'] if marker != stuck]
                 if not cap['review_prompts']:
                     cap.pop('review_prompts')
@@ -1331,9 +1336,21 @@ CORRECTION_REQUESTED = 'Tether asked the reviewer to review the current commit.'
 CORRECTION_WAIT = 'Wait for the next review.'
 
 
-def prompt_source(text):
-    if text.startswith('[Working directory changed to '):
-        text = text.partition('. Run commands and resolve relative paths there.] ')[2]
+def prompt_source(entry, record, text):
+    """Classify a native prompt for callers that decide who started a turn."""
+    receipt = injected_prompts.bound_receipt(entry, record)
+    if receipt is not None:
+        return (_relay_source(text) if receipt['metadata']['prompt'] == 'review' else None) or 'tether'
+    if injected_prompts.has_delivery_id(text):
+        return injected_prompts.UNKNOWN_RECEIPT
+    if injected_prompts.keeps_receipts(entry) and not injected_prompts.is_legacy(
+            record.get('timestamp'), injected_prompts.cutover_ms()):
+        return None
+    return _relay_source(text)
+
+
+def _relay_source(text):
+    text = injected_prompts.strip_delivery_id(shell_log.strip_folder_note(continuations.unwrap(text)))
     if text.startswith(PARENT_SUMMARY) and text.rstrip().endswith(PARENT_SUMMARY_END):
         return 'review-summary'
     notice = PARENT_NOTICE.match(text)
@@ -1496,6 +1513,9 @@ def _turn_ended_on_limit(worker):
 def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clear, delivery,
           work_mark, review_reply, stalled_replies, turn_source, turn_reads, sources, level, parent, reply_effect,
           scope=None, commit=None, fresh=None, folder=None):
+    key = _cap_key(link)
+    if key in turn_reads and turn_reads[key] is None:
+        raise injected_prompts.ReceiptsUnreadable('Review turn source unavailable this tick')
     worker = entries.get(link['worker'])
     reviewer = entries.get(link['reviewer'])
     if link['reviewer_thread'] is None:
@@ -1520,7 +1540,6 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
     link.pop('lost_ticks', None)
     link.pop('lost_reason', None)
     state = status(worker)['state']
-    key = _cap_key(link)
     turn = key, cap.get('cap_reset')
     # Only the correction's own pending turn is not a work turn. A marker left by another turn must not block reviews.
     correction_turn = ((feedback := cap.get('feedback_turn')) is not None
@@ -1532,8 +1551,8 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
     if state == 'Idle' and (between_ticks or 'restart' in cap or link['seen_working'] or link.get('approved_turn')
                             or cap.get('review_prompts') or cap.get('feedback_turn') or turn in sources):
         if key not in turn_reads:
-            read = (_call(turn_source, worker) if between_ticks else
-                    turn_source(worker) if turn_source is not None else 'user')
+            turn_reads[key] = None  # Defer every link for this cap if the read fails.
+            read = turn_source(worker) if turn_source is not None else (None if between_ticks else 'user')
             turn_reads[key] = read if isinstance(read, tuple) else (read, None, None)
         if upgrade_paused:
             # A parent stamps the cap before it sends the prompt. The store has it once its turn is readable.
@@ -1832,6 +1851,10 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                         'retries', 'request_id', 'send_reply', 'verify_ticks'):
                 link.pop(key, None)
         return link
+    if state == 'Idle' and source == injected_prompts.UNKNOWN_RECEIPT:
+        # This completion cannot start a review. A later turn can still do so.
+        link['seen_working'] = False
+        return link
     if state == 'Working':
         if link['worker'] not in awaiting and not correction_turn:
             link['seen_working'] = True
@@ -2093,13 +2116,15 @@ def _apply_step(old, updated, snapshot, cap, entries, delivery):
             _release(key, delivery)
 
 
-def _claim_upgrade_alerts(rows, entries):
+def _claim_upgrade_alerts(rows, entries, unavailable):
     """Return the alerts to send, and whether a deferral changed the rows."""
     alerts, deferred = [], False
     for cap in rows:
         if not _is_cap(cap) or cap.get('paused') != UPGRADE_PAUSE or cap.get('upgrade_alerted'):
             continue
         key = _cap_key(cap)
+        if key in unavailable:
+            continue
         worker = entries.get(key[0])
         current = helper_tabs._thread(worker) if worker is not None else None
         if key[1] is None:
@@ -2139,9 +2164,8 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
             bound = False
             for worker in bindable & by_pane.keys():
                 bound |= _bind_worker(rows, worker, helper_tabs._thread(by_pane[worker]))
-            upgrade_alerts, deferred = _claim_upgrade_alerts(rows, by_pane) if alert is not None else ([], False)
-            if bound or deferred or upgrade_alerts or any(_is_cap(row) and row.get('pending_adoption')
-                                             and _cap_key(row) not in _feedback_in_flight for row in rows):
+            if bound or any(_is_cap(row) and row.get('pending_adoption')
+                            and _cap_key(row) not in _feedback_in_flight for row in rows):
                 _write(rows)
         links = [row for row in rows if _is_link(row)]
         upgrade_paused = {_cap_key(row) for row in rows if _is_cap(row) and row.get('paused') == UPGRADE_PAUSE}
@@ -2158,18 +2182,6 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
                     return False
                 return True
             return False
-
-        for key, upgrade_at, message in upgrade_alerts:
-            # Success means the callback returned. Push delivery runs in a daemon thread and is not tracked here.
-            if notify(key, message):
-                with _lock:
-                    stored_rows = _read()
-                    stored = _cap_for(stored_rows, key)
-                    if (stored is not None and stored.get('paused') == UPGRADE_PAUSE
-                            and stored.get('upgrade_at') == upgrade_at):
-                        stored['upgrade_alerted'] = True
-                        _write(stored_rows)
-                        _cap_for(rows, key)['upgrade_alerted'] = True
 
         stalled_replies = {}
         turn_reads = {}
@@ -2234,9 +2246,26 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
                              f'“{name}”: Tether could not find the reviewer reply. '
                              f'Ask the reviewer again, or send its latest reply. Latest reply: “{preview}”'),
                        review={'worker': key[0], 'reviewer': reviewer, 'id': updated['stalled']})
+        unavailable = {key for key, read in turn_reads.items() if read is None}
         with _lock:
-            caps = [row for row in _read() if _is_cap(row)]
+            rows = _read()
+            caps = [row for row in rows if _is_cap(row)]
+            upgrade_alerts, deferred = _claim_upgrade_alerts(rows, by_pane, unavailable) if alert is not None else ([], False)
+            if deferred or upgrade_alerts:
+                _write(rows)
+        for key, upgrade_at, message in upgrade_alerts:
+            # Success means the callback returned. Push delivery runs in a daemon thread and is not tracked here.
+            if notify(key, message):
+                with _lock:
+                    stored_rows = _read()
+                    stored = _cap_for(stored_rows, key)
+                    if (stored is not None and stored.get('paused') == UPGRADE_PAUSE
+                            and stored.get('upgrade_at') == upgrade_at):
+                        stored['upgrade_alerted'] = True
+                        _write(stored_rows)
         for cap in caps:
+            if _cap_key(cap) in unavailable:
+                continue
             try:
                 notify(_cap_key(cap), _step_parent(cap, by_pane, status, send, clear))
             except Exception:
