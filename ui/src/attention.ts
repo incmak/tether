@@ -66,11 +66,22 @@ export interface StaleRuleResult { confirmed: boolean | null; last: boolean; err
 export class StaleRuleQueue {
   private running = false
   private next: boolean | null = null
-  wanted: boolean | null = null  // the newest choice while writes run
-  generation = 0                 // changes on each choice, so an older read cannot overwrite it
+  wanted: boolean | null = null     // the newest choice while writes run
+  confirmed: boolean | null = null  // the last value the server confirmed, kept when Settings closes
+  generation = 0                    // changes on each choice, so an older read cannot overwrite it
   listener: ((result: StaleRuleResult) => void) | null = null
 
   get busy() { return this.running || this.next !== null }
+
+  // A read counts only when no write ran from its start to its end: a write that ran has the newer value.
+  startRead() {
+    const generation = this.generation, idle = !this.busy
+    return (value: boolean) => {
+      if (!idle || this.busy || generation !== this.generation) return false
+      this.confirmed = value
+      return true
+    }
+  }
 
   async set(value: boolean, write: (value: boolean) => Promise<boolean>, read: () => Promise<boolean>,
     describe: (reason: unknown) => string) {
@@ -91,10 +102,11 @@ export class StaleRuleQueue {
           try { confirmed = await read() } catch { /* Keep the last confirmation. */ }
           result = { confirmed, error: describe(reason) }
         }
+        if (result.confirmed !== null) this.confirmed = result.confirmed
         // Only the newest write decides what the switch shows and whether an error shows.
         const last = this.next === null
         if (last) this.wanted = null
-        this.listener?.({ ...result, last })
+        this.listener?.({ ...result, confirmed: this.confirmed, last })
       }
     } finally {
       this.running = false

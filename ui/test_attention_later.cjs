@@ -109,6 +109,26 @@ async function testStaleRuleQueue() {
   q2.listener = result => seen.push({ ...result })
   await q2.set(false, async () => { throw new Error('503') }, async () => true, () => 'Could not save. Try again.')
   assert.deepEqual(seen, [{ confirmed: true, error: 'Could not save. Try again.', last: true }])
+  // Review 5: a read that starts during a write never counts, even after the write ends.
+  const q3 = new a.StaleRuleQueue()
+  let release
+  const writing = q3.set(false, () => new Promise(resolve => { release = resolve }), async () => true, () => 'x')
+  const duringWrite = q3.startRead()
+  release(false)
+  await writing
+  assert.equal(q3.confirmed, false)
+  assert.equal(duringWrite(true), false)
+  assert.equal(q3.confirmed, false)
+  const idleRead = q3.startRead()
+  assert.equal(idleRead(true), true)
+  assert.equal(q3.confirmed, true)
+  // Review 5: the confirmed value outlives the dialog, so a failed write and a failed read fall back to it.
+  const q4 = new a.StaleRuleQueue(), last = []
+  q4.startRead()(true)
+  q4.listener = result => last.push({ ...result })
+  await q4.set(false, async () => { throw new Error('503') }, async () => { throw new Error('503') }, () => 'Could not save. Try again.')
+  assert.deepEqual(last, [{ confirmed: true, error: 'Could not save. Try again.', last: true }])
+  assert.deepEqual({ ...a.confirmStaleRule({ confirmed: q4.confirmed, shown: false }, last[0].confirmed, true) }, { confirmed: true, shown: true })
   // A failed read keeps what the switch shows when nothing was confirmed yet.
   assert.deepEqual({ ...a.confirmStaleRule({ confirmed: null, shown: true }, null, true) }, { confirmed: null, shown: true })
 }

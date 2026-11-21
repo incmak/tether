@@ -345,7 +345,7 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
 /** Settings: the stale ask rule, on by default. It is a server setting. */
 export function StaleRuleSetting({ api }: { api: Api }) {
   const [{ shown: stale }, setStale] = useState<{ confirmed: boolean | null; shown: boolean | null }>(
-    () => ({ confirmed: null, shown: staleRuleQueue.busy ? staleRuleQueue.wanted : null }))
+    () => ({ confirmed: staleRuleQueue.confirmed, shown: staleRuleQueue.busy ? staleRuleQueue.wanted : null }))
   const [error, setError] = useState('')
   useEffect(() => {
     const listener = (result: StaleRuleResult) => {
@@ -354,12 +354,11 @@ export function StaleRuleSetting({ api }: { api: Api }) {
     }
     staleRuleQueue.listener = listener
     const controller = new AbortController()
-    const generation = staleRuleQueue.generation
-    // A write that runs or ran since this read started has the newer value.
-    const current = () => !controller.signal.aborted && generation === staleRuleQueue.generation && !staleRuleQueue.busy
+    const accept = staleRuleQueue.startRead()
     api<AttentionState>('attention', undefined, controller.signal).then(data => {
-      if (current()) setStale(state => confirmStaleRule(state, data.rules?.stale ?? true, true))
-    }).catch(reason => { if (current()) setError(errorText(reason)) })
+      const value = data.rules?.stale ?? true
+      if (!controller.signal.aborted && accept(value)) setStale(state => confirmStaleRule(state, value, true))
+    }).catch(reason => { if (!controller.signal.aborted && !staleRuleQueue.busy) setError(errorText(reason)) })
     return () => {
       controller.abort()
       if (staleRuleQueue.listener === listener) staleRuleQueue.listener = null

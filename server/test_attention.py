@@ -1422,7 +1422,7 @@ class RouteTest(unittest.TestCase):
         self.log.record.assert_not_called()
         self.clock.now += 1
         self.move_reply()
-        self.log.query.assert_called_once_with(kinds=['auto.undo'], since=undo['at'] - 1, limit=100)
+        self.log.query.assert_called_once_with(kinds=['auto.undo'], since=undo['at'] - attention.AUTOMATION_HISTORY, limit=100)
         self.assertEqual([row['kind'] for row in self.log.entries], ['auto.stale_ask', 'auto.undo'])
         self.assertEqual(self.store.undos, {})
         self.assertEqual(json.loads(self.path.read_text())['undos'], {})
@@ -1470,10 +1470,49 @@ class RouteTest(unittest.TestCase):
         self.log.record.reset_mock()
         self.move_reply()
         self.log.record.assert_not_called()
-        filters = {'kinds': ['auto.undo'], 'since': undo['at'] - 1, 'limit': 100}
+        filters = {'kinds': ['auto.undo'], 'since': undo['at'] - attention.AUTOMATION_HISTORY, 'limit': 100}
         self.assertEqual(self.log.query.call_args_list, [mock.call(**filters), mock.call(**filters, before='0002')])
         self.assertEqual(self.store.undos, {})
         self.assertEqual(json.loads(self.path.read_text())['undos'], {})
+
+    def undo_with_pending_line(self, at):
+        self.clock.now = at
+        self.move_reply()
+        move, = self.log.entries
+        target = {'session': '%1', 'thread': 't1', 'ask': move['detail']['ask'], 'entry': move['id']}
+        self.log.fail.add('auto.undo')
+        with mock.patch('sys.stderr', new_callable=io.StringIO):
+            self.assertEqual(self.post('back', target)[0], 200)
+        self.log.fail.clear()
+        return move
+
+    def test_undo_dated_before_midnight_counts_the_same_on_home_and_log(self):
+        midnight = attention._local_midnight(datetime(2026, 11, 23, 12).timestamp())
+        move = self.undo_with_pending_line(midnight + 10)
+        self.clock.now = midnight - 10                     # the clock steps back across midnight
+        self.store._failed_undos.clear()
+        self.move_reply()
+        self.assertEqual([row['kind'] for row in self.log.entries], ['auto.stale_ask', 'auto.undo'])
+        self.assertLess(self.log.entries[1]['at'], midnight)
+        self.clock.now = midnight + 30
+        _, log = self.get('/log')
+        self.assertTrue(next(row for row in log['entries'] if row['id'] == move['id'])['undone'])
+        self.assertEqual((self.get()[1]['handled_today'], log['handled_today']), (0, 0))
+
+    def test_reload_finds_an_undo_line_dated_before_its_outbox_item(self):
+        self.undo_with_pending_line(self.clock.now + 25 * 3600)
+        self.clock.now -= 20                               # the line is dated before its outbox item
+        self.store._failed_undos.clear()
+        save = self.store._save
+        with mock.patch.object(self.store, '_save', side_effect=lambda now: save(now) if len(self.log.entries) == 1 else False):
+            self.move_reply()
+        self.assertEqual(len(self.log.entries), 2)
+        self.assertTrue(json.loads(self.path.read_text())['undos'])
+        self.store = attention.Attention(self.path, self.clock, log=self.log)
+        self.clock.now += 20
+        self.move_reply()
+        self.assertEqual([row['kind'] for row in self.log.entries], ['auto.stale_ask', 'auto.undo'])
+        self.assertEqual(self.store.undos, {})
 
     def test_outbox_load_filters_invalid_items_and_prunes_expired_undos(self):
         now = self.clock.now

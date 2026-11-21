@@ -595,7 +595,9 @@ class Attention:
                if entry_id == only or (only is None and self._failed_undos.get(entry_id, now) <= now)}
         if not due:
             return
-        filters = {'kinds': ['auto.undo'], 'since': min(item['at'] for item in due.values()) - 1, 'limit': 100}
+        # Match by entry id only: a clock correction can date the line before its outbox item or its move.
+        filters = {'kinds': ['auto.undo'], 'since': min(now, *(item['at'] for item in due.values())) - AUTOMATION_HISTORY,
+                   'limit': 100}
         logged = set()
         can_append = False
         try:
@@ -603,7 +605,7 @@ class Attention:
                 page = self._query_log(**filters)
                 for row in page['entries']:
                     entry_id = row.get('detail', {}).get('entry')
-                    if entry_id in due and row['at'] >= due[entry_id]['at'] - 1:
+                    if entry_id in due:
                         logged.add(entry_id)
                 if not page['next'] or len(logged) == len(due):
                     break
@@ -641,8 +643,11 @@ class Attention:
 
     def _automation_today(self, midnight, page=None):
         """Count moves and collect their state under the same lock as the audit reads."""
+        # Undo lines come from the whole log window, not from today only: a clock correction can date an Undo
+        # before midnight while its move counts today. Home and the log then read the same lines.
+        since = self.clock() - AUTOMATION_HISTORY
         if page is None:
-            page = self._query_log(kinds=['automation'], since=midnight, limit=100)
+            page = self._query_log(kinds=['automation'], since=since, limit=100)
         asks = {ask['id']: ask for ask in (*self.parked.values(), *self.asks.values())}
         moves, undone = set(), set(self.undos)
         while True:
@@ -653,9 +658,9 @@ class Attention:
                 elif row['kind'] == 'auto.stale_ask' and row['at'] >= midnight and not self._move_failed(row, asks):
                     moves.add(row['id'])
             before = page['next']
-            if not before or entries[-1]['at'] < midnight:
+            if not before:
                 break
-            page = self._query_log(kinds=['automation'], since=midnight, limit=100, before=before)
+            page = self._query_log(kinds=['automation'], since=since, limit=100, before=before)
         # Active rule moves in state take precedence over Undo records.
         undone.difference_update(ask['later']['entry'] for ask in asks.values()
                                  if (ask.get('later') or {}).get('by') == 'rule')
