@@ -298,6 +298,69 @@ class IntentEvalTests(unittest.TestCase):
                     self.assertIsNone(trace['proposal'])
                     self.assertEqual(trace['action']['name'], 'send_to_chat')
 
+    def test_approval_readback_scores_the_fixed_question_chat_and_decision(self):
+        chat = 'deploy-check'
+        for decision, status in (('approve', 'approved'), ('deny', 'denied')):
+            with self.subTest(decision=decision):
+                expect = {'tool': None, 'readback_chat': chat, 'readback_tool': 'answer_approval',
+                          'args': {'decision': f'^{decision}$'}}
+                example = case(user=f'{decision} it', expect=expect)
+                question = f'Not {status} yet. Should I {decision} {chat}? Yes or no?'
+                action = assistant(tool_calls=[call('answer_approval', chat=chat, decision=decision)])
+                result, payloads = self.run_script(example, action)
+                self.assertEqual((result['passed'], result['fails']), (1, {}))
+                trace, = result['samples']
+                self.assertIsNone(trace['action'])
+                self.assertEqual(trace['proposal'], {'name': 'answer_approval', 'chat': chat, 'payload': decision})
+                self.assertEqual(trace['reply'], question)
+                self.assertEqual(len(payloads), 1)
+                wrong_chat = assistant(tool_calls=[call('answer_approval', chat='docs', decision=decision)])
+                self.assertEqual(self.run_script(example, wrong_chat)[0]['fails'], {'readback': 1})
+                self.assertEqual(self.run_script(example, assistant(question))[0]['fails'],
+                                 {'wrong_args': 1, 'readback': 1})
+                expect['args']['decision'] = '^unexpected$'
+                self.assertEqual(self.run_script(example, action)[0]['fails'], {'wrong_args': 1})
+
+    def test_fixed_approval_answers_match_runtime_consent(self):
+        chat = 'deploy-check'
+        for decision, status, answer, requested in (('approve', 'approved', 'yes', 'deny'),
+                                                    ('deny', 'denied', 'deny', 'deny')):
+            with self.subTest(decision=decision, answer=answer):
+                pending = {'name': 'answer_approval', 'chat': chat, 'payload': decision}
+                question = f'Not {status} yet. Should I {decision} {chat}? Yes or no?'
+                example = case('answer_approval', user=answer, history=[assistant(question)], pending=pending)
+                action = assistant(tool_calls=[call('answer_approval', chat=chat, decision=requested)])
+                result, _ = self.run_script(example, action)
+                self.assertEqual((result['passed'], result['fails']), (1, {}))
+                trace, = result['samples']
+                self.assertEqual(trace['action'], {'name': 'answer_approval', 'args': {'chat': chat, 'decision': decision}})
+                self.assertIsNone(trace['proposal'])
+                example['user'] = 'No'
+                result, payloads = self.run_script(example, action)
+                trace, = result['samples']
+                self.assertIsNone(trace['action'])
+                self.assertIsNone(trace['proposal'])  # "No" ends the question; Friday does not ask again.
+                self.assertEqual(trace['reply'], evaluation.friday.APPROVAL_DECLINED_REPLY)
+                self.assertEqual(len(payloads), 0)  # a bare "No": the fixed reply, the model does not run
+                # B489 review 2: a decision claim without a call is replaced, as in the runtime.
+                example['user'] = 'No, what does it want?'  # not a bare "No": the model runs
+                for claim in ('Denied.', 'I rejected the request. Anything else?', 'Denied. I did not send anything.',
+                              'Denied because it was not safe.'):
+                    trace, = self.run_script(example, assistant(claim))[0]['samples']
+                    self.assertEqual(trace['reply'], evaluation.friday.APPROVAL_DECLINED_REPLY)
+                for kept in ('Okay, it still waits.', 'It wants the installation approved before it can continue.',
+                             'It asks whether the request was approved.'):
+                    trace, = self.run_script(example, assistant(kept))[0]['samples']
+                    self.assertEqual(trace['reply'], kept)
+                # B489 review: later calls in the same batch still run, as in the runtime.
+                batch = assistant(tool_calls=[call('answer_approval', chat=chat, decision='deny'),
+                                              call('send_to_chat', chat='Other', prompt='Check the logs')])
+                result, payloads = self.run_script(example, batch)
+                trace, = result['samples']
+                self.assertIsNone(trace['action'])
+                self.assertEqual(trace['proposal'], {'name': 'send_to_chat', 'chat': 'Other', 'payload': 'Check the logs'})
+                self.assertEqual(len(payloads), 1)
+
     def test_replacement_readback_invalidates_pending_approval(self):
         for name, key, payload in (('send_to_chat', 'prompt', 'Fix the login bug'),
                                    ('backlog_send', 'item', 'B12')):

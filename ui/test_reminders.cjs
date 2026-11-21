@@ -64,15 +64,89 @@ test('repeat labels use the anchor weekday in IST', () => {
   assert.equal(repeatLabel({ ...rule, every: 'week', anchor: seconds('2026-11-23T04:30:00Z') }), 'Every Monday')
 })
 
-test('repeat options give a weekly hint when the time is set', () => {
+test('repeat labels name N, the month day and the year date from the rule, not a clamped anchor', () => {
+  const { repeatLabel } = loadReminders()
+  const feb28 = seconds('2027-02-28T04:30:00Z'), zone = 'Asia/Kolkata'
+  assert.equal(repeatLabel({ every: 'day', interval: 3, anchor: feb28, zone }), 'Every 3 days')
+  assert.equal(repeatLabel({ every: 'week', interval: 2, anchor: feb28, zone }), 'Every 2 weeks on Sunday')
+  assert.equal(repeatLabel({ every: 'month', day: 31, anchor: feb28, zone }), 'Every month on the 31st')
+  assert.equal(repeatLabel({ every: 'month', day: -1, anchor: feb28, zone }), 'Every month on the last day')
+  assert.equal(repeatLabel({ every: 'month', interval: 3, day: 22, anchor: feb28, zone }), 'Every 3 months on the 22nd')
+  assert.equal(repeatLabel({ every: 'year', day: 29, month: 2, anchor: feb28, zone }), 'Every year on 29 Feb')
+  assert.equal(repeatLabel({ every: 'year', interval: 2, day: 21, month: 11, anchor: seconds('2026-11-21T04:30:00Z'), zone }), 'Every 2 years on 21 Nov')
+  // A rule from before day and month existed falls back to its anchor.
+  assert.equal(repeatLabel({ every: 'month', anchor: seconds('2026-11-13T04:30:00Z'), zone }), 'Every month on the 13th')
+})
+
+test('ordinals', () => {
+  const { ordinal } = loadReminders()
+  assert.deepEqual([1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 30, 31].map(ordinal), ['1st', '2nd', '3rd', '4th', '11th', '12th', '13th', '21st', '22nd', '23rd', '30th', '31st'])
+})
+
+test('repeat options name the date; the last-day option shows only for a short month end', () => {
   const { repeatOptions } = loadReminders()
-  const first = [
-    { value: 'never', label: 'Never' },
-    { value: 'day', label: 'Every day' },
-    { value: 'weekday', label: 'Every weekday', detail: 'Mon–Fri' },
-  ]
-  assert.deepEqual(repeatOptions(null), [...first, { value: 'week', label: 'Every week', detail: 'Same day each week' }])
-  assert.deepEqual(repeatOptions(TOMORROW), [...first, { value: 'week', label: 'Every week', detail: 'On Thursdays' }])
+  const values = at => repeatOptions(at).map(option => option.value)
+  const detail = (at, value, rule) => repeatOptions(at, rule).find(option => option.value === value)?.detail
+  assert.deepEqual(values(null), ['never', 'day', 'weekday', 'week', 'month', 'year', 'custom'])
+  assert.equal(detail(null, 'week'), 'Same day each week')
+  assert.equal(detail(TOMORROW, 'week'), 'On Thursdays')
+  assert.equal(detail(TOMORROW, 'month'), 'On the 19th')
+  assert.equal(detail(TOMORROW, 'year'), 'On 19 Nov')
+  const nov30 = seconds('2026-11-30T04:30:00Z'), dec31 = seconds('2026-12-31T04:30:00Z'), feb29 = seconds('2028-02-29T04:30:00Z')
+  assert.deepEqual(values(nov30), ['never', 'day', 'weekday', 'week', 'month', 'last', 'year', 'custom'])
+  assert.equal(detail(nov30, 'month'), 'On the 30th, or the last day')
+  assert.deepEqual(values(dec31), values(null), 'the 31st already is the last day')
+  assert.equal(detail(feb29, 'year'), "On 29 Feb; 28 Feb in other years")
+  // An edit that keeps a clamped 28 Feb copy of a 31st series names the 31st, and offers no last-day choice.
+  const rule = { every: 'month', day: 31, anchor: seconds('2027-02-28T04:30:00Z'), zone: 'Asia/Kolkata' }
+  assert.equal(detail(rule.anchor, 'month', rule), 'On the 31st, or the last day')
+  assert.equal(repeatOptions(rule.anchor, rule).some(option => option.value === 'last'), false)
+  assert.equal(repeatOptions(TOMORROW, null, 'last').some(option => option.value === 'last'), true, 'a last-day rule keeps its option')
+  // Another unit takes the date, as the server does: the 31st series on 28 Feb becomes 28 Feb yearly.
+  assert.equal(detail(rule.anchor, 'year', rule), 'On 28 Feb')
+  const leap = { every: 'year', day: 29, month: 2, anchor: seconds('2029-02-28T04:30:00Z'), zone: 'Asia/Kolkata' }
+  assert.equal(detail(leap.anchor, 'year', leap), "On 29 Feb; 28 Feb in other years")
+  assert.equal(detail(leap.anchor, 'month', leap), 'On the 28th')
+  const last = { every: 'month', day: -1, anchor: rule.anchor, zone: 'Asia/Kolkata' }
+  assert.equal(detail(last.anchor, 'month', last), 'On the 28th', 'a last-day rule switched to a fixed day takes the date')
+  // A New York series (Sun 14 Feb 2027, 15:00; already Mon 15 Feb in IST) uses New York dates, as the server does.
+  const york = { every: 'month', day: 14, anchor: seconds('2027-02-14T20:00:00Z'), zone: 'America/New_York' }
+  assert.equal(detail(york.anchor, 'year', york), 'On 14 Feb')
+  assert.equal(detail(york.anchor, 'week', york), 'On Sundays')
+  const { choiceLabel, repeatLabel } = loadReminders()
+  assert.equal(choiceLabel({ pick: 'custom', unit: 'week', interval: 2, lastDay: false }, york.anchor, york), 'Every 2 weeks on Sunday')
+  assert.equal(repeatLabel({ ...york, every: 'week' }), 'Every Sunday')
+  assert.equal(detail(york.anchor, 'week', { ...york, zone: 'Not/AZone' }), 'On Mondays', 'an unknown zone falls back to IST')
+})
+
+test('repeat choices round-trip to the request body and validate N per unit', () => {
+  const { choiceOf, repeatBody, choiceValid, sameChoice, choiceLabel, NO_REPEAT } = loadReminders()
+  const anchor = TOMORROW, zone = 'Asia/Kolkata'
+  assert.equal(repeatBody(choiceOf(null)), null)
+  assert.equal(repeatBody(choiceOf({ every: 'week', anchor, zone })), 'week')
+  assert.deepEqual(repeatBody(choiceOf({ every: 'month', day: -1, anchor, zone })), { every: 'month', last_day: true })
+  assert.deepEqual(choiceOf({ every: 'month', interval: 3, day: 19, anchor, zone }), { pick: 'custom', unit: 'month', interval: 3, lastDay: false })
+  assert.deepEqual(repeatBody({ pick: 'custom', unit: 'week', interval: 2 }), { every: 'week', interval: 2 })
+  assert.equal(repeatBody({ pick: 'custom', unit: 'day', interval: 1 }), 'day', 'every 1 day is the plain rule')
+  assert.equal(sameChoice({ pick: 'custom', unit: 'year', interval: 1 }, { ...NO_REPEAT, pick: 'year' }), true)
+  for (const [unit, max] of [['day', 365], ['week', 52], ['month', 60], ['year', 5]]) {
+    assert.equal(choiceValid({ pick: 'custom', unit, interval: max }), true, unit)
+    assert.equal(choiceValid({ pick: 'custom', unit, interval: max + 1 }), false, unit)
+  }
+  for (const interval of [0, -1, 1.5, NaN]) assert.equal(choiceValid({ pick: 'custom', unit: 'day', interval }), false, String(interval))
+  assert.equal(choiceValid({ pick: 'never', unit: 'day', interval: NaN }), true, 'a hidden N does not block')
+  assert.equal(choiceLabel({ pick: 'custom', unit: 'week', interval: 2 }, TOMORROW), 'Every 2 weeks on Thursday')
+  assert.equal(choiceLabel({ pick: 'custom', unit: 'month', interval: 3 }, seconds('2027-02-28T04:30:00Z'), { every: 'month', day: 31, anchor, zone }), 'Every 3 months on the 31st')
+  // A custom last-day rule keeps last_day when its N changes, and only a monthly unit sends it.
+  const feb28 = seconds('2027-02-28T04:30:00Z'), lastRule = { every: 'month', interval: 3, day: -1, anchor: feb28, zone }
+  const kept = choiceOf(lastRule)
+  assert.deepEqual(kept, { pick: 'custom', unit: 'month', interval: 3, lastDay: true })
+  assert.deepEqual(repeatBody({ ...kept, interval: 4 }), { every: 'month', interval: 4, last_day: true })
+  assert.deepEqual(repeatBody({ ...kept, interval: 1 }), { every: 'month', last_day: true })
+  assert.deepEqual(repeatBody({ ...kept, unit: 'week' }), { every: 'week', interval: 3 })
+  assert.equal(choiceLabel({ ...kept, interval: 4 }, feb28, lastRule), 'Every 4 months on the last day')
+  assert.equal(choiceLabel({ ...kept, lastDay: false }, feb28, lastRule), 'Every 3 months on the 28th')
+  assert.equal(choiceLabel({ ...kept, unit: 'year' }, feb28, lastRule), 'Every 3 years on 28 Feb')
 })
 
 test('quick picks respect the evening cutoff and round-trip across month end', () => {

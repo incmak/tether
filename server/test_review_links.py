@@ -30,7 +30,7 @@ import server
 import terminal_input
 import undo
 from own_time import own_time
-from test_notification_priority import ASSISTANT, BACKGROUND, claude, codex
+from test_notification_priority import ASSISTANT, BACKGROUND, COMPACT_BOUNDARY, COMPACT_SUMMARY, claude, codex
 from terminal_input import DraftError
 
 
@@ -1407,6 +1407,63 @@ class ReviewLinksTests(unittest.TestCase):
         self.request_review()
         self.assertEqual(self.send.call_count, 3)
         self.assertEqual(self.send.call_args.args[0], self.reviewer)
+
+    def test_claude_compaction_during_feedback_preserves_the_review_cap(self):
+        self.worker['agent'] = 'claude'
+        self.turn_source = server.review_turn_source
+        records = []
+        self.enterContext(patch.object(server, 'notification_records', return_value=records))
+        wall_clock = self.enterContext(own_time(review_links, time=Mock()))
+        initial_time = datetime(2026, 11, 21, 1, 54, 30, tzinfo=timezone.utc).timestamp()
+        limit = review_links.MAX_ROUNDS
+
+        for origin in ('task_notification', 'human'):
+            with self.subTest(turnOrigin=origin):
+                self.file.write_text('[]')
+                wall_clock.return_value = initial_time
+                self.add(agent='claude', worker_thread=WORKER_THREAD)
+                self.alert.reset_mock()
+                records[:] = [claude('user', 'Fix the lock.', timestamp='2026-11-21T01:54:28Z'),
+                              dict(claude_final('Fixed.'), timestamp='2026-11-21T01:54:29Z'), CLAUDE_DONE]
+                self.request_review()
+                self.finish_review(FINDINGS)
+                self.assertEqual(self.links()[0]['rounds'], 1)
+                for failed in range(2, limit + 1):
+                    entry, feedback, _ = self.send.call_args.args
+                    self.assertEqual(entry, self.worker)
+                    self.assertIn('Fix what it raises, then stop and wait.', feedback)
+                    sent_at = wall_clock.return_value
+                    prompt = claude('user', f'\n\n<pasted_content id="e29c">\n{feedback}\n</pasted_content id="e29c">\n',
+                                    timestamp=datetime.fromtimestamp(sent_at + 179, timezone.utc).isoformat())
+                    summary = dict(COMPACT_SUMMARY, turnOrigin=origin,
+                                   timestamp=datetime.fromtimestamp(sent_at + 2, timezone.utc).isoformat())
+                    wall_clock.return_value = sent_at + 180
+                    final = dict(claude_final('Fixed the review findings.'),
+                                 timestamp=datetime.fromtimestamp(wall_clock.return_value, timezone.utc).isoformat())
+                    records.extend([prompt, COMPACT_BOUNDARY, summary, final, CLAUDE_DONE])
+                    self.request_review()
+                    self.assertEqual(self.links()[0].get('rounds', 0), failed - 1)
+                    self.finish_review(FINDINGS)
+                    self.assertEqual(self.links()[0].get('rounds', 0), failed)
+                self.assert_mak_stop(rounds=limit)
+                self.assertEqual(review_links.paused(), {'%13': ['%12']})
+
+    def test_claude_compaction_keeps_the_review_summary_source(self):
+        self.worker['agent'] = 'claude'
+        prompt = claude('user', f'{review_links.PARENT_SUMMARY}{FINDINGS}\n\n{review_links.PARENT_SUMMARY_END}',
+                        timestamp='2026-11-21T01:57:29Z')
+        records = [prompt, COMPACT_BOUNDARY, COMPACT_SUMMARY, claude_final('Open findings.'), CLAUDE_DONE]
+        with patch.object(server, 'notification_records', return_value=records):
+            self.assertEqual(server.review_turn_source(self.worker)[0], 'review-summary')
+
+    def test_claude_pasted_review_feedback_keeps_its_source(self):
+        self.worker['agent'] = 'claude'
+        prompt = legacy_prompt(claude('user', '\n\n<pasted_content id="e29c">\n'
+                                      '[Tether review] Feedback from the reviewer tab (%12):\n\n'
+                                      f'{FINDINGS}\n\nFix what it raises, then stop and wait.\n'
+                                      '</pasted_content id="e29c">\n'))
+        with patch.object(server, 'notification_records', return_value=[prompt, claude_final('Fixed.'), CLAUDE_DONE]):
+            self.assertEqual(server.review_turn_source(self.worker)[0], 'review-feedback')
 
     def test_review_turn_shorter_than_a_tick_is_seen_by_a_changed_reply(self):
         self.request_review()

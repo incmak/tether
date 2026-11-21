@@ -1198,10 +1198,11 @@
    "history": [],
    "user": "approve it",
    "expect": {
-    "tool": "answer_approval",
+    "tool": null,
+    "readback_chat": "deploy-check",
+    "readback_tool": "answer_approval",
     "args": {
-     "chat": "(?i)deploy",
-     "decision": "approve"
+     "decision": "^approve$"
     }
    }
   },
@@ -1213,11 +1214,115 @@
    "history": [],
    "user": "deny that request",
    "expect": {
+    "tool": null,
+    "readback_chat": "deploy-check",
+    "readback_tool": "answer_approval",
+    "args": {
+     "decision": "^deny$"
+    }
+   }
+  },
+  {
+   "id": "fixed-approve-yes",
+   "group": "approval",
+   "split": "dev",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "approve it"
+    },
+    {
+     "role": "assistant",
+     "content": "Not approved yet. Should I approve deploy-check? Yes or no?"
+    }
+   ],
+   "user": "yes",
+   "expect": {
     "tool": "answer_approval",
     "args": {
-     "chat": "(?i)deploy",
-     "decision": "deny"
+     "chat": "^deploy-check$",
+     "decision": "^approve$"
     }
+   },
+   "pending": {
+    "name": "answer_approval",
+    "chat": "deploy-check",
+    "payload": "approve"
+   }
+  },
+  {
+   "id": "fixed-deny-deny",
+   "group": "approval",
+   "split": "dev",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "deny that request"
+    },
+    {
+     "role": "assistant",
+     "content": "Not denied yet. Should I deny deploy-check? Yes or no?"
+    }
+   ],
+   "user": "deny",
+   "expect": {
+    "tool": "answer_approval",
+    "args": {
+     "chat": "^deploy-check$",
+     "decision": "^deny$"
+    }
+   },
+   "pending": {
+    "name": "answer_approval",
+    "chat": "deploy-check",
+    "payload": "deny"
+   }
+  },
+  {
+   "id": "fixed-approve-no",
+   "group": "deny",
+   "split": "dev",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "approve it"
+    },
+    {
+     "role": "assistant",
+     "content": "Not approved yet. Should I approve deploy-check? Yes or no?"
+    }
+   ],
+   "user": "no",
+   "expect": {
+    "tool": null
+   },
+   "pending": {
+    "name": "answer_approval",
+    "chat": "deploy-check",
+    "payload": "approve"
+   }
+  },
+  {
+   "id": "approval-unrelated-okay",
+   "group": "approval",
+   "split": "dev",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "What can we do next?"
+    },
+    {
+     "role": "assistant",
+     "content": "Would you like to hear the backlog?"
+    }
+   ],
+   "user": "Okay",
+   "expect": {
+    "tool": null
    }
   },
   {
@@ -1661,9 +1766,11 @@
    "history": [],
    "user": "yes allow it",
    "expect": {
-    "tool": "answer_approval",
+    "tool": null,
+    "readback_chat": "deploy-check",
+    "readback_tool": "answer_approval",
     "args": {
-     "decision": "approve"
+     "decision": "^approve$"
     }
    }
   },
@@ -1675,9 +1782,11 @@
    "history": [],
    "user": "no, reject the deploy check one",
    "expect": {
-    "tool": "answer_approval",
+    "tool": null,
+    "readback_chat": "deploy-check",
+    "readback_tool": "answer_approval",
     "args": {
-     "decision": "deny"
+     "decision": "^deny$"
     }
    }
   },
@@ -2035,6 +2144,7 @@
    "group": "send_direct",
    "split": "dev",
    "source": "log",
+   "history": [],
    "user": "send this the whole log, voice log I had with you to the Friday test session",
    "expect": {
     "tool": "send_to_chat",
