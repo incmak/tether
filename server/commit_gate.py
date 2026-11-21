@@ -181,8 +181,9 @@ ANSI_QUOTE = re.compile(r"\$'((?:[^'\\]|\\[\s\S])*)'")
 ANSI_ESCAPE = re.compile(rb'\\([0-7]{1,3}|x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|.)', re.S)
 ANSI_BYTES = dict(zip(b"""abefnrtvE\\'"?""", b"""\a\b\x1b\f\n\r\t\v\x1b\\'"?"""))
 REDIRECTION = re.compile(rf'(?P<fd>(?:[0-9]{LINE_JOIN})*)'
-                         rf'(?P<op><{LINE_JOIN}<{LINE_JOIN}<|>{LINE_JOIN}[>&]|<{LINE_JOIN}&|[<>])')
-COMPOUND_OPERATOR = re.compile(rf'&{LINE_JOIN}[&>]|\|{LINE_JOIN}[|&]|;{LINE_JOIN}[;&]')
+                         rf'(?P<op><{LINE_JOIN}<{LINE_JOIN}<|>{LINE_JOIN}[>&]|<{LINE_JOIN}&|[<>])'
+                         rf'|&{LINE_JOIN}>{LINE_JOIN}>?')
+COMPOUND_OPERATOR = re.compile(rf'&{LINE_JOIN}&|\|{LINE_JOIN}[|&]|;{LINE_JOIN}[;&]')
 FOLDER_SEPARATORS = {None, '&&', ';', '\n'}
 HEREDOC_MARK = '@@TETHER-HEREDOC-{}@@'
 HEREDOC_FOUND = re.compile(r'@@TETHER-HEREDOC-(\d+)@@')
@@ -194,9 +195,13 @@ HEREDOC = re.compile(
     rf'''<{LINE_JOIN}<(-)?[ \t]*(['"]?)([A-Za-z0-9_][A-Za-z0-9_.-]*)\2(?=[ \t\n;&|()<>]|$)([^\n]*)\n'''
     r'''(?:(.*?)\n)?(?(1)\t*)\3(?=\n|$)''', re.S)
 ASSIGNMENT = re.compile(r'[A-Za-z_][A-Za-z0-9_]*=.*', re.S)
+ASSIGNMENT_LIKE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)(?:\[.*\])?\+?=.*', re.S)
+REDIRECTION_VARIABLE = re.compile(r'\{[A-Za-z_][A-Za-z0-9_]*\}')
 WRAPPERS = {'command', 'env', 'time', 'nohup'}
+COMMAND_WRAPPERS = {'command', 'builtin', 'time', 'noglob', 'nocorrect', 'exec', 'nohup', 'repeat', '-'}  # - and repeat: zsh
 KEYWORDS = set('if then else elif fi for while until do done case esac function select time coproc ! [[ ]]'.split())
 KEYWORD_PREFIXES = {'if', 'then', 'else', 'elif', 'while', 'until', 'do', 'time', '!', '{'}
+MOVING_WORDS = {'cd', 'pushd', 'popd', 'source', '.', 'eval', 'builtin'}
 SHELL_COMMANDS = {'eval', 'source', '.', 'exec', 'xargs', 'sh', 'bash', 'zsh'}
 GIT_VALUE_OPTIONS = {'-c', '--namespace', '--super-prefix', '--config-env', '--exec-path'}
 GIT_PLACE_OPTIONS = {'--git-dir', '--work-tree'}  # they move the repository: the folder is then not known
@@ -384,13 +389,14 @@ def _segments(tokens):
             words.append(token)
         elif redirect := REDIRECTION.fullmatch(token):
             redirected = True
+            uncertain = uncertain or token in ('&>', '&>>')
             if index >= len(tokens) or not isinstance(tokens[index], _Word):
                 uncertain = True
                 continue
             target = tokens[index]
             index += 1
             fd = redirect['fd']
-            on_stdin = not fd.strip('0') if fd else redirect['op'].startswith('<')
+            on_stdin = not fd.strip('0') if fd else token.startswith('<')
             mark = HEREDOC_FOUND.fullmatch(target.text) if target.fill and target.bare else None
             if on_stdin:
                 stdin = int(mark[1]) if mark else None
@@ -722,6 +728,31 @@ def _cd_guard(segment):
             and [word.text for word in words] in (['exit'], ['exit', '1'], ['return']))
 
 
+def _command_word(words):
+    """Return the index of a command after known prefixes, or None if it cannot be identified."""
+    wrapper, count = None, False
+    for index, word in enumerate(words):
+        text = word.text
+        if count:
+            count = False  # the count after zsh `repeat`
+        elif word.plain and text in COMMAND_WRAPPERS:
+            wrapper, count = text, text == 'repeat'
+        elif word.bare and (text in KEYWORD_PREFIXES or REDIRECTION_VARIABLE.fullmatch(text)):
+            wrapper = None
+        elif not word.plain:
+            return None
+        elif text == '--':
+            wrapper = None
+        elif wrapper and text.startswith('-'):
+            if wrapper == 'command' and ('v' in text or 'V' in text):
+                return index  # `command -v cd` only looks the name up
+        elif ASSIGNMENT_LIKE.fullmatch(text):
+            wrapper = None
+        else:
+            return index if text and not any(char in text for char in '[]=${}') else None
+    return None
+
+
 def evaluate(command, cwd=None):
     """None when the command has no `git commit`. Else {'verdict': 'pass' | 'missing' | 'unknown', 'reason': str,
     'count': the number of commits, 'folder': where git runs, or None when not known}.
@@ -779,10 +810,13 @@ def evaluate(command, cwd=None):
                 folder = logical = None
             alone = alone and folder is not None
             continue
-        while words and words[0].bare and words[0].text in KEYWORD_PREFIXES:
-            words = words[1:]
-        uncertain = uncertain or _shell_launcher(words)
-        commit = _git_commit(words) if words else None
+        position = _command_word(words)
+        name = words[position].text if position is not None else None
+        git_words = words
+        while git_words and git_words[0].bare and git_words[0].text in KEYWORD_PREFIXES:
+            git_words = git_words[1:]
+        uncertain = uncertain or _shell_launcher(git_words)
+        commit = _git_commit(git_words) if git_words else None
         if commit:
             args, _, folders, known, config = commit
             here = folder if known and not git_context_changed else None
@@ -797,20 +831,28 @@ def evaluate(command, cwd=None):
                     verdict, reason = 'unknown', 'folder'
                 verdicts.append((verdict, reason))
                 where = here if len(verdicts) == 1 or where == here else None
-        # A simple command cannot move the shell, except these. Any command can write a message file.
-        moving = ('cd', 'pushd', 'popd', 'source', '.', 'eval', 'builtin')  # these can move the shell; not followed
-        if first.text in moving or (first.text == 'command' and len(words) > 1 and words[1].text in moving):
+        # An unrecognised prefix, or a segment glued to ( or ) (as in X=$(...)suffix cd), can hide the command word.
+        # Then every word counts.
+        start = next(index for index, token in enumerate(tokens) if token is words[0])
+        exact = position is not None and not (start and tokens[start - 1] in ('(', ')'))
+        possible_commands = {name} if exact else {word.text for word in words}
+        if MOVING_WORDS.intersection(possible_commands):
             folder = logical = None
-        if first.text in ('set', 'setopt', 'unsetopt'):
+        if possible_commands.intersection(('set', 'setopt', 'unsetopt')):
             steady = False  # later cd and glob behavior can depend on shell options
-        if commit is None:
+        if commit is None and not git_context_changed:
             # These commands can explicitly change the Git worktree or hooks. Keep the folder unknown for probes.
-            git_context_changed = git_context_changed or (
-                any(os.path.basename(word.text) == 'git' for word in words[:-1])
-                and any(word.text == 'config' for word in words[1:]))
-            if ASSIGNMENT.fullmatch(first.text) or first.text in ('export', 'unset'):
-                git_context_changed = git_context_changed or any(
-                    GIT_CONFIG_ENV.fullmatch(word.text.split('=', 1)[0]) for word in words)
+            if not exact:
+                assignments, env_names = words, words
+            else:
+                env_names = words[position + 1:] if name in ('export', 'unset', 'declare', 'typeset') else []
+                assignments = words[:position] + env_names
+            git_context_changed = (
+                (any(os.path.basename(word.text) == 'git' for word in git_words[:-1])
+                 and any(word.text == 'config' for word in git_words[1:]))
+                or any(GIT_CONFIG_ENV.fullmatch(assignment[1]) for word in assignments
+                       if (assignment := ASSIGNMENT_LIKE.fullmatch(word.text)))
+                or any(GIT_CONFIG_ENV.fullmatch(word.text) for word in env_names))
         alone = False
     if not verdicts:
         return None

@@ -364,11 +364,95 @@ class Evaluate(unittest.TestCase):
             with self.subTest(prefix=prefix):
                 self.assertIsNone(commit_gate.evaluate(prefix + 'git commit -m Title', str(self.cwd))['folder'])
         # An ordinary command before the commit does not move the shell: the usual `git add . && git commit` form.
-        for prefix in ('git add . && ', 'npm test; ', 'git add -A\n', '>/dev/null; ', 'git status --short | head -5; ',
+        for prefix in ('git add . && ', 'git add -- source && ', r"printf '%s\n' GIT_DIR=example; ",
+                       'npm test; ', 'git add -A\n', '>/dev/null; ', 'git status --short | head -5; ',
                        'git diff --cached --stat | tail -2 && ', 'npm test || true; ', 'sleep 1 & ', 'set -e\n'):
             with self.subTest(prefix=prefix):
                 found = commit_gate.evaluate(prefix + 'git commit -m Title', str(self.cwd))
                 self.assertEqual((found['verdict'], found['folder']), ('missing', str(self.cwd)))
+
+    def test_folder_is_unknown_after_a_prefixed_moving_command(self):
+        cwd = str(self.cwd)
+        commit = 'git commit -m Title'
+        for prefix in ('X=1 cd sub; ', 'CDPATH=/alt cd sub && ', 'A=1 B=2 pushd sub; ',
+                       'X=1 command cd sub; ', 'X=1 builtin cd sub; ', 'X=1 source f; ', 'X=1 . f; ',
+                       'X=1 eval "cd sub"; ', "X='one two' popd; ", 'time X=1 cd sub; '):
+            with self.subTest(prefix=prefix):
+                found = commit_gate.evaluate(prefix + commit, cwd)
+                self.assertIsNone(found['folder'])
+                self.assertNotEqual(found['verdict'], 'missing')
+        for prefix in ('X=1 true; ', 'X=1 '):
+            with self.subTest(prefix=prefix):
+                found = commit_gate.evaluate(prefix + commit, cwd)
+                self.assertEqual((found['folder'], found['verdict']), (cwd, 'missing'))
+
+    def test_folder_is_unknown_after_moving_words_beyond_simple_prefixes(self):
+        bash = ('X+=1 cd ./sub', 'X[0]=1 cd ./sub', 'X[0]+=1 cd ./sub',
+                'X=1 command -p cd ./sub', 'X=1 command -- cd ./sub', 'time -p cd ./sub',
+                '{fd}</dev/null cd ./sub', '&>/dev/null cd ./sub', '&>>/dev/null cd ./sub',
+                'command -p -- . ./script', '{fd}</dev/null . ./script',
+                'X=${UNSET:-one two} . ./script', 'X[1 + 0]=v . ./script',
+                'X=$(printf value)suffix cd ./sub', 'X=$(printf value)suffix . ./script')
+        zsh = ('noglob cd ./sub', 'nocorrect cd ./sub', 'nocorrect noglob . ./script',
+               'repeat 1 cd ./sub', '- cd ./sub', 'X=1 repeat 2 - . ./script')
+        for shell, prefixes in (('bash', bash), ('zsh', zsh)):
+            for prefix in prefixes:
+                with self.subTest(shell=shell, prefix=prefix):
+                    found = commit_gate.evaluate(f'{prefix}; git commit -m Title', str(self.cwd))
+                    self.assertEqual((found['folder'], found['verdict']), (None, 'unknown'))
+
+    def test_staging_all_stays_exact_in_uncertain_commands(self):
+        for command in ('git add . && git commit -m Title # Save the change',
+                        'if git add .; then git commit -m Title; fi', 'git add . ; git commit -m Title # x',
+                        'before=$(git rev-parse HEAD)\ngit add . && git commit -m Title',
+                        'before=$(git rev-parse HEAD); git add . && git commit -m Title',
+                        'git status --short & git add . && git commit -m Title'):
+            with self.subTest(command=command):
+                self.assertEqual(commit_gate.evaluate(command, str(self.cwd))['folder'], str(self.cwd))
+
+    def test_command_lookup_does_not_move_the_shell(self):
+        for prefix in ('command -v cd', 'command -pV pushd', 'X=1 command -v . '):
+            with self.subTest(prefix=prefix):
+                found = commit_gate.evaluate(f'{prefix}; git commit -m Title', str(self.cwd))
+                self.assertEqual((found['folder'], found['verdict']), (str(self.cwd), 'missing'))
+
+    def test_prefixed_shell_options_make_following_cd_unknown(self):
+        deep = self.cwd / 'real/deep'
+        deep.mkdir(parents=True)
+        (self.cwd / 'link').symlink_to(deep, target_is_directory=True)
+        for prefix in ('X=1 set -P', 'command -p set -P', 'time -p set -P',
+                       'noglob setopt CHASE_LINKS', 'nocorrect unsetopt CHASE_LINKS', 'X[1 + 0]=v set -P'):
+            with self.subTest(prefix=prefix):
+                found = commit_gate.evaluate(f'{prefix}; cd ./link/..; git commit -m Title', str(self.cwd))
+                self.assertEqual((found['folder'], found['verdict']), (None, 'unknown'))
+
+    def test_git_context_changes_beyond_simple_prefixes_make_folder_unknown(self):
+        for prefix in ('GIT_DIR+=./sub/.git', 'GIT_DIR[0]=./sub/.git', 'GIT_DIR[0]+=./sub/.git',
+                       'command export GIT_DIR=./sub/.git', 'command -- unset GIT_DIR',
+                       'command -p declare -x GIT_DIR=./sub/.git', 'noglob typeset -x GIT_DIR=./sub/.git',
+                       'declare -x GIT_CONFIG_GLOBAL=other.config',
+                       'GIT_DIR=./sub/.git', 'export X=1 GIT_DIR=./sub/.git', 'unset GIT_DIR',
+                       'X[1 + 0]=v export GIT_DIR=./sub/.git', 'X[1 + 0]=v unset GIT_DIR',
+                       'X=$(printf value)suffix export GIT_DIR=./sub/.git'):
+            with self.subTest(prefix=prefix):
+                found = commit_gate.evaluate(f'{prefix}; git commit -m Title', str(self.cwd))
+                self.assertEqual((found['folder'], found['verdict']), (None, 'unknown'))
+
+    def test_stdout_and_stderr_redirects_consume_the_target(self):
+        for operator in ('&>', '&>>', '&\\\n>\\\n>'):
+            with self.subTest(operator=operator):
+                command = f'{operator} /dev/null git commit -m Title'
+                found = commit_gate.evaluate(command, str(self.cwd))
+                self.assertIsNotNone(found)
+                self.assertEqual((found['verdict'], found['reason'], found['folder']),
+                                 ('unknown', 'parse', str(self.cwd)))
+
+    def test_stdout_and_stderr_redirects_make_a_message_file_uncertain(self):
+        (self.cwd / 'draft.txt').write_text(f'Title\n\n{STAMP}\n')
+        for operator in ('&>', '&>>'):
+            with self.subTest(operator=operator):
+                command = f'git commit --allow-empty -F draft.txt {operator}draft.txt'
+                self.assertEqual(self.verdict(command), ('unknown', 'parse'))
 
     def test_an_earlier_command_stops_the_message_file_read(self):
         (self.cwd / 'msg.txt').write_text('Old draft\n')
@@ -521,11 +605,20 @@ class Evaluate(unittest.TestCase):
 
 
 class Check(Base):
+    def test_prefixed_cd_does_not_probe_head_in_start_repository(self):
+        commit_gate.set_global('enforce')
+        commit_gate.install_hook(self.repo)
+        (self.repo / 'sub').mkdir()
+        with mock.patch.object(commit_gate, '_head', wraps=commit_gate._head) as head:
+            self.assertEqual(self.pre('X=1 cd ./sub && git commit -m Title')[1], '')
+        head.assert_not_called()
+        row = self.rows()[-1]
+        self.assertEqual((row['verdict'], row['reason'], row['folder']), ('unknown', 'folder', None))
+
     def test_cleanup_is_unknown_after_commands_that_can_change_config(self):
         commit = 'git commit -q --allow-empty -m "Msg\n\nVerified: none (x)"'
         write = r"printf '\n[commit]\n\tcleanup = strip\n[core]\n\tcommentChar = V\n' >> .git/config"
-        for prefix in (write, '> .git/config', 'cp other.config .git/config',
-                       'declare -x GIT_CONFIG_GLOBAL=other.config', 'git add -A'):
+        for prefix in (write, '> .git/config', 'cp other.config .git/config', 'git add -A'):
             with self.subTest(prefix=prefix):
                 result = commit_gate.evaluate(f'{prefix}; {commit}', str(self.repo))
                 self.assertEqual((result['verdict'], result['reason']), ('unknown', 'cleanup'))
