@@ -14,11 +14,12 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import agent_coordinator_cli as cli
 import coordinator
 import history
+import injected_prompts
 import paths
 
 
@@ -236,7 +237,7 @@ class Commands(unittest.TestCase):
                 self.assertEqual(world.sent, [])
 
     def test_send_rechecks_the_caller_mark_chat_and_target_state(self):
-        for check in ('caller mark', 'caller chat', 'Approval', 'Input needed', 'Unavailable', 'Unknown'):
+        for check in ('caller mark', 'caller chat', 'read-only target', 'Approval', 'Input needed', 'Unavailable', 'Unknown'):
             with self.subTest(check=check):
                 world = World()
                 world.act('%1', action='claim')
@@ -245,6 +246,8 @@ class Commands(unittest.TestCase):
                     world.entries[0].pop('coordinator')
                 elif check == 'caller chat':
                     world.entries[0]['transcript'] = 'new-chat.jsonl'
+                elif check == 'read-only target':
+                    world.entries[1]['writable'] = False
                 else:
                     world.fresh_status = lambda entry: {'state': check}
                 with self.assertRaises(RuntimeError):
@@ -323,8 +326,12 @@ class BrowserRole(unittest.TestCase):
                                  {'coordinator': '%2', 'events': 'needs', 'sent': True,
                                   'replaced': '%1' if take else None})
                 self.assertEqual(self.world.marked(), {'%2': 'needs'})
-                self.assertEqual(self.world.sent[-1], ('%2',
-                    '[Tether] The user made this tab the coordinator of this session in Tether.\n' + coordinator.rules()))
+                pane, delivery = self.world.sent[-1]
+                self.assertEqual(pane, '%2')
+                self.assertRegex(delivery, r'\n\n\[Tether id [0-9a-f]{16}\]$')
+                self.assertEqual(injected_prompts.strip_delivery_id(delivery),
+                                 '[Tether] The user made this tab the coordinator of this session in Tether.\n'
+                                 + coordinator.rules())
         self.assertEqual(len(self.world.sent), 2)
 
     def test_a_send_failure_restores_each_previous_mark(self):
@@ -1510,6 +1517,34 @@ class ServerSend(unittest.TestCase):
                 self.assertEqual(self.deliver() is not None, sent)
                 self.assertEqual(submit.called, sent)
         self.assertFalse(self.server.SEND_LOCK.locked())
+
+    def test_read_only_coordinator_gets_no_status_and_cannot_claim_with_rules(self):
+        with patch.dict(self.entry, writable=False), self.fresh('Idle'), \
+                patch.object(self.server, 'terminal_submit') as terminal:
+            self.assertIsNone(self.deliver())
+            target = dict(self.entry, thread='sample')
+            target.pop('coordinator')
+            with self.assertRaisesRegex(RuntimeError, 'Messaging is unavailable'), \
+                    patch.object(self.server, 'send_text', wraps=self.server.send_text) as send:
+                coordinator.browser_role({'pane': '%1', 'thread': 'sample', 'mode': 'all'},
+                                         fresh=lambda: [target], lock=self.server.SEND_LOCK, run=Mock(),
+                                         status=self.server.fresh_status, send=partial(send, held=True))
+            send.assert_not_called()
+            terminal.assert_not_called()
+
+    def test_coordinator_held_submit_rechecks_writable_at_the_shared_guard(self):
+        with patch.dict(self.entry):
+            def status(entry):
+                if entry is self.entry:
+                    entry['writable'] = False
+                    return {'state': 'Idle'}
+                return {'state': 'Approval', 'approval': {'id': 'a1'}}
+
+            with patch.object(self.server, 'fresh_status', side_effect=status), \
+                    patch.object(self.server, 'terminal_submit') as terminal:
+                with self.assertRaisesRegex(RuntimeError, 'Messaging is unavailable'):
+                    self.deliver()
+                terminal.assert_not_called()
 
     def test_send_text_uses_the_lock_the_caller_already_holds(self):
         results = Queue()

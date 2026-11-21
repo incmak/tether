@@ -232,8 +232,8 @@ def browser_role(body, *, fresh, lock, run, status, send):
 
             def notify():
                 text = '[Tether] The user made this tab the coordinator of this session in Tether.\n' + rules()
-                with injected_prompts.track_send(target, text, 'rules'):
-                    send(target, text, state)
+                with injected_prompts.track_send(target, text, 'rules') as delivery:
+                    send(target, delivery, state)
 
             changed = _change_mark({'action': 'claim', 'events': mode, 'take': body.get('take')},
                                    target, entries, run, on_claim=notify)
@@ -510,8 +510,8 @@ def deliver(pane, queue, events, *, lock, fresh, fresh_status, latest_outcome, s
                 {'pane': event['pane'], 'session': event['session'], 'thread': by_pane[event['pane']].get('thread')}
                 for event in live
             ]
-            with injected_prompts.track_send(coordinator, text, 'status', tabs=tabs):
-                submit_locked(text, coordinator)
+            with injected_prompts.track_send(coordinator, text, 'status', tabs=tabs) as delivery:
+                submit_locked(delivery, coordinator)
         return live, held
     finally:
         lock.release()

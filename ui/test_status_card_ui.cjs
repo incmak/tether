@@ -9,7 +9,7 @@ const { status, review } = require('../server/fixtures/injected_prompts/browser.
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = process.env.SHOTS && shotsDir('status-card')
-const sizes = [[320, 720], [1280, 900]]
+const sizes = [[320, 720], [360, 800], [1280, 900]]
 const [header, row] = status.split('\n')
 const LONG = row.split(' finished: ')[1]
 const pastedStatus = [header.replace('4 tab updates.', '1 tab update.'), '- `Sample guide` (%10) finished'].join('\n')
@@ -159,7 +159,7 @@ async function main() {
         return { text: el.textContent.trim().slice(0, 24), ratio: Math.round((hi + 0.05) / (lo + 0.05) * 100) / 100 }
       })
     }, selector)
-    const TEXT = '.status-summary span, .status-toggle time, .status-name, .status-state, .status-text, .notice-line span'
+    const TEXT = '.status-summary span, .status-toggle time, .status-when, .status-name, .status-state, .status-text, .notice-line span'
     const low = list => list.filter(item => item.ratio < 4.5).map(item => `${item.text} ${item.ratio}`).join('; ')
 
     for (const [width, height] of sizes) {
@@ -171,19 +171,23 @@ async function main() {
       const toggle = card.locator('.status-toggle')
       const summary = await toggle.innerText()
       check(`${at} starts folded`, await toggle.getAttribute('aria-expanded') === 'false' && !(await card.locator('ul').isVisible()))
-      check(`${at} folded line names the count`, summary.includes('Tether status · 4 tab updates'), summary)
-      check(`${at} folded line says what waits`, /1 waits on you/.test(summary) && /1 asks you/.test(summary) && /1 failed/.test(summary), summary)
+      check(`${at} folded line names the count`, summary.includes(width < 600 ? '4 updates' : 'Tether status · 4 tab updates'), summary)
+      check(`${at} folded line says what waits`, (width < 600 ? /1\s*waits/ : /1\s*waits on you/).test(summary), summary)
       check(`${at} folded line has the attention style`, await card.evaluate(node => node.classList.contains('has-needs'))
         && await toggle.evaluate(node => getComputedStyle(node).backgroundColor !== 'rgba(0, 0, 0, 0)'))
-      const folded = await card.boundingBox()
-      check(`${at} folded card is one line tall`, folded.height <= (width === 320 ? 96 : 56), JSON.stringify(folded))
+      // One line at every width: the summary is a single row of text, and nothing in it is cut off.
+      const line = await card.locator('.status-summary').evaluate(node => ({
+        height: node.getBoundingClientRect().height, line: parseFloat(getComputedStyle(node).lineHeight) || 13 * 1.6,
+        cut: node.scrollWidth > node.clientWidth + 1 }))
+      check(`${at} folded summary is one line`, line.height < line.line * 1.5 && !line.cut, JSON.stringify(line))
+      check(`${at} the button name keeps the full words`, /4 tab updates, 1 waits on you, 1 asks you, 1 failed/.test(await toggle.getAttribute('aria-label')))
       const shortCard = message('short-tabs')
       if (await shortCard.locator('.status-toggle').count()) await shortCard.locator('.status-toggle').click()
       await card.scrollIntoViewIfNeeded()
       await shot(`card-${width}-folded.png`)
       await toggle.click()
       check(`${at} tap opens the rows`, await toggle.getAttribute('aria-expanded') === 'true' && await card.locator('ul').isVisible())
-      check(`${at} the toggle controls the list`, await card.locator('ul').getAttribute('id') === await toggle.getAttribute('aria-controls'))
+      check(`${at} the toggle controls the list`, await card.locator('.status-rows').getAttribute('id') === await toggle.getAttribute('aria-controls'))
       const rows = card.locator('.status-row')
       const order = await rows.evaluateAll(list => list.map(row => row.className.replace('status-row ', '')))
       check(`${at} waits-on-you first, then asks, failed, finished`, order.join(',') === 'needs,asks,failed,done', order.join(','))

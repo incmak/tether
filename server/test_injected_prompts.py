@@ -1,5 +1,6 @@
 """Replay native transcripts and mock terminal writes to test prompt provenance."""
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
+from copy import deepcopy
 from datetime import datetime, timezone
 import importlib
 import json
@@ -12,12 +13,15 @@ import unittest
 from unittest.mock import Mock, patch
 from uuid import UUID
 
+import agents
 import antigravity
+import auto_resume
 import continuations
 import coordinator
 import delegate
 import history
 import injected_prompts
+import notification_priority
 import review_links
 import server
 import shell_log
@@ -85,8 +89,8 @@ class InjectedPromptTests(unittest.TestCase):
         return injected_prompts.mark(entry, self.raw(entry))
 
     def send(self, entry, text, kind='review', tabs=None):
-        with injected_prompts.track_send(entry, text, kind, tabs=tabs):
-            self.append(entry, text)
+        with injected_prompts.track_send(entry, text, kind, tabs=tabs) as delivery:
+            self.append(entry, delivery)
 
     def sources(self, entry=None):
         return [m.get('source') for m in self.messages(entry)]
@@ -107,6 +111,8 @@ class InjectedPromptTests(unittest.TestCase):
                 self.append(entry, 'Repeated prompt')
                 self.send(entry, 'Repeated prompt', 'status', tabs=[])
                 self.assertEqual([m.get('prompt') for m in self.messages(entry)], ['rules', None, 'status'])
+                first, _, last = self.raw(entry)
+                self.assertNotEqual(first['text'], last['text'])
 
     def test_review_replay_marks_the_second_identical_record(self):
         fixture = json.loads((FIXTURES / 'transcript_replay.json').read_text())
@@ -121,8 +127,13 @@ class InjectedPromptTests(unittest.TestCase):
                     entry = self.entry(agent, self.folder / f'{agent}-{kind}.jsonl')
                     self.append(entry, record=native[kind])
                     self.now += 1
-                    with injected_prompts.track_send(entry, text, kind, tabs=[]):
-                        self.append(entry, record=native[kind])
+                    with injected_prompts.track_send(entry, text, kind, tabs=[]) as delivery:
+                        record = deepcopy(native[kind])
+                        if agent == 'claude':
+                            record['message']['content'] = record['message']['content'].replace(text, delivery)
+                        else:
+                            record['payload']['content'][0]['text'] = delivery
+                        self.append(entry, record=record)
                     first, second = self.messages(entry)
                     self.assertEqual(first['text'].strip(), text)
                     self.assertEqual(second['text'].strip(), text)
@@ -137,13 +148,67 @@ class InjectedPromptTests(unittest.TestCase):
             delivered = review_links._send_message(
                 self.chat, relay, 'Working', lambda *args: server.review_send(*args, receipt=True), lambda _: True)
         self.assertTrue(delivered)
-        send.assert_called_once_with(dict(self.chat, _review=True), relay, 'Working', held=True)
+        delivery = send.call_args.args[1]
+        self.assertRegex(delivery, r'^Review feedback while working\n\n\[Tether id [0-9a-f]{16}\]$')
+        send.assert_called_once_with(dict(self.chat, _review=True), delivery, 'Working', held=True)
         self.assertEqual(self.sources(), [None])
         self.now += 40
-        self.append(self.chat, record={'type': 'attachment', 'attachment': {'type': 'queued_command', 'prompt': relay}})
+        self.append(self.chat, record={'type': 'attachment', 'attachment': {'type': 'queued_command', 'prompt': delivery}})
         self.append(self.chat, relay)
         self.assertEqual(self.sources(), [None, 'tether', None])
         self.assertEqual(self.messages()[1]['delivery'], 'queued')
+
+    def assert_delivery_keeps_its_identity(self, agent):
+        entry = self.entry(agent)
+        relay = 'Same review text'
+        self.append(entry, 'Start the task')
+        send = Mock(return_value='queued')
+        with patch.object(server, 'stash_quiet_draft', return_value=None), patch.object(server, 'send_text', send):
+            self.assertEqual(server.review_send(entry, relay, 'Working', receipt=True), 'queued')
+        self.append(entry, relay)
+        delivery = send.call_args.args[1]
+        if agent == 'claude':
+            self.append(entry, record={'type': 'attachment', 'attachment': {
+                'type': 'queued_command', 'prompt': delivery}})
+        else:
+            self.append(entry, delivery)
+        self.assertEqual(self.sources(entry), [None, None, 'tether'])
+        self.assertEqual([m['text'] for m in self.messages(entry)[-2:]], [relay, relay])
+
+    def test_claude_person_paste_lands_before_queued_delivery(self):
+        self.assert_delivery_keeps_its_identity('claude')
+
+    def test_codex_person_paste_lands_before_queued_delivery(self):
+        self.assert_delivery_keeps_its_identity('codex')
+
+    def test_chat_read_after_ten_minutes_keeps_receipt_for_late_claude_attachment(self):
+        self.append(self.chat, 'Start the task')
+        with injected_prompts.track_send(self.chat, 'Late review', 'review') as delivery:
+            pass
+        self.now += 601
+        self.assertEqual(self.sources(), [None])
+        self.append(self.chat, record={'type': 'attachment', 'attachment': {
+            'type': 'queued_command', 'prompt': delivery}})
+        self.assertEqual(self.sources(), [None, 'tether'])
+
+    def test_receipt_requires_both_the_id_and_the_text(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                entry = self.entry(agent)
+                with injected_prompts.track_send(entry, 'Review text', 'review') as delivery:
+                    pass
+                edited = delivery.replace('Review text', 'Different text')
+                self.append(entry, edited)
+                self.append(entry, delivery)
+                self.append(entry, delivery)
+                self.assertEqual(self.sources(entry), [None, 'tether', None])
+                self.assertEqual([m['text'] for m in self.messages(entry)], [edited, 'Review text', delivery])
+
+    def test_receipt_accepts_native_whitespace_changes_to_the_prompt(self):
+        with injected_prompts.track_send(self.chat, 'First line  second line', 'review') as delivery:
+            self.append(self.chat, delivery.replace('line  second', 'line\nsecond'))
+        marked, = self.messages()
+        self.assertEqual((marked['source'], marked['text']), ('tether', 'First line\nsecond line'))
 
     def test_failed_review_send_leaves_no_receipt(self):
         with patch.object(server, 'stash_quiet_draft', return_value=None), \
@@ -155,21 +220,43 @@ class InjectedPromptTests(unittest.TestCase):
         self.assertEqual(self.sources(), [None])
         self.assertEqual(list(self.root.glob('*.json')), [])
 
-    def test_no_delivery_expires_before_a_later_paste(self):
+    def test_read_only_review_refuses_plain_and_receipt_sends_before_terminal_access(self):
+        for agent in ('claude', 'codex'):
+            for receipt in (False, True):
+                with self.subTest(agent=agent, receipt=receipt), \
+                        patch.object(server, 'terminal_submit') as terminal, \
+                        patch.object(server, 'stash_quiet_draft') as stash, \
+                        patch.object(server, 'clear_unsent') as clear:
+                    entry = dict(self.entry(agent), writable=False)
+                    with self.assertRaisesRegex(RuntimeError, '^Messaging is unavailable for this session. Use Termius.$'):
+                        server.review_send(entry, 'Review text', 'Working', receipt=receipt)
+                    terminal.assert_not_called()
+                    stash.assert_not_called()
+                    clear.assert_not_called()
+        self.assertEqual(list(self.root.glob('*.json')), [])
+
+    def test_pending_delivery_expires_after_seven_days(self):
         for agent in ('claude', 'codex'):
             with self.subTest(agent=agent):
                 entry = self.entry(agent)
-                with injected_prompts.track_send(entry, 'Missing delivery', 'review'):
+                with injected_prompts.track_send(entry, 'Missing delivery', 'review') as delivery:
                     pass
-                self.now += injected_prompts.BIND_WINDOW + 1
-                self.append(entry, 'Missing delivery')
+                self.now += 7 * 24 * 60 * 60 + 1
+                self.append(entry, delivery)
                 self.assertEqual(self.sources(entry), [None])
                 receipt = injected_prompts._file(entry['transcript'])
                 self.assertEqual(json.loads(receipt.read_text())['receipts'], [])
 
-    def test_delivered_record_still_binds_when_reader_arrives_after_window(self):
+    def test_binding_does_not_use_the_native_timestamp(self):
+        with injected_prompts.track_send(self.chat, 'Clock skew', 'review') as delivery:
+            pass
+        self.now -= 1
+        self.append(self.chat, delivery)
+        self.assertEqual(self.sources(), ['tether'])
+
+    def test_delivered_record_still_binds_when_reader_arrives_after_ten_minutes(self):
         self.send(self.chat, 'Delivered promptly')
-        self.now += injected_prompts.BIND_WINDOW + 1
+        self.now += 601
         self.append(self.chat, 'Delivered promptly')
         self.assertEqual(self.sources(), ['tether', None])
 
@@ -196,6 +283,20 @@ class InjectedPromptTests(unittest.TestCase):
             for agent in ('claude', 'codex'):
                 self.assertEqual(self.sources(self.entry(agent)), ['tether', None])
 
+    def test_bound_legacy_receipts_survive_but_unbound_legacy_receipts_cannot_claim_a_paste(self):
+        old = self.append(self.chat, 'Previously marked')
+        before = injected_prompts.anchor(self.chat)
+        with injected_prompts.track_send(self.chat, 'Current send', 'review') as delivery:
+            # A receipt from the old format has no delivery ID.
+            file = injected_prompts._file(self.chat['transcript'])
+            injected_prompts._write(file, {'transcript': str(self.chat['transcript']), 'receipts': [
+                dict(before, id=old['uuid'], metadata={'prompt': 'review'}),
+                dict(before, hash=injected_prompts._hash('Same text'), metadata={'prompt': 'review'}),
+            ]})
+            self.append(self.chat, 'Same text')
+            self.append(self.chat, delivery)
+        self.assertEqual(self.sources(), ['tether', None, 'tether'])
+
     def test_live_bindings_survive_age_and_count_and_prune_deleted_transcripts(self):
         for index in range(502):
             self.send(self.chat, f'Status {index}', 'status', tabs=[])
@@ -215,8 +316,9 @@ class InjectedPromptTests(unittest.TestCase):
 
     def test_antigravity_step_rewrites_are_unmarked(self):
         entry = self.entry('antigravity')
-        with injected_prompts.track_send(entry, 'Relay text', 'review'):
-            self.append(entry, record={'type': 'USER_INPUT', 'step_index': 2, 'content': 'Relay text'})
+        with injected_prompts.track_send(entry, 'Relay text', 'review') as delivery:
+            self.assertEqual(delivery, 'Relay text')
+            self.append(entry, record={'type': 'USER_INPUT', 'step_index': 2, 'content': delivery})
         self.append(entry, record={'type': 'USER_INPUT', 'step_index': 1, 'content': 'Earlier text'})
         self.append(entry, record={'type': 'USER_INPUT', 'step_index': 2, 'content': 'Relay text rewritten'})
         data = antigravity.snapshot(entry, server.display_text, server.records, server.usage)
@@ -245,17 +347,91 @@ class InjectedPromptTests(unittest.TestCase):
         marker = 'a' * 32
         prefix = shell_log._FOLDER_NOTE % '/srv/project'
         text = '[Tether status] A line\nwith a row'
-        wrapped = f'<tether_handoff_context id="{marker}">\n"context"\n</tether_handoff_context>\n\n{prefix}{text}'
-        with patch.object(continuations, 'ROOT', self.folder / 'continuations'), \
-                patch.object(continuations, '_read', return_value={'id': marker}):
-            continuations.stage(self.chat, wrapped, marker)
-            with injected_prompts.track_send(self.chat, text.replace('\n', '  '), 'status', tabs=[]):
-                self.append(self.chat, wrapped)
-            self.append(self.chat, prefix + text)
-            marked, pasted = self.messages()
-        self.assertEqual((marked['text'], marked['source'], marked['tabs']), (text, 'tether', []))
-        self.assertEqual(pasted['text'], prefix + text)
-        self.assertNotIn('source', pasted)
+        link = {'id': marker, 'brief': 'context', 'sent': False}
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent), patch.object(continuations, 'ROOT', self.folder / 'continuations'), \
+                    patch.object(continuations, '_read', return_value=link):
+                entry = self.entry(agent)
+                with injected_prompts.track_send(entry, text, 'status', tabs=[]) as delivery:
+                    wrapped, found = continuations.prepare(entry, prefix + delivery)
+                    self.assertEqual(found, marker)
+                    continuations.stage(entry, wrapped, found)
+                    self.assertEqual(continuations.unwrap(wrapped), prefix + delivery)
+                    self.append(entry, wrapped)
+                self.append(entry, prefix + text)
+                marked, pasted = self.messages(entry)
+                self.assertEqual((marked['text'], marked['source'], marked['tabs']), (text, 'tether', []))
+                self.assertEqual(pasted['text'], prefix + text)
+                self.assertNotIn('source', pasted)
+
+    def test_review_source_recognises_tagged_feedback_summary_notice_and_correction(self):
+        samples = json.loads((FIXTURES / 'other.json').read_text())
+        feedback = '[Tether review] Feedback from the reviewer tab (%2):\n\nCheck the rows.\n\nFix what it raises, then stop and wait.'
+        correction = (f"{review_links.CORRECTION_HEAD}{'1' * 40} only. This tab is now at {'2' * 40}. "
+                      f'{review_links.CORRECTION_ACTION} {review_links.CORRECTION_WAIT}')
+        old_options = samples['review_notice'].split('\n\n', 1)[1]
+        for source, text in [
+            ('review-feedback', feedback), ('review-summary', samples['review_summary']),
+            ('review-notice', samples['review_notice']), ('review-correction', correction),
+        ]:
+            for agent in ('claude', 'codex'):
+                with self.subTest(source=source, agent=agent), patch.object(review_links, '_parent_options', return_value=old_options):
+                    entry = self.entry(agent, self.folder / f'{agent}-{source}.jsonl')
+                    prefix = shell_log._FOLDER_NOTE % '/srv/project'
+                    with injected_prompts.track_send(entry, text, 'review') as delivery:
+                        if agent == 'claude':
+                            raw = f'<pasted_content id="349c">\n{prefix}{delivery}\n</pasted_content id="349c">'
+                            self.append(entry, record={'type': 'attachment', 'attachment': {
+                                'type': 'queued_command', 'prompt': raw}})
+                        else:
+                            self.append(entry, record={'type': 'response_item', 'payload': {
+                                'type': 'message', 'role': 'user',
+                                'content': [{'type': 'input_text', 'text': '# AGENTS.md instructions'},
+                                            {'type': 'input_text', 'text': prefix + delivery}],
+                                'internal_chat_message_metadata_passthrough': {
+                                    'content_item_kinds': ['agents_md.instructions', 'text'],
+                                    'content_item_metadata': [{'provenance': {'type': 'agents_md'}},
+                                                              {'provenance': {'type': 'user'}}],
+                                },
+                            }})
+                    self.append(entry, 'Reviewed.', assistant=True)
+                    self.assertEqual(review_links.prompt_source(prefix + delivery), source)
+                    self.assertEqual(server.review_turn_source(entry)[0], source)
+                    self.assertEqual(notification_priority.classify('finished', agent,
+                                     server.notification_records(entry), 'Reviewed.'),
+                                     ('important', 'Reviewed.'))
+
+    def test_tagged_review_request_still_starts_a_claude_turn_and_gets_its_reply(self):
+        request_id = '0a1b2c3d'
+        text = (f'[Tether review] The Codex tab “Worker” (%2) finished a turn. {review_links.INTRO} '
+                f'Review id: {request_id}. Its last reply:\n\nDone.\n\nTranscript: /srv/project/chat.jsonl')
+        with injected_prompts.track_send(self.chat, text, 'review') as delivery:
+            record = self.append(self.chat, delivery)
+        self.assertTrue(agents.person_prompt(record))
+        self.assertTrue(auto_resume.new_turn(agent='claude', transcript=self.chat['transcript'], offset=0))
+        self.assertEqual(server.review_reply(self.chat, request_id), review_links.REPLY_PENDING)
+        self.append(self.chat, record={'type': 'assistant', 'message': {
+            'role': 'assistant', 'content': [{'type': 'text', 'text': 'APPROVED'}], 'stop_reason': 'end_turn'}})
+        self.append(self.chat, record={'type': 'system', 'subtype': 'turn_duration'})
+        self.assertEqual(server.review_reply(self.chat, request_id), 'APPROVED')
+
+    def test_tagged_codex_rollout_keeps_the_native_turn_start(self):
+        entry = self.entry('codex')
+        with injected_prompts.track_send(entry, '[Tether status] An update', 'status', tabs=[]) as delivery:
+            self.append(entry, record={'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': 'sample'}})
+            self.append(entry, delivery)
+        self.assertTrue(auto_resume.new_turn(agent='codex', transcript=entry['transcript'], offset=0))
+
+    def test_coordinator_reads_the_result_of_its_tagged_queued_status(self):
+        status = '[Tether status] Update from another tab'
+        with injected_prompts.track_send(self.chat, status, 'status', tabs=[]) as delivery:
+            queued = self.append(self.chat, record={'type': 'attachment', 'promptId': 'sample', 'attachment': {
+                'type': 'queued_command', 'prompt': delivery}})
+        self.assertTrue(agents.person_prompt(queued))
+        self.append(self.chat, 'Summarised the update.', assistant=True)
+        self.append(self.chat, record={'type': 'system', 'subtype': 'turn_duration'})
+        outcome = coordinator.Feed().latest_outcome(self.chat)
+        self.assertEqual(outcome, {'kind': 'done', 'text': 'Summarised the update.', 'identity': queued['uuid'], 'open': False})
 
     def test_status_and_rules_only_record_successful_sends(self):
         world = test_coordinator.World()
@@ -265,7 +441,7 @@ class InjectedPromptTests(unittest.TestCase):
         waiting['thread'] = 'waiting'
         unmarked_target = target.copy()
         with patch.object(injected_prompts, 'anchor', wraps=injected_prompts.anchor) as anchor, \
-                patch.object(injected_prompts, 'record') as record:
+                patch.object(injected_prompts, '_record') as record:
             world.fail = RuntimeError('Draft exists.')
             with self.assertRaises(RuntimeError):
                 world.change_role('%1', 'coordinator')
@@ -273,7 +449,9 @@ class InjectedPromptTests(unittest.TestCase):
             record.assert_not_called()
             world.fail = None
             world.change_role('%1', 'coordinator')
-            self.assertEqual(record.call_args.args, (unmarked_target, world.sent[-1][1], 'rules'))
+            path, text, kind = record.call_args.args
+            self.assertEqual((path, kind), (Path(unmarked_target['transcript']).absolute(), 'rules'))
+            self.assertEqual(text, injected_prompts.strip_delivery_id(world.sent[-1][1]))
             self.assertIn('before', record.call_args.kwargs)
 
             waiting_status = {'state': 'Input needed', 'attention': {'id': 'question'}}
@@ -294,7 +472,9 @@ class InjectedPromptTests(unittest.TestCase):
             record.assert_not_called()
             world.fail = None
             world.deliver('%1', queue, events)
-            self.assertEqual(record.call_args.args, (target, world.sent[-1][1], 'status'))
+            path, text, kind = record.call_args.args
+            self.assertEqual((path, kind), (Path(target['transcript']).absolute(), 'status'))
+            self.assertEqual(text, injected_prompts.strip_delivery_id(world.sent[-1][1]))
             self.assertEqual(record.call_args.kwargs['tabs'], [
                 {'pane': '%3', 'session': '$0', 'thread': 'waiting'},
                 {'pane': '%2', 'session': '$0', 'thread': 'done'},

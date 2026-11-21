@@ -4,7 +4,7 @@ import re
 import codex_messages
 from antigravity import transcript_message
 
-from agents import task_notice
+from agents import task_notice, tidy_user_text
 
 
 def text_content(content):
@@ -80,7 +80,7 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
                 # Tool-result-only user records are continuations of the same turn.
                 if not content.strip():
                     continue
-                return prompt_source(record, content, claude_background(record, content))
+                return prompt_source(record, tidy_user_text(content), claude_background(record, content))
             if kind == 'attachment':
                 attachment = record.get('attachment') or {}
                 if not isinstance(attachment, dict):
@@ -89,7 +89,7 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
                     prompt = attachment.get('prompt')
                     if not isinstance(prompt, str) or not prompt.strip():
                         continue
-                    return prompt_source(record, prompt, claude_background(record, prompt))
+                    return prompt_source(record, tidy_user_text(prompt), claude_background(record, prompt))
                 if attachment.get('type') == 'hook_blocking_error' and identify is not None:
                     hook_blocked = True  # a blocked hook continues the same turn: find the prompt that started it
                     continue
@@ -105,8 +105,9 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
                     is_assistant = True
                 elif assistant_seen and payload.get('role') == 'user':
                     content = text_content(payload.get('content'))
-                    if any(part.get('_user') for part in codex_messages.parts(payload)):
-                        return prompt_source(record, content)
+                    user_parts = [part['text'] for part in codex_messages.parts(payload) if part.get('_user')]
+                    if user_parts:
+                        return prompt_source(record, '\n'.join(user_parts))
                     # AGENTS instructions are injected context, not a fresh prompt.
                     if content.lstrip().startswith('# AGENTS.md instructions'):
                         continue

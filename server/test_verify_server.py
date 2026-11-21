@@ -1064,6 +1064,8 @@ class Boot(unittest.TestCase):
         self.assertNotIn(b'encrypted_content', body)
         self.assertIn(verify_server.CHAT_LINE.encode(), body)
         self.assertIn(f'start it with `APPROVED {verify_server.REVIEW_COMMIT}`'.encode(), body)  # the chat-review surface
+        self.assertEqual((messages[0]['source'], messages[0]['prompt']), ('tether', 'review'))
+        self.assertNotIn(b'[Tether id ', body)
         for title in (b'Write the release notes', b'Fix the flaky share test', b'Add backlog search', b'Draw the new icon set'):
             self.assertNotIn(title, body)
         status, body = self.request(info, '/mobile/api/projects/backlog')

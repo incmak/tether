@@ -21,7 +21,9 @@ import unicodedata
 
 import agents
 import audit
+import continuations
 import helper_tabs
+import injected_prompts
 import paths
 import review_scope
 import shell_log
@@ -1229,7 +1231,7 @@ CORRECTION_WAIT = 'Wait for the next review.'
 
 
 def prompt_source(text):
-    text = shell_log.strip_folder_note(text)
+    text = injected_prompts.strip_delivery_id(shell_log.strip_folder_note(continuations.unwrap(text)))
     if text.startswith(PARENT_SUMMARY) and text.rstrip().endswith(PARENT_SUMMARY_END):
         return 'review-summary'
     notice = PARENT_NOTICE.match(text)

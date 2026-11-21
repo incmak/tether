@@ -289,8 +289,7 @@ REVIEW_SOURCE_TAIL_BYTES = 8 * 1024 * 1024
 def review_turn_source(entry):
     """Return the source and transcript times of the latest turn for the review watcher."""
     def classify(records, **options):
-        return notification_priority.turn_source(entry.get('agent'), records,
-                                                 identify=lambda text: review_links.prompt_source(continuations.unwrap(text)),
+        return notification_priority.turn_source(entry.get('agent'), records, identify=review_links.prompt_source,
                                                  distinguish_missing=True, with_time=True, **options)
 
     result = classify(notification_records(entry))
@@ -1579,14 +1578,18 @@ def review_reply(entry, request_id):
 
 def submit(message, config=None):
     config = config or settings()
-    if not config.get('writable', True):
-        raise RuntimeError('Messaging is unavailable for this session. Use Termius.')
     with SEND_LOCK:
         submit_locked(message, config)
 
 
+def _require_writable(config):
+    if not config.get('writable', True):
+        raise RuntimeError('Messaging is unavailable for this session. Use Termius.')
+
+
 def submit_locked(message, config):
     """submit for a caller that holds SEND_LOCK already."""
+    _require_writable(config)
     wrapped, marker = continuations.prepare(config, message)
     if marker:
         continuations.stage(config, wrapped, marker)
@@ -1616,12 +1619,13 @@ def send_text(config, message, state=None, *, held=False):
 
 def review_send(config, message, state=None, *, receipt=False):
     """Deliver a review around a quiet Claude draft, preserving ordinary send guards."""
+    _require_writable(config)
     config = dict(config, _review=True)
     stashed = stash_quiet_draft(config) if config.get('agent') == 'claude' else None
     try:
         if receipt:
-            with SEND_LOCK, injected_prompts.track_send(config, message, 'review'):
-                result = send_text(config, message, state, held=True)
+            with SEND_LOCK, injected_prompts.track_send(config, message, 'review') as delivery:
+                result = send_text(config, delivery, state, held=True)
         else:
             result = send_text(config, message, state)
     except Exception as exc:

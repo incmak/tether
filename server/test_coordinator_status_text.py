@@ -3,10 +3,12 @@ import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 from pathlib import Path
 import re
+import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import coordinator
+import injected_prompts
 
 
 FIXTURES = Path(__file__).with_name('fixtures') / 'injected_prompts'
@@ -50,6 +52,24 @@ class CoordinatorStatusTextTests(unittest.TestCase):
                 text = coordinator.message(case['events'], case['mode'])
                 self.assertEqual(text, case['text'])
                 self.assert_status_grammar(text)
+
+    def test_status_sender_appends_one_delivery_id_after_the_pinned_writer_text(self):
+        case = json.loads((FIXTURES / 'tether_status_written.json').read_text(encoding='utf-8'))['cases'][0]
+        receiver = {'id': '%2', 'agent': 'claude', 'writable': True, 'coordinator': 'all',
+                    'tmux_session': '$0', 'transcript': '/srv/project/coordinator.jsonl'}
+        source = {'id': '%1', 'agent': 'codex', 'tmux_session': '$0', 'transcript': '/srv/project/worker.jsonl'}
+        queue = {'session': '$0', 'chat': receiver['transcript']}
+        event = dict(case['events'][0], session='$0', chat=source['transcript'], identity='done')
+        submit = Mock()
+        with patch.object(coordinator, 'cli', return_value=CLI), \
+                patch.object(injected_prompts, 'anchor', return_value={'at': 0, 'offset': 0, 'file': None}), \
+                patch.object(injected_prompts.secrets, 'token_hex', return_value='0123456789abcdef'), \
+                patch.object(injected_prompts, '_record'):
+            self.assertEqual(coordinator.deliver(
+                '%2', queue, [event], lock=threading.Lock(), fresh=lambda: [receiver, source],
+                fresh_status=lambda _: {'state': 'Idle'}, latest_outcome=lambda _: event, submit_locked=submit,
+            ), ([event], []))
+        submit.assert_called_once_with(case['text'] + '\n\n[Tether id 0123456789abcdef]', receiver)
 
     def test_recorded_prompts_match_line_grammar(self):
         prompts = json.loads((FIXTURES / 'tether_status.json').read_text(encoding='utf-8'))['prompts']

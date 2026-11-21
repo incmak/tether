@@ -492,15 +492,13 @@ def seed(root, pane, pane_pid, session):
               "that holds them. Open the screenshots and check them against the claims. "
               "Its last reply:\n\nThe review card now shows the commit and the reply format.\n\n"
               "Transcript: /work/.codex/sessions/fixture.jsonl")
-    turns = [('user', review),
-             ('user', 'Check the Settings page at phone width.'),
-             ('assistant', 'The Settings page fits a 320 px screen. Each control keeps a 44 px touch target.'),
-             ('user', 'Where does this conversation go?'),
-             ('assistant', CHAT_LINE)]
-    # Tether sent the review request: the receipt's anchor is the start of the new file at the record's own time.
-    sent = {'at': injected_prompts.timestamp_ms('2026-01-05T09:00:00.000Z'), 'offset': 0, 'file': None}
-    injected_prompts.record({'agent': 'claude', 'tmux_session': session, 'transcript': str(transcript)}, review, 'review', before=sent)
-    with open(transcript, 'w') as stream:
+    entry = {'agent': 'claude', 'transcript': transcript}
+    with injected_prompts.track_send(entry, review, 'review') as delivery, transcript.open('w') as stream:
+        turns = [('user', delivery),
+                 ('user', 'Check the Settings page at phone width.'),
+                 ('assistant', 'The Settings page fits a 320 px screen. Each control keeps a 44 px touch target.'),
+                 ('user', 'Where does this conversation go?'),
+                 ('assistant', CHAT_LINE)]
         for index, (role, text) in enumerate(turns):
             stream.write(json.dumps({'type': role, 'uuid': f'00000000-0000-4000-8000-{index:012d}', 'sessionId': SESSION, 'cwd': work,
                                      'timestamp': f'2026-01-05T09:{index:02d}:00.000Z',

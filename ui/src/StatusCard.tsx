@@ -53,8 +53,13 @@ function StatusRow({ update, tab }: { update: TabUpdate; tab?: StatusTab }) {
   </li>
 }
 
-// The folded line counts what needs the person; "finished" rows only add to the total.
-const COUNTS: [TabUpdateState, string][] = [['needs', 'waits on you'], ['asks', 'asks you'], ['failed', 'failed']]
+// The folded line counts what needs the person; "finished" rows only add to the total. In a narrow card the words
+// shorten ("waits") or leave only the row icon, so the line stays one line; the button's name keeps the full words.
+const COUNTS: { state: TabUpdateState; words: string; short: string }[] = [
+  { state: 'needs', words: 'waits on you', short: 'waits' },
+  { state: 'asks', words: 'asks you', short: '' },
+  { state: 'failed', words: 'failed', short: '' },
+]
 
 /** Tether's "[Tether status]" prompt in the coordinator tab. It starts folded to one line; open it for one row per tab,
  *  what needs the person first. */
@@ -63,23 +68,30 @@ export function StatusCard({ id, status, time, tabs }: { id: string; status: Sta
   const listId = useId()
   const rows = status.tabs.map((update, at) => ({ update, at })).sort((a, b) => STATE[a.update.state].rank - STATE[b.update.state].rank || a.at - b.at)
   const targets = tabs?.length === rows.length ? tabs : undefined
-  const counts = COUNTS.map(([state, words]) => ({ state, n: status.tabs.filter(update => update.state === state).length, words })).filter(item => item.n)
+  const counts = COUNTS.map(item => ({ ...item, n: status.tabs.filter(update => update.state === item.state).length })).filter(item => item.n)
   const waiting = counts.find(item => item.state === 'needs')?.n ?? 0
   const when = stamp(time)
-  const total = `${status.tabs.length} tab ${status.tabs.length === 1 ? 'update' : 'updates'}`
-  return <section className={`status-card ${waiting ? 'has-needs' : ''}`} data-msg-id={id}
-    aria-label={`Tether status: ${total}${counts.map(item => `, ${item.n} ${item.words}`).join('')}`}>
-    <button type="button" className="status-toggle" aria-expanded={open} aria-controls={listId} onClick={() => setOpen(value => !value)}>
+  const n = status.tabs.length
+  const total = `${n} tab ${n === 1 ? 'update' : 'updates'}`
+  const label = `Tether status: ${total}${counts.map(item => `, ${item.n} ${item.words}`).join('')}${when ? `, ${when}` : ''}`
+  return <section className={`status-card ${waiting ? 'has-needs' : ''}`} data-msg-id={id} aria-label={`Tether status: ${total}`}>
+    <button type="button" className="status-toggle" aria-label={label} aria-expanded={open} aria-controls={listId} onClick={() => setOpen(value => !value)}>
       <Radio className="status-toggle-icon" size={13} aria-hidden="true" />
       <span className="status-summary">
-        <span>Tether status · {total}</span>
-        {counts.map(item => <span key={item.state} className={`status-count ${item.state}`}>
-          {item.state === 'needs' && <Hand size={13} aria-hidden="true" />}{item.n} {item.words}
-        </span>)}
+        <span className="status-total"><span className="long">Tether status · {total}</span><span className="short">{n} {n === 1 ? 'update' : 'updates'}</span></span>
+        {counts.map(item => {
+          const Icon = STATE[item.state].Icon
+          return <span key={item.state} className={`status-count ${item.state}`}>
+            <Icon size={13} aria-hidden="true" />{item.n}<span className="long">{item.words}</span>{item.short && <span className="short">{item.short}</span>}
+          </span>
+        })}
       </span>
       {when && <time dateTime={time}>{when}</time>}
       <ChevronDown className="status-chevron" size={15} aria-hidden="true" />
     </button>
-    <ul id={listId} hidden={!open}>{rows.map(({ update, at }) => <StatusRow key={at} update={update} tab={targets?.[at]} />)}</ul>
+    <div id={listId} className="status-rows" hidden={!open}>
+      {when && <time className="status-when" dateTime={time}>{when}</time>}
+      <ul>{rows.map(({ update, at }) => <StatusRow key={at} update={update} tab={targets?.[at]} />)}</ul>
+    </div>
   </section>
 }
