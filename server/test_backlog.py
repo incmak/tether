@@ -474,7 +474,7 @@ class BacklogAuditTests(unittest.TestCase):
     def test_add_caps_the_title(self):
         title = 'Add the checklist ' * 6
         backlog.add(title, project='Docs')
-        self.assert_entry('backlog.add', f'B58 added: {title[:80].rstrip()}', 'Docs')
+        self.assert_entry('backlog.add', 'B58 added: ' + 'Add the checklist ' * 4 + 'Add…', 'Docs')
 
     def test_start_uses_the_item_project_and_ignores_a_repeat(self):
         backlog.start('B56', 'claude', project='Build')
@@ -485,6 +485,14 @@ class BacklogAuditTests(unittest.TestCase):
         backlog.mark_done('B57')
         backlog.archive_done()
         self.assert_entry('backlog.done', 'B57 done: Fix warnings', 'Build')
+
+    def test_done_clips_a_long_title_at_a_word_break(self):
+        state = backlog.read()
+        prefix = 'Check that the backlog shows the full item title before reporting the'
+        title = prefix + ' verification results'
+        backlog.save(state['text'].replace('Fix warnings', title), state['version'])
+        backlog.mark_done('B57')
+        self.assert_entry('backlog.done', f'B57 done: {prefix}…', 'Build')
 
     def test_move_uses_the_actual_source_and_destination(self):
         backlog.move('B56', 'Build')

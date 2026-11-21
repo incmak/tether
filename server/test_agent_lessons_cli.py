@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 import agent_lessons_cli as cli
+import audit
 import lessons
 import paths
 
@@ -25,15 +26,17 @@ class Cli(unittest.TestCase):
             self.enterContext(patch.object(paths, name, root / name.lower()))
         (paths.TETHER / 'projects' / PID).mkdir(parents=True)
         self.enterContext(patch.dict(os.environ, TMUX_PANE='%7'))
+        self.enterContext(patch.object(audit, '_TABS', {}))
         self.values = {'#{@project}': PID, '#{@tether_helper}': '', '#{pane_current_command}': 'codex', '#{@chat_name}': 'Review'}
         self.run = self.enterContext(patch.object(cli.subprocess, 'run', side_effect=self.process))
 
     def process(self, command, **options):
         self.assertEqual(command[:5], [paths.TMUX, 'display-message', '-p', '-t', '%7'])
-        timeout = options.get('timeout')
-        self.assertIn(timeout, (1, 5) if command[-1] == '#{@chat_name}' else (5,))
+        combined = command[-1] == '#{@chat_name}\t#{pane_current_command}'
+        timeout = 1 if combined else 5
         self.assertEqual(options, dict(capture_output=True, text=True, timeout=timeout))
-        return SimpleNamespace(returncode=0, stdout=self.values[command[-1]])
+        value = '\t'.join(self.values[key] for key in command[-1].split('\t')) if combined else self.values[command[-1]]
+        return SimpleNamespace(returncode=0, stdout=value)
 
     def invoke(self, args):
         with contextlib.redirect_stdout(io.StringIO()) as output:

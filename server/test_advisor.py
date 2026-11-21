@@ -257,6 +257,8 @@ class Cli(Base):
             value = command[-1]
             if value == '#{@chat_name}':
                 return SimpleNamespace(returncode=0, stdout='Build\n')
+            if value == '#{@chat_name}\t#{pane_current_command}':
+                return SimpleNamespace(returncode=0, stdout='Build\tcodex\n')
             if value == '#{@project}':
                 return SimpleNamespace(returncode=0, stdout=self.project)
             if value == '#{session_id}':
@@ -319,7 +321,7 @@ class Cli(Base):
         entry = result['entries'][0]
         self.assertEqual(entry['kind'], 'advisor.ask')
         self.assertEqual(entry['detail'], {'status': 'decided', 'critical': True})
-        self.assertEqual(entry['actor'], {'source': 'agent-cli', 'pane': '%1', 'tab': 'Build'})
+        self.assertEqual(entry['actor'], {'source': 'agent-cli', 'pane': '%1', 'tab': 'Build', 'agent': 'codex'})
         self.assertEqual(entry['project'], 'Example')
         # Only the goal: a cut excerpt of the question could still hold a token (B56 review).
         self.assertEqual(entry['summary'], 'Asked advisor: Audit log review')

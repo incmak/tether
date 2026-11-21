@@ -29,7 +29,7 @@ class BacklogObservedTests(unittest.TestCase):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.object(paths, 'TETHER', root / 'tether'))
         self.enterContext(mock.patch.object(paths, 'CONFIG', root / 'config'))
-        self.enterContext(mock.patch.object(audit, '_tab_name', return_value=None))
+        self.enterContext(mock.patch.object(audit, '_tab_name', return_value=(None, None)))
         backlog.folder().mkdir(parents=True)
         self.file = backlog.folder() / 'BACKLOG.md'
         self.file.write_text(INITIAL)

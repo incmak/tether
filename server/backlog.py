@@ -694,7 +694,7 @@ def _audit_changes(before, after, *, observed=False, archived=None, old_archived
                 if ref not in previous and at is not None:
                     previous[ref] = rows.pop(at)
     for ref, (project, title, stage, doing) in current.items():
-        short = title[:80]
+        short = audit.clip(title, 80)
         block = blocks.get(ref, ())
         if ref not in previous:
             record('backlog.add', f'{ref} added: {short}', project=project, block=block)
@@ -717,23 +717,23 @@ def _audit_changes(before, after, *, observed=False, archived=None, old_archived
         if ref in current:
             continue
         if ref not in new_archived:  # an entry the snapshot already held does not vouch for this removal
-            record('backlog.remove', f'{ref} removed: {title[:80]}', project=project)
+            record('backlog.remove', f'{ref} removed: {audit.clip(title, 80)}', project=project)
         elif stage != 'done':
-            record('backlog.done', f'{ref} done: {title[:80]}', project=project, block=archived[ref][1])
+            record('backlog.done', f'{ref} done: {audit.clip(title, 80)}', project=project, block=archived[ref][1])
     for ref in sorted(new_archived - previous.keys() - current.keys()):
         (project, title, _, _), block = archived[ref]
         project = ARCHIVE_STAMP.sub('', project or '')
         project = None if project == 'Inbox' else project
-        record('backlog.add', f'{ref} added: {title[:80]}', project=project, block=block)
-        record('backlog.done', f'{ref} done: {title[:80]}', project=project, block=block)
+        record('backlog.add', f'{ref} added: {audit.clip(title, 80)}', project=project, block=block)
+        record('backlog.done', f'{ref} done: {audit.clip(title, 80)}', project=project, block=block)
     if observed:
         for row, count in added_unnumbered.items():
             project, title, _, _ = row
             for block in unnumbered_blocks[row][-count:]:
-                record('backlog.add', f'Added backlog item: {title[:80]}', project=project, block=block)
+                record('backlog.add', f'Added backlog item: {audit.clip(title, 80)}', project=project, block=block)
     for rows in by_title.values():
         for project, title, _, _ in rows:
-            record('backlog.remove', f'Removed backlog item: {title[:80]}', project=project)
+            record('backlog.remove', f'Removed backlog item: {audit.clip(title, 80)}', project=project)
     return succeeded
 
 

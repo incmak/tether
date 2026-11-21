@@ -222,7 +222,7 @@ def main(argv=None):
     if args is not None:
         # Never the question text: a cut excerpt can still hold a token or a key. The project advisor log keeps the
         # full question; the audit log names only the goal (1 to 3 words, already shown as the advisor tab name).
-        goal = ' '.join((args.stack or '').split()[:3])[:40]
+        goal = audit.clip(' '.join((args.stack or '').split()[:3]), 40)
         summary = f'Asked advisor: {goal}' if goal else 'Asked advisor'
         audit.record('advisor.ask', summary, project=projects.audit_name(pid), status=result['status'],
                      critical=args.critical)

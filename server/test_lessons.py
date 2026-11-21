@@ -52,7 +52,7 @@ class Lessons(unittest.TestCase):
         projects.set_name(PID, 'Example')
         actor = {'source': 'agent-cli', 'pane': '%7', 'tab': 'Build'}
         before = {entry['id'] for entry in audit.query()['entries']}
-        with audit.acting(**actor):
+        with audit.acting(**actor), patch.object(audit, '_tab_name', return_value=(None, None)):
             action()
         entries = [entry for entry in audit.query()['entries'] if entry['id'] not in before]
         self.assertEqual(len(entries), 1)
@@ -64,13 +64,14 @@ class Lessons(unittest.TestCase):
         return entry
 
     def test_audit_add_caps_the_lesson_and_ignores_similar(self):
-        text = 'When a check fails, inspect ' + 'x' * 130
+        prefix = 'When a check fails, inspect its output and use it to isolate the failing step before you make changes'
+        text = prefix + ' specifically for that failure.'
 
         def add_twice():
             self.assertEqual(self.add(text, quote='private quote')['status'], 'added')
             self.assertEqual(self.add(text)['status'], 'similar')
 
-        entry = self.assert_lesson_event('lesson.add', f'Added lesson: {text[:120]}', add_twice)
+        entry = self.assert_lesson_event('lesson.add', f'Added lesson: {prefix} specifically for…', add_twice)
         self.assertNotIn('private quote', json.dumps(entry))
 
     def test_audit_remove_ignores_a_repeat(self):

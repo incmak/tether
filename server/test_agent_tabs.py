@@ -327,7 +327,7 @@ class AgentTabsTests(unittest.TestCase):
     def test_audit_records_one_start_and_close_with_cli_actor(self):
         headers = {'X-Tether-Client': 'agent-cli', 'X-Tether-Pane': '%12'}
         ownership = {'owner_pane': '%12', 'owner_thread': THREAD, 'helper_thread': THREAD}
-        with patch.object(audit.paths, 'CONFIG', self.root), patch.object(audit, '_tab_name', return_value='Source'), \
+        with patch.object(audit.paths, 'CONFIG', self.root), patch.object(audit, '_tab_name', return_value=('Source', None)), \
                 patch.object(delegate, 'start', return_value=('%15', 'Audit Log')), \
                 patch.object(agent_tabs.helper_tabs, 'load', return_value=(True, ownership)), \
                 patch.object(server, 'shared_status', return_value={'state': 'Idle'}), \

@@ -77,7 +77,8 @@ class AuditTests(unittest.TestCase):
         self.assertFalse(stale.exists())
 
     def test_filter_text_by_all_words_and_other_fields(self):
-        with audit.acting('ui', tab='Audit Log', device='Chrome on Mac', pane='%12'):
+        with (audit.acting('ui', tab='Audit Log', device='Chrome on Mac', pane='%12'),
+              mock.patch.object(audit, '_tab_name', return_value=(None, None))):
             settings = audit.record('setting.codex_run', 'Changed run', project='Tether', old='auto · auto · off',
                                     new='sol · high · fast', undo=True, outcome='saved')
         self.clock.return_value += 1
@@ -148,12 +149,29 @@ class AuditTests(unittest.TestCase):
                                  'signature', 'public_key', 'cookie', 'key_material'), 'sensitive')
         good = {'list_value': ['body'], 'payload': {'value': 'body'}, 'not_finite': float('inf'),
                 'message': 'm' * 250, 'result': True, 'none': None, **{f'field{i}': i for i in range(10)}}
-        entry = audit.record('setting.reviewers', 'A' * 220, old='o' * 130, new='n' * 131, **secrets, **good)
-        self.assertEqual(entry['summary'], 'A' * 200)
-        self.assertEqual((entry['old'], entry['new']), ('o' * 120, 'n' * 120))
-        self.assertEqual(entry['detail'], {'message': 'm' * 200, 'result': True, 'none': None,
+        entry = audit.record('setting.reviewers', 'A' * 250, old='o' * 130, new='n' * 131, **secrets, **good)
+        self.assertEqual(entry['summary'], 'A' * 199 + '…')
+        self.assertEqual((entry['old'], entry['new']), ('o' * 119 + '…', 'n' * 119 + '…'))
+        self.assertEqual(entry['detail'], {'message': 'm' * 199 + '…', 'result': True, 'none': None,
                                            **{f'field{i}': i for i in range(5)}})
         self.assertNotIn('sensitive', self.folder.joinpath('2026-11-18.jsonl').read_text())
+
+    def test_summary_clips_at_a_word_break_and_preserves_exact_limit(self):
+        words = 'change ' * 26 + 'recorded'
+        for summary, expected in ((words + ',;:- verification that continues quite far', words + '…'),
+                                  ('A' * 200, 'A' * 200)):
+            with self.subTest(summary=summary):
+                entry = audit.record('backlog.add', summary)
+                self.assertEqual(entry['summary'], expected)
+                self.assertLessEqual(len(entry['summary']), 200)
+
+    def test_clip_preserves_non_strings_and_uses_whitespace(self):
+        value = object()
+        self.assertIs(audit.clip(value, 20), value)
+        self.assertEqual(audit.clip('multiple words\tlonger tail', 20), 'multiple words…')
+        self.assertEqual(audit.clip('multiple words\nlonger tail', 16), 'multiple words…')
+        self.assertEqual(audit.clip('abcdefghij trailing content', 20), 'abcdefghij…')
+        self.assertEqual(audit.clip('short waytoolongtobreakatthatspace', 20), 'short waytoolongtob…')
 
     def test_no_op_settings_are_quiet_and_nonsettings_keep_actions(self):
         self.assertIsNone(audit.record('setting.codex_level', 'No change', old=2, new=2))
@@ -235,17 +253,18 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(audit.actor_from_request({}), {'source': 'unknown', 'device': 'No user agent'})
 
     def test_default_actor_context_and_tmux_cache(self):
-        tmux = SimpleNamespace(returncode=0, stdout='Audit Log\n')
+        tmux = SimpleNamespace(returncode=0, stdout='Audit Log\tcodex\n')
         with (mock.patch.object(audit.subprocess, 'run', return_value=tmux) as run,
               mock.patch.object(audit.time, 'monotonic', side_effect=(100, 159, 160))):
             self.assertEqual(audit.record('tab.start', 'Started')['actor'], {'source': 'cli'})
             os.environ['TMUX_PANE'] = '%12'
-            expected = {'source': 'agent-cli', 'pane': '%12', 'tab': 'Audit Log'}
+            expected = {'source': 'agent-cli', 'pane': '%12', 'tab': 'Audit Log', 'agent': 'codex'}
             self.assertEqual(audit.record('tab.start', 'Started')['actor'], expected)
             with audit.acting('server'):
                 self.assertEqual(audit.record('tab.start', 'Started')['actor'], {'source': 'server'})
             self.assertEqual(audit.record('tab.start', 'Started')['actor'], expected)
-            run.assert_called_once_with([paths.TMUX, 'display-message', '-p', '-t', '%12', '#{@chat_name}'],
+            run.assert_called_once_with([paths.TMUX, 'display-message', '-p', '-t', '%12',
+                                         '#{@chat_name}\t#{pane_current_command}'],
                                         capture_output=True, text=True, timeout=1)
             tmux.stdout = ''
             self.assertEqual(audit.record('tab.start', 'Started')['actor'], {'source': 'agent-cli', 'pane': '%12'})
@@ -255,6 +274,51 @@ class AuditTests(unittest.TestCase):
         with (audit.acting('agent-cli', pane='%21'),
               mock.patch.object(audit.subprocess, 'run', side_effect=OSError)):
             self.assertEqual(audit.capture_actor(), {'source': 'agent-cli', 'pane': '%21'})
+
+    def test_unnamed_panes_use_agent_labels_and_filter_by_label(self):
+        for pane, command, agent, label in (('%305', '', None, 'An agent tab'),
+                                            ('%7', 'bash', None, 'An agent tab'),
+                                            ('%8', 'claude', 'claude', 'Claude tab'),
+                                            ('%9', 'codex', 'codex', 'Codex tab'),
+                                            ('%10', 'agy', 'antigravity', 'Antigravity tab')):
+            with self.subTest(pane=pane, command=command):
+                with mock.patch.object(audit.subprocess, 'run',
+                                       return_value=SimpleNamespace(returncode=0, stdout=f'\t{command}\n')):
+                    entry = audit.record('tab.start', 'Started', actor={'source': 'agent-cli', 'pane': pane})
+                self.assertEqual(entry['actor'].get('agent'), agent)
+                self.assertEqual(audit.actor_name(entry['actor']), label)
+        with mock.patch.object(audit.subprocess, 'run') as run:
+            self.assertEqual(audit.facets()['actors'], ['An agent tab', 'Antigravity tab', 'Claude tab', 'Codex tab'])
+            unnamed = audit.query(actor='An agent tab')['entries']
+            self.assertEqual({entry['actor']['pane'] for entry in unnamed}, {'%305', '%7'})
+            self.assertEqual([entry['actor']['pane'] for entry in audit.query(actor='CLAUDE TAB')['entries']], ['%8'])
+            run.assert_not_called()
+
+    def test_legacy_pane_actor_uses_generic_label_without_a_lookup(self):
+        entry = audit.record('tab.start', 'Started')
+        entry['actor'] = {'source': 'agent-cli', 'pane': '%305'}
+        self.folder.joinpath('2026-11-18.jsonl').write_text(json.dumps(entry) + '\n')
+        with mock.patch.object(audit.subprocess, 'run') as run:
+            stored, = audit.query(actor='An agent tab')['entries']
+            self.assertEqual(stored['actor'], entry['actor'])
+            self.assertEqual(audit.actor_name(stored['actor']), 'An agent tab')
+            run.assert_not_called()
+
+    def test_actor_prefers_supplied_names_and_recognizes_only_known_agents(self):
+        tmux = SimpleNamespace(returncode=0, stdout='Discovered\tclaude\n')
+        with mock.patch.object(audit.subprocess, 'run', return_value=tmux) as run:
+            actor = {'source': 'hook', 'pane': '%31', 'tab': 'Chosen'}
+            entry = audit.record('tab.start', 'Started', actor=actor)
+            self.assertEqual(entry['actor'], dict(actor, agent='claude'))
+            self.assertEqual(audit.actor_name(entry['actor']), 'Chosen')
+            run.assert_called_once()
+        with mock.patch.object(audit.subprocess, 'run') as run:
+            actor = {'source': 'agent-cli', 'pane': '%32', 'tab': 'Chosen', 'agent': 'codex'}
+            self.assertEqual(audit.record('tab.start', 'Started', actor=actor)['actor'], actor)
+            run.assert_not_called()
+        for agent in ('bash', 12, ['claude']):
+            entry = audit.record('tab.start', 'Started', actor={'source': 'agent-cli', 'agent': agent})
+            self.assertEqual(entry['actor'], {'source': 'agent-cli'})
 
     def test_facets_counts_use_the_file_signature_cache(self):
         audit.record('review.link', 'Linked', project='Tether', actor={'source': 'ui', 'tab': 'Review'})
