@@ -342,6 +342,14 @@ class IntentEvalTests(unittest.TestCase):
                 self.assertIsNone(trace['proposal'])  # "No" ends the question; Friday does not ask again.
                 self.assertEqual(trace['reply'], evaluation.friday.APPROVAL_DECLINED_REPLY)
                 self.assertEqual(len(payloads), 1)  # the fixed reply; the model does not run again
+                # B489 review: later calls in the same batch still run, as in the runtime.
+                batch = assistant(tool_calls=[call('answer_approval', chat=chat, decision='deny'),
+                                              call('send_to_chat', chat='Other', prompt='Check the logs')])
+                result, payloads = self.run_script(example, batch)
+                trace, = result['samples']
+                self.assertIsNone(trace['action'])
+                self.assertEqual(trace['proposal'], {'name': 'send_to_chat', 'chat': 'Other', 'payload': 'Check the logs'})
+                self.assertEqual(len(payloads), 1)
 
     def test_replacement_readback_invalidates_pending_approval(self):
         for name, key, payload in (('send_to_chat', 'prompt', 'Fix the login bug'),

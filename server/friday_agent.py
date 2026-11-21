@@ -631,6 +631,10 @@ def confirms(proposal, text):
         return plain_yes(text)
     if APPROVAL_NEGATION.search(text):
         return False
+    words = re.sub(r'\bdon t\b', "don't", norm(text.replace('\u2019', "'"))).split()
+    # "Don't!" to "Should I deny docs?" withdraws the denial; "Send it" answers a send, not an approval.
+    if "don't" in words or 'send' in words:
+        return False
     if plain_yes(text):
         return True
     # No or nope with only filler declines either question. An explicit "deny" can confirm a denial.
@@ -650,11 +654,14 @@ def confirmed_args(name, args, last_user_text, previous_assistant, pending=None,
     """
     if (name not in (*SEND_TOOLS, 'answer_approval') or not isinstance(args, dict) or pending is None):
         return args
-    chat = str(args.get('chat', '')).strip()
-    if not (plain_yes(last_user_text) and pending.live(user_turn)
+    chat = str(args.get('chat') or '').strip()
+    consent = confirms(pending, last_user_text) if name == 'answer_approval' else plain_yes(last_user_text)
+    if not (consent and pending.live(user_turn)
             and pending.heard and pending.follows(previous_assistant)
             and name == pending.name and chat.casefold() == pending.chat.strip().casefold()):
         return args
+    # The browser resolves a chat by its own rules ("STRASSE" is not "Straße"): send the name the user heard.
+    args = dict(args, chat=pending.chat)
     if name == 'answer_approval':
         return dict(args, decision=pending.payload)
     if name == 'send_to_chat':
@@ -796,7 +803,7 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                          and confirms(replace(pending, payload=decision), last_user_text))):
             return APPROVAL_DECLINED
         bound = (live and pending.name == name and pending.heard and pending.follows(previous_assistant)
-                 and str(args.get('chat', '')).strip().casefold() == pending.chat.strip().casefold()
+                 and str(args.get('chat') or '').strip() == pending.chat.strip()
                  and decision == pending.payload and confirms(pending, last_user_text))
         if not bound:
             if '?' in previous_assistant and SEND_WORDS.search(previous_assistant):
@@ -2178,7 +2185,8 @@ def runtime_types():
                 return
             if response and response.turn is not None:
                 self.session.llm_calls += 1
-            if response and run and run.failed_action and not run.succeeded_action:
+            declined_approval = bool(run and run.declined and run.proposal.name == 'answer_approval')
+            if response and run and (run.failed_action or declined_approval) and not run.succeeded_action:
                 # Check the full reply before speaking: a later chunk can negate an earlier one.
                 response.buffered_text = []
             token = self._active_run.set(run)
@@ -2227,7 +2235,9 @@ def runtime_types():
                         if (not run.succeeded_action
                                 and false_success(''.join(frame.text for frame in response.buffered_text))):
                             print('Friday corrected false success', file=sys.stderr, flush=True)
-                            await self.push_frame(TTSSpeakFrame('That did not go through.'))
+                            declined_approval = run.declined and run.proposal.name == 'answer_approval'
+                            await self.push_frame(TTSSpeakFrame(
+                                APPROVAL_DECLINED_REPLY if declined_approval else 'That did not go through.'))
                         else:
                             for frame in response.buffered_text:
                                 await super().push_frame(frame)

@@ -158,7 +158,7 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
             trace['reply'] = message.get('content') or ''
             return
         messages.append(message)
-        replay_action_result = False
+        replay_action_result = declined_reply = False
         for call in message['tool_calls']:
             name, args = call['function']['name'], _tool_args(call)
             args = friday.confirmed_args(name, args, last_user_text, previous_assistant, pending or declined, user_turn)
@@ -176,9 +176,10 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
                           if reason == friday.APPROVAL_CONFIRM_REQUIRED else 'Not sent yet.')
                 result = {'error': f'{status} Friday asked the user to confirm.'}
             elif reason == friday.APPROVAL_DECLINED:
-                # The runtime speaks a fixed reply and does not run the model again.
+                # The runtime speaks a fixed reply and does not run the model again; later calls still run.
                 trace['reply'] = friday.APPROVAL_DECLINED_REPLY
-                return
+                declined_reply = True
+                result = {'error': reason}
             elif reason:
                 trace['blocked'].append({'name': name, 'args': args, 'blocked': reason})
                 result = {'error': reason}
@@ -196,7 +197,7 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
                     replay_action_result |= name in results
                 result = results.get(name, {'ok': True})
             messages.append({'role': 'tool', 'tool_call_id': call['id'], 'content': json.dumps(result)})
-        if trace['proposal'] is not None or (trace['action'] is not None and not replay_action_result):
+        if declined_reply or trace['proposal'] is not None or (trace['action'] is not None and not replay_action_result):
             return
 
 

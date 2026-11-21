@@ -648,11 +648,45 @@ class FridayRulesTests(unittest.TestCase):
             spoken_chat = 'Docs, Staging' if chat == 'Docs . Staging' else chat
             status = 'approved' if decision == 'approve' else 'denied'
             self.assertEqual(previous, f'Not {status} yet. Should I {decision} {spoken_chat}? Yes or no?')
-            args = {'chat': f' {chat.upper()} ', 'decision': decision}
             for answer in answers:
                 with self.subTest(chat=chat, decision=decision, answer=answer):
+                    # The model may change the case; the call carries the exact name the user heard.
+                    args = friday.confirmed_args(proposal.name, {'chat': f' {chat.upper()} ', 'decision': decision},
+                                                 answer, previous, proposal, 1)
+                    self.assertEqual(args, {'chat': chat, 'decision': decision})
                     self.assertIsNone(friday.check_tool(proposal.name, args, 'speech', answer, set(),
                                                        previous, proposal, 1))
+
+    def test_approval_dispatches_the_chat_the_user_heard(self):
+        # B489 review: casefold("Straße") == "strasse", and the browser resolves names by its own rules.
+        for heard, said in (('Straße', 'STRASSE'), ('None', None), ('Docs', 'docs')):
+            proposal = friday.SendProposal('answer_approval', heard, 'approve', 0, heard=True)
+            previous = friday.send_readback(proposal)
+            with self.subTest(heard=heard, said=said):
+                args = friday.confirmed_args(proposal.name, {'chat': said, 'decision': 'approve'}, 'Yes',
+                                             previous, proposal, 1)
+                if heard.casefold() == str(said or '').casefold():
+                    self.assertEqual(args['chat'], heard)
+                    self.assertIsNone(friday.check_tool(proposal.name, args, 'speech', 'Yes', set(),
+                                                        previous, proposal, 1))
+                else:
+                    self.assertNotEqual(friday.check_tool(proposal.name, args, 'speech', 'Yes', set(),
+                                                          previous, proposal, 1), None)
+        proposal = friday.SendProposal('send_to_chat', 'Straße', 'Check the logs', 0, heard=True)
+        args = friday.confirmed_args('send_to_chat', {'chat': 'STRASSE', 'prompt': 'Check the logs'}, 'Yes',
+                                     friday.send_readback(proposal), proposal, 1)
+        self.assertEqual(args['chat'], 'Straße')
+
+    def test_send_and_dont_words_never_answer_an_approval(self):
+        # B489 review: "Send it" is a send answer; "Don't!" to "Should I deny docs?" withdraws the denial.
+        for payload, answer in (('approve', 'Send it'), ('approve', 'Yes, send it'), ('deny', "Don't!"),
+                                ('deny', 'Don\u2019t'), ('approve', "Don't")):
+            proposal = friday.SendProposal('answer_approval', 'docs', payload, 0, heard=True)
+            previous = friday.send_readback(proposal)
+            with self.subTest(payload=payload, answer=answer):
+                self.assertFalse(friday.confirms(proposal, answer))
+                self.assertNotEqual(friday.check_tool(proposal.name, {'chat': 'docs', 'decision': payload},
+                                                      'speech', answer, set(), previous, proposal, 1), None)
 
     def test_approval_rejects_answers_that_do_not_bind_to_the_question(self):
         proposal = friday.SendProposal('answer_approval', 'docs', 'approve', 1, heard=True)
@@ -722,7 +756,8 @@ class FridayRulesTests(unittest.TestCase):
                     proposal = friday.SendProposal('answer_approval', 'docs', decision, 0, heard=True)
                     reason = friday.check_tool(proposal.name, {'chat': 'docs', 'decision': decision},
                         'speech', word.upper() + '!', set(), friday.send_readback(proposal), proposal, 1)
-                    expected = friday.APPROVAL_DECLINED if word in ('no', 'nope') else None
+                    # "Don't!" to "Should I deny docs?" can mean "don't deny it": it decides nothing.
+                    expected = friday.APPROVAL_DECLINED if word in ('no', 'nope', "don't") else None
                     self.assertEqual(reason, expected)
 
     def test_approval_requires_a_whole_consent_answer(self):
@@ -769,12 +804,12 @@ class FridayRulesTests(unittest.TestCase):
             ('docs', 'Deny', 'deny', True),
             ('docs', 'No', 'deny', False),
             ('docs', 'Go ahead', 'approve', True),
-            # "Don't" alone denies; a negated command decides nothing.
+            # A "don't" never confirms the question "Should I deny docs?": it can withdraw the denial.
             ('docs', "Don't deny.", 'deny', False),
             ('docs', "Don't stop.", 'deny', False),
             ('docs', "Don\u2019t approve it.", 'approve', False),
-            ('docs', "Don't!", 'deny', True),
-            ('docs', "Don\u2019t, please.", 'deny', True),
+            ('docs', "Don't!", 'deny', False),
+            ('docs', "Don\u2019t, please.", 'deny', False),
         )
         for chat, text, decision, allowed in cases:
             with self.subTest(chat=chat, text=text, decision=decision):
@@ -2786,6 +2821,23 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(('dispatch', 'send_to_chat'), frames)
         self.assertIn('Not sent yet. Should I send this to Automation tether, Can we have…? yes to all. Yes or no?',
                       [f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)])
+
+    async def test_no_to_the_approval_question_never_speaks_a_decision(self):
+        # B489 review: after "No", the model may say "Denied." without a call; nothing was decided.
+        proposal = friday.SendProposal('answer_approval', 'docs', 'approve', 0, heard=True)
+        history = [{'role': 'user', 'content': 'Approve docs'},
+                   {'role': 'assistant', 'content': friday.send_readback(proposal)},
+                   {'role': 'user', 'content': 'No'}]
+        for reply in (['Denied.'], ['Okay, I have ', 'denied it.']):
+            with self.subTest(reply=reply), patch('sys.stderr'):
+                _, frames = await self.tool_flow(history, [(reply, 1, [])], proposal)
+                self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], [])
+                self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)],
+                                 [friday.APPROVAL_DECLINED_REPLY])
+        with patch('sys.stderr'):
+            _, frames = await self.tool_flow(history, [(['Okay, I will leave it waiting.'], 1, [])], proposal)
+        self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)],
+                         ['Okay, I will leave it waiting.'])
 
     async def test_false_success_replaces_complete_reply_after_failed_or_blocked_action(self):
         cases = (
