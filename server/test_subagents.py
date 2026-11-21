@@ -904,6 +904,10 @@ class ProcessTasksTests(unittest.TestCase):
             'description': 'Same name', 'agentType': 'general-purpose', 'finished': True}))
         self.assertCountEqual([record['id'] for record in subagents.bar_candidates(self.config)],
                               ['target', 'other'])
+        # Claude links the task output before the transcript or metadata exists.
+        (self.tasks / 'early.output').symlink_to(self.folder / 'agent-early.jsonl')
+        with self.assertRaises(ValueError):
+            subagents.bar_candidates(self.config)
 
     def test_monitor_in_old_running_agent_has_parent_and_kind(self):
         old = self.old_agent()
