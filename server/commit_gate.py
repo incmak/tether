@@ -31,7 +31,9 @@ calls where git can say which commit the call made (see stats()). Two sessions t
 the same moment can still mix their results; sessions use their own worktrees.
 Known limit: the row of an attempt that failed after the hook can cover a later silent commit in the same worktree.
 That commit must copy the tree, parents, message and author date, and carry a hand-set committer date inside the
-attempt's process lifetime (Linux dates a process from its creation, which can precede an exec of git)."""
+attempt's process lifetime (Linux dates a process from its creation, which can precede an exec of git).
+The gate assumes one HEAD-moving git operation per deferred call, so several HEAD moves in one call (for example,
+amend, reset and re-merge) can still mix."""
 import fcntl
 import hashlib
 import hmac
@@ -1012,25 +1014,57 @@ def _git_path(folder, *args):
     return path if path.is_absolute() else None
 
 
-def _head_reflog(folder):
-    """Return the HEAD before each commit's first reflog entry, or None if unavailable.
-
-    The first entry is the one that made the commit. Later checkouts and resets cannot replace it."""
+def _head_reflog_position(folder):
+    """Record where the call's reflog entries will start."""
     path = _git_path(folder, '--git-path', 'logs/HEAD')
     if path is None:
         return None
     try:
-        with open(path, 'rb', opener=lambda path, flags: os.open(path, flags | os.O_NONBLOCK)) as source:
+        found = path.lstat()
+    except FileNotFoundError:
+        return {'size': 0, 'ino': None, 'dev': None}
+    except OSError:
+        return None
+    if stat_module.S_ISREG(found.st_mode):
+        return {'size': found.st_size, 'ino': found.st_ino, 'dev': found.st_dev}
+    return None
+
+
+def _head_reflog(folder, start):
+    """Return the HEAD before each commit's first entry since start, or None if unavailable.
+
+    The first entry is the one that made the commit. Later checkouts and resets cannot replace it."""
+    if not isinstance(start, dict) or not {'size', 'ino', 'dev'} <= start.keys():
+        return None
+    offset, ino, dev = start['size'], start['ino'], start['dev']
+    if type(offset) is not int or offset < 0:
+        return None
+    missing = offset == 0 and ino is None and dev is None
+    if not missing and any(type(value) is not int or value < 0 for value in (ino, dev)):
+        return None
+    path = _git_path(folder, '--git-path', 'logs/HEAD')
+    if path is None:
+        return None
+    try:
+        if not stat_module.S_ISREG(path.lstat().st_mode):
+            return None
+        flags = os.O_NOFOLLOW | os.O_NONBLOCK
+        with open(path, 'rb', opener=lambda path, mode: os.open(path, mode | flags)) as source:
             found = os.fstat(source.fileno())
             if not stat_module.S_ISREG(found.st_mode):
                 return None
-            offset = max(0, found.st_size - REFLOG_BYTES)
-            source.seek(offset)
-            tail = source.read(REFLOG_BYTES)
-        if tail and not tail.endswith(b'\n'):
+            length = found.st_size - offset
+            if not 0 <= length <= REFLOG_BYTES:
+                return None
+            if offset:
+                if (found.st_ino, found.st_dev) != (ino, dev):
+                    return None
+                source.seek(offset - 1)
+                if source.read(1) != b'\n':
+                    return None
+            tail = source.read(length + 1)
+        if len(tail) != length or not tail.endswith(b'\n'):
             return None
-        if offset:
-            tail = tail.partition(b'\n')[2]  # The first entry can start before the read window.
         heads = {}
         for line in tail.split(b'\n')[:-1]:
             old, new, ident = line.split(b' ', 2)
@@ -1302,6 +1336,8 @@ def check(data, env=os.environ, now=None):
                         other['shared'] = shared = True
                 state['pending'][tool] = {'folder': folder, 'tree': tree, 'head': head, 'at': now, 'project': pid,
                                           'shared': shared}
+                if (reflog := _head_reflog_position(folder)) is not None:
+                    state['pending'][tool]['reflog'] = reflog
                 if deferred:
                     state['pending'][tool].update(deferred=True, mode=mode)
             if json.dumps(state, sort_keys=True) != before:
@@ -1456,7 +1492,7 @@ def _log_deferred_checks(commits, waiting, session, tool, now):
 
     @cache
     def reflog():
-        return _head_reflog(waiting['folder'])
+        return _head_reflog(waiting['folder'], waiting.get('reflog'))
 
     worktree = os.path.realpath(waiting.get('tree') or waiting['folder'])
     rows = list(_rows(locked=True))

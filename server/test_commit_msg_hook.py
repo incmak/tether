@@ -1225,6 +1225,74 @@ time.sleep(20)
         self.assertEqual(check['head'], original)
         self.assert_hook_silent(command, 'skip')
 
+    def test_claude_does_not_claim_a_fresh_commit_row_for_a_remerge_of_an_old_amend(self):
+        self.prepare_merge()
+        self.env.update(GIT_AUTHOR_DATE='2001-01-01T00:00:00+00:00',
+                        GIT_COMMITTER_DATE='2001-01-01T00:00:00+00:00')
+        self.git('merge', '--no-ff', '--no-verify', '-m', 'original merge', 'side')
+        original = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.git('commit', '--amend', '--no-verify', '-m', 'same')
+        amended = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.git('reset', '--keep', original)
+
+        command = 'git commit --allow-empty -m same'
+        self.pre(command)
+        self.assertEqual(self.rows(), [])
+        self.commit('-m', 'same')
+        check, = self.rows()
+        self.assertEqual((check['via'], check['head']), ('commit-msg', original))
+        self.git('reset', '--keep', f'{original}^')
+        self.git('merge', '--no-ff', '--no-verify', '-m', 'same', 'side')
+        self.assertEqual(self.git('rev-parse', 'HEAD').stdout.strip(), amended)
+        self.assert_hook_silent(command, 'skip')
+
+    def test_claude_covers_a_checked_amend_that_recreates_an_old_merge(self):
+        self.prepare_merge()
+        self.env.update(GIT_AUTHOR_DATE='2001-01-01T00:00:00+00:00',
+                        GIT_COMMITTER_DATE='2001-01-01T00:00:00+00:00')
+        self.git('merge', '--no-ff', '--no-verify', '-m', f'same\n\n{STAMP}', 'side')
+        merged = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.git('reset', '--keep', 'HEAD^')
+        self.git('merge', '--no-ff', '--no-verify', '-m', 'original merge', 'side')
+        original = self.git('rev-parse', 'HEAD').stdout.strip()
+
+        command = f'git commit --amend -m same -m {shlex.quote(STAMP)}'
+        self.pre(command)
+        self.assertEqual(self.rows(), [])
+        self.git('commit', '--amend', '-m', 'same', '-m', STAMP)
+        self.assertEqual(self.git('rev-parse', 'HEAD').stdout.strip(), merged)
+        self.pre(command, 'PostToolUse')
+        check, *results = self.rows()
+        self.assertEqual((check['via'], check['verdict'], check['head']), ('commit-msg', 'pass', original))
+        self.assertEqual([(row['event'], row.get('reason')) for row in results], [('landed', None)])
+
+    def test_claude_skips_a_silent_merge_amendment_with_an_old_pending_record(self):
+        self.prepare_merge()
+        self.git('merge', '--no-ff', '--no-verify', '-m', 'merge side', 'side')
+        command = 'git commit --amend -m amended'
+        self.pre(command)
+        session = self.cache / 'commit-gate' / f'{SESSION}.json'
+        state = json.loads(session.read_text())
+        del state['pending']['tool-1']['reflog']
+        session.write_text(json.dumps(state))
+        self.git('commit', '--amend', '--no-verify', '-m', 'amended')
+        self.assert_hook_silent(command, 'skip')
+
+    def test_claude_skips_a_silent_merge_amendment_after_a_reflog_rewrite(self):
+        self.prepare_merge()
+        self.git('merge', '--no-ff', '--no-verify', '-m', 'merge side', 'side')
+        command = 'git commit --amend -m amended'
+        self.pre(command)
+        reflog = self.repo / '.git' / 'logs' / 'HEAD'
+        original = reflog.stat()
+        rewritten = reflog.with_name('HEAD.rewritten')
+        rewritten.write_bytes(reflog.read_bytes())
+        rewritten.replace(reflog)
+        self.assertEqual(reflog.stat().st_size, original.st_size)
+        self.assertNotEqual(reflog.stat().st_ino, original.st_ino)
+        self.git('commit', '--amend', '--no-verify', '-m', 'amended')
+        self.assert_hook_silent(command, 'skip')
+
     def test_claude_does_not_claim_a_fresh_commit_row_for_a_remerge_without_a_reflog(self):
         self.prepare_merge()
         self.git('config', 'core.logAllRefUpdates', 'false')
