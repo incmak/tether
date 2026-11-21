@@ -26,7 +26,7 @@
 .reminder-every input:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -1px; border-color: var(--accent); }
 .reminder-every input[aria-invalid="true"] { border-color: var(--error); }
 .sm-trigger.reminder-unit-select { width: auto; flex: 1 1 8em; max-width: 12em; }
-.reminder-every-hint { flex-basis: 100%; }
+.reminder-every-hint, .reminder-every-last { flex-basis: 100%; }
 .reminder-repeat-select { min-width: 0; }
 .reminder-stop-repeat { justify-self: start; min-height: 24px; font-size: 13px; }
 .reminder-repeat { display: inline-flex; align-items: center; gap: 4px; }

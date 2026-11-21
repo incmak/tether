@@ -102,6 +102,13 @@ test('repeat options name the date; the last-day option shows only for a short m
   assert.equal(detail(rule.anchor, 'month', rule), 'On the 31st, or the last day')
   assert.equal(repeatOptions(rule.anchor, rule).some(option => option.value === 'last'), false)
   assert.equal(repeatOptions(TOMORROW, null, 'last').some(option => option.value === 'last'), true, 'a last-day rule keeps its option')
+  // Another unit takes the date, as the server does: the 31st series on 28 Feb becomes 28 Feb yearly.
+  assert.equal(detail(rule.anchor, 'year', rule), 'On 28 Feb')
+  const leap = { every: 'year', day: 29, month: 2, anchor: seconds('2029-02-28T04:30:00Z'), zone: 'Asia/Kolkata' }
+  assert.equal(detail(leap.anchor, 'year', leap), "On 29 Feb; 28 Feb in other years")
+  assert.equal(detail(leap.anchor, 'month', leap), 'On the 28th')
+  const last = { every: 'month', day: -1, anchor: rule.anchor, zone: 'Asia/Kolkata' }
+  assert.equal(detail(last.anchor, 'month', last), 'On the 28th', 'a last-day rule switched to a fixed day takes the date')
 })
 
 test('repeat choices round-trip to the request body and validate N per unit', () => {
@@ -110,7 +117,7 @@ test('repeat choices round-trip to the request body and validate N per unit', ()
   assert.equal(repeatBody(choiceOf(null)), null)
   assert.equal(repeatBody(choiceOf({ every: 'week', anchor, zone })), 'week')
   assert.deepEqual(repeatBody(choiceOf({ every: 'month', day: -1, anchor, zone })), { every: 'month', last_day: true })
-  assert.deepEqual(choiceOf({ every: 'month', interval: 3, day: 19, anchor, zone }), { pick: 'custom', unit: 'month', interval: 3 })
+  assert.deepEqual(choiceOf({ every: 'month', interval: 3, day: 19, anchor, zone }), { pick: 'custom', unit: 'month', interval: 3, lastDay: false })
   assert.deepEqual(repeatBody({ pick: 'custom', unit: 'week', interval: 2 }), { every: 'week', interval: 2 })
   assert.equal(repeatBody({ pick: 'custom', unit: 'day', interval: 1 }), 'day', 'every 1 day is the plain rule')
   assert.equal(sameChoice({ pick: 'custom', unit: 'year', interval: 1 }, { ...NO_REPEAT, pick: 'year' }), true)
@@ -122,6 +129,16 @@ test('repeat choices round-trip to the request body and validate N per unit', ()
   assert.equal(choiceValid({ pick: 'never', unit: 'day', interval: NaN }), true, 'a hidden N does not block')
   assert.equal(choiceLabel({ pick: 'custom', unit: 'week', interval: 2 }, TOMORROW), 'Every 2 weeks on Thursday')
   assert.equal(choiceLabel({ pick: 'custom', unit: 'month', interval: 3 }, seconds('2027-02-28T04:30:00Z'), { every: 'month', day: 31, anchor, zone }), 'Every 3 months on the 31st')
+  // A custom last-day rule keeps last_day when its N changes, and only a monthly unit sends it.
+  const feb28 = seconds('2027-02-28T04:30:00Z'), lastRule = { every: 'month', interval: 3, day: -1, anchor: feb28, zone }
+  const kept = choiceOf(lastRule)
+  assert.deepEqual(kept, { pick: 'custom', unit: 'month', interval: 3, lastDay: true })
+  assert.deepEqual(repeatBody({ ...kept, interval: 4 }), { every: 'month', interval: 4, last_day: true })
+  assert.deepEqual(repeatBody({ ...kept, interval: 1 }), { every: 'month', last_day: true })
+  assert.deepEqual(repeatBody({ ...kept, unit: 'week' }), { every: 'week', interval: 3 })
+  assert.equal(choiceLabel({ ...kept, interval: 4 }, feb28, lastRule), 'Every 4 months on the last day')
+  assert.equal(choiceLabel({ ...kept, lastDay: false }, feb28, lastRule), 'Every 3 months on the 28th')
+  assert.equal(choiceLabel({ ...kept, unit: 'year' }, feb28, lastRule), 'Every 3 years on 28 Feb')
 })
 
 test('quick picks respect the evening cutoff and round-trip across month end', () => {

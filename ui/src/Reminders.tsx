@@ -65,6 +65,10 @@ function RepeatField({ id, value, at, rule, onChange }: { id: string; value: Rep
         options={UNITS.map(unit => ({ value: unit, label: unitName(unit, Number.isNaN(value.interval) ? 2 : value.interval) }))}
         onChange={next => onChange({ ...value, unit: next as RepeatUnit })} />
     </div>}
+    {custom && value.unit === 'month' && <label className="reminder-link-tab reminder-every-last">
+      <input type="checkbox" checked={value.lastDay} aria-describedby={hint} onChange={event => onChange({ ...value, lastDay: event.target.checked })} />
+      On the last day of the month
+    </label>}
     {custom && <p id={hint} className={valid ? 'reminder-parsed reminder-every-hint' : 'reminder-parsed reminder-every-hint bad'} aria-live="polite">
       {!valid ? `Type a number from 1 to ${INTERVAL_MAX[value.unit]}.` : at === null ? 'Pick a time to start from.' : choiceLabel(value, at, rule)}
     </p>}

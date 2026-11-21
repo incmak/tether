@@ -465,6 +465,27 @@ test('Reminders in Chromium', async t => {
     assert.deepEqual(await post(page, 'edit', () => button(edit, 'Save').click()), { id: monthly.id, repeat: { every: 'month', interval: 2 } })
   })
 
+  await t.test('Edit of an every-3-months last-day rule keeps the last day when N changes', async t => {
+    const feb28 = Date.UTC(2027, 1, 28, 4, 30) / 1000
+    const quarterly = reminder('R1', 'Close the books', { due: feb28, repeat: { ...repeatRule('month', feb28), interval: 3, day: -1 } })
+    const { page, sheet } = await open(t, browser, origin, phone, { records: [quarterly] })
+    await button(sheet, `Edit: ${quarterly.text}`).click()
+    const edit = sheet.getByRole('form', { name: `Edit reminder: ${quarterly.text}` })
+    const last = edit.getByRole('checkbox', { name: 'On the last day of the month' })
+    assert.equal(await last.isChecked(), true)
+    await edit.getByRole('spinbutton', { name: 'Repeat every' }).fill('4')
+    assert.equal(await edit.locator('.reminder-every-hint').textContent(), 'Every 4 months on the last day')
+    assert.deepEqual(await post(page, 'edit', () => button(edit, 'Save').click()),
+      { id: quarterly.id, repeat: { every: 'month', interval: 4, last_day: true } })
+    // Unchecked, the rule falls on the copy's date; another unit hides the checkbox.
+    await button(sheet, `Edit: ${quarterly.text}`).click()
+    await last.uncheck()
+    assert.equal(await edit.locator('.reminder-every-hint').textContent(), 'Every 4 months on the 28th')
+    await button(edit, 'Repeat unit: months').click()
+    await sheet.getByRole('listbox', { name: 'Repeat unit' }).getByRole('option', { name: 'weeks' }).click()
+    assert.equal(await last.count(), 0)
+  })
+
   await t.test('weekly label uses the anchor even when the copy was snoozed', async t => {
     const weekly = reminder('R1', 'Review weekly reports', { due: TOMORROW + 86400, repeat: repeatRule('week', TOMORROW) })
     const { sheet } = await open(t, browser, origin, phone, { records: [weekly] })

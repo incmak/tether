@@ -132,6 +132,14 @@ def _recently_deleted(records, now):
                   key=lambda r: r['deleted_at'], reverse=True)
 
 
+# Stored rule times must convert to dates with room for a few years of steps; 1e20 passes a finiteness check but not this.
+TIME_LIMIT = 253402300799 - 10 * 366 * 86400  # 9999-12-31 less ten years
+
+
+def _usable_time(value):
+    return type(value) in (int, float) and 0 <= value <= TIME_LIMIT
+
+
 def _int_between(value, low, high):
     return type(value) is int and low <= value <= high
 
@@ -145,7 +153,7 @@ def _valid_repeat(rule):
     if not isinstance(rule.get('zone'), str):
         return False
     anchor = rule.get('anchor')
-    if type(anchor) not in (int, float) or not -inf < anchor < inf:
+    if not _usable_time(anchor):
         return False
     if every in ('month', 'year'):
         day = rule.get('day')
@@ -177,8 +185,7 @@ def _load(now, *, prune_deleted=True):
         record.setdefault('sending', {})
         record.setdefault('failed', [])
         repeat = record.get('repeat')
-        if isinstance(repeat, dict) and 'origin' in repeat and not (
-                type(repeat['origin']) in (int, float) and -inf < repeat['origin'] < inf):
+        if isinstance(repeat, dict) and 'origin' in repeat and not _usable_time(repeat['origin']):
             repeat.pop('origin')  # a bad origin falls back to the anchor's wall time; the rule stays
         if not _valid_repeat(repeat):
             record['repeat'] = None
@@ -293,7 +300,9 @@ def _clean_repeat(repeat, due, previous=None):
         raise ReminderError('Use true or false for last_day.')
     if last_day and every != 'month':
         raise ReminderError('Use last_day only with a monthly repeat.')
-    rule = {'every': every, 'anchor': previous['anchor'] if previous else due, 'zone': ZONE.key}
+    # A rule-only edit keeps the series zone: its day and wall time belong to that zone.
+    rule = {'every': every, 'anchor': previous['anchor'] if previous else due,
+            'zone': previous['zone'] if previous else ZONE.key}
     if interval > 1:
         rule['interval'] = interval
     if previous and 'origin' in previous:

@@ -1303,13 +1303,14 @@ class RepeatTests(Base):
         bad = (dict(legacy, interval=True), dict(legacy, every='weekday', interval=2),
                dict(month, interval=61), dict(month, day=0), dict(month, day=32), dict(month, day=True),
                dict(year, month=13), dict(year, month=False), dict(year, month=None),
-               dict(legacy, every='month'), dict(month, every='year'))
+               dict(legacy, every='month'), dict(month, every='year'),
+               dict(month, anchor=1e20), dict(legacy, anchor=-1e20), dict(year, anchor=float('nan')))
         good = (legacy, dict(month, day=-1, interval=3), year)
         # A bad origin is dropped and the rule stays: the wall time then comes from the anchor.
         stored['reminders'] = [dict(stored['reminders'][0], id=f'R{i}', repeat=repeat)
-                               for i, repeat in enumerate(bad + good + (dict(month, origin='tomorrow'),), 1)]
+                               for i, repeat in enumerate(bad + good + (dict(month, origin='tomorrow'), dict(month, origin=1e20)), 1)]
         (self.folder / 'reminders.json').write_text(json.dumps(stored))
-        self.assertEqual([r['repeat'] for r in reminders.listing(NOW)['reminders']], [None] * len(bad) + list(good) + [month])
+        self.assertEqual([r['repeat'] for r in reminders.listing(NOW)['reminders']], [None] * len(bad) + list(good) + [month, month])
 
     def test_v1_upgrade_keeps_all_fields_and_clears_invalid_rules(self):
         self.folder.mkdir()
@@ -1359,6 +1360,20 @@ class RepeatTests(Base):
         with mock.patch.object(reminders, 'ZONE', zone):
             item = self.add(due=anchor, repeat='month')
         self.assertEqual(self.following(self.complete(item, anchor), anchor)['due'], expected)
+
+    def test_rule_only_edit_keeps_the_series_zone(self):
+        # A New York series edited while the server default is Kolkata keeps New York's day and wall time.
+        zone = ZoneInfo('America/New_York')
+        feb = datetime(2027, 2, 14, 15, tzinfo=zone).timestamp()
+        with mock.patch.object(reminders, 'ZONE', zone):
+            item = self.add(due=feb, repeat='month')
+        for repeat in ({'every': 'month', 'interval': 2}, {'every': 'year'}):
+            with self.subTest(repeat=repeat):
+                edited = reminders.change(item['id'], 'edit', {'repeat': repeat}, now=feb - 60)
+                self.assertEqual((edited['repeat']['zone'], edited['repeat']['day']), ('America/New_York', 14))
+        edited = reminders.change(item['id'], 'edit', {'repeat': {'every': 'month', 'interval': 2}}, now=feb - 60)
+        self.assertEqual(self.following(self.complete(edited, feb), feb)['due'],
+                         datetime(2027, 4, 14, 15, tzinfo=zone).timestamp())
 
     def test_wall_clock_survives_a_skipped_hour(self):
         zone = ZoneInfo('America/New_York')

@@ -90,16 +90,19 @@ export function repeatLabel(rule: RepeatRule | null | undefined): string {
   return describe(rule.every, rule.interval ?? 1, target(rule.anchor, rule))
 }
 
-/** What the Repeat picker holds. last: the last day of every month. custom: every `interval` `unit`s. */
+/** What the Repeat picker holds. last: the last day of every month. custom: every `interval` `unit`s;
+ *  lastDay: a custom monthly rule falls on the last day of the month. */
 export type RepeatPick = 'never' | Repeat | 'last' | 'custom'
-export interface RepeatChoice { pick: RepeatPick; unit: RepeatUnit; interval: number }
-export const NO_REPEAT: RepeatChoice = { pick: 'never', unit: 'week', interval: 2 }
+export interface RepeatChoice { pick: RepeatPick; unit: RepeatUnit; interval: number; lastDay: boolean }
+export const NO_REPEAT: RepeatChoice = { pick: 'never', unit: 'week', interval: 2, lastDay: false }
+/** The choice falls on the last day of the month. */
+export const onLastDay = (choice: RepeatChoice) => choice.pick === 'last' || (choice.pick === 'custom' && choice.unit === 'month' && choice.lastDay === true)
 
 /** The picker's value for a stored rule. */
 export function choiceOf(rule: RepeatRule | null | undefined): RepeatChoice {
   if (!rule) return NO_REPEAT
   const interval = rule.interval ?? 1
-  if (interval > 1 && rule.every !== 'weekday') return { pick: 'custom', unit: rule.every, interval }
+  if (interval > 1 && rule.every !== 'weekday') return { pick: 'custom', unit: rule.every, interval, lastDay: rule.every === 'month' && rule.day === -1 }
   if (rule.every === 'month' && rule.day === -1) return { ...NO_REPEAT, pick: 'last' }
   return { ...NO_REPEAT, pick: rule.every }
 }
@@ -108,11 +111,13 @@ export function choiceOf(rule: RepeatRule | null | undefined): RepeatChoice {
 export const choiceValid = (choice: RepeatChoice) => choice.pick !== 'custom'
   || (Number.isInteger(choice.interval) && choice.interval >= 1 && choice.interval <= INTERVAL_MAX[choice.unit])
 
-/** The `repeat` the server takes: null, a rule name (every 1), or { every, interval } / { every: 'month', last_day }. */
-export function repeatBody(choice: RepeatChoice): null | Repeat | { every: RepeatUnit; interval: number } | { every: 'month'; last_day: true } {
+/** The `repeat` the server takes: null, a rule name (every 1), or { every, interval?, last_day? }. */
+export type RepeatBody = null | Repeat | { every: RepeatUnit; interval?: number; last_day?: true }
+export function repeatBody(choice: RepeatChoice): RepeatBody {
   if (choice.pick === 'never') return null
-  if (choice.pick === 'last') return { every: 'month', last_day: true }
-  if (choice.pick !== 'custom') return choice.pick
+  if (onLastDay(choice)) return choice.pick === 'custom' && choice.interval > 1
+    ? { every: 'month', interval: choice.interval, last_day: true } : { every: 'month', last_day: true }
+  if (choice.pick !== 'custom') return choice.pick as Repeat
   return choice.interval === 1 ? choice.unit : { every: choice.unit, interval: choice.interval }
 }
 export const sameChoice = (a: RepeatChoice, b: RepeatChoice) => JSON.stringify(repeatBody(a)) === JSON.stringify(repeatBody(b))
@@ -122,15 +127,21 @@ export function choiceLabel(choice: RepeatChoice, at: number, rule?: RepeatRule 
   const body = repeatBody(choice)
   if (body === null) return ''
   const every = typeof body === 'string' ? body : body.every
-  const kept = rule && rule.every === every && (rule.day === -1) === (choice.pick === 'last') ? rule : null
-  const on = target(at, kept)
-  if (choice.pick === 'last') on.day = -1
-  return describe(every, typeof body === 'object' && 'interval' in body ? body.interval : 1, on)
+  const last = onLastDay(choice)
+  const on = target(at, keptFor(every, last, rule))
+  if (last) on.day = -1
+  return describe(every, typeof body === 'object' ? body.interval ?? 1 : 1, on)
 }
+
+/** The kept rule whose own day and month a new rule takes, as the server does: the same unit and the same last-day
+ *  setting. Any other change takes the day from the date. */
+const keptFor = (every: Repeat, last: boolean, rule?: RepeatRule | null) =>
+  rule && rule.every === every && (rule.day === -1) === last ? rule : null
 
 /** The picker's choices. at: the date the rule starts from; rule: the kept rule, whose own day wins over a clamped date. */
 export function repeatOptions(at: number | null, rule?: RepeatRule | null, current?: RepeatPick): MenuOption[] {
-  const on = at === null ? null : target(at, rule && (rule.every === 'month' || rule.every === 'year') && rule.day !== -1 ? rule : null)
+  const on = at === null ? null : target(at, keptFor('month', false, rule))
+  const yearly = at === null ? null : target(at, keptFor('year', false, rule))
   const shorter = on && on.day >= 29 ? `, or the last day` : ''
   const options: MenuOption[] = [
     { value: 'never', label: 'Never' },
@@ -144,7 +155,7 @@ export function repeatOptions(at: number | null, rule?: RepeatRule | null, curre
     options.push({ value: 'last', label: 'Last day of every month', detail: 'The 28th to the 31st, as the month ends' })
   }
   options.push(
-    { value: 'year', label: 'Every year', detail: on ? `On ${on.day} ${MONTHS[on.month]}${on.day === 29 && on.month === 1 ? '; 28 Feb in other years' : ''}` : 'Same date each year' },
+    { value: 'year', label: 'Every year', detail: yearly ? `On ${yearly.day} ${MONTHS[yearly.month]}${yearly.day === 29 && yearly.month === 1 ? '; 28 Feb in other years' : ''}` : 'Same date each year' },
     { value: 'custom', label: 'Custom', detail: 'Every N days, weeks, months or years' },
   )
   return options
