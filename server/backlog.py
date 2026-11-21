@@ -303,17 +303,19 @@ def _catch_up(text, *, archive=_READ, settled=True):
     can be half done: DONE.md has an item that BACKLOG.md still holds. Such an item is not counted as archived yet, so
     the next pass sees it leave the list for DONE.md."""
     try:
-        archived = _checked_archive(_read_archive() if archive is _READ else archive)
-        if archived and not settled:
-            listed = _audit_items(text)[0].keys()
-            archived = {ref: row for ref, row in archived.items() if ref not in listed}
-        if archived is None:
-            audit._warn('could not read the backlog archive; items that left the list count as removed.')
         path = audit.folder() / _SEEN
         old_archived = None
         if path.exists():
             seen = json.loads(_read(path))
             before, old_archived = seen['text'], set(seen['archived'])
+        archived = _checked_archive(_read_archive() if archive is _READ else archive)
+        if archived and not settled:
+            # Defer only IDs that are new to the snapshot; the snapshot keeps the IDs it already holds.
+            listed = _audit_items(text)[0].keys()
+            archived = {ref: row for ref, row in archived.items() if ref not in listed or ref in (old_archived or ())}
+        if archived is None:
+            audit._warn('could not read the backlog archive; items that left the list count as removed.')
+        if old_archived is not None:
             if before == text and (archived is None or old_archived == archived.keys()):
                 return old_archived
             if not _audit_changes(before, text, observed=True, archived=archived or {}, old_archived=old_archived):

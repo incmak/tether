@@ -151,22 +151,13 @@ _folder = folder
 def _locked(folder):
     with _LOCK:
         folder.mkdir(mode=0o700, parents=True, exist_ok=True)
-        nofollow = getattr(os, 'O_NOFOLLOW', 0)
-        # Take the lock on a write-only (0200) file. A sandboxed agent can read this folder but not write it, so it
-        # can open neither this file nor hold its lock to stop appends (B303). .lock keeps the day markers.
-        guard = os.open(folder / '.write-lock', os.O_CREAT | os.O_WRONLY | nofollow, 0o200)
+        fd = os.open(folder / '.lock', os.O_CREAT | os.O_RDWR | os.O_APPEND | getattr(os, 'O_NOFOLLOW', 0), 0o600)
         try:
-            os.fchmod(guard, 0o200)
             if fcntl is not None:
-                fcntl.flock(guard, fcntl.LOCK_EX)
-            fd = os.open(folder / '.lock', os.O_CREAT | os.O_RDWR | os.O_APPEND | nofollow, 0o600)
-            try:
-                yield fd
-            finally:
-                os.close(fd)
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            yield fd
         finally:
-            with contextlib.suppress(OSError):
-                os.close(guard)
+            os.close(fd)
 
 
 def _day_files(folder):

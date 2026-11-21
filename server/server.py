@@ -2574,8 +2574,7 @@ class Handler(BaseHTTPRequestHandler):
             elif codex_level.handles(path):
                 codex_level.get(self)
             elif audit.handles(path):
-                backlog.observe()
-                audit.get(self)
+                audit.get(self)  # backlog.watch() keeps observed backlog changes at most 2 s behind (B303)
             elif commit_gate.handles(path):
                 commit_gate.get(self)
             elif claude_advisor.handles(path):

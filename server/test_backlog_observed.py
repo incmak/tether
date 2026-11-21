@@ -634,5 +634,23 @@ class BacklogObservedTests(unittest.TestCase):
         self.assertEqual(self.entries(), [])
 
 
+    # B303 round 6 review
+
+    def test_fallback_keeps_archive_ids_the_snapshot_already_holds(self):
+        self.archive.write_text('## Build (moved 2026-11-20 10:00)\n- [x] Fix warnings #B12\n')
+        backlog.observe()
+        self.assertEqual(self.seen()['archived'], ['B12'])
+        with open(backlog.folder() / '.lock', 'rb') as handle, mock.patch.object(backlog, 'BUSY_LIMIT', 0):
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            self.file.write_text(INITIAL + '- [ ] Unrelated edit #B14\n')
+            backlog.observe()
+            self.assertEqual(self.seen()['archived'], ['B12'])
+            self.file.write_text(INITIAL.replace('- [ ] Fix warnings #B12\n', '') + '- [ ] Unrelated edit #B14\n')
+            backlog.observe()
+        kinds = sorted((e['kind'], e['summary']) for e in self.entries())
+        self.assertEqual(kinds, [('backlog.add', 'B14 added: Unrelated edit (seen in the file)'),
+                                 ('backlog.remove', 'B12 removed: Fix warnings (seen in the file)')])
+
+
 if __name__ == '__main__':
     unittest.main()
