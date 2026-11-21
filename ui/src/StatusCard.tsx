@@ -1,6 +1,6 @@
 import { useContext, useId, useLayoutEffect, useRef, useState } from 'react'
 import { ChevronDown, CircleAlert, CircleCheck, Hand, MessageCircleQuestion, Radio } from 'lucide-react'
-import type { Pane } from './api'
+import type { StatusTab } from './api'
 import { FileLink, TabOpener } from './MediaLink'
 import { stamp } from './messageTime'
 import type { StatusUpdate, TabUpdate, TabUpdateState } from './statusText'
@@ -13,21 +13,17 @@ const STATE: Record<TabUpdateState, { word: string; rank: number; Icon: typeof H
   done: { word: 'Finished', rank: 3, Icon: CircleCheck },
 }
 
-// tmux reuses pane ids: the id opens a tab only while that tab still has the same name. Else the name alone, when one tab has it.
-function useTabOf(update: TabUpdate) {
+// A pane id can be reused. A link follows the reported chat within its original session.
+function useTabOf(tab?: StatusTab) {
   const tabs = useContext(TabOpener)
-  if (!tabs) return null
-  const others = tabs.panes.filter(pane => pane.id !== tabs.current.id)
-  const named = (pane: Pane) => [pane.pane_name, pane.agent_name, pane.label].some(name => !!name && name.trim() === update.name.trim())
-  const byId = others.find(pane => pane.id === update.pane)
-  const byName = others.filter(named)
-  const pane = byId && named(byId) ? byId : byName.length === 1 ? byName[0] : null
-  return pane ? () => tabs.open(pane) : null
+  if (!tabs || !tab || tab.thread === null) return null
+  const matches = tabs.panes.filter(pane => pane.id !== tabs.current.id && pane.tmux_session === tab.session && pane.thread === tab.thread)
+  return matches.length === 1 ? () => tabs.open(matches[0]) : null
 }
 
-function StatusRow({ update }: { update: TabUpdate }) {
+function StatusRow({ update, tab }: { update: TabUpdate; tab?: StatusTab }) {
   const { word, Icon } = STATE[update.state]
-  const open = useTabOf(update)
+  const open = useTabOf(tab)
   const textId = useId()
   const textRef = useRef<HTMLSpanElement>(null)
   const [expanded, setExpanded] = useState(false)
@@ -57,14 +53,33 @@ function StatusRow({ update }: { update: TabUpdate }) {
   </li>
 }
 
-/** Tether's "[Tether status]" prompt in the coordinator tab: one row per tab, what needs the person first. */
-export function StatusCard({ id, status, time }: { id: string; status: StatusUpdate; time?: string }) {
+// The folded line counts what needs the person; "finished" rows only add to the total.
+const COUNTS: [TabUpdateState, string][] = [['needs', 'waits on you'], ['asks', 'asks you'], ['failed', 'failed']]
+
+/** Tether's "[Tether status]" prompt in the coordinator tab. It starts folded to one line; open it for one row per tab,
+ *  what needs the person first. */
+export function StatusCard({ id, status, time, tabs }: { id: string; status: StatusUpdate; time?: string; tabs?: StatusTab[] }) {
+  const [open, setOpen] = useState(false)
+  const listId = useId()
   const rows = status.tabs.map((update, at) => ({ update, at })).sort((a, b) => STATE[a.update.state].rank - STATE[b.update.state].rank || a.at - b.at)
-  const waiting = status.tabs.filter(update => update.state === 'needs').length
+  const targets = tabs?.length === rows.length ? tabs : undefined
+  const counts = COUNTS.map(([state, words]) => ({ state, n: status.tabs.filter(update => update.state === state).length, words })).filter(item => item.n)
+  const waiting = counts.find(item => item.state === 'needs')?.n ?? 0
   const when = stamp(time)
-  const count = `${status.tabs.length} ${status.tabs.length === 1 ? 'tab' : 'tabs'}`
-  return <section className="status-card" data-msg-id={id} aria-label={`Tether status: ${count}${waiting ? `, ${waiting} waiting on you` : ''}`}>
-    <p className="status-title"><Radio size={13} aria-hidden="true" /><span>Tether status · {count}</span>{when && <time dateTime={time}>{when}</time>}</p>
-    <ul>{rows.map(({ update, at }) => <StatusRow key={at} update={update} />)}</ul>
+  const total = `${status.tabs.length} tab ${status.tabs.length === 1 ? 'update' : 'updates'}`
+  return <section className={`status-card ${waiting ? 'has-needs' : ''}`} data-msg-id={id}
+    aria-label={`Tether status: ${total}${counts.map(item => `, ${item.n} ${item.words}`).join('')}`}>
+    <button type="button" className="status-toggle" aria-expanded={open} aria-controls={listId} onClick={() => setOpen(value => !value)}>
+      <Radio className="status-toggle-icon" size={13} aria-hidden="true" />
+      <span className="status-summary">
+        <span>Tether status · {total}</span>
+        {counts.map(item => <span key={item.state} className={`status-count ${item.state}`}>
+          {item.state === 'needs' && <Hand size={13} aria-hidden="true" />}{item.n} {item.words}
+        </span>)}
+      </span>
+      {when && <time dateTime={time}>{when}</time>}
+      <ChevronDown className="status-chevron" size={15} aria-hidden="true" />
+    </button>
+    <ul id={listId} hidden={!open}>{rows.map(({ update, at }) => <StatusRow key={at} update={update} tab={targets?.[at]} />)}</ul>
   </section>
 }

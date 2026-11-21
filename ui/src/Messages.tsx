@@ -113,7 +113,7 @@ function WatchGroup({ id, run, time, api, session }: { id: string; run: WatchRun
       : <div key={item.id} className="watch-reply" data-msg-id={item.id}>{item.text.split(/\n\s*\n/).map((part, at) => <p key={at}><Linked text={part.trim()} /></p>)}<MessageActions text={item.text} time={item.time} /></div>)}</div>
   </details>
 }
-export function Message({ id, role, kind, title, text, count, time, tools, api, session, actions = true, images, imageKey, live, runningShown, watch, advisor }: { watch?: WatchRun; live?: boolean; runningShown?: boolean; images?: number; imageKey?: string; actions?: boolean; id: string; role: string; kind?: unknown; title?: string; text: string; count?: unknown; time?: string; tools?: ToolSummary[]; advisor?: AdvisorCall; api: Api; session: string }) {
+export function Message({ id, role, kind, title, text, source, legacy, tabs, count, time, tools, api, session, actions = true, images, imageKey, live, runningShown, watch, advisor }: { watch?: WatchRun; live?: boolean; runningShown?: boolean; images?: number; imageKey?: string; actions?: boolean; id: string; role: string; kind?: unknown; title?: string; text: string; source?: ChatMessage['source']; legacy?: ChatMessage['legacy']; tabs?: ChatMessage['tabs']; count?: unknown; time?: string; tools?: ToolSummary[]; advisor?: AdvisorCall; api: Api; session: string }) {
   if (kind === 'watch' && watch) return <WatchGroup id={id} run={watch} time={time} api={api} session={session} />
   if (kind === 'advisor') return advisor
     ? <AdvisorRow id={id} advisor={advisor} time={time} live={live} />
@@ -156,15 +156,18 @@ export function Message({ id, role, kind, title, text, count, time, tools, api, 
   // A "!" line the person sent: the agent ran it in its terminal. Show it as the prompt line of the output below it.
   const command = role === 'user' && !kind ? /^!\s*(\S[\s\S]*)$/.exec(text) : null
   if (command) return <div className="shell-command" data-msg-id={id} role="group" aria-label="Shell command"><span className="shell-sigil" aria-hidden="true">$</span><code>{command[1]}</code></div>
-  // Tether's review loop types these into a tab: a review request to the reviewer, or its feedback to the worker.
-  const review = role === 'user' && !kind ? parseReview(text) : null
-  if (review) return <ReviewCard id={id} review={review} />
-  // Tether's coordinator updates: which tabs finished, failed, or wait on you (server/coordinator.py message()).
-  const status = role === 'user' && !kind ? parseStatus(text) : null
-  if (status) return <StatusCard id={id} status={status} time={time} />
-  // The rules Tether gives a tab when it becomes the coordinator (server/coordinator.py). They are not the person's words.
-  if (role === 'user' && !kind && text.startsWith(COORDINATOR_RULES)) {
-    return <details className="tool-row compact-row" data-msg-id={id}><summary><Radio size={15} />Coordinator rules<ChevronRight size={15} /></summary><pre>{text.slice(COORDINATOR_RULES.length)}</pre></details>
+  if (role === 'user' && !kind && (source === 'tether' || legacy)) {
+    const review = parseReview(text)
+    if (review && (source === 'tether' || review.kind === 'request' || review.kind === 'feedback')) {
+      return <ReviewCard id={id} review={review} />
+    }
+  }
+  if (role === 'user' && !kind && source === 'tether') {
+    const status = parseStatus(text)
+    if (status) return <StatusCard id={id} status={status} time={time} tabs={tabs} />
+    if (text.startsWith(COORDINATOR_RULES)) {
+      return <details className="tool-row compact-row" data-msg-id={id}><summary><Radio size={15} />Coordinator rules<ChevronRight size={15} /></summary><pre>{text.slice(COORDINATOR_RULES.length)}</pre></details>
+    }
   }
   // Claude Code writes these when you stop a turn: a quiet line, not a bubble with your name.
   const stopped = role === 'user' && !kind ? INTERRUPTED.get(text.trim()) : undefined
@@ -338,7 +341,7 @@ function QuoteBlock(props: React.ComponentProps<'blockquote'>) {
 export function Markdown() { return <MarkdownTextPrimitive remarkPlugins={[remarkGfm, remarkPaths, remarkTabs]} smooth={false} components={{ CodeHeader, code: InlineCode, a: Link, blockquote: QuoteBlock }} /> }
 export const convertMessage = (message: ChatMessage): ThreadMessageLike => ({
   id: message.id, role: message.role, content: message.text,
-  metadata: { custom: { kind: message.kind, title: message.title, count: message.count, tools: message.tools, advisor: message.advisor, text: message.text, time: message.time, images: message.images, imageKey: message.image_key,
+  metadata: { custom: { kind: message.kind, title: message.title, count: message.count, tools: message.tools, advisor: message.advisor, text: message.text, source: message.source, legacy: message.legacy, tabs: message.tabs, time: message.time, images: message.images, imageKey: message.image_key,
     watch: message.kind === 'watch' ? { members: message.members ?? [], watches: message.watches ?? [], cycles: message.cycles ?? 1, rearmed: !!message.rearmed, schedule: !!message.schedule, reported: !!message.reported, result: message.result } : undefined } },
 })
 

@@ -24,6 +24,7 @@ import audit
 import helper_tabs
 import paths
 import review_scope
+import shell_log
 from terminal_input import DraftError
 
 FILE = paths.CACHE / 'review-links.json'
@@ -1228,8 +1229,7 @@ CORRECTION_WAIT = 'Wait for the next review.'
 
 
 def prompt_source(text):
-    if text.startswith('[Working directory changed to '):
-        text = text.partition('. Run commands and resolve relative paths there.] ')[2]
+    text = shell_log.strip_folder_note(text)
     if text.startswith(PARENT_SUMMARY) and text.rstrip().endswith(PARENT_SUMMARY_END):
         return 'review-summary'
     notice = PARENT_NOTICE.match(text)

@@ -5,35 +5,54 @@ const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
 const { getBrowser, serveLocal, shotsDir } = require('./browser_test_helper.cjs')
+const { status, review } = require('../server/fixtures/injected_prompts/browser.json')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = shotsDir('status-card')
+const SHOTS = process.env.SHOTS && shotsDir('status-card')
 const sizes = [[320, 720], [1280, 900]]
-const CLI = 'python3 /opt/tether/server/agent_coordinator_cli.py'
-const head = (count, mode = 'all') => `[Tether status] ${count} tab update${count === 1 ? '' : 's'}. Tell the user what changed and what needs them, in one or two lines per tab. `
-  + `Reports are set to "${mode}". If you do not have the coordinator rules, run \`${CLI} claim\`.`
-const LONG = 'B12 is done: the commit a1b2c3d is on main and deployed. The settings page now loads in 300 ms on a phone over 3G, and the review approved the change with no open findings.'
-const status = [head(4),
-  '- `B12 settings speed with a long tab name` (%7) finished: ' + LONG,
-  '- `B13 login` (%8) failed: the server tests failed at test_auth.py:42.',
-  '- `B14 export` (%9) waits on the user: question: Keep CSV or move to JSON?',
-  '- `Gone tab` (%55) finished and asks the user: Should I deploy?'].join('\n')
+const [header, row] = status.split('\n')
+const LONG = row.split(' finished: ')[1]
+const pastedStatus = [header.replace('4 tab updates.', '1 tab update.'), '- `Sample guide` (%10) finished'].join('\n')
 const rules = '[Tether] The user made this tab the coordinator of this session in Tether.\nYou are the coordinator of this Tether session.'
 const quoted = 'Why did you write "[Tether status] 1 tab update." in the middle of this?'
+const sharedPrompt = 'Try the sample filter'
+const realPrompt = 'Clear the sample filter'
 const now = new Date().toISOString()
+const tabs = ['%7', '%8', '%9', '%55'].map(pane => ({ pane, session: '$1', thread: 't' + pane }))
+const user = (id, text, meta) => ({ id, role: 'user', text, time: now, ...meta })
 const messages = [
-  { id: 'u1', role: 'user', text: rules, time: now },
+  user('u1', rules, { source: 'tether', prompt: 'rules' }),
+  user('pasted-rules', rules),
   { id: 'a1', role: 'assistant', text: 'I am the coordinator now.', time: now },
-  { id: 's1', role: 'user', text: status, time: now },
-  { id: 'a2', role: 'assistant', text: 'B14 needs you.', time: now },
-  { id: 'i1', role: 'user', text: '[Request interrupted by user]', time: now },
-  { id: 'q1', role: 'user', text: quoted, time: now },
-  // One tab fewer than the header says: the parser refuses, so the text stays a bubble.
-  { id: 's2', role: 'user', text: [head(2), '- `B15 docs` (%10) finished'].join('\n'), time: now },
+  ...Object.entries(review).flatMap(([kind, text]) => [
+    user('review-' + kind, text, { source: 'tether', prompt: 'review' }),
+    user('pasted-' + kind, text),
+  ]),
+  user('short-tabs', pastedStatus, { source: 'tether', prompt: 'status', tabs: [tabs[1], tabs[2]] }),
+  user('s2', pastedStatus.replace('1 tab update.', '2 tab updates.'), { source: 'tether', prompt: 'status' }),
+  user('q1', quoted),
+  user('pasted-status', pastedStatus),
+  user('s1', status, { source: 'tether', prompt: 'status', tabs }),
+  { id: 'a2', role: 'assistant', text: 'The export needs your answer.', time: now },
+  user('i1', '[Request interrupted by user]'),
+  user('legacy-status', pastedStatus, { legacy: true }),
+  user('legacy-approved', review.approved, { legacy: true }),
+  user('legacy-feedback', review.feedback, { legacy: true }),
+  user('legacy-request', review.request, { legacy: true }),
+  user('pill-pasted', sharedPrompt),
+  { id: 'pill-spacer', role: 'assistant', text: 'The filter matched the sample.\n\nThe list has one item.' },
+  user('pill-real', realPrompt),
+  user('pill-marked', sharedPrompt, { source: 'tether', prompt: 'review' }),
+  { id: 'pill-tail', role: 'assistant', text: Array.from({ length: 28 }, (_, n) => `Sample result ${n + 1}`).join('\n\n') },
 ]
-const pane = (id, name) => ({ id, tmux_session: '$1', label: `project:0.${id.slice(1)}`, pane_name: name, agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: 't' + id, approval: null })
-// %9 is now another tab: tmux reused the id. The name check keeps the link off it.
-const panes = [pane('%1', 'Coordinator'), pane('%7', 'B12 settings speed with a long tab name'), pane('%8', 'B13 login'), pane('%9', 'Something else')]
+const pane = (id, name, extra) => ({ id, tmux_session: '$1', label: `project:0.${id.slice(1)}`, pane_name: name, agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: 't' + id, approval: null, ...extra })
+const panes = [
+  pane('%1', 'Coordinator'),
+  pane('%7', 'Settings speed with a long tab name'),
+  pane('%18', 'Renamed after the report', { thread: 't%8' }),
+  pane('%9', 'Sample export', { thread: 'different' }),
+  pane('%55', 'Gone tab', { tmux_session: '$2' }),
+]
 const fixture = {
   undo: { entries: [], next_undo: null, next_redo: null, next_undo_label: null, next_redo_label: null },
   sessions: { sessions: panes, default_thread: 't%1' },
@@ -53,7 +72,7 @@ async function main() {
   const pageErrors = [], writes = []
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
   try {
-    await fs.mkdir(SHOTS, { recursive: true })
+    if (SHOTS) await fs.mkdir(SHOTS, { recursive: true })
     server = http.createServer(async (req, res) => {
       const url = new URL(req.url, 'http://127.0.0.1')
       const file = url.pathname === '/chat/' ? path.join(DIST, 'index.html') : path.resolve(DIST, '.' + decodeURIComponent(url.pathname.slice('/chat'.length)))
@@ -83,6 +102,12 @@ async function main() {
         if (request.method() === 'POST' && endpoint === 'ui-usage') return route.fulfill({ json: { gen: '' } })
         if (request.method() !== 'GET') { writes.push(`${request.method()} ${endpoint}`); return route.fulfill({ json: {} }) }
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
+        if (endpoint === 'search') {
+          const text = url.searchParams.get('q')
+          const matches = messages.flatMap((message, index) => message.text === text
+            ? [{ id: message.id, role: message.role, source: message.source, snippet: message.text, from_end: messages.length - index }] : []).reverse()
+          return route.fulfill({ json: { matches, total: matches.length, max_limit: 2000 } })
+        }
         return route.fulfill({ json: fixture[endpoint] || {} })
       }
       if (url.origin === origin && url.pathname.startsWith('/chat/')) return serveLocal(route)
@@ -96,10 +121,25 @@ async function main() {
     })
     // The chat also keeps an inert copy (it is not shown to anyone): look only at the live one.
     const live = selector => page.locator(`${selector}:not([inert] *)`)
+    const message = id => live(`[data-msg-id="${id}"]`)
     const card = live('.status-card[data-msg-id="s1"]')
+    const shot = name => SHOTS && page.screenshot({ path: path.join(SHOTS, name) })
     const open = async () => {
       await page.goto(`${origin}/chat/?session=%251`, { waitUntil: 'load' })
       await card.waitFor()
+    }
+    const showMineBarAt = async id => {
+      const scroll = live('section.chat-panel[data-pane="%1"] .chat-scroll')
+      await scroll.evaluate(async (node, id) => {
+        node.scrollTop = node.scrollHeight
+        node.dispatchEvent(new Event('scroll'))
+        await new Promise(requestAnimationFrame)
+        const target = node.querySelector(`[data-msg-id="${id}"]`)
+        node.scrollTop += target.getBoundingClientRect().top - node.getBoundingClientRect().top - 28
+        node.dispatchEvent(new Event('scroll'))
+        await new Promise(requestAnimationFrame)
+      }, id)
+      return live('.mine-bar.shown .mine-bar-text').innerText()
     }
     // WCAG 2.2 1.4.3: text against the background it sits on (every ancestor layer composited).
     const contrast = selector => page.evaluate(selector => {
@@ -119,7 +159,7 @@ async function main() {
         return { text: el.textContent.trim().slice(0, 24), ratio: Math.round((hi + 0.05) / (lo + 0.05) * 100) / 100 }
       })
     }, selector)
-    const TEXT = '.status-title span, .status-title time, .status-name, .status-state, .status-text, .notice-line span'
+    const TEXT = '.status-summary span, .status-toggle time, .status-name, .status-state, .status-text, .notice-line span'
     const low = list => list.filter(item => item.ratio < 4.5).map(item => `${item.text} ${item.ratio}`).join('; ')
 
     for (const [width, height] of sizes) {
@@ -127,8 +167,23 @@ async function main() {
       await page.setViewportSize({ width, height })
       await open()
 
-      // The card: a header with the count, then one row per tab, what needs the person first. No pane id, no boilerplate.
-      check(`${at} header names the count`, (await card.locator('.status-title').innerText()).includes('Tether status · 4 tabs'))
+      // Folded first: one line with the count and what waits on the person, in the attention style; the rows are hidden.
+      const toggle = card.locator('.status-toggle')
+      const summary = await toggle.innerText()
+      check(`${at} starts folded`, await toggle.getAttribute('aria-expanded') === 'false' && !(await card.locator('ul').isVisible()))
+      check(`${at} folded line names the count`, summary.includes('Tether status · 4 tab updates'), summary)
+      check(`${at} folded line says what waits`, /1 waits on you/.test(summary) && /1 asks you/.test(summary) && /1 failed/.test(summary), summary)
+      check(`${at} folded line has the attention style`, await card.evaluate(node => node.classList.contains('has-needs'))
+        && await toggle.evaluate(node => getComputedStyle(node).backgroundColor !== 'rgba(0, 0, 0, 0)'))
+      const folded = await card.boundingBox()
+      check(`${at} folded card is one line tall`, folded.height <= (width === 320 ? 96 : 56), JSON.stringify(folded))
+      const shortCard = message('short-tabs')
+      if (await shortCard.locator('.status-toggle').count()) await shortCard.locator('.status-toggle').click()
+      await card.scrollIntoViewIfNeeded()
+      await shot(`card-${width}-folded.png`)
+      await toggle.click()
+      check(`${at} tap opens the rows`, await toggle.getAttribute('aria-expanded') === 'true' && await card.locator('ul').isVisible())
+      check(`${at} the toggle controls the list`, await card.locator('ul').getAttribute('id') === await toggle.getAttribute('aria-controls'))
       const rows = card.locator('.status-row')
       const order = await rows.evaluateAll(list => list.map(row => row.className.replace('status-row ', '')))
       check(`${at} waits-on-you first, then asks, failed, finished`, order.join(',') === 'needs,asks,failed,done', order.join(','))
@@ -139,10 +194,10 @@ async function main() {
       check(`${at} the waiting row has the attention wash`, await rows.first().evaluate(row => getComputedStyle(row).backgroundColor !== 'rgba(0, 0, 0, 0)'))
       check(`${at} the waiting row shows its question`, (await rows.first().innerText()).includes('Keep CSV or move to JSON?'))
 
-      // Links: a live tab with the same name opens; a reused id with another name, and a gone tab, stay plain text.
-      check(`${at} B13 is a link`, await card.getByRole('button', { name: 'Open the tab B13 login' }).count() === 1)
-      check(`${at} a reused pane id is not a link`, await card.getByRole('button', { name: 'Open the tab B14 export' }).count() === 0)
-      check(`${at} a gone tab is not a link`, await card.getByRole('button', { name: 'Open the tab Gone tab' }).count() === 0)
+      check(`${at} the same chat remains a link after a new pane id and name`, await card.getByRole('button', { name: 'Open the tab Sample sign-in' }).count() === 1)
+      check(`${at} the old pane id and name with a different thread display plain text`, await card.getByRole('button', { name: 'Open the tab Sample export' }).count() === 0)
+      check(`${at} the same name and thread in another session display plain text`, await card.getByRole('button', { name: 'Open the tab Gone tab' }).count() === 0)
+      check(`${at} a list with the wrong row count has no links`, await message('short-tabs').getByRole('button', { name: /Open the tab/ }).count() === 0)
 
       // Expand: the long summary is cut to one line; its button shows the rest and says so.
       const done = rows.nth(3)
@@ -155,11 +210,11 @@ async function main() {
         check(`${at} the expand button is at least 24 px`, box.width >= 24 && box.height >= 24, JSON.stringify(box))
       }
       await card.scrollIntoViewIfNeeded()
-      await page.screenshot({ path: path.join(SHOTS, `card-${width}.png`) })
+      await shot(`card-${width}.png`)
       await more.click()
       check(`${at} expand shows the whole summary`, await more.getAttribute('aria-expanded') === 'true' && (await done.boundingBox()).height > tall.height)
       check(`${at} the expanded text is the region it controls`, await live(`[id="${await more.getAttribute('aria-controls')}"]`).innerText() === LONG)
-      await page.screenshot({ path: path.join(SHOTS, `card-${width}-open.png`) })
+      await shot(`card-${width}-open.png`)
       await more.click()
       check(`${at} collapse again`, await more.getAttribute('aria-expanded') === 'false')
 
@@ -168,6 +223,16 @@ async function main() {
       check(`${at} interrupted is a notice line`, (await live('[data-msg-id="i1"]').innerText()).trim() === 'You stopped the turn')
       check(`${at} a quote of the header stays a bubble`, await live('[data-msg-id="q1"]').evaluate(node => node.classList.contains('user-message')))
       check(`${at} a status with the wrong count stays a bubble`, await live('[data-msg-id="s2"]').evaluate(node => node.classList.contains('user-message')))
+      for (const kind of Object.keys(review)) {
+        check(`${at} marked ${kind} is a review card`, await message('review-' + kind).evaluate(node => node.classList.contains('review-message')))
+        check(`${at} pasted ${kind} stays a bubble`, await message('pasted-' + kind).evaluate(node => node.classList.contains('user-message')))
+      }
+      check(`${at} pasted rules stay a bubble`, await message('pasted-rules').evaluate(node => node.classList.contains('user-message')))
+      check(`${at} pasted status stays a bubble`, await message('pasted-status').evaluate(node => node.classList.contains('user-message')))
+      check(`${at} legacy review request is a card`, await message('legacy-request').evaluate(node => node.classList.contains('review-message')))
+      check(`${at} legacy review feedback is a card`, await message('legacy-feedback').evaluate(node => node.classList.contains('review-message')))
+      check(`${at} legacy status stays a bubble`, await message('legacy-status').evaluate(node => node.classList.contains('user-message')))
+      check(`${at} legacy approval stays a bubble`, await message('legacy-approved').evaluate(node => node.classList.contains('user-message')))
 
       check(`${at} no sideways scroll`, !(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)))
       for (const theme of ['light', 'dark']) {
@@ -175,13 +240,36 @@ async function main() {
         const bad = low(await contrast(TEXT))
         check(`${at} ${theme} text contrast at least 4.5:1`, !bad, bad)
         await card.scrollIntoViewIfNeeded()
-        await page.screenshot({ path: path.join(SHOTS, `card-${width}-${theme}.png`) })
+        await shot(`card-${width}-${theme}.png`)
       }
       await page.evaluate(() => { document.documentElement.dataset.theme = 'light' })
 
+      const composer = live('form.composer textarea')
+      await composer.press('ArrowUp')
+      check(`${at} Up skips the marked prompt`, await composer.inputValue() === realPrompt)
+      await composer.press('ArrowUp')
+      check(`${at} Up recalls the identical unmarked paste`, await composer.inputValue() === sharedPrompt)
+      await composer.press('ArrowUp')
+      check(`${at} Up recalls the legacy review request`, await composer.inputValue() === review.request)
+      await composer.fill('')
+
+      check(`${at} the You pill skips the marked prompt`, await showMineBarAt('pill-marked') === realPrompt)
+      await shot(`you-pill-${width}.png`)
+      check(`${at} the You pill shows the identical unmarked paste`, await showMineBarAt('pill-pasted') === sharedPrompt)
+      check(`${at} the You pill keeps the legacy review card`, (await showMineBarAt('legacy-request')).startsWith('[Tether review] The Codex tab'))
+
+      await live('button.search-toggle').click()
+      await live('input[type="search"][aria-label="Words to find"]').fill(sharedPrompt)
+      const searchLabels = live('.search-results small')
+      await searchLabels.nth(1).waitFor()
+      check(`${at} search labels the marked prompt Tether and the identical paste You`,
+        (await searchLabels.allInnerTexts()).join(',') === 'Tether,You')
+      await shot(`search-${width}.png`)
+      await live('dialog.search-sheet button[aria-label="Close"]').click()
+
       // The link opens that tab.
-      await card.getByRole('button', { name: 'Open the tab B13 login' }).click()
-      await page.locator('section.chat-panel[data-pane="%8"]').waitFor()
+      await card.getByRole('button', { name: 'Open the tab Sample sign-in' }).press('Enter')
+      await live('section.chat-panel[data-pane="%18"]').waitFor()
       check(`${at} the link opens the tab`, true)
     }
     check('no page errors', pageErrors.length === 0, pageErrors.join('; '))

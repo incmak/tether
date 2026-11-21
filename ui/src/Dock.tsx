@@ -290,7 +290,7 @@ export function LiveSheet({ api, pane, show, taskDetails, crons, scheduled, onCl
     <div className="live-actions"><button type="button" className="secondary" onClick={() => { onClose(); onTerminal() }}><SquareTerminal size={16} />Open terminal</button></div>
   </dialog>
 }
-interface SearchMatch { id: string; role: string; kind?: string; time?: string; from_end: number; snippet: string }
+interface SearchMatch { id: string; role: string; source?: 'tether'; kind?: string; time?: string; from_end: number; snippet: string }
 // Finds words in the whole conversation (not only the loaded part). Tapping a result loads enough of the chat and scrolls to it.
 export function SearchSheet({ api, pane, shell, onClose, onPick }: { api: Api; pane: Pane; shell: boolean; onClose: () => void; onPick: (match: SearchMatch, maxLimit: number) => void }) {
   const modal = useModal(true, onClose)
@@ -325,7 +325,7 @@ export function SearchSheet({ api, pane, shell, onClose, onPick }: { api: Api; p
     {result && <p className="search-count" role="status">{result.total === 0 ? 'No messages found.' : `${result.total} ${result.total === 1 ? 'message' : 'messages'}${result.total > result.matches.length ? `, newest ${result.matches.length} shown` : ''}`}</p>}
     {result && !!result.matches.length && <ul className="search-results">{result.matches.map(match => <li key={match.id}>
       <button type="button" disabled={match.from_end > result.max_limit} onClick={() => onPick(match, result.max_limit)}>
-        <small>{match.kind === 'advisor' ? 'Advisor' : match.kind === 'actions' ? 'Tools' : match.role === 'user' ? 'You' : 'Agent'}{match.time ? ` · ${since(Date.parse(match.time) / 1000)}` : ''}{match.from_end > result.max_limit ? ' · too far back to open' : ''}</small>
+        <small>{match.source === 'tether' ? 'Tether' : match.kind === 'advisor' ? 'Advisor' : match.kind === 'actions' ? 'Tools' : match.role === 'user' ? 'You' : 'Agent'}{match.time ? ` · ${since(Date.parse(match.time) / 1000)}` : ''}{match.from_end > result.max_limit ? ' · too far back to open' : ''}</small>
         <span>{marked(match.snippet)}</span>
       </button></li>)}</ul>}
   </dialog>

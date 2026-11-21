@@ -1200,8 +1200,28 @@ button.live-chip:active { background: var(--line); }
 .review-path { margin-top: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
 /* Tether's coordinator update (StatusCard.tsx): one row per tab. A row that waits on you gets the needs-you wash (attention.css). */
 .status-card { margin: 16px 0; padding: 4px 0; border-left: 2px solid var(--line); }
-.status-title { display: flex; align-items: center; gap: 6px; margin: 0 0 4px; padding-left: 12px; font-size: 13px; color: var(--muted); }
-.status-title time { margin-left: auto; font-size: 12px; font-variant-numeric: tabular-nums; }
+/* Folded by default: one line that says how many tabs reported and what waits on the person. */
+.status-toggle { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 32px; margin: 0; padding: 4px 8px 4px 12px; border: 0; border-radius: var(--radius); background: transparent; color: var(--muted); font-size: 13px; text-align: left; cursor: pointer; }
+.status-toggle:hover { background: var(--hover); }
+.status-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.status-toggle-icon { flex: none; }
+.status-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 0 6px; min-width: 0; }
+.status-count { display: inline-flex; align-items: center; gap: 4px; color: var(--text); }
+.status-count::before { content: "·"; color: var(--muted); }
+.status-count.needs { font-weight: 600; }
+.status-count.needs svg { color: var(--attention); }
+.status-count.needs::before { margin-right: 2px; }
+.status-toggle time { margin-left: auto; padding-left: 6px; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.status-chevron { flex: none; }
+.status-toggle[aria-expanded='true'] .status-chevron { transform: rotate(180deg); }
+.status-card.has-needs { border-left-color: var(--attention); }
+.status-card.has-needs > .status-toggle { background: color-mix(in srgb, var(--attention) 13%, transparent); }
+/* --muted and --attention text on the wash fall under 4.5:1: the text stays --text, the icons carry the color. */
+.status-card.has-needs > .status-toggle { color: var(--text); }
+.status-card.has-needs > .status-toggle .status-toggle-icon { color: var(--attention); }
+.status-card ul[hidden] { display: none; }
+.status-card ul:not([hidden]) { margin-top: 4px; }
+@media (pointer: coarse) { .status-toggle { min-height: var(--control); } }
 /* Wide: the rows share columns (subgrid), so names, states and summaries line up. A long name gets at most 40%. */
 .status-card ul { display: grid; grid-template-columns: auto fit-content(40%) minmax(0, 1fr) auto; margin: 0; padding: 0; list-style: none; }
 .status-row { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: center; gap: 2px 8px; min-height: 36px; margin-left: 4px; padding: 4px 8px; border: 1px solid transparent; border-radius: var(--radius); font-size: 14px; line-height: 1.4; }
@@ -1210,9 +1230,10 @@ button.live-chip:active { background: var(--line); }
 .status-row.failed .status-icon { color: var(--error); }
 .status-row.asks .status-icon, .status-row.needs .status-icon { color: var(--attention); }
 .status-row.needs { border-color: color-mix(in srgb, var(--attention) 28%, transparent); background: color-mix(in srgb, var(--attention) 13%, transparent); }
-.status-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; white-space: nowrap; }
-.status-name { overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
-.status-head .file-link { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The name wraps instead of cutting: a closed tab has no other place to read its full name (WCAG 1.4.10). */
+.status-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 8px; min-width: 0; }
+.status-name { font-weight: 600; overflow-wrap: anywhere; }
+.status-head .file-link { min-width: 0; }
 .status-state { flex: none; color: var(--text); font-size: 13px; }
 .status-row.needs .status-state, .status-row.failed .status-state { font-weight: 600; }
 .status-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }

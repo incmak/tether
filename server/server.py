@@ -28,6 +28,7 @@ import audit
 import codex_messages
 import continuations
 import coordinator
+import injected_prompts
 import pane_icons
 import antigravity
 from antigravity import snapshot as antigravity_snapshot, transcript_message as antigravity_message, window_active
@@ -512,7 +513,7 @@ def monitor_notices():
             time.sleep(2)
             continue
         _observe_push(entries)
-        review_links.observe(entries, shared_status, review_send, last_reply,
+        review_links.observe(entries, shared_status, partial(review_send, receipt=True), last_reply,
                              alert=review_alert, work_mark=review_work_mark, review_reply=review_reply,
                              turn_source=review_turn_source, level=review_level,
                              parent=lambda entry: review_parent(entry, entries),
@@ -812,9 +813,11 @@ def session_row(entry):
 def brief_messages(entry):
     """The chat for a tab brief, from the transcript only (no screen capture): user prompts and text replies."""
     if entry.get('agent') == 'claude':
-        return claude_snapshot(entry, display_text)['messages']
-    path = Path(entry.get('transcript') or '')
-    return history.read(path, codex_state, codex_consume)['messages'] if path.is_file() else []
+        messages = claude_snapshot(entry, display_text)['messages']
+    else:
+        path = Path(entry.get('transcript') or '')
+        messages = history.read(path, codex_state, codex_consume, with_offset=True)['messages'] if path.is_file() else []
+    return injected_prompts.mark(entry, messages)
 
 
 def brief_enabled():
@@ -960,7 +963,7 @@ def settings_time(stamp):
         return None
 
 
-def codex_consume(state, index, entry):
+def codex_consume(state, index, entry, *, offset=None):
     """Fold one rollout record into the chat messages, busy flag and latest usage figures."""
     messages = state['messages']
     payload = entry.get('payload', {})
@@ -1063,8 +1066,11 @@ def codex_consume(state, index, entry):
         text = continuations.unwrap(part['text']) if explicit_user else display_text(part['text'])
         if not text.strip() or (not explicit_user and text.startswith('# AGENTS.md instructions')):
             continue
-        messages.append(dict(part, id=str(index) if at == 0 else f'{index}.{at}', text=text,
-                             time=entry.get('timestamp'), phase=payload.get('phase')))
+        message = dict(part, id=str(index) if at == 0 else f'{index}.{at}', text=text,
+                       time=entry.get('timestamp'), phase=payload.get('phase'))
+        if offset is not None and role == 'user' and not part.get('kind'):
+            message['_record_id'] = injected_prompts.codex_id(offset, entry.get('timestamp'))
+        messages.append(message)
 
 
 def claude_cwd(entry):
@@ -1461,7 +1467,7 @@ def snapshot(config=None):
         metrics = codex_metrics(config, None)
         return {'messages': terminal_replies.merge(config, merge_quota_notices(dict(config, agent='codex'), [])), 'busy': False, 'thread': config['thread'], 'usage': metrics, 'footer': codex_footer(config, metrics),
                 'agent': 'codex', 'writable': config.get('writable', True), 'session': config.get('id')}
-    state = history.read(path, codex_state, codex_consume)
+    state = history.read(path, codex_state, codex_consume, with_offset=True)
     messages, busy = state['messages'], state['busy']
     try:
         cleared = fresh_codex_screen(capture(config))
@@ -1473,6 +1479,12 @@ def snapshot(config=None):
                             tier=state.get('tier', ''))
     return {'messages': terminal_replies.merge(config, merge_quota_notices(dict(config, agent='codex'), activity.group_actions(activity.merge(list(messages))))), 'dropped': state['dropped'], 'busy': busy, 'thread': config['thread'], 'usage': metrics,
             'agent': 'codex', 'writable': config.get('writable', True), 'session': config.get('id'), 'footer': codex_footer(config, metrics)}
+
+
+def marked_snapshot(entry):
+    data = snapshot(entry)
+    messages = data.get('messages')
+    return dict(data, messages=injected_prompts.mark(entry, messages)) if isinstance(messages, list) else data
 
 
 def last_reply(entry):
@@ -1602,12 +1614,16 @@ def send_text(config, message, state=None, *, held=False):
     return 'queued' if state == 'Working' else 'submitted'
 
 
-def review_send(config, message, state=None):
+def review_send(config, message, state=None, *, receipt=False):
     """Deliver a review around a quiet Claude draft, preserving ordinary send guards."""
     config = dict(config, _review=True)
     stashed = stash_quiet_draft(config) if config.get('agent') == 'claude' else None
     try:
-        result = send_text(config, message, state)
+        if receipt:
+            with SEND_LOCK, injected_prompts.track_send(config, message, 'review'):
+                result = send_text(config, message, state, held=True)
+        else:
+            result = send_text(config, message, state)
     except Exception as exc:
         try:
             if 'reached the agent input' in str(exc):
@@ -1700,7 +1716,7 @@ def chat_payload(config, shell_mode=False, limit=DEFAULT_WINDOW, preview=False):
     before = change_signature(config) if preview else None
     shell = config['agent'] == 'shell' and shell_mode
     state = {'state': 'Shell', 'approval': None} if shell else auto_resume.overlay(config, live_status(config))
-    data = shell_snapshot(config) if shell else snapshot(config)
+    data = shell_snapshot(config) if shell else marked_snapshot(config)
     if not shell and isinstance(data.get('messages'), list):
         data = dict(data, messages=shell_log.merge(config['id'], data['messages']))
     if data.get('busy') and state['state'] == 'Idle':
@@ -1750,17 +1766,21 @@ def find_messages(messages, query, limit=60):
             at = lower.find(words[0])
             start = max(0, at - 60)
             snippet = ' '.join(text[start:at + len(words[0]) + 120].split())
-            found.append({'id': message.get('id'), 'role': message.get('role'), 'kind': message.get('kind'), 'time': message.get('time'),
-                          'from_end': len(messages) - index, 'snippet': ('…' if start else '') + snippet})
+            match = {'id': message.get('id'), 'role': message.get('role'), 'kind': message.get('kind'), 'time': message.get('time'),
+                     'from_end': len(messages) - index, 'snippet': ('…' if start else '') + snippet}
+            if message.get('source') == 'tether':
+                match['source'] = 'tether'
+            found.append(match)
     return {'matches': found[:limit], 'total': len(found)}
 
 
 def search_payload(config, query, shell_mode=False):
     shell = config['agent'] == 'shell' and shell_mode
-    data = shell_snapshot(config) if shell else snapshot(config)
+    data = shell_snapshot(config) if shell else marked_snapshot(config)
     messages = data.get('messages')
     if not shell and isinstance(messages, list):
         messages = shell_log.merge(config['id'], messages)
+        messages = continuations.decorate(config, dict(data, messages=messages))['messages']
     return dict(find_messages(messages, query), max_limit=MAX_WINDOW)
 
 
@@ -1773,7 +1793,7 @@ def change_signature(config):
             parts.append((info.st_ino, info.st_mtime_ns, info.st_size))
         except (OSError, TypeError):
             parts.append(None)
-    return tuple(parts)
+    return (*parts, injected_prompts.revision(config))
 
 
 CHAT_UI_ROOT = Path(os.environ.get('TMUX_CHAT_DIST', str(Path(__file__).resolve().parent.parent / 'ui' / 'dist')))
@@ -2345,7 +2365,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = footer.parse(screen) if config['agent'] == 'claude' else {}
                 result = claude_hooks.overlay(config, result, screen_read_at=screen_read_at)
                 if config['agent'] == 'codex' and not config.get('ambiguous'):
-                    state = history.read(config['transcript'], codex_state, codex_consume)
+                    state = history.read(config['transcript'], codex_state, codex_consume, with_offset=True)
                     result = codex_footer(config, codex_metrics(config, state['usage'], state['model'], state.get('effort', ''),
                                                                 state.get('credits'), tier=state.get('tier', '')))
                     live = claude_hooks.codex_live(config)
@@ -2838,7 +2858,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(200, {'ok': True})
                 return
             if self.path == agent_tabs.PATH:
-                agent_tabs.serve(self, body, sessions=sessions, fresh=fresh_sessions, folder=agent_folder, snapshot=snapshot,
+                agent_tabs.serve(self, body, sessions=sessions, fresh=fresh_sessions, folder=agent_folder, snapshot=marked_snapshot,
                                  last_reply=last_reply, run=subprocess.run, lock=SEND_LOCK,
                                  status=shared_status, send=review_send, timeline=timeline)
                 return
@@ -3214,7 +3234,7 @@ class Handler(BaseHTTPRequestHandler):
                             self.respond(200, {'pane': existing})
                             return
                     state = live_status(entry)['state']
-                    data = continuations.decorate(entry, snapshot(entry))
+                    data = continuations.decorate(entry, marked_snapshot(entry))
                     if data.get('busy'):
                         state = 'Working'
                     continuations.validate(entry, body, state)
@@ -3270,7 +3290,7 @@ class Handler(BaseHTTPRequestHandler):
                         if stack or 'group' in body:
                             place['group'] = stack['id'] if stack else body['group']
                         pane, name = delegate.start(entry, body, folder if folder and os.path.isdir(folder) else str(paths.HOME),
-                                                    run=subprocess.run, recent=lambda: snapshot(entry).get('messages') or [],
+                                                    run=subprocess.run, recent=lambda: marked_snapshot(entry).get('messages') or [],
                                                     by_user=True, **place)
                     except Exception:
                         if stack:
@@ -3752,6 +3772,7 @@ def start_office_origin(host):
 
 if __name__ == '__main__':
     undo_store.enable()
+    injected_prompts.initialize()
     audit.prune()
     import share_api
     share_api.get_store()  # Reconcile private storage before accepting requests.

@@ -25,6 +25,7 @@ import attention
 import auth
 import codex_messages
 import history
+import injected_prompts
 import needs
 import paths
 import push
@@ -230,7 +231,9 @@ def browser_role(body, *, fresh, lock, run, status, send):
             state = _send_state(target, status)   # refuse before any mark changes; a Working tab gets a held send
 
             def notify():
-                send(target, '[Tether] The user made this tab the coordinator of this session in Tether.\n' + rules(), state)
+                text = '[Tether] The user made this tab the coordinator of this session in Tether.\n' + rules()
+                with injected_prompts.track_send(target, text, 'rules'):
+                    send(target, text, state)
 
             changed = _change_mark({'action': 'claim', 'events': mode, 'take': body.get('take')},
                                    target, entries, run, on_claim=notify)
@@ -502,7 +505,13 @@ def deliver(pane, queue, events, *, lock, fresh, fresh_status, latest_outcome, s
             return None
         if live:
             # terminal_submit refuses a draft in the input.
-            submit_locked(message(live, mode), coordinator)
+            text = message(live, mode)
+            tabs = [
+                {'pane': event['pane'], 'session': event['session'], 'thread': by_pane[event['pane']].get('thread')}
+                for event in live
+            ]
+            with injected_prompts.track_send(coordinator, text, 'status', tabs=tabs):
+                submit_locked(text, coordinator)
         return live, held
     finally:
         lock.release()

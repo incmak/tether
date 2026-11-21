@@ -14,7 +14,7 @@ const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 // free text; each ends at the fixed text that the server puts after it. No field before the reply holds
 // "Its last reply:" (the server escapes it), and the reply runs to the last "\n\nTranscript: ".
 const NAME = '(?:(?!Its last reply:\\n\\n)[\\s\\S])*'
-const request = (name: string, after: string) => new RegExp(`^\\[Tether review\\] The (\\S+) tab “(${name})” \\((%\\d+)\\) `
+const request = (name: string, after: string) => new RegExp(`^\\[Tether review\\] The (Claude|Codex|claude|codex) tab “(${name})” \\((%\\d+)\\) `
   + `finished a turn\\. ${after}Its last reply:\\n\\n([\\s\\S]*)\\n\\nTranscript: ([^\\n]*?)`
   + '( This is the last round: your reply stays here\\.)?\\s*$')
 // The current request has the full intro and a review id (secrets.token_hex(4)) before the terms. An older one has neither.
@@ -31,14 +31,17 @@ const HEADER = new RegExp(`^(Commit under review: ([0-9a-f]{40}|[0-9a-f]{64}) in
   + '(?:Read the review rules first: `(git -C \\3 show origin/main:REVIEW\\.md)`\\. )?'
   + 'An approval counts only for this commit: start it with `APPROVED \\2` \\(the full hash\\)\\.(?: |$)')
 
-const HASH = '[0-9a-f]{12}|[0-9a-f]{40}|[0-9a-f]{64}'
+const FULL_HASH = '[0-9a-f]{40}|[0-9a-f]{64}'
+const HASH = `[0-9a-f]{12}|${FULL_HASH}`
 const APPROVED = new RegExp(String.raw`^\[Tether review\] Approved by the reviewer tab \((%[0-9]+)\)`
   + String.raw`(?: for commit (${HASH})( and its uncommitted changes)?)?:\n\n`)
+// review_links approves a reply when raw.strip().upper().startswith('APPROVED').
+const APPROVED_REPLY = /^APPROVED/i
 const APPROVED_MARK = '\n\nThe review is complete. '
 const APPROVED_END = 'the next step your instructions give for an approved review, then stop.'
 const APPROVED_DIRTY = 'It covered uncommitted changes, so no commit is approved yet: commit the work '
   + 'in this turn, and Tether asks the reviewer to confirm that commit. '
-const APPROVED_CLEAN = new RegExp(`^The approval is for commit (${HASH}) only\\. Before you push, deploy or merge, `
+const APPROVED_CLEAN = new RegExp(`^The approval is for commit (${FULL_HASH}) only\\. Before you push, deploy or merge, `
   + `check that HEAD (?:${literal("in this tab's worktree (`git rev-parse HEAD`)")}`
   + `|in (${FOLDER}) \\(\`git -C \\2 rev-parse HEAD\`\\)) is \\1\\. `
   + literal('If HEAD is different or you cannot read it, do not act on this approval. '
@@ -88,12 +91,15 @@ export function parseReview(text: string): Review | null {
     const end = message.lastIndexOf(APPROVED_MARK)
     if (end < approved[0].length) return null
     const footer = message.slice(end + APPROVED_MARK.length)
-    const simple = `${dirty ? APPROVED_DIRTY : ''}Do ${APPROVED_END}`
-    if (footer !== simple && (dirty || !commit || APPROVED_CLEAN.exec(footer)?.[1] !== commit)) return null
-    return {
-      kind: 'approved', feedback: true, tab, commit, ...(dirty ? { uncommitted: true } : {}),
-      reply: message.slice(approved[0].length, end).trim(),
-    }
+    const reply = message.slice(approved[0].length, end).trim()
+    if (!APPROVED_REPLY.test(reply)) return null
+    // Older relays used a 12-digit hash with the same footer as an unbound approval.
+    const legacy = commit?.length === 12
+    if (legacy && dirty) return null
+    const matches = commit && !legacy && !dirty ? APPROVED_CLEAN.exec(footer)?.[1] === commit
+      : footer === `${dirty ? APPROVED_DIRTY : ''}Do ${APPROVED_END}`
+    if (!matches) return null
+    return { kind: 'approved', feedback: true, tab, commit, ...(dirty ? { uncommitted: true } : {}), reply }
   }
   const stopped = STOPPED.exec(message)
   if (stopped && Number.isSafeInteger(Number(stopped[1]))) {

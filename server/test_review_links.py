@@ -7171,12 +7171,15 @@ class ServerWatcherTests(unittest.TestCase):
             with self.assertRaises(StopIteration):
                 server.monitor_notices()
         self.assertEqual(observe.call_count, 2)
-        observe.assert_called_with(entries, server.shared_status, server.review_send, server.last_reply,
+        observe.assert_called_with(entries, server.shared_status, ANY, server.last_reply,
                                    alert=server.review_alert, work_mark=server.review_work_mark,
                                    review_reply=server.review_reply, turn_source=server.review_turn_source,
                                    level=server.review_level, parent=ANY,
                                    scope=server.review_scope_of, commit=server.review_commit,
                                    fresh=server.fresh_status, folder=server.review_folder)
+        send = observe.call_args.args[2]
+        self.assertIs(send.func, server.review_send)
+        self.assertEqual(send.keywords, {'receipt': True})
         with patch.object(server, 'review_parent') as parent:
             observe.call_args.kwargs['parent'](entries[0])
             parent.assert_called_once_with(entries[0], entries)
@@ -7191,7 +7194,7 @@ class ServerWatcherTests(unittest.TestCase):
             with self.assertRaises(StopIteration):
                 server.monitor_notices()
         self.assertEqual(sessions.call_count, 2)
-        observe.assert_called_once_with(entries, server.shared_status, server.review_send, server.last_reply,
+        observe.assert_called_once_with(entries, server.shared_status, ANY, server.last_reply,
                                         alert=server.review_alert, work_mark=server.review_work_mark,
                                         review_reply=server.review_reply, turn_source=server.review_turn_source,
                                         level=server.review_level, parent=ANY,

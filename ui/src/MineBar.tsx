@@ -20,7 +20,7 @@ export function MineBar({ view, messages, earlier, onReveal, onEarlier }: {
   onReveal: (id: string) => void
   onEarlier: () => void
 }) {
-  const mine = useMemo(() => new Map(messages.filter(item => item.role === 'user' && !item.kind).map(item => [item.id, item])), [messages])
+  const mine = useMemo(() => new Map(messages.filter(item => item.role === 'user' && !item.kind && item.source !== 'tether').map(item => [item.id, item])), [messages])
   const [above, setAbove] = useState<string | null>(null)
   // The bar comes only while you scroll back. It goes when you scroll down, reach the end, or stop for HIDE_MS.
   const [shown, setShown] = useState(false)
@@ -37,9 +37,9 @@ export function MineBar({ view, messages, earlier, onReveal, onEarlier }: {
       let found: string | null = null
       for (const node of element.querySelectorAll<HTMLElement>('[data-msg-id]')) {
         const id = node.dataset.msgId
-        // Only bubbles you typed: compaction summaries, review cards and shell runs are user records too.
-        if (!id || !mine.has(id) || !node.classList.contains('user-message')) continue
-        if (node.getBoundingClientRect().top < line) found = id
+        const message = id ? mine.get(id) : undefined
+        if (!message || !(node.classList.contains('user-message') || (message.legacy && node.classList.contains('review-message')))) continue
+        if (node.getBoundingClientRect().top < line) found = message.id
         else break
       }
       setAbove(found)

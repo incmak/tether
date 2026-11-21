@@ -21,7 +21,7 @@ runInNewContext(compile(readFileSync('src/Messages.tsx', 'utf8')), {
     if (name === '@assistant-ui/react') return { MessagePrimitive: { Root, Parts: () => 'PARTS' } }
     if (name === './shellCommand') return { shellCommand: () => null }
     if (name === './SentImages') return { sentContent: () => null }
-    // The pure parsers load for real: Message() asks each one whether the text is an injected prompt.
+    // Marked prompts still have to pass the real parsers.
     if (PARSERS.includes(name)) return parser(name)
     return {}
   },
@@ -44,11 +44,36 @@ assert(!render('[Answer from Teams] x', { role: 'assistant', actions: false }).i
 const HASH = '3f9c2a7b41d6e8f05a1c9b2d7e4f6a8c0b1d2e3f'
 const card = render(`[Tether review] The codex tab “W” (%7) finished a turn. Review its work: check the changes and the claims, then list what is wrong or missing. Start your reply with APPROVED if nothing is. Tether sends your reply to that tab. Review id: 0a1b2c3d. Commit under review: ${HASH} in /w. `
   + `Read the review rules first: \`git -C /w show origin/main:REVIEW.md\`. An approval counts only for this commit: start it with \`APPROVED ${HASH}\` (the full hash). `
-  + 'Its last reply:\n\nDone.\n\nTranscript: /t.jsonl')
+  + 'Its last reply:\n\nDone.\n\nTranscript: /t.jsonl', { source: 'tether', prompt: 'review' })
 assert(card.includes(`Reply <code>APPROVED ${HASH}</code> (the full hash)`), card)
 assert(card.includes('<code>git -C /w show origin/main:REVIEW.md</code>'), card)
 assert(!card.includes('Reply APPROVED,'), card)
 assert.equal(card.split(`APPROVED ${HASH}`).length, 2, 'the reply format shows once')
+
+const { parseReview } = parser('./reviewText')
+const approve = (covers, reply, footer) => `[Tether review] Approved by the reviewer tab (%7)${covers}:\n\n${reply}\n\nThe review is complete. ${footer}`
+const next = 'the next step your instructions give for an approved review, then stop.'
+const unbound = `Do ${next}`
+const dirty = 'It covered uncommitted changes, so no commit is approved yet: commit the work '
+  + `in this turn, and Tether asks the reviewer to confirm that commit. ${unbound}`
+const clean = `The approval is for commit ${HASH} only. Before you push, deploy or merge, `
+  + `check that HEAD in this tab's worktree (\`git rev-parse HEAD\`) is ${HASH}. `
+  + `If HEAD is different or you cannot read it, do not act on this approval. Stop and wait for the next review. If HEAD is that hash, do ${next}`
+for (const [covers, reply, footer] of [
+  ['', 'approved', unbound],
+  [` for commit ${HASH}`, `APPROVED ${HASH}`, clean],
+  [` for commit ${HASH} and its uncommitted changes`, `Approved ${HASH}`, dirty],
+]) assert.equal(parseReview(approve(covers, reply, footer))?.kind, 'approved')
+for (const [covers, reply, footer] of [
+  [` for commit ${HASH}`, 'I have not reviewed this.', unbound],
+  [` for commit ${HASH}`, `APPROVED ${HASH}`, unbound],
+  [` for commit ${HASH}`, `APPROVED ${HASH}`, dirty],
+  [` for commit ${HASH} and its uncommitted changes`, `APPROVED ${HASH}`, clean],
+  ['', 'Reviewed and approved.', unbound],
+]) assert.equal(parseReview(approve(covers, reply, footer)), null)
+const legacy = agent => `[Tether review] The ${agent} tab “W” (%7) finished a turn. Review its work: Its last reply:\n\nDone.\n\nTranscript: /srv/project/chat.jsonl`
+for (const agent of ['Claude', 'Codex', 'claude', 'codex']) assert.equal(parseReview(legacy(agent))?.kind, 'request')
+for (const agent of ['fictional', 'Antigravity']) assert.equal(parseReview(legacy(agent)), null)
 
 // Words that are also Object.prototype keys stay the person's bubble; only the exact interrupt lines become notice lines.
 for (const word of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) assert(render(word).includes('class="user-message"'), word)

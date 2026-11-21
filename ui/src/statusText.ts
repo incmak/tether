@@ -3,7 +3,7 @@ export type TabUpdateState = 'done' | 'asks' | 'needs' | 'failed'
 export type TabUpdate = { name: string; pane: string; state: TabUpdateState; text: string }
 export type StatusUpdate = { mode: 'all' | 'needs' | 'off'; tabs: TabUpdate[] }
 
-const HEADER = /^\[Tether status\] ([1-9][0-9]*) tab (updates?)\. Tell the user what changed and what needs them, in one or two lines per tab\. Reports are set to "(all|needs|off)"\. If you do not have the coordinator rules, run `[^`\r\n\u2028\u2029]+ claim`\.$/
+const HEADER = /^\[Tether status\] ([1-9][0-9]*) tab (updates?)\. Tell the user what changed and what needs them, in one or two lines per tab\. Reports are set to "(all|needs|off)"\. If you do not have the coordinator rules, run `python3 [^`\r\n\u2028\u2029]*\/agent_coordinator_cli\.py claim`\.$/
 const STATES = {
   'finished and asks the user': 'asks',
   finished: 'done',

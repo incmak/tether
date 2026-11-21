@@ -130,6 +130,8 @@ def brief(messages):
     """The last few user and assistant texts, each cut short, oldest first. Tool output is left out."""
     picked, total = [], 0
     for message in reversed(messages or []):
+        if isinstance(message, dict) and message.get('source') == 'tether':
+            continue
         text = message.get('text') if isinstance(message, dict) else None
         role = message.get('role') if isinstance(message, dict) else None
         if role not in ('user', 'assistant') or not isinstance(text, str) or not text.strip():

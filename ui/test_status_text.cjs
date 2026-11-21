@@ -37,7 +37,7 @@ assert.deepEqual(plain(parseStatus(`${single}\t \n\n `)), plain(parseStatus(sing
 assert.deepEqual(plain(parseStatus(`${noDetail}: \n`)), plain(parseStatus(noDetail)))
 assert.deepEqual(plain(parseStatus(`${noDetail}: \u2028`)), plain(parseStatus(noDetail)))
 assert.deepEqual(plain(parseStatus(`${noDetail} \t`)), plain(parseStatus(noDetail)))
-assert.deepEqual(plain(parseStatus(single.replace('python3 /opt/tether/server/agent_coordinator_cli.py', '/another path/cli'))), plain(parseStatus(single)))
+assert.deepEqual(plain(parseStatus(single.replace('/opt/tether/server/agent_coordinator_cli.py', '/another path/agent_coordinator_cli.py'))), plain(parseStatus(single)))
 assert.equal(parseStatus(multiple.replace('finished: Build passes.', 'finished: ')).tabs[0].text, '')
 
 for (const [reason, invalid] of Object.entries({
@@ -47,6 +47,8 @@ for (const [reason, invalid] of Object.entries({
   'zero count': single.replace('1 tab update.', '0 tab updates.'),
   'unknown mode': single.replace('"all"', '"sometimes"'),
   'unknown state': single.replace('finished:', 'finished with errors:'),
+  'unrelated command': single.replace('python3 /opt/tether/server/agent_coordinator_cli.py claim', 'unrelated command claim'),
+  'wrong CLI file': single.replace('agent_coordinator_cli.py', 'agent_tab_cli.py'),
   'missing header sentence': single.replace('Reports are set to "all". ', ''),
   'blank line inside': multiple.replace('\n- `Review`', '\n\n- `Review`'),
   'whitespace on an inner row': multiple.replace('Build passes.\n', 'Build passes. \n'),

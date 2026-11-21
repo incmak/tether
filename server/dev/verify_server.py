@@ -466,10 +466,11 @@ def guard(root, dist):
 REVIEW_COMMIT = '3f9c2a7b41d6e8f05a1c9b2d7e4f6a8c0b1d2e3f'
 
 
-def seed(root, pane, pane_pid):
+def seed(root, pane, pane_pid, session):
     """Fixture data, written with the server's own modules: one Claude chat on the fixture pane and a backlog."""
     import backlog
     import factory_history
+    import injected_prompts
     import paths
     work = str(Path(root) / 'work')
     registry = paths.CLAUDE / 'sessions' / f'{pane_pid}.json'
@@ -480,7 +481,7 @@ def seed(root, pane, pane_pid):
     transcript = paths.CLAUDE / 'projects' / ''.join(c if c.isalnum() else '-' for c in work) / f'{SESSION}.jsonl'
     transcript.parent.mkdir(parents=True, exist_ok=True)
     # A review request as server/review_links.py sends it to a reviewer tab (the chat-review surface).
-    review = ("[Tether review] The codex tab \u201cFixture worker\u201d (%7) finished a turn. "
+    review = ("[Tether review] The Codex tab \u201cFixture worker\u201d (%7) finished a turn. "
               "Review its work: check the changes and the claims, then list what is wrong or missing. "
               "Start your reply with APPROVED if nothing is. Tether sends your reply to that tab. Review id: 5e1f0c2a. "
               f"Commit under review: {REVIEW_COMMIT} in /work/tether. "
@@ -496,6 +497,9 @@ def seed(root, pane, pane_pid):
              ('assistant', 'The Settings page fits a 320 px screen. Each control keeps a 44 px touch target.'),
              ('user', 'Where does this conversation go?'),
              ('assistant', CHAT_LINE)]
+    # Tether sent the review request: the receipt's anchor is the start of the new file at the record's own time.
+    sent = {'at': injected_prompts.timestamp_ms('2026-01-05T09:00:00.000Z'), 'offset': 0, 'file': None}
+    injected_prompts.record({'agent': 'claude', 'tmux_session': session, 'transcript': str(transcript)}, review, 'review', before=sent)
     with open(transcript, 'w') as stream:
         for index, (role, text) in enumerate(turns):
             stream.write(json.dumps({'type': role, 'uuid': f'00000000-0000-4000-8000-{index:012d}', 'sessionId': SESSION, 'cwd': work,
@@ -589,7 +593,7 @@ def serve(root, dist):
     listed = subprocess.run([wrapper, 'list-panes', '-a', '-F', '#{pane_id}\t#{pane_pid}\t#{session_id}'],
                             capture_output=True, text=True, timeout=10, check=True)
     pane, pane_pid, session = listed.stdout.splitlines()[0].split('\t')
-    seed(root, pane, int(pane_pid))
+    seed(root, pane, int(pane_pid), session)
     use_fixture_processes(int(pane_pid))
     use_fixture_folders(root)
     import auth

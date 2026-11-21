@@ -954,8 +954,11 @@ def claude_consume(messages, index, record, clean):
             messages.append(notice)
             return
         if isinstance(prompt, str) and clean(prompt).strip():
-            messages.append({'id': str(index), 'role': 'user', 'text': tidy_user_text(clean(prompt)), 'time': record.get('timestamp'),
-                             'delivery': 'queued'})
+            item = {'id': str(index), 'role': 'user', 'text': tidy_user_text(clean(prompt)), 'time': record.get('timestamp'),
+                    'delivery': 'queued'}
+            if isinstance(record.get('uuid'), str):
+                item['_record_id'] = record['uuid']
+            messages.append(item)
         return
     message = record.get('message', {})
     role = message.get('role')
@@ -1016,6 +1019,8 @@ def claude_consume(messages, index, record, clean):
         text = tidy_user_text(text)
     if text.strip() and not text.startswith(('<system-reminder>', '<local-command', '<command-name>')):
         item = {'id': str(index), 'role': role, 'text': text, 'time': record.get('timestamp')}
+        if role == 'user' and isinstance(record.get('uuid'), str):
+            item['_record_id'] = record['uuid']
         if role == 'user' and isinstance(content, list):
             count = len(tool_details.images({'content': content}))
             if count > 0 and isinstance(record.get('uuid'), str):
