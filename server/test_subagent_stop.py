@@ -1,6 +1,7 @@
 """All terminal writes use a fake tmux runner and isolated transcript files."""
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
+from itertools import permutations
 import json
 import os
 from pathlib import Path
@@ -1028,14 +1029,14 @@ class AgentBarTests(unittest.TestCase):
     def test_waiting_identity_requires_supported_counts_and_complete_name(self):
         screen = self.screen('agent_selected')
         self.assertEqual(stop.agent_bar(screen)['rows'][1], {
-            'kind': 'general-purpose', 'name': self.NAME, 'waiting': self.agent['waiting'], 'name_clipped': False,
+            'kind': 'general-purpose', 'value': self.NAME + ' · since 8:54 AM', 'waiting': self.agent['waiting'],
         })
         for text in (screen.replace('1 monitor', '1 worker'), screen.replace('1 monitor', '2 shells'),
                      screen.replace(' · since 8:54 AM', '')):
             self.assertIsNone(stop.agent_bar(text)['rows'][1]['waiting'])
         narrow = self.screen('narrow_agent_selected')
         self.assertEqual(stop.agent_bar(narrow)['rows'][1], {
-            'kind': 'general-purpose', 'name': 'Prob…', 'waiting': {'shell': 1, 'monitor': 0}, 'name_clipped': True,
+            'kind': 'general-purpose', 'value': 'Prob…', 'waiting': {'shell': 1, 'monitor': 0},
         })
 
     def drive(self, frames, fresh=None):
@@ -1076,17 +1077,13 @@ class AgentBarTests(unittest.TestCase):
 
     def narrow_frames(self):
         self.agent.update(description='Probe agent', waiting={'shell': 1, 'monitor': 0})
-        return [(self.screen('narrow_' + name), key) for name, key in (
-            ('prompt_waiting', 'Down'), ('pill_focus', 'Down'), ('main_selected', 'Down'),
-            ('agent_selected', 'x'), ('agent_stopped', 'Escape'), ('after_escape', None),
-        )]
+        return [self.screen('narrow_' + name)
+                for name in ('prompt_waiting', 'pill_focus', 'main_selected', 'agent_selected')]
 
     def test_driver_writes_only_verified_keys(self):
-        for frames in (self.wide_frames, self.narrow_frames):
-            with self.subTest(frames=frames.__name__):
-                self.assertEqual(self.drive(frames()), {'ok': True, 'state': 'stopped'})
-                self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
-                self.assertEqual(self.reads.count(3), 2)  # Fresh screen before x.
+        self.assertEqual(self.drive(self.wide_frames()), {'ok': True, 'state': 'stopped'})
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
+        self.assertEqual(self.reads.count(3), 2)  # Fresh screen before x.
 
     def test_cleanup_accepts_the_resume_footer_after_a_stop(self):
         # Live 2.1.330: after x and Escape the prompt footer says "↓ to resume subagent".
@@ -1129,35 +1126,49 @@ class AgentBarTests(unittest.TestCase):
             with self.subTest(suffix=suffix):
                 frames = self.wide_frames()
                 frames[3] = (frames[3][0].replace(' · since 8:54 AM', suffix), 'x')
-                self.siblings = [dict(self.agent, id='beta', description=self.NAME + ' extra')]
+                self.siblings = [dict(self.agent, id='beta', description='Different agent')]
                 self.assertEqual(self.drive(frames), {'ok': True, 'state': 'stopped'})
                 self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
 
-    def test_complete_since_field_requires_the_exact_description(self):
+    def test_complete_since_field_matches_the_rendered_description(self):
         frames = self.wide_frames()
         self.agent['description'] = 'a' * 200 + ' suffix'
         literal_name = 'a' * 199 + '…'
         frames = [(screen.replace(self.NAME, literal_name), key) for screen, key in frames]
-        with self.assertRaisesRegex(stop.StopError, 'Could not identify'):
-            self.drive([(frames[0][0], None)])
-        self.assertEqual(self.keys, [])
-        self.agent['description'] = literal_name
         self.assertEqual(self.drive(frames), {'ok': True, 'state': 'stopped'})
         self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
 
-    def test_clipped_prefix_must_match_including_whitespace(self):
+    def test_ambiguous_rendered_names_refuse_even_if_only_one_row_is_visible(self):
         frames = self.wide_frames()
-        for value in ('Stop can …', self.NAME + ' · sibling…'):
-            with self.subTest(value=value), self.assertRaisesRegex(stop.StopError, 'Could not identify'):
-                changed = frames[3][0].replace(self.NAME + ' · since 8:54 AM', value)
-                self.drive([*frames[:3], (changed, 'Escape'), frames[-1]])
-            self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+        self.agent['description'] = 'a' * 199 + '…'
+        self.siblings = [dict(self.agent, id='beta', description='a' * 200 + ' suffix')]
+        selected = frames[3][0].replace(self.NAME, self.agent['description'])
+        with self.assertRaisesRegex(stop.StopError, 'share this name'):
+            self.drive([(selected, None)])
+        self.assertEqual(self.keys, [])
+
+    def test_description_port_normalizes_spacing_before_counting_columns(self):
+        self.assertEqual(stop.rendered_description(' Café\t·  déjà\r\n vu\xa0 '), 'Café · déjà vu')
+        self.assertEqual(stop.rendered_description('é' * 200), 'é' * 200)
+        self.assertEqual(stop.rendered_description('é' * 201), 'é' * 199 + '…')
+
+    def test_unverified_descriptions_refuse_before_x(self):
+        selected = self.wide_frames()[3][0]
+        for description in ('\x1b[31m' + self.NAME + '\x1b[0m', '界' + self.NAME, 'Cafe\u0301'):
+            for unsupported_target in (True, False):
+                with self.subTest(description=description, unsupported_target=unsupported_target):
+                    self.agent['description'] = description if unsupported_target else self.NAME
+                    self.siblings = [] if unsupported_target else [dict(self.agent, id='beta', description=description)]
+                    with self.assertRaisesRegex(stop.StopError, 'Could not identify'):
+                        self.drive([(selected, None)])
+                    self.assertEqual(self.keys, [])
 
     def test_working_prompt_with_tasks_indicator_and_draft_refuses_without_keys(self):
         screen = self.screen('prompt_waiting_working').replace(
-            'esc to interrupt', 'cohort · enter to view tasks · esc to interrupt').replace(
+            'esc to interrupt · ← for agents · ↓ to manage', 'cohort · enter to view tasks').replace(
             '\n❯\n', '\n❯ Unsent draft\n')
-        with self.assertRaisesRegex(stop.StopError, 'Could not read'):
+        self.assertEqual(stop.agent_bar(screen)['focus'], 'pill')
+        with self.assertRaisesRegex(stop.StopError, 'unsent draft'):
             self.drive([(screen, None)])
         self.assertEqual(self.keys, [])
 
@@ -1172,6 +1183,41 @@ class AgentBarTests(unittest.TestCase):
         with self.assertRaisesRegex(stop.StopError, 'unsent draft'):
             self.drive([(screen, None)])
         self.assertEqual(self.keys, [])
+
+    def test_refusal_after_down_to_the_pill_sends_one_escape(self):
+        frames = self.wide_frames()
+        pill = frames[1][0].replace(self.NAME, 'Different agent')
+        with self.assertRaisesRegex(stop.StopError, 'Could not identify'):
+            self.drive([frames[0], (pill, 'Escape'), (frames[0][0], None)])
+        self.assertEqual(self.keys, ['Down', 'Escape'])
+
+    def test_pill_escape_is_refused_if_this_stop_already_closed_a_tasks_panel(self):
+        frames = self.wide_frames()
+        tasks = (RealScreenTests.FOLDER_330 / 'list.txt').read_text()
+        pill = frames[1][0].replace(self.NAME, 'Different agent')
+        with self.assertRaisesRegex(stop.StopError, 'agent bar did not close'):
+            self.drive([(tasks, 'Escape'), frames[0], (pill, None)])
+        self.assertEqual(self.keys, ['Escape', 'Down'])
+
+    def test_prompt_footer_that_mimics_the_pill_never_gets_a_second_escape(self):
+        frames = self.wide_frames()
+        prompt = self.screen('after_stop_resume_footer').replace(
+            '↓ to resume subagent', 'cohort · enter to view tasks')
+        self.assertEqual(stop.agent_bar(prompt)['focus'], 'pill')
+        with self.assertRaisesRegex(stop.StopError, 'agent bar did not close'):
+            self.drive([*frames[:5], (prompt, None)])
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
+
+    def test_expanded_idle_teammates_keep_the_row_cursor_for_a_second_escape(self):
+        frames = self.wide_frames()
+        expanded = ''.join(f'  ◯ teammate-{index}  idle\n' for index in range(1, 5))
+        selected = frames[3][0].replace('x to stop', 'x to stop · esc to collapse') + expanded
+        stopped = frames[4][0].replace('x to clear', 'x to clear · esc to collapse') + expanded
+        collapsed = frames[4][0] + expanded.rsplit('  ◯ ', 1)[0] + '  ◯ 1 idle agent\n'
+        prompt = frames[-1][0] + expanded.rsplit('  ◯ ', 1)[0] + '  ◯ 1 idle agent\n'
+        self.assertEqual(self.drive([(selected, 'x'), (stopped, 'Escape'), (collapsed, 'Escape'),
+                                     (prompt, None)]), {'ok': True, 'state': 'stopped'})
+        self.assertEqual(self.keys, ['x', 'Escape', 'Escape'])
 
     def test_artifact_and_ambiguous_footers_refuse_navigation_and_cleanup(self):
         frames = self.wide_frames()
@@ -1207,20 +1253,63 @@ class AgentBarTests(unittest.TestCase):
                     self.drive([(screen, None)])
                 self.assertEqual(self.keys, [])
 
-    def test_truncated_name_refuses_a_second_row(self):
-        frames = self.narrow_frames()
-        prompt, _ = frames[0]
-        with self.assertRaisesRegex(stop.StopError, 'share this name'):
-            self.drive([(prompt + '  ◯ general-purpose  waiting on 1 shell · Pro…\n', None)])
-        self.assertEqual(self.keys, [])
+    def test_probe_five_cuts_inside_the_name_and_refuses_without_keys(self):
+        for screen in self.narrow_frames():
+            with self.subTest(footer=screen.splitlines()[-4]):
+                with self.assertRaisesRegex(stop.StopError, r'terminal is too narrow.*Claude Code 2\.1\.330'):
+                    self.drive([(screen, None)])
+                self.assertEqual(self.keys, [])
 
-    def test_truncated_name_refuses_a_second_running_listed_agent(self):
-        frames = self.narrow_frames()
-        self.siblings = [dict(self.agent, id='beta', description='Probe two')]
-        frames[3:] = [(frames[3][0], 'Escape'), (frames[0][0], None)]
-        with self.assertRaisesRegex(stop.StopError, 'share this name.*Claude Code 2.1.330'):
-            self.drive(frames)
-        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+    def test_clipped_values_without_the_whole_name_and_separator_refuse(self):
+        selected = self.wide_frames()[3][0]
+        for value in ('', '…', 'Stop can ', 'Stop can …', self.NAME, self.NAME + '…', self.NAME + ' …'):
+            with self.subTest(value=value), self.assertRaisesRegex(stop.StopError, 'terminal is too narrow'):
+                self.drive([(selected.replace(self.NAME + ' · since 8:54 AM', value), None)])
+            self.assertEqual(self.keys, [])
+
+    def test_every_clip_of_displayed_names_can_only_stop_the_requested_agent(self):
+        long_name = 'a' * 199 + '…'
+        descriptions = [(name, name) for name in ('A', 'A · single run', 'A…', 'B')]
+        descriptions += [('a' * 200 + suffix, long_name) for suffix in (' one', ' two')]
+        footer = '───\n❯\n───\n  enter to view · x to stop\n  ● main\n'
+        prompt = '───\n❯\n───\n  ↓ to manage\n  ● main\n'
+        row = '◯ general-purpose  waiting on 1 shell, 1 monitor · '
+        keys = []
+        screen = ''
+
+        def press_key(_entry, key, *, run):
+            nonlocal screen
+            keys.append(key)
+            screen = prompt
+
+        def clip(value, length):
+            return value[:length] + '…' if length < len(value) else value
+
+        successes = 0
+        for (target, target_render), (other, other_render) in permutations(descriptions, 2):
+            agent = dict(self.agent, description=target)
+            sibling = dict(self.agent, id='beta', description=other)
+            values = [name + ' · since 8:54 AM' for name in (target_render, other_render)]
+            with patch.object(stop, 'press', new=press_key), \
+                    patch.object(stop, 'visible', new=lambda *_: screen), \
+                    patch.object(subagents, 'listing', new=lambda _, *, limit: {'agents': [agent, sibling]}):
+                for shown, selected in ((False, 1), (True, 1), (True, 0)):
+                    first = 0 if shown else 1
+                    for width in range(max(map(len, values[first:])) + 1):
+                        # Both rows have the same width when the target is visible.
+                        screen = footer + ''.join(('❯ ' if index == selected else '  ') + row
+                                                  + clip(values[index], width) + '\n'
+                                                  for index in range(first, 2))
+                        keys.clear()
+                        try:
+                            stop.stop_from_agent_bar({}, agent, {'kind': agent['type']}, None, lambda _: None, {})
+                        except stop.StopError:
+                            pass
+                        if 'x' in keys:
+                            self.assertEqual((shown, selected, keys), (True, 0, ['x']), (target, other, width))
+                            self.assertGreaterEqual(width, len(target_render) + len(' ·'))
+                            successes += 1
+        self.assertGreater(successes, 0)
 
     def test_clipped_since_can_be_part_of_a_second_listed_agents_name(self):
         frames = self.wide_frames()
@@ -1249,12 +1338,17 @@ class AgentBarTests(unittest.TestCase):
                 self.drive([*frames[:3], (changed, 'Escape'), frames[-1]])
             self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
 
-    def test_unknown_selection_does_not_send_escape_or_x(self):
+    def test_unknown_footer_allows_escape_only_if_a_single_row_has_the_cursor(self):
         frames = self.wide_frames()
         for action in ('x to stop all', 'x to stop · Esc to cancel'):
             unknown = frames[3][0].replace('x to stop', action)
             with self.subTest(action=action), self.assertRaisesRegex(
-                    stop.StopError, 'agent bar did not close.*Claude Code 2.1.330'):
+                    stop.StopError, 'Could not read.*Claude Code 2.1.330'):
+                self.drive([*frames[:3], (unknown, 'Escape'), frames[-1]])
+            self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+        for unknown in (frames[3][0].replace('  ● main', '❯ ● main'),
+                        frames[3][0].replace('❯ ◯', '  ◯').replace('  enter to view · x to stop', '❯ ● main')):
+            with self.assertRaisesRegex(stop.StopError, 'agent bar did not close'):
                 self.drive([*frames[:3], (unknown, None)])
             self.assertEqual(self.keys, ['Down', 'Down', 'Down'])
 

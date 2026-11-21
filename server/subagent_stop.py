@@ -42,14 +42,15 @@ def dialog_open(screen):
 
 
 def close(entry, run, sleep, *, is_open=dialog_open):
-    """Esc is safe only while the tasks dialog's hint remains visible."""
-    for _ in range(3):
+    """Esc is safe only while the tasks dialog's hint remains visible. Return whether it was sent."""
+    for step in range(3):
         if not is_open(visible(entry, run)):
-            return
+            return step > 0
         press(entry, 'Escape', run=run)
         sleep(0.35)
     if is_open(visible(entry, run)):
         raise StopError('The tasks dialog did not close. Check the terminal view.')
+    return True
 
 
 def matches(description, shown):
@@ -330,17 +331,19 @@ def stop_selected(entry, target, run, sleep, clock=time.time, pressed=None, obse
 BAR_READ_ERROR = 'Could not read the agent bar. Check the terminal view.'
 BAR_ID_ERROR = 'Could not identify that agent. Stop it in the terminal.'
 BAR_CLOSE_ERROR = 'The agent bar did not close. Check the terminal view.'
+BAR_NARROW_ERROR = 'The terminal is too narrow to identify that agent. Widen it or stop it in the terminal.'
 WAITING_COUNT = r'([1-9]\d*) (shell|monitor)s?'
-BAR_ROW = re.compile(r'(❯ )?\s*([●◯])\s+(\S+)(?:\s{2,}(.+)| (stopped · .+))?')
+BAR_ROW = re.compile(r'(❯ )?\s*([●◯])\s+([1-9]\d* idle agents?|\S+)(?:\s{2,}(.+)| (stopped · .+))?')
 PROMPT_ACTIONS = {'↓ to manage', '↓ to resume subagent', 'esc to interrupt', '← for agents'}
 TASKS_PILL_ACTION = 'enter to view tasks'
 ARTIFACT_ACTIONS = {'enter to view artifacts', 'enter to open in browser'}
 STOP_ALL_ACTION = 'ctrl+x ctrl+k to stop all agents'
+COLLAPSE_ACTION = 'esc to collapse'
 ROW_ACTIONS = {'↑/↓ to select', 'enter to view', 'x to stop', 'x to clear', STOP_ALL_ACTION}
 # Compare clipped actions with the other controls in Claude's 2.1.330 footer.
 FOCUS_ACTIONS = PROMPT_ACTIONS | {TASKS_PILL_ACTION}
 FOOTER_ACTIONS = FOCUS_ACTIONS | ROW_ACTIONS | ARTIFACT_ACTIONS | {
-    'esc to stop', 'esc to return to team lead', 'esc to collapse', 'enter to expand', '← to go back',
+    'esc to stop', 'esc to return to team lead', COLLAPSE_ACTION, 'enter to expand', '← to go back',
     'ctrl+t to show tasks', 'ctrl+t to hide tasks', 'shift+tab to cycle', '? for shortcuts',
     '/tasks to see subagents', 'ctrl+c to copy', 'shift+click to native select',
     'option+click to native select', 'hold space to speak',
@@ -348,25 +351,28 @@ FOOTER_ACTIONS = FOCUS_ACTIONS | ROW_ACTIONS | ARTIFACT_ACTIONS | {
 
 
 def waiting_row(text):
-    """Read the whole description or keep the clipped text, including any visible since suffix."""
-    action, separator, name = text.partition(' · ')
+    """Keep the displayed text after the waiting counts, including any visible since suffix."""
+    action, separator, value = text.partition(' · ')
+    if not separator:
+        action, separator, value = text.rpartition(' ·')
+        if value:
+            return None, None
     if not separator or not re.fullmatch(rf'waiting on {WAITING_COUNT}(?:, {WAITING_COUNT})*', action):
-        return None, None, False
-    clipped = name.endswith('…')
-    if not clipped:
-        name, divider, tail = name.rpartition(' · ')
+        return None, None
+    if not value.endswith('…'):
+        name, divider, tail = value.rpartition(' · ')
         if not (name and divider and tail.startswith('since ') and tail[6:].strip()):
-            return None, None, False
+            return value, None
     waiting = {'shell': 0, 'monitor': 0}
     for count, kind in re.findall(WAITING_COUNT, action):
         if waiting[kind]:
-            return None, None, False
+            return None, None
         waiting[kind] = int(count)
-    return name, waiting, clipped
+    return value, waiting
 
 
-def agent_bar(screen):
-    """Read focus, rows and the main prompt draft from one visible Claude capture."""
+def agent_bar_parts(screen):
+    """Locate the prompt, footer, and row block without interpreting the footer text."""
     lines = [line.rstrip() for line in screen.splitlines()]
     rules = [i for i, line in enumerate(lines) if re.fullmatch(r'─+', line)]
     if len(rules) < 2:
@@ -380,6 +386,15 @@ def agent_bar(screen):
     if not below:
         return None
     footer, *row_lines = below
+    return prompt, footer, row_lines
+
+
+def agent_bar(screen):
+    """Read focus, rows and the main prompt draft from one visible Claude capture."""
+    parts = agent_bar_parts(screen)
+    if parts is None:
+        return None
+    prompt, footer, row_lines = parts
     parsed = []
     selected, main = [], []
     for index, line in enumerate(row_lines):
@@ -393,15 +408,15 @@ def agent_bar(screen):
             if dot != '●' or text or compact:
                 return None
             main.append(index)
-        elif dot == '●' or not (text or compact):
+        elif dot == '●' or not (text or compact or re.fullmatch(r'[1-9]\d* idle agents?', kind)):
             return None
-        name, waiting, clipped = waiting_row(text or '')
-        parsed.append({'kind': kind, 'name': name, 'waiting': waiting, 'name_clipped': clipped})
+        value, waiting = waiting_row(text or '')
+        parsed.append({'kind': kind, 'value': value, 'waiting': waiting})
     if len(main) != 1 or len(selected) > 1:
         return None
 
     actions = {_norm(part) for part in footer.split('·')}
-    row_actions = actions - {STOP_ALL_ACTION}
+    row_actions = actions - {STOP_ALL_ACTION, COLLAPSE_ACTION}
     action = None
     if selected == main and row_actions == {'↑/↓ to select'}:
         focus = 'row'
@@ -433,20 +448,30 @@ def agent_bar(screen):
             'draft': bool(prompt[0][1:].strip() or any(line.strip() for line in prompt[1:]))}
 
 
-def matches_bar_name(description, row):
-    if not row['name_clipped']:
-        return description == row['name']
-    shown_prefix = row['name'][:-1]
-    rendered_prefix = description + ' · since '
-    return rendered_prefix.startswith(shown_prefix) or shown_prefix.startswith(rendered_prefix)
+def rendered_description(meta_description):
+    """Return the description Claude puts in the bar, or None for unsupported text."""
+    # In the 2.1.330 bundle, follow _9e's "since" field to Vbe's held row, then
+    # Ki (chunk-874m1hb1.js) and Tt. Ki normalizes whitespace and caps the input
+    # at 800 UTF-16 units before Tt cuts at 200 display columns, including the ellipsis.
+    # ANSI stripping, combining graphemes and widths outside this single-column
+    # ASCII/common Latin set (plus middle dot and ellipsis) are not verified.
+    if not isinstance(meta_description, str) or not re.fullmatch(r'[ -~\t-\r\xa0·…À-ÖØ-öø-ſ]*', meta_description):
+        return None
+    description = re.sub(r'[\t-\r \xa0]+', ' ', meta_description).strip(' ')
+    return description if len(description) <= 200 else description[:199] + '…'
 
 
-def bar_target(bar, target, waiting):
-    candidates = [index for index, row in enumerate(bar['rows'])
-                  if row['kind'] == target['kind'] and row['name'] is not None
-                  and any(matches_bar_name(label, row) for label in target['labels'])]
+def bar_target(bar, kind, rendered, waiting):
+    boundary = rendered + ' ·'
+    values = [(index, row['value'], row['waiting']) for index, row in enumerate(bar['rows'])
+              if row['kind'] == kind and row['value'] is not None]
+    candidates = [index for index, value, counts in values if counts is not None and value.startswith(boundary)
+                  and (value.endswith('…') or value.rpartition(' · ')[0] == rendered)]
     if len(candidates) > 1:
         raise StopError('Multiple agents share this name. Stop it in the terminal.')
+    if not candidates and any((counts is None or value.endswith('…'))
+                              and len(value.removesuffix('…')) < len(boundary) for _, value, counts in values):
+        raise StopError(BAR_NARROW_ERROR)
     if not candidates or bar['rows'][candidates[0]]['waiting'] != waiting:
         raise StopError(BAR_ID_ERROR)
     return candidates[0]
@@ -467,10 +492,9 @@ def tasks_panel_open(screen):
     )
 
 
-def stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar=None):
+def stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar=None, *, escape_sent=False):
     """Navigate with Down, then stop only the freshly verified waiting agent."""
-    def read():
-        screen = visible(entry, run)
+    def parse(screen):
         bar = agent_bar(screen)
         if bar is not None and observe_bar is not None:
             observe_bar(screen, bar)
@@ -481,12 +505,18 @@ def stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar=N
             raise StopError(BAR_READ_ERROR)
         if bar['draft']:
             raise StopError('There is an unsent draft in the agent input. Clear it, then try again.')
-        return bar_target(bar, target, agent['waiting'])
+        return bar_target(bar, target['kind'], rendered, agent['waiting'])
 
-    bar = read()
+    rendered = rendered_description(agent['description'])
+    if rendered is None:
+        raise StopError(BAR_ID_ERROR)
+    if not rendered:
+        raise StopError(BAR_NARROW_ERROR)
+    bar = parse(visible(entry, run))
     if bar is None:
         raise StopError(BAR_READ_ERROR)
     sent_bar_key = False
+    pill_down = False
     try:
         for step in range(9):
             position = identify(bar)
@@ -495,19 +525,31 @@ def stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar=N
                 break
             if (selected is not None and selected > position) or step == 8:
                 raise StopError('Could not reach that agent in the agent bar. Stop it in the terminal.')
+            from_prompt = bar['focus'] == 'prompt'
+            pill_down = False
             press(entry, 'Down', run=run)
             sent_bar_key = True
             sleep(0.18)
-            bar = read()
+            bar = parse(visible(entry, run))
+            # Record the Down transition during navigation. A later footer
+            # that looks like a pill cannot authorize cleanup by itself.
+            pill_down = from_prompt and bar is not None and bar['focus'] == 'pill'
 
         if bar['action'] != 'stop':
             raise StopError(BAR_ID_ERROR)
         selected_text = bar['selected_text']
         row = bar['rows'][position]
-        fitting = [item for item in subagents.listing(entry, limit=False)['agents']
-                   if item['state'] == 'running' and (item.get('type') or 'general-purpose') == row['kind']
-                   and matches_bar_name(item.get('description') or '', row)]
-        bar = read()
+        visible_prefix = row['value'].removesuffix('…')
+        fitting = []
+        for item in subagents.listing(entry, limit=False)['agents']:
+            if item['state'] != 'running' or (item.get('type') or 'general-purpose') != row['kind']:
+                continue
+            name = rendered_description(item.get('description') or '')
+            if name is None:
+                raise StopError(BAR_ID_ERROR)
+            if visible_prefix.startswith(name) or name.startswith(visible_prefix):
+                fitting.append(item)
+        bar = parse(visible(entry, run))
         position = identify(bar)
         if bar['selected'] != position or bar['action'] != 'stop' or bar['selected_text'] != selected_text:
             raise StopError(BAR_ID_ERROR)
@@ -516,16 +558,28 @@ def stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar=N
         if not fitting or fitting[0]['id'] != agent['id'] or fitting[0].get('waiting') != agent['waiting']:
             raise StopError(BAR_ID_ERROR)
         pressed['x'] = True
+        pill_down = False
         press(entry, 'x', run=run)
         sent_bar_key = True
         sleep(0.18)
     finally:
         if sent_bar_key:
-            for step in range(4):
-                bar = read()
-                if bar is None or step == 3 or bar['focus'] == 'prompt':
+            row_escapes = 0
+            while True:
+                screen = visible(entry, run)
+                bar = parse(screen)
+                parts = agent_bar_parts(screen)
+                if parts is None:
                     break
+                selected_rows = sum(bool(row[1]) for line in parts[2] if (row := BAR_ROW.fullmatch(line)))
+                if selected_rows == 1 and row_escapes < 3:
+                    row_escapes += 1
+                elif selected_rows or not pill_down or escape_sent:
+                    break
+                # Collapse can preserve the row cursor. Read it again before
+                # another Escape, even if the footer looks like pill focus.
                 press(entry, 'Escape', run=run)
+                escape_sent = True
                 sleep(0.35)
             if bar is None or bar['focus'] != 'prompt':
                 raise StopError(BAR_CLOSE_ERROR)
@@ -549,7 +603,7 @@ def with_version(entry, message):
     """Name the Claude Code version when its Stop controls could not be read."""
     version = claude_version(entry)
     if version is None or version == CHECKED_TASKS_UI or not re.search(
-            r'Could not (identify|read|see|reach)|dialog|agent bar|share this name', message):
+            r'Could not (identify|read|see|reach)|dialog|agent bar|share this name|too narrow', message):
         return message
     return f'{message} This tab runs Claude Code {version}; Tether checked Stop on {CHECKED_TASKS_UI}.'
 
@@ -647,7 +701,7 @@ def stop(entry, agent_id, run=subprocess.run, sleep=time.sleep, clock=time.time,
             terminal_input.verify(entry, run)
             # Do not drive an unverified pane, including a pane for another agent.
             if waiting:
-                close(entry, run, sleep, is_open=tasks_panel_open)
+                escape_sent = close(entry, run, sleep, is_open=tasks_panel_open)
             else:
                 close(entry, run, sleep)
             try:
@@ -655,7 +709,7 @@ def stop(entry, agent_id, run=subprocess.run, sleep=time.sleep, clock=time.time,
                     raise StopError(f'Claude is waiting for you. Answer its prompt before stopping a {noun}.')
                 if waiting:
                     # The bar parser reads the prompt draft and also refuses the subagent input view.
-                    stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar)
+                    stop_from_agent_bar(entry, agent, target, run, sleep, pressed, observe_bar, escape_sent=escape_sent)
                 else:
                     if any(terminal_input.prompt_draft(entry, run)):
                         raise StopError(f'There is an unsent draft in the {noun} input. Clear it, then try again.')
