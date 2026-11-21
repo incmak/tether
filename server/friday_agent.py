@@ -83,8 +83,8 @@ SYSTEM_PROMPT = (
     'Always write the chat name exactly as in state, for example api-server, even when speech-to-text '
     'misheard it ("docs sight" is docs-site): use the closest name in state. '
     '1. If the user said send, tell, ask, prompt, instruct, message, forward, have it, or get it to, call the tool now. '
-    'Those words are the consent; do not read back. "Don\'t send" or "not yet" is never consent. '
-    '2. Otherwise call the tool anyway: it reads the task back and asks yes or no. '
+    'Those words are consent only for sends without the call transcript. "Don\'t send" or "not yet" is never consent. '
+    '2. For a call attachment or a request without those words, call the tool to read the task back and ask yes or no. '
     'Never ask "Shall I send" in your own words. '
     '3. When the user says yes to that read-back, call the tool again with the same chat, task, and attach_call value. '
     'Speech-to-text may hear "suggest to me" as "search to me"; that is not a send word. '
@@ -468,6 +468,7 @@ class SendProposal:
     marker_id: str | None = None
     voice_turn: int | None = None
     attach: bool = False
+    cue: bool = False
 
     @property
     def key(self):
@@ -765,9 +766,9 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                         continue
                     if words == normalized_payload or (' ' in words and f' {words} ' in f' {normalized_payload} '):
                         return READBACK_REQUIRED
-        # An answer to a send question never sends directly, even when it holds send words
-        # ("Yes, and can you tell docs ..."). A fresh, explicit request does.
-        if (not (live or readback_debt or answers_question(previous_assistant))
+        # A transcript always requires a heard read-back. Other sends take the direct path
+        # only for a fresh, explicit request, never for an answer that includes a send word.
+        if (not attach and not (live or readback_debt or answers_question(previous_assistant))
                 and send_intent(last_user_text)):
             return None
         # Only the server's own stored proposal binds a yes. A yes to Friday's free-form words gets
@@ -860,10 +861,15 @@ class CallLog:
             self.turns.clear()
             self._messages.clear()
 
-    def record_spoken(self, text, *, generation=None):
-        """Record Friday speech that never enters the model context, such as the read-back cue."""
-        if (generation is None or generation == self.generation) and text.strip():
-            self.turns.append((self.clock(), 'friday', text.strip()))
+    def record_readback_cue(self, reply, *, generation):
+        """Insert the heard cue before the assistant message that committed the read-back."""
+        if generation != self.generation or id(reply) not in self._messages:
+            return
+        _, turn = self._messages[id(reply)]
+        for index in range(len(self.turns) - 1, -1, -1):
+            if self.turns[index] is turn:
+                self.turns.insert(index, (turn[0], 'friday', READBACK_CUE))
+                return
 
     def record_messages(self, messages, *, generation=None):
         # A peer whose teardown timed out can still deliver frames after reconnect.
@@ -885,8 +891,9 @@ class CallLog:
             else:
                 continue
             # Retain the object, including after trim_context, so its ID cannot be reused.
-            self._messages[id(message)] = message
-            self.turns.append((self.clock(), who, text))
+            turn = (self.clock(), who, text)
+            self._messages[id(message)] = (message, turn)
+            self.turns.append(turn)
 
 
 def format_call_transcript(turns, budget=CALL_TRANSCRIPT_LIMIT):
@@ -1692,8 +1699,6 @@ def runtime_types():
 
         async def speak_readback(self, text, marker_id, *, cue):
             if cue:
-                # The cue tells the user when to confirm, so the call transcript keeps it.
-                self.call_log.record_spoken(READBACK_CUE, generation=self.call_log_generation)
                 await self.push_frame(FridayReadbackSpeechFrame(READBACK_CUE, append_to_context=False))
             await self.push_frame(FridayReadbackSpeechFrame(text, marker_id=marker_id))
 
@@ -1706,13 +1711,19 @@ def runtime_types():
             if n > MAX_READBACK_REPLAYS:
                 self.session.pending_proposal = None
                 return READBACK_CAP, None, False
-            self.session.pending_proposal = replace(proposal, marker_id=marker_id, heard=False, voice_turn=None)
+            self.session.pending_proposal = replace(proposal, marker_id=marker_id, heard=False,
+                                                    voice_turn=None, cue=n > 0)
             return send_readback(proposal), marker_id, n > 0
 
         def mark_readback_heard(self, proposal):
+            if proposal.heard:
+                return
             self.session.pending_proposal = replace(proposal, heard=True)
             self.session.readback_debt = False
             self.readback_budget.reset(proposal)
+            reply, _ = self._last_reply
+            if proposal.cue and reply is not None and proposal.follows(reply['content']):
+                self.call_log.record_readback_cue(reply, generation=self.call_log_generation)
 
         def track_assistant(self, assistant, context):
             response = None
@@ -1748,7 +1759,7 @@ def runtime_types():
                     if reply is not previous_tail and reply['role'] == 'assistant' and not reply.get('tool_calls'):
                         # The aggregator pushes a context frame immediately after committing speech.
                         # Pipecat commits TTSSpeakFrame text here too, including Friday's ack and read-back.
-                        # Fillers stay out of context and the transcript; speak_readback records the cue.
+                        # Fillers stay out of context and the transcript.
                         self.call_log.record_messages((reply,), generation=self.call_log_generation)
                         snapshot = response.request_messages if response is not None else speech_snapshot
                         self._last_reply = (reply, snapshot)
