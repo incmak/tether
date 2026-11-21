@@ -6148,9 +6148,10 @@ class ReviewLinksTests(unittest.TestCase):
                     'give for an approved review, then stop.', 'Idle')
                 self.assertEqual(review_links._relay_source(self.send.call_args.args[1]), 'review-feedback')
                 link = self.links()[0]
-                self.assertEqual((link['approved_commit'], link['approved_at']), (self.HASH, 1700000000))
+                self.assertEqual((link['approved_commit'], link['approved_at'], link['approved_folder']),
+                                 (self.HASH, 1700000000, '/work/my tree'))
                 self.assertEqual(review_links.approved_commits(),
-                                 {'%13': {'%12': {'commit': self.HASH, 'at': 1700000000}}})
+                                 {'%13': {'%12': {'commit': self.HASH, 'at': 1700000000, 'folder': '/work/my tree'}}})
 
     def test_clean_approval_uses_the_worktree_when_the_bound_folder_is_missing(self):
         commit = '1f0e' * 16
@@ -6163,6 +6164,30 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertIn(f"HEAD in this tab's worktree (`git rev-parse HEAD`) is {commit}.", text)
         self.assertNotIn('/work/a different tree', text)
         self.assertEqual(review_links._relay_source(text), 'review-feedback')
+        # B368: auto-merge gets the worktree that the clean read checked.
+        self.assertEqual(review_links.approved_commits()['%13']['%12']['folder'], '/work/a different tree')
+
+    def test_approved_folder_is_saved_reloaded_and_replaced_with_each_approval(self):
+        self.bind()
+        self.request_review()
+        self.finish_review(f'APPROVED {self.HASH}')
+        self.assertEqual(json.loads(self.file.read_text())[0]['approved_folder'], '/work/my tree')
+        # A second approval whose clean read names no folder must not keep the old folder.
+        self.bind(self.NEXT)
+        self.request_review()
+        self.scope = lambda entry: {'commit': self.NEXT, 'dirty': False, 'mark': 'worktree fingerprint'}
+        self.finish_review(f'APPROVED {self.NEXT}')
+        self.assertEqual(review_links.approved_commits()['%13']['%12'], {'commit': self.NEXT, 'at': ANY, 'folder': None})
+
+    def test_a_stored_approval_without_a_valid_folder_lists_none(self):
+        link = dict(self.rows()[0], approved_commit='a' * 40, approved_at=5)
+        for stored in ({}, {'approved_folder': 7}, {'approved_folder': None}):
+            with self.subTest(stored=stored):
+                self.file.write_text(json.dumps([dict(link, **stored)]))
+                self.assertEqual(review_links.approved_commits(), {'%13': {'%12': {'commit': 'a' * 40, 'at': 5,
+                                                                                   'folder': None}}})
+        self.file.write_text(json.dumps([dict(link, approved_folder='/work/b')]))
+        self.assertEqual(review_links.approved_commits()['%13']['%12']['folder'], '/work/b')
 
     def test_approval_of_uncommitted_work_is_forwarded_but_not_recorded_as_an_approved_commit(self):
         self.bind()

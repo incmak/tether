@@ -118,9 +118,9 @@ class Base(unittest.TestCase):
 
     def job(self, head, at='now'):
         at = int(auto_merge.time.time()) + 5 if at == 'now' else at
-        return {'folder': str(self.work), 'commit': head, 'approved_at': at,
+        return {'folder': str(self.work), 'tab': str(self.work), 'commit': head, 'approved_at': at,
                 'worker': '%1', 'name': 'Worker', 'reviewer': '%2', 'reviewer_agent': 'codex',
-                'current': lambda: {'%1': {'%2': {'commit': head, 'at': at}}}}
+                'current': lambda: {'%1': {'%2': {'commit': head, 'at': at, 'folder': str(self.work)}}}}
 
     def origin_main(self):
         return self.git(self.origin, 'rev-parse', 'main')
@@ -1542,6 +1542,8 @@ class Modes(Base):
             (lambda: job.update(current=self.job(head, at=job['approved_at'] + 1)['current']), 'approval changed'),
             (lambda: job.update(current=self.job('a' * 40, at=job['approved_at'])['current']), 'approval changed'),
             (lambda: job.update(current=lambda: {}), 'approval changed'),
+            (lambda: job.update(current=lambda: {'%1': {'%2': {'commit': head, 'at': job['approved_at'],
+                                                               'folder': str(self.repo)}}}), 'approval changed'),
             (lambda: job.update(current=None), 'approval changed'),
             (lambda: job.update(current=fail_read), 'Could not read'),
         )
@@ -1922,23 +1924,108 @@ class Ladder(Base):
         self.assertEqual({area['rung'] for area in self.levels().values()}, {1})
 
 
+class CrossWorktree(Base):
+    """B368: auto-merge checks the worktree the approval checked, inside the tab's own repository."""
+
+    def other_worktree(self, name='other'):
+        folder = self.root / 'project-wt' / name
+        self.git(self.repo, 'worktree', 'add', '-b', name, str(folder), 'main')
+        return folder
+
+    def test_an_approval_in_another_worktree_of_the_tab_repository_passes(self):
+        head = self.change()
+        # The tab started in the main checkout, or in a sibling worktree, and committed in project-wt/work.
+        for tab in (self.repo, self.other_worktree()):
+            with self.subTest(tab=tab.name):
+                auto_merge._seen.clear()
+                decision = auto_merge.process({**self.job(head), 'tab': str(tab)})
+                self.assertEqual(self.failed(decision), [])
+                self.assertEqual((decision['outcome'], decision['head']), ('would_merge', head))
+
+    def test_the_review_folder_is_merged_not_the_tab_folder(self):
+        self.enforce()
+        head = self.change()
+        decision = auto_merge.process({**self.job(head), 'tab': str(self.repo)})
+        self.assertEqual(decision['outcome'], 'merged')
+        self.assertEqual(self.git(self.origin, 'rev-parse', 'main^2'), head)
+
+    def test_a_moved_tip_in_the_review_folder_is_refused(self):
+        head = self.change()
+        self.change(text='later\n')
+        decision = auto_merge.process({**self.job(head), 'tab': str(self.repo)})
+        self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['approval']))
+        self.assertIn(f'approved {head[:12]}, but the branch is at', decision['checks'][0]['text'])
+
+    def test_an_approval_without_a_folder_is_refused_without_a_guess(self):
+        head = self.change()
+        before = self.origin_main()
+        with mock.patch.object(auto_merge, 'evaluate') as evaluate:
+            decision = auto_merge.process({**self.job(head), 'folder': None})
+        evaluate.assert_not_called()
+        self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['approval']))
+        self.assertIn('does not name the folder it reviewed', decision['checks'][0]['text'])
+        self.assertEqual((decision['root'], decision['head']), (str(self.work), head))
+        self.assertEqual(self.origin_main(), before)
+
+    def test_a_gone_review_folder_is_refused(self):
+        head = self.change()
+        gone = self.root / 'project-wt' / 'gone'
+        decision = auto_merge.process({**self.job(head), 'folder': str(gone)})
+        self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['git']))
+
+    def test_a_review_folder_in_another_repository_is_refused_before_any_fetch(self):
+        head = self.change()
+        clone = self.root / 'clone'
+        self.git(self.root, 'clone', '-q', str(self.origin), str(clone))
+        self.git(clone, 'fetch', '-q', str(self.repo), 'work')
+        self.git(clone, 'worktree', 'add', '-b', 'work', str(self.root / 'clone-wt'), head)
+        cases = ((str(self.root / 'clone-wt'), str(self.work), 'not a checkout of the tab'),
+                 (str(self.work), str(self.root / 'clone-wt'), 'not a checkout of the tab'),
+                 (str(self.work), str(self.root), "tab's own folder is not in a Git repository"))
+        for folder, tab, reason in cases:
+            with self.subTest(reason=reason, tab=tab):
+                with mock.patch.object(auto_merge, '_fetch_target') as fetch:
+                    decision = auto_merge.process({**self.job(head), 'folder': folder, 'tab': tab})
+                fetch.assert_not_called()
+                self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['git']))
+                self.assertIn(reason, decision['checks'][0]['text'])
+
+
 class Watcher(Base):
     def test_each_approval_is_queued_once_with_the_reviewer_agent(self):
         entries = [{'id': '%1', 'name': 'Worker', 'agent': 'claude'}, {'id': '%2', 'agent': 'codex'}]
-        approvals = {'%1': {'%2': {'commit': 'a' * 40, 'at': 5}}, '%9': {'%2': {'commit': 'b' * 40, 'at': 5}},
+        approvals = {'%1': {'%2': {'commit': 'a' * 40, 'at': 5, 'folder': str(self.work)}},
+                     '%9': {'%2': {'commit': 'b' * 40, 'at': 5}},
                      '%2': {'%1': {'commit': 'short', 'at': 5}}}
         def current():
             return approvals
 
-        jobs = auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False, current=current)
-        self.assertEqual(jobs, [{'folder': str(self.work), 'commit': 'a' * 40, 'approved_at': 5, 'worker': '%1',
-                                 'name': 'Worker', 'reviewer': '%2', 'reviewer_agent': 'codex', 'current': current}])
+        jobs = auto_merge.observe(entries, approvals, lambda entry: str(self.repo), start=False, current=current)
+        self.assertEqual(jobs, [{'folder': str(self.work), 'tab': str(self.repo), 'commit': 'a' * 40, 'approved_at': 5,
+                                 'worker': '%1', 'name': 'Worker', 'reviewer': '%2', 'reviewer_agent': 'codex',
+                                 'current': current}])
         self.assertEqual(auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False), [])
         approvals['%1']['%2']['at'] = 6
-        renewed = auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False, current=current)
+        renewed = auto_merge.observe(entries, approvals, lambda entry: str(self.repo), start=False, current=current)
         self.assertEqual(renewed, [dict(jobs[0], approved_at=6)])
         self.assertEqual(auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False), [])
         approvals['%1']['%2'] = {'commit': 'c' * 40, 'at': 6}
+        self.assertEqual(len(auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False)), 1)
+
+    def test_an_approval_without_a_folder_is_queued_once_with_no_folder(self):
+        entries = [{'id': '%1', 'name': 'Worker', 'agent': 'claude'}]
+        for saved in ({'commit': 'a' * 40, 'at': 5}, {'commit': 'b' * 40, 'at': 5, 'folder': None},
+                      {'commit': 'c' * 40, 'at': 5, 'folder': ''}):
+            with self.subTest(saved=saved):
+                approvals = {'%1': {'%2': saved}}
+                jobs = auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False)
+                self.assertEqual([(job['folder'], job['tab']) for job in jobs], [(None, str(self.work))])
+                self.assertEqual(auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False), [])
+
+    def test_a_tab_without_a_folder_is_tried_again(self):
+        entries = [{'id': '%1', 'name': 'Worker', 'agent': 'claude'}]
+        approvals = {'%1': {'%2': {'commit': 'a' * 40, 'at': 5, 'folder': str(self.work)}}}
+        self.assertEqual(auto_merge.observe(entries, approvals, lambda entry: None, start=False), [])
         self.assertEqual(len(auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False)), 1)
 
 

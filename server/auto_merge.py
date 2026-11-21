@@ -1091,10 +1091,12 @@ def _trial_merge(scratch, target_sha, head):
     return tree
 
 
-def evaluate(folder, approved):
+def evaluate(folder, approved, tab=None):
     """(decision, plan) for the branch in `folder`. Git can write objects during fetch and trial merge.
 
-    decision: the record for the log and the Settings page. plan: what merge() needs, or None when a check failed."""
+    tab: the worker tab's own folder. When given, `folder` must be a checkout of the same repository (B368: one
+    `--git-common-dir`), checked before any fetch. decision: the record for the log and the Settings page.
+    plan: what merge() needs, or None when a check failed."""
     decision = {'at': int(time.time()), 'folder': str(folder), 'approved': approved if isinstance(approved, str) else None,
                 'checks': [], 'areas': {}, 'outcome': 'wait'}
     checks = decision['checks']
@@ -1104,6 +1106,14 @@ def evaluate(folder, approved):
         return bool(ok)
 
     try:
+        if tab is not None:
+            common = _git_dir(folder, '--git-common-dir').resolve()
+            try:
+                own = _git_dir(tab, '--git-common-dir').resolve()
+            except GitError as exc:
+                raise GitError(f"The tab's own folder is not in a Git repository: {exc}") from exc
+            if common != own:
+                raise GitError(f"The reviewed folder {folder} is not a checkout of the tab's repository {own}.")
         root = main_checkout(folder)
         head = _head(folder)
         branch = _git(folder, 'symbolic-ref', '--quiet', '--short', 'HEAD', check=False).stdout.strip()
@@ -1323,7 +1333,7 @@ def merge(plan, reviewer, job):
         current = job.get('current')
         try:
             live = current().get(job.get('worker'), {}).get(job.get('reviewer')) if callable(current) else None
-            matches = live == {'commit': head, 'at': job['approved_at']}
+            matches = live == {'commit': head, 'at': job['approved_at'], 'folder': job['folder']}
         except Exception as exc:
             raise NotAuthorized('Could not read the current reviewer approval.') from exc
         if not matches:
@@ -1338,12 +1348,19 @@ _merge_lock = threading.Lock()
 def process(job, alert=None):
     """Decide one approved commit and, in enforce mode, merge it. Returns the recorded decision, or None.
 
-    job: {'folder', 'commit', 'approved_at', 'worker', 'name', 'reviewer', 'reviewer_agent', 'current'}.
+    job: {'folder' (the approved worktree, or None), 'tab' (the tab's own folder), 'commit', 'approved_at', 'worker', 'name', 'reviewer', 'reviewer_agent', 'current'}.
     The mode is read here, when the work runs, not when the approval was seen."""
     setting = read_setting()
     if setting['mode'] == 'off':
         return None
-    decision, plan = evaluate(job['folder'], job.get('commit'))
+    if job.get('folder'):
+        decision, plan = evaluate(job['folder'], job.get('commit'), tab=job.get('tab'))
+    else:
+        # B368: the approval does not name the worktree it checked (saved before B368). Do not guess a folder.
+        decision = {'at': int(time.time()), 'folder': job.get('tab'), 'approved': job.get('commit'), 'areas': {},
+                    'outcome': 'wait', 'checks': [{'key': 'approval', 'ok': False, 'text':
+                    'The approval does not name the folder it reviewed. Ask the reviewer to review the commit again.'}]}
+        plan = None
     if decision['outcome'] == 'already':
         return None
     decision.update(mode=setting['mode'], worker=job.get('worker'), name=job.get('name'), reviewer=job.get('reviewer'))
@@ -1425,13 +1442,15 @@ def observe(entries, approvals, folder_of, alert=None, start=True, current=None)
             if key in _seen:
                 continue
             try:
-                folder = folder_of(entry)
+                tab = folder_of(entry)
             except (OSError, KeyError, ValueError, TypeError):
-                folder = None
-            if not folder:
+                tab = None
+            if not tab:
                 continue
+            # B368: merge the worktree the approval checked; the tab's own folder only names the repository.
+            folder = approval.get('folder')
             _seen.add(key)
-            jobs.append({'folder': folder, 'commit': commit, 'approved_at': at, 'worker': worker,
+            jobs.append({'folder': folder if isinstance(folder, str) and folder else None, 'tab': tab, 'commit': commit, 'approved_at': at, 'worker': worker,
                          'name': str(entry.get('name') or '')[:80], 'reviewer': reviewer,
                          'reviewer_agent': (by_pane.get(reviewer) or {}).get('agent'), 'current': current})
     if jobs and start:

@@ -270,6 +270,9 @@ available when auto-merge has its own identity, so agents on the same OS account
 
 A branch passes the checks when all of this holds:
 
+- Tether checks the worktree that the review checked. That can be a worktree other than the tab's start folder, but
+  it must belong to the same repository as the tab's folder. An approval saved before this rule names no worktree
+  and waits.
 - The reviewer approved the exact commit at the head of the branch. The worktree has no uncommitted or untracked files.
   Git itself answers (`git status`, with untracked files and submodules). A tree with a filter such as Git LFS
   waits: Tether does not run the filter's program.

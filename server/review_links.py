@@ -183,7 +183,7 @@ def _sanitize(row):
             and re.fullmatch(r'[0-9a-f]{8}|[0-9a-f]{64}', correction['request'])
             and type(correction['requested']) is bool):
         row['stale_correction'] = correction
-    for field in ('review_folder', 'follow_up_folder'):
+    for field in ('review_folder', 'follow_up_folder', 'approved_folder'):
         if not isinstance(row.get(field), str):
             row.pop(field, None)
     stage = row.pop('parent_stage', None)
@@ -642,14 +642,16 @@ def _reviewers(*, paused_only=False):
 
 
 def approved_commits():
-    """{worker: {reviewer: {'commit': full hash, 'at': Unix seconds}}} for approvals bound to a commit with a clean
-    tree. An approval of uncommitted work, or of a folder with no readable commit, is not listed."""
+    """{worker: {reviewer: {'commit': full hash, 'at': Unix seconds, 'folder': worktree or None}}} for approvals bound
+    to a commit with a clean tree. 'folder' is the worktree whose clean HEAD the approval checked; an approval saved
+    before B368 has None. An approval of uncommitted work, or of a folder with no readable commit, is not listed."""
     with _lock:
         result = {}
         for link in _read():
             if _is_link(link) and isinstance(link.get('approved_commit'), str):
                 result.setdefault(link['worker'], {})[link['reviewer']] = {
-                    'commit': link['approved_commit'], 'at': link.get('approved_at')}
+                    'commit': link['approved_commit'], 'at': link.get('approved_at'),
+                    'folder': link.get('approved_folder')}
         return result
 
 
@@ -1780,8 +1782,8 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                                          if owner != reviewer_key}
                         _clear_restart_counts(cap, reviewer_key, COUNTS)
                         _clear_follow_up(link)
-                        for key in ('stale_commit', 'approved_commit', 'approved_at', 'stale_delivered', 'confirm_commit',
-                                    'stale_unreadable', 'stale_correction'):
+                        for key in ('stale_commit', 'approved_commit', 'approved_at', 'approved_folder', 'stale_delivered',
+                                    'confirm_commit', 'stale_unreadable', 'stale_correction'):
                             link.pop(key, None)
                         # Proof of an approved commit needs a clean tree and a reply at the transcript anchor of this
                         # request. "Send latest reply" has no anchor: that reply may answer an earlier request.
@@ -1791,6 +1793,9 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                             if isinstance(now, dict) and now.get('commit') == bound and now.get('dirty') is False:
                                 link['approved_commit'] = bound
                                 link['approved_at'] = int(time.time())
+                                # B368: auto-merge merges the worktree that this clean read checked, not the tab's cwd.
+                                if isinstance(now.get('folder'), str) and now['folder']:
+                                    link['approved_folder'] = now['folder']
                         if uncommitted:
                             link['approved_dirty'] = bound
                         link['awaiting'] = False
