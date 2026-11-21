@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import attention
+import choice_state
 import helper_tabs
 import server
 import task_tree_answer as answers
@@ -401,13 +402,29 @@ class HelperAnswerTests(unittest.TestCase):
         for prefix, start, last, after, heading, keys in (
             ('120-q1', 0, 4, [('Enter', self.live2('120-q1-05'))], q1, ['Down'] * 4 + ['Enter']),
             ('44-q1', 3, 6, [('Enter', self.live2('44-q1-07'))], q1, ['Down'] * 3 + ['Enter']),
-            ('120-q2', 4, 6, [('Enter', self.live2('120-q2-07')), ('Enter', '')], q2, ['Down'] * 2 + ['Enter'] * 2),
-            ('44-q2', 2, 5, [('Enter', self.live2('44-q2-06')), ('Enter', '')], q2, ['Down'] * 3 + ['Enter'] * 2),
         ):
             with self.subTest(prefix=prefix):
                 (status, _), writes = self.live_done(prefix, start, last, after, heading)
                 self.assertEqual(status, 200)
                 self.assertEqual(writes, keys)
+
+    def test_live_two_question_review_stays_open_for_the_user(self):
+        """Submit answers sends both answers, and the Dock showed only the last question's ticks. The server stops on
+        the verified review, also when the first answer changed in the terminal."""
+        self.two_question_ask()
+        q2 = 'Which formats do you want?'
+        for prefix, start, last, review, moves in (('120-q2', 4, 6, '120-q2-07', 2), ('44-q2', 2, 5, '44-q2-06', 3)):
+            frame = self.live2(review)
+            first = choice_state.ask_review(frame)['blocks'][0][1]
+            other = 'Search, Sync' if first != 'Search, Sync' else 'Search, Export'
+            changed = frame.replace('→ ' + first, '→ ' + other, 1)
+            self.assertEqual(choice_state.ask_review(changed)['blocks'][0][1], other)
+            for name, shown in (('as chosen', frame), ('first answer changed', changed)):
+                with self.subTest(prefix=prefix, review=name):
+                    (status, response), writes = self.live_done(prefix, start, last, [('Enter', shown), ('Enter', '')], q2)
+                    self.assertEqual(status, 409)
+                    self.assertEqual(response['error'], terminal_input.REVIEW_OPEN)
+                    self.assertEqual(writes, ['Down'] * moves + ['Enter'])
 
     def test_live_stale_ticks_on_next_and_submit_rows_send_no_keys(self):
         """Claude 2.1.330, live two-question ask: Done with ticks other than the screen's is refused before any key."""

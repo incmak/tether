@@ -204,7 +204,7 @@ async function sendTerminalInput(path, payload) {
   } catch (failure) { error.textContent = failure.message; }
 }
 document.querySelector('#attention-terminal').addEventListener('click', () => {
-  openModelPicker(chatTabs().find(tab => tab.dataset.session === selected)?.dataset.tmuxSession, selected, thread);
+  openModelPicker(selected, thread);
 });
 for (const button of document.querySelectorAll('#attention-keys button'))
   button.addEventListener('click', () => sendTerminalInput('/mobile/api/key', {key: button.dataset.key}));
@@ -780,8 +780,7 @@ addEventListener('drop', (event) => {
 });
 document.querySelector('#close-screen').addEventListener('click', () => screenDialog.close());
 document.querySelector('#screen-interact').addEventListener('click', () => {
-  const tmuxSession = chatTabs().find(tab => tab.dataset.session === selected)?.dataset.tmuxSession;
-  screenDialog.close(); openModelPicker(tmuxSession, selected, thread);   // the full interactive terminal
+  screenDialog.close(); openModelPicker(selected, thread);   // the full interactive terminal
 });
 screenDialog.addEventListener('close', () => { clearInterval(screenTimer); screenTimer = null; if (!input.disabled) input.focus({preventScroll: true}); });
 document.querySelector('#screen-more').addEventListener('click', event => {
@@ -796,11 +795,12 @@ document.querySelector('#screen-copy').addEventListener('click', async event => 
 const modelDialog = document.querySelector('#model-dialog');
 const modelFrame = document.querySelector('#model-frame');
 let modelSession = null, modelThread = null;
-function openModelPicker(tmuxSession, session, conversation) {
-  if (!tmuxSession) { showNotice('Could not find the terminal for this tab. Refresh and try again.'); return; }
+// The live view and the key buttons act on the same pane: "z%N" shows that pane (zoomed), never the session's active tab.
+function openModelPicker(session, conversation) {
+  if (!/^%[0-9]+$/.test(session || '')) { showNotice('Could not find the terminal for this tab. Refresh and try again.'); return; }
   modelSession = session; modelThread = conversation;
   document.querySelector('#model-error').textContent = '';
-  modelFrame.src = '/terminal/live/?arg=' + encodeURIComponent(tmuxSession);
+  modelFrame.src = '/terminal/live/?arg=' + encodeURIComponent('z' + session);
   modelDialog.showModal();
 }
 document.querySelector('#close-model').addEventListener('click', () => modelDialog.close());

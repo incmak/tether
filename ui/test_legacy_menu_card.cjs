@@ -80,7 +80,7 @@ async function main() {
           await open.click()
           const frame = page.locator('#model-frame')
           await page.waitForFunction(() => document.querySelector('#model-frame')?.getAttribute('src')?.includes('/terminal/live/'))
-          assert.equal(new URL(await frame.getAttribute('src'), origin).searchParams.get('arg'), pane.tmux_session)
+          assert.equal(new URL(await frame.getAttribute('src'), origin).searchParams.get('arg'), 'z' + pane.id)
           await page.locator('#close-model').click()
         }
         assert.equal(writes.filter(({ endpoint }) => ['key', 'type'].includes(endpoint)).length, 0)
@@ -106,6 +106,18 @@ async function main() {
       assert.deepEqual(await page.locator('#attention-keys button:visible').evaluateAll(nodes => nodes.map(node => node.dataset.key)),
         keys, `${step.name}: keys`)
     }
+    // Second caller of the live terminal: the read-only screen's Interact. Both callers show the selected pane ("z%N",
+    // never the tmux session's active tab), and the dialog's key buttons act on that same pane.
+    await page.evaluate(() => document.querySelector('#screen-dialog').showModal())
+    await page.locator('#screen-interact').click()
+    await page.waitForFunction(() => document.querySelector('#model-frame')?.getAttribute('src')?.includes('/terminal/live/'))
+    assert.equal(new URL(await page.locator('#model-frame').getAttribute('src'), origin).searchParams.get('arg'), 'z' + pane.id)
+    const [keyed] = await Promise.all([
+      page.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname === '/mobile/api/key'),
+      page.locator('#model-keys button[data-key="Escape"]').click(),
+    ])
+    assert.equal(keyed.postDataJSON().session, pane.id)
+    await page.locator('#close-model').click()
     assert.deepEqual(errors, [])
     console.log('Legacy card: verified one-choice answers post /menu with the revision; unverified and multi-select offer only the terminal, at 320 px and 1280 px.')
   } finally { await browser.close() }

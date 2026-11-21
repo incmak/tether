@@ -739,6 +739,7 @@ def _wait_for_picker_redraw(look, sleep):
 
 
 NO_TICKS = 'Tick at least one option, then choose Done.'
+REVIEW_OPEN = 'Claude shows your answers to all questions. Open the terminal, check each answer, then choose Submit answers.'
 
 
 def _wait_for_box(entry, run, sleep, revision, row, checked):
@@ -779,6 +780,10 @@ def _finish_claude_multi(entry, menu, press, run, sleep):
         questions = [' '.join(item['question'].split()) for item in menu['ask']['questions']]
         if (result['selected'] and [question for question, _ in blocks] == questions
                 and all(answer for _, answer in blocks) and _review_ticks_match(blocks[index][1], ticks)):
+            if len(blocks) > 1:
+                # Submit answers sends every answer, and the user saw only this question's ticks: earlier answers
+                # can change in the terminal after they were chosen. The review stays open for the user.
+                raise MenuChanged(REVIEW_OPEN)
             press('Enter')
             return
     # The screen after Enter did not verify: send nothing more. The user checks it in the terminal.
