@@ -49,6 +49,7 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
     An unreadable receipt stops the scan. A strict caller gets the read error instead of an unknown source.
     """
     finished_at = None
+    unknown = []  # latest_user, strict: the newest prompt whose sender is unknown
 
     def result(source, record=None):
         return (source, _timestamp(record) if record is not None else None, finished_at) if with_time else source
@@ -69,7 +70,12 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
                     raise
                 return result(injected_prompts.UNKNOWN_RECEIPT, record)
         if source == injected_prompts.UNKNOWN_RECEIPT and latest_user and require_receipts:
-            raise injected_prompts.ProvenanceUnknown(_timestamp(record))  # never skip a prompt that may be the person's
+            # Never skip a prompt that may be the person's. Keep scanning for a proven user prompt before it.
+            if not unknown:
+                unknown.append(_timestamp(record))
+            return None
+        if unknown and latest_user and (source or 'user') == 'user':
+            raise injected_prompts.ProvenanceUnknown(unknown[0], _timestamp(record) or 0)
         if source == injected_prompts.UNKNOWN_RECEIPT and not require_receipts:
             source = 'background'
         source = source or 'user'
@@ -161,11 +167,15 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
                     if found := prompt_source(record, prompt['text']):
                         return found
                     continue
+                if unknown and latest_user:
+                    raise injected_prompts.ProvenanceUnknown(unknown[0], _timestamp(record) or 0)
                 return result('user', record if latest_user else None)
         if is_assistant:
             if with_time and not assistant_seen and finished_at is None:
                 finished_at = _timestamp(record)
             assistant_seen = True
+    if unknown:
+        raise injected_prompts.ProvenanceUnknown(unknown[0])
     if distinguish_missing:
         return result('unknown-background' if hook_blocked else 'unknown')
     return result('background' if hook_blocked else 'user')

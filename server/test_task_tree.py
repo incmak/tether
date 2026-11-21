@@ -734,6 +734,20 @@ class Routes(unittest.TestCase):
                 append_prompt(self.root, 'A real reply', '2026-11-21T00:03:00Z')
                 self.assertFalse(task_tree.manual_mark(self.root, options, server.task_user_prompt_at))
 
+    def test_unknown_prompt_does_not_hide_a_confirmed_reopen(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent), patch.object(task_tree, 'done_items', return_value=set()):
+                self.mark_for_unreadable_prompt(agent)
+                append_prompt(self.root, 'A real reply', '2026-11-21T00:02:00Z')
+                append_prompt(self.root, 'Relay\n\n[Tether id 0123456789abcdef]', '2026-11-21T00:03:00Z')
+                with self.assertRaises(injected_prompts.ProvenanceUnknown) as caught:
+                    server.task_user_prompt_at(self.root)
+                self.assertEqual((caught.exception.at, caught.exception.user_at), (1795219380, 1795219320))
+                tree = self.tree()
+                self.assertFalse(task_tree.manual_mark(self.root, tree.options['%1'], server.task_user_prompt_at))
+                self.assertEqual(task_tree_close.clear_obsolete_marks(tree, self.lock, server.task_user_prompt_at), set())
+                self.assertTrue(self.run.writes)  # the obsolete Done mark is cleared
+
     def test_auto_close_refuses_unreadable_helper_at_final_validation(self):
         for agent in ('claude', 'codex'):
             with self.subTest(agent=agent), patch.object(task_tree, 'done_items', return_value={'B446'}), \
@@ -848,7 +862,7 @@ class DoneRuleTests(unittest.TestCase):
                     # Readable, but the copied delivery's sender is unknown: never skipped as "not the user".
                     with self.assertRaises(injected_prompts.ProvenanceUnknown) as caught:
                         server.task_user_prompt_at(root)
-                    self.assertEqual((caught.exception.at, caught.exception.user_at), (1795219380, 0))
+                    self.assertEqual((caught.exception.at, caught.exception.user_at), (1795219380, 1795219320))
 
     def test_is_done_does_not_fall_back_to_backlog_on_unreadable_manual_mark(self):
         with tempfile.TemporaryDirectory() as folder:
