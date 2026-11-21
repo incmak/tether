@@ -201,7 +201,7 @@ WRAPPERS = {'command', 'env', 'time', 'nohup'}
 COMMAND_WRAPPERS = {'command', 'builtin', 'time', 'noglob', 'nocorrect', 'exec', 'nohup'}
 KEYWORDS = set('if then else elif fi for while until do done case esac function select time coproc ! [[ ]]'.split())
 KEYWORD_PREFIXES = {'if', 'then', 'else', 'elif', 'while', 'until', 'do', 'time', '!', '{'}
-MOVING_WORDS = {'cd', 'pushd', 'popd', 'source', 'eval', 'builtin'}
+MOVING_WORDS = {'cd', 'pushd', 'popd', 'source', '.', 'eval', 'builtin'}
 SHELL_COMMANDS = {'eval', 'source', '.', 'exec', 'xargs', 'sh', 'bash', 'zsh'}
 GIT_VALUE_OPTIONS = {'-c', '--namespace', '--super-prefix', '--config-env', '--exec-path'}
 GIT_PLACE_OPTIONS = {'--git-dir', '--work-tree'}  # they move the repository: the folder is then not known
@@ -389,6 +389,7 @@ def _segments(tokens):
             words.append(token)
         elif redirect := REDIRECTION.fullmatch(token):
             redirected = True
+            uncertain = uncertain or token in ('&>', '&>>')
             if index >= len(tokens) or not isinstance(tokens[index], _Word):
                 uncertain = True
                 continue
@@ -728,21 +729,24 @@ def _cd_guard(segment):
 
 
 def _command_word(words):
-    """Skip shell prefixes for folder and Git context checks."""
+    """Return the index of a command after known prefixes, or None if it cannot be identified."""
     wrapper_options = False
-    for word in words:
+    for index, word in enumerate(words):
         text = word.text
-        if text in COMMAND_WRAPPERS:
+        if word.plain and text in COMMAND_WRAPPERS:
             wrapper_options = True
+        elif word.bare and (text in KEYWORD_PREFIXES or REDIRECTION_VARIABLE.fullmatch(text)):
+            wrapper_options = False
+        elif not word.plain:
+            return None
         elif text == '--':
             wrapper_options = False
         elif wrapper_options and text.startswith('-'):
             continue
-        elif (ASSIGNMENT_LIKE.fullmatch(text) or REDIRECTION_VARIABLE.fullmatch(text)
-              or (word.bare and text in KEYWORD_PREFIXES)):
+        elif ASSIGNMENT_LIKE.fullmatch(text):
             wrapper_options = False
         else:
-            return text
+            return index if text and not any(char in text for char in '[]=${}') else None
     return None
 
 
@@ -803,11 +807,13 @@ def evaluate(command, cwd=None):
                 folder = logical = None
             alone = alone and folder is not None
             continue
-        name = _command_word(words)
-        while words and words[0].bare and words[0].text in KEYWORD_PREFIXES:
-            words = words[1:]
-        uncertain = uncertain or _shell_launcher(words)
-        commit = _git_commit(words) if words else None
+        position = _command_word(words)
+        name = words[position].text if position is not None else None
+        git_words = words
+        while git_words and git_words[0].bare and git_words[0].text in KEYWORD_PREFIXES:
+            git_words = git_words[1:]
+        uncertain = uncertain or _shell_launcher(git_words)
+        commit = _git_commit(git_words) if git_words else None
         if commit:
             args, _, folders, known, config = commit
             here = folder if known and not git_context_changed else None
@@ -822,21 +828,25 @@ def evaluate(command, cwd=None):
                     verdict, reason = 'unknown', 'folder'
                 verdicts.append((verdict, reason))
                 where = here if len(verdicts) == 1 or where == here else None
-        # A wrapper or shell syntax we do not handle can hide a command that moves the shell.
-        if name == '.' or any(word.text in MOVING_WORDS for word in words):
+        # An unrecognised prefix can hide the command word, so consider every word in that case.
+        possible_commands = {word.text for word in words} if position is None else {name}
+        if MOVING_WORDS.intersection(possible_commands):
             folder = logical = None
-        if name in ('set', 'setopt', 'unsetopt'):
+        if possible_commands.intersection(('set', 'setopt', 'unsetopt')):
             steady = False  # later cd and glob behavior can depend on shell options
-        if commit is None:
+        if commit is None and not git_context_changed:
             # These commands can explicitly change the Git worktree or hooks. Keep the folder unknown for probes.
-            git_context_changed = git_context_changed or (
-                any(os.path.basename(word.text) == 'git' for word in words[:-1])
-                and any(word.text == 'config' for word in words[1:]))
-            git_context_changed = git_context_changed or any(
-                GIT_CONFIG_ENV.fullmatch(assignment[1]) for word in words
-                if (assignment := ASSIGNMENT_LIKE.fullmatch(word.text)))
-            if name in ('export', 'unset', 'declare', 'typeset'):
-                git_context_changed = git_context_changed or any(GIT_CONFIG_ENV.fullmatch(word.text) for word in words)
+            if position is None:
+                assignments, env_names = words, words
+            else:
+                env_names = words[position + 1:] if name in ('export', 'unset', 'declare', 'typeset') else []
+                assignments = words[:position] + env_names
+            git_context_changed = (
+                (any(os.path.basename(word.text) == 'git' for word in git_words[:-1])
+                 and any(word.text == 'config' for word in git_words[1:]))
+                or any(GIT_CONFIG_ENV.fullmatch(assignment[1]) for word in assignments
+                       if (assignment := ASSIGNMENT_LIKE.fullmatch(word.text)))
+                or any(GIT_CONFIG_ENV.fullmatch(word.text) for word in env_names))
         alone = False
     if not verdicts:
         return None
@@ -1259,7 +1269,14 @@ def _hook_ready(contents):
 def _defer_to_hook(tree, command, *, cwd_fallback=False):
     if tree is None:
         return False
+    hooks = _git_path(tree, '--git-path', 'hooks')
+    if hooks is None:
+        return False
+    hook = hooks / 'commit-msg'
     try:
+        contents = _owned_hook(hook) if os.access(hook, os.X_OK) else None
+        if contents is None or not _hook_ready(contents):
+            return False
         tokens = list(_tokens(command, [], for_hook=True))
         if any(isinstance(token, str) and token not in ('&&', '\n') for token in tokens):
             return False
@@ -1299,14 +1316,9 @@ def _defer_to_hook(tree, command, *, cwd_fallback=False):
                 return False
             if not message and HOOK_CONFIG_WORD.search(word.text):
                 return False
-        hooks = _git_path(tree, '--git-path', 'hooks')
-        if hooks is None:
-            return False
-        hook = hooks / 'commit-msg'
-        contents = _owned_hook(hook) if os.access(hook, os.X_OK) else None
-        return contents is not None and _hook_ready(contents)
     except (OSError, ValueError):
         return False
+    return True
 
 
 def check(data, env=os.environ, now=None):

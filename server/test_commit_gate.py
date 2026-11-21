@@ -364,7 +364,8 @@ class Evaluate(unittest.TestCase):
             with self.subTest(prefix=prefix):
                 self.assertIsNone(commit_gate.evaluate(prefix + 'git commit -m Title', str(self.cwd))['folder'])
         # An ordinary command before the commit does not move the shell: the usual `git add . && git commit` form.
-        for prefix in ('git add . && ', 'npm test; ', 'git add -A\n', '>/dev/null; ', 'git status --short | head -5; ',
+        for prefix in ('git add . && ', 'git add -- source && ', r"printf '%s\n' GIT_DIR=example; ",
+                       'npm test; ', 'git add -A\n', '>/dev/null; ', 'git status --short | head -5; ',
                        'git diff --cached --stat | tail -2 && ', 'npm test || true; ', 'sleep 1 & ', 'set -e\n'):
             with self.subTest(prefix=prefix):
                 found = commit_gate.evaluate(prefix + 'git commit -m Title', str(self.cwd))
@@ -389,7 +390,8 @@ class Evaluate(unittest.TestCase):
         bash = ('X+=1 cd ./sub', 'X[0]=1 cd ./sub', 'X[0]+=1 cd ./sub',
                 'X=1 command -p cd ./sub', 'X=1 command -- cd ./sub', 'time -p cd ./sub',
                 '{fd}</dev/null cd ./sub', '&>/dev/null cd ./sub', '&>>/dev/null cd ./sub',
-                'command -p -- . ./script', '{fd}</dev/null . ./script')
+                'command -p -- . ./script', '{fd}</dev/null . ./script',
+                'X=${UNSET:-one two} . ./script', 'X[1 + 0]=v . ./script')
         zsh = ('noglob cd ./sub', 'nocorrect cd ./sub', 'nocorrect noglob . ./script')
         for shell, prefixes in (('bash', bash), ('zsh', zsh)):
             for prefix in prefixes:
@@ -402,7 +404,7 @@ class Evaluate(unittest.TestCase):
         deep.mkdir(parents=True)
         (self.cwd / 'link').symlink_to(deep, target_is_directory=True)
         for prefix in ('X=1 set -P', 'command -p set -P', 'time -p set -P',
-                       'noglob setopt CHASE_LINKS', 'nocorrect unsetopt CHASE_LINKS'):
+                       'noglob setopt CHASE_LINKS', 'nocorrect unsetopt CHASE_LINKS', 'X[1 + 0]=v set -P'):
             with self.subTest(prefix=prefix):
                 found = commit_gate.evaluate(f'{prefix}; cd ./link/..; git commit -m Title', str(self.cwd))
                 self.assertEqual((found['folder'], found['verdict']), (None, 'unknown'))
@@ -412,7 +414,8 @@ class Evaluate(unittest.TestCase):
                        'command export GIT_DIR=./sub/.git', 'command -- unset GIT_DIR',
                        'command -p declare -x GIT_DIR=./sub/.git', 'noglob typeset -x GIT_DIR=./sub/.git',
                        'declare -x GIT_CONFIG_GLOBAL=other.config',
-                       'GIT_DIR=./sub/.git', 'export X=1 GIT_DIR=./sub/.git', 'unset GIT_DIR'):
+                       'GIT_DIR=./sub/.git', 'export X=1 GIT_DIR=./sub/.git', 'unset GIT_DIR',
+                       'X[1 + 0]=v export GIT_DIR=./sub/.git', 'X[1 + 0]=v unset GIT_DIR'):
             with self.subTest(prefix=prefix):
                 found = commit_gate.evaluate(f'{prefix}; git commit -m Title', str(self.cwd))
                 self.assertEqual((found['folder'], found['verdict']), (None, 'unknown'))
@@ -421,7 +424,17 @@ class Evaluate(unittest.TestCase):
         for operator in ('&>', '&>>', '&\\\n>\\\n>'):
             with self.subTest(operator=operator):
                 command = f'{operator} /dev/null git commit -m Title'
-                self.assertEqual(self.verdict(command), ('missing', 'no-line'))
+                found = commit_gate.evaluate(command, str(self.cwd))
+                self.assertIsNotNone(found)
+                self.assertEqual((found['verdict'], found['reason'], found['folder']),
+                                 ('unknown', 'parse', str(self.cwd)))
+
+    def test_stdout_and_stderr_redirects_make_a_message_file_uncertain(self):
+        (self.cwd / 'draft.txt').write_text(f'Title\n\n{STAMP}\n')
+        for operator in ('&>', '&>>'):
+            with self.subTest(operator=operator):
+                command = f'git commit --allow-empty -F draft.txt {operator}draft.txt'
+                self.assertEqual(self.verdict(command), ('unknown', 'parse'))
 
     def test_an_earlier_command_stops_the_message_file_read(self):
         (self.cwd / 'msg.txt').write_text('Old draft\n')
@@ -574,15 +587,13 @@ class Evaluate(unittest.TestCase):
 
 
 class Check(Base):
-    def test_prefixed_cd_does_not_probe_head_or_hooks_in_start_repository(self):
+    def test_prefixed_cd_does_not_probe_head_in_start_repository(self):
         commit_gate.set_global('enforce')
         commit_gate.install_hook(self.repo)
         (self.repo / 'sub').mkdir()
-        with mock.patch.object(commit_gate, '_head', wraps=commit_gate._head) as head, \
-                mock.patch.object(commit_gate, '_git_path', wraps=commit_gate._git_path) as git_path:
+        with mock.patch.object(commit_gate, '_head', wraps=commit_gate._head) as head:
             self.assertEqual(self.pre('X=1 cd ./sub && git commit -m Title')[1], '')
         head.assert_not_called()
-        git_path.assert_not_called()
         row = self.rows()[-1]
         self.assertEqual((row['verdict'], row['reason'], row['folder']), ('unknown', 'folder', None))
 
