@@ -287,10 +287,10 @@
 @media (pointer: coarse) { .live .live-held-remove { min-width: 40px; height: 36px; } .live .live-held-clear { min-height: 44px; } }
 .live-held-draft { margin-top: 10px; padding: 10px 12px; border-radius: 12px; background: var(--live-well); border: 1px solid var(--live-hair); scroll-margin-block: 8px; }
 .live-held-draft[data-shown="true"] { border-color: var(--live-you); }
-.live-held-draft-head { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; }
-.live-held-draft-head svg { flex: none; color: var(--muted); }
+.live-held-draft-head { display: flex; align-items: flex-start; line-height: 1.35; gap: 6px; font-size: 13px; font-weight: 600; }
+.live-held-draft-head svg { flex: none; margin-top: 2px; color: var(--muted); }
 .live-held-draft-head > span { min-width: 0; overflow-wrap: anywhere; }
-.live-held-draft-head small { font-weight: 400; color: var(--muted); font-variant-numeric: tabular-nums; }
+.live-held-draft-head small { flex: none; margin-left: auto; white-space: nowrap; font-weight: 400; color: var(--muted); font-variant-numeric: tabular-nums; }
 .live-held-draft-status { margin: 6px 0 0; font-size: 13px; line-height: 1.35; color: var(--muted); }
 .live-held-draft-status[data-failed="true"] { color: var(--error); }
 .live-held-draft-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin: 6px 0 4px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
