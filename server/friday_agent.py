@@ -17,6 +17,7 @@ TETHER_FRIDAY_GEMINI_EFFORT configure the brain. TETHER_FRIDAY_VAD_STOP defaults
 with Smart Turn. Without Smart Turn, VAD uses 0.8s.
 """
 import asyncio
+from bisect import bisect_right
 from collections import deque
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -77,13 +78,15 @@ SYSTEM_PROMPT = (
     'When the user answers a chat\'s question, send only the answers the user gave, in the user\'s words. '
     'Never copy a reply the chat suggested, such as reply "C, yes to all", unless the user said those words. '
     'Sending work to a chat, with send_to_chat or backlog_send: '
+    'Set attach_call on send_to_chat when the user asks to send this call, voice log, transcript, or conversation, '
+    'and use the prompt to say what the chat should do with it. Do not summarize the call in the prompt instead. '
     'Always write the chat name exactly as in state, for example api-server, even when speech-to-text '
     'misheard it ("docs sight" is docs-site): use the closest name in state. '
     '1. If the user said send, tell, ask, prompt, instruct, message, forward, have it, or get it to, call the tool now. '
     'Those words are the consent; do not read back. "Don\'t send" or "not yet" is never consent. '
     '2. Otherwise call the tool anyway: it reads the task back and asks yes or no. '
     'Never ask "Shall I send" in your own words. '
-    '3. When the user says yes to that read-back, call the tool again with the same chat and task. '
+    '3. When the user says yes to that read-back, call the tool again with the same chat, task, and attach_call value. '
     'Speech-to-text may hear "suggest to me" as "search to me"; that is not a send word. '
     'Never say you sent, switched, opened, or did anything unless its tool returned ok in this turn. '
     'After a tool error, say plainly that it did not happen. For show tools, give the reason. '
@@ -109,6 +112,8 @@ SYSTEM_PROMPT = (
 )
 STATE_PREFIX = 'Current Tether state: '
 EVENT_PREFIX = 'Tether news to tell the user in one sentence; do not act on it: '
+CALL_GAP_SECONDS = 900
+CALL_TRANSCRIPT_LIMIT = 40000
 MAX_REPLY_TOKENS = 120
 BARGE_IN_WORDS = 3
 FRIDAY_HOTWORDS = ('Tether', 'tether')
@@ -121,6 +126,9 @@ SEND_INTENT = re.compile(
     r'(?:prompt|message)\s+(?:it|them|\w+(?:-\w+)*)\b(?![^.!]*\?)'
     r'|\bhave\s+(?:it|them|\w+(?:-\w+)+)\s+\w+'
     r'|\bget\s+(?:it|them)\s+to\b', re.I)
+CALL_LOG_INTENT = re.compile(
+    r'\b(?:voice logs?|call logs?|transcript|conversation|(?:this|the|our|whole) call|call with (?:you|friday)'
+    r'|logs? (?:i had )?with you|(?:what|everything) (?:we|i) (?:said|discussed))\b', re.I)
 APPROVAL_YES = re.compile(r'\b(?:approve|approved|yes|yeah|yep|ok|okay|sure|allow|go ahead)\b', re.I)
 APPROVAL_NO = re.compile(r"\b(?:deny|denied|no|nope|reject|stop|don't)\b", re.I)
 # "Do not approve it" or "Not yet" decides nothing: a negation refuses answer_approval, never denies.
@@ -383,7 +391,7 @@ def action_ok(result):
     return isinstance(result, dict) and result.get('ok') is True and 'error' not in result
 
 
-def action_ack(name, args, result):
+def action_ack(name, args, result, *, call_turn_count=0):
     """Use confirmed browser results for short spoken acknowledgements."""
     if not action_ok(result):
         return None
@@ -398,6 +406,11 @@ def action_ack(name, args, result):
     # 'queued': the agent was busy; the prompt waits in its input queue, so "sent" would overclaim.
     queued = field('delivery') == 'queued'
     if name == 'send_to_chat':
+        if call_turn_count:
+            attachment = f' with {call_turn_count} call turns.'
+            if queued:
+                return 'Queued' + (' for ' + chat if chat else '') + attachment + ' It is busy.'
+            return 'Sent' + to_chat + attachment
         return f'Queued for {chat}. It is busy.' if queued and chat else 'Queued.' if queued else f'Sent{to_chat}.'
     if name == 'answer_approval':
         decision = field('decision') or args.get('decision')
@@ -449,10 +462,11 @@ class SendProposal:
     heard: bool = False
     marker_id: str | None = None
     voice_turn: int | None = None
+    attach: bool = False
 
     @property
     def key(self):
-        return self.name, self.chat.strip().casefold(), same_text(self.payload)
+        return self.name, self.chat.strip().casefold(), same_text(self.payload), self.attach
 
     def live(self, user_turn):
         return 1 <= user_turn - self.turn <= 2
@@ -505,6 +519,8 @@ def readback_overlapped(session):
 def send_readback(proposal):
     # The whole name: "Release . Staging" and "Release . Production" must sound different.
     chat = ' '.join(proposal.chat.replace(' . ', ', ').split())
+    if proposal.attach:
+        chat += " with this call's transcript"
     if proposal.name == 'backlog_send':
         return f'{SEND_READBACK_START}{proposal.payload} to {chat}{SEND_READBACK_QUESTION_END}'
     # The whole prompt, never a cut: a yes confirms only the words the user heard.
@@ -581,7 +597,14 @@ def confirmed_args(name, args, last_user_text, previous_assistant, pending=None,
             and pending.heard and pending.follows(previous_assistant)
             and name == pending.name and chat.casefold() == pending.chat.strip().casefold()):
         return args
-    return dict(args, **{'prompt' if name == 'send_to_chat' else 'item': pending.payload})
+    if name == 'send_to_chat':
+        # Keep a changed attachment visible to check_tool so either mismatch fails consent.
+        if bool(args.get('attach_call')) != pending.attach:
+            return args
+        if pending.attach or 'attach_call' in args:
+            return dict(args, prompt=pending.payload, attach_call=pending.attach)
+        return dict(args, prompt=pending.payload)
+    return dict(args, item=pending.payload)
 
 
 def binds(payload, proposed):
@@ -706,10 +729,13 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
     if name in SEND_TOOLS:
         payload = str(args.get('prompt' if name == 'send_to_chat' else 'item', ''))
         chat = str(args.get('chat', '')).strip().casefold()
+        attach = name == 'send_to_chat' and bool(args.get('attach_call'))
         # A yes confirms the one send Friday proposed: the same tool and chat, and the read-back text exactly.
         proposal_matches = (has_proposal and name == pending.name and chat == pending.chat.strip().casefold()
-                            and binds(payload, pending.payload))
+                            and attach == pending.attach and binds(payload, pending.payload))
         yes = plain_yes(last_user_text, chat)
+        if attach and not (CALL_LOG_INTENT.search(last_user_text) or (yes and proposal_matches)):
+            return 'The user did not ask to send the call.'
         if suggestions:
             normalized_payload = norm(payload)
             normalized_speech = norm(last_user_text)
@@ -757,7 +783,10 @@ def tool_schemas():
         ('list_chats', 'Read current chats, session counts, and the default target. '
          'With session, list only chats in the closest matching tmux session.', {'session': string}, []),
         ('send_to_chat', 'Send a clear, complete coding prompt to a named chat.',
-         {'chat': string, 'prompt': string}, ['chat', 'prompt']),
+         {'chat': string, 'prompt': string, 'attach_call': {'type': 'boolean', 'description':
+          "True when the user asks to send this call, the voice log, the transcript, or this conversation. "
+          "Tether adds this call's user and Friday turns after the prompt. The prompt says what the chat should do with them."}},
+         ['chat', 'prompt']),
         ('answer_approval', 'Approve or deny only with clear user consent for this request in this turn.',
          {'chat': string, 'decision': {'type': 'string', 'enum': ['approve', 'deny']}}, ['chat', 'decision']),
         ('read_last_reply', 'Read the last assistant reply from a named chat. Long replies come in parts.',
@@ -796,6 +825,75 @@ def tool_schemas():
 def is_real_user(message):
     return (message.get('role') == 'user' and not (
         isinstance(message.get('content'), str) and message['content'].startswith(STATE_PREFIX)))
+
+
+class CallLog:
+    """Keep the current call independent of the model context and WebRTC peer."""
+
+    def __init__(self, clock=time.time):
+        self.clock = clock
+        self.turns = []
+        self.generation = 0
+        self._messages = {}
+
+    def start_session(self):
+        if self.turns and self.clock() - self.turns[-1][0] >= CALL_GAP_SECONDS:
+            self.turns.clear()
+            self._messages.clear()
+            self.generation += 1
+
+    def record_messages(self, messages, *, generation=None):
+        # A peer whose teardown timed out can still deliver frames after a new call starts.
+        if generation is not None and generation != self.generation:
+            return
+        for message in messages:
+            if not isinstance(message, dict) or id(message) in self._messages:
+                continue
+            text = message.get('content')
+            if not isinstance(text, str):
+                continue
+            text = text.strip()
+            if not text or text.startswith((STATE_PREFIX.rstrip(), EVENT_PREFIX.rstrip())):
+                continue
+            if is_real_user(message):
+                who = 'user'
+            elif message.get('role') == 'assistant' and not message.get('tool_calls'):
+                who = 'friday'
+            else:
+                continue
+            # Retain the object, including after trim_context, so its ID cannot be reused.
+            self._messages[id(message)] = message
+            self.turns.append((self.clock(), who, text))
+
+
+def format_call_transcript(turns):
+    """Return a JSON-size-bounded transcript and the number of turns it includes."""
+    if not turns:
+        return '', 0
+
+    def heading(cut):
+        start = datetime.fromtimestamp(turns[cut][0]).strftime('%H:%M')
+        end = datetime.fromtimestamp(turns[-1][0]).strftime('%H:%M')
+        count = len(turns) - cut
+        unit = 'turn' if count == 1 else 'turns'
+        header = f'Voice call transcript ({count} {unit}, from {start} to {end}):'
+        return f'[{cut} earlier turns cut]\n{header}' if cut else header
+
+    lines = [f'{who.capitalize()}: {text}' for _, who, text in turns]
+    # Each JSON string's two quotes cost the same as the escaped newline before its line.
+    sizes = [len(json.dumps(line)) for line in lines]
+    size = sum(sizes)
+    for cut, line_size in enumerate(sizes):
+        header = heading(cut)
+        if len(json.dumps(header)) + size <= CALL_TRANSCRIPT_LIMIT:
+            return header + '\n' + '\n'.join(lines[cut:]), len(lines) - cut
+        size -= line_size
+
+    # If even the final turn is too large, keep as much of it as fits.
+    suffix = ' [turn cut]'
+    limit = CALL_TRANSCRIPT_LIMIT - len(json.dumps(header + '\n' + suffix)) + 2
+    end = bisect_right(range(len(lines[-1]) + 1), limit, key=lambda n: len(json.dumps(lines[-1][:n]))) - 1
+    return header + '\n' + lines[-1][:end] + suffix, 1
 
 
 def add_state(messages, state, notes, last_sent):
@@ -1440,6 +1538,8 @@ def runtime_types():
                 base_url=brain.base_url, settings=settings)
             self.brain = brain
             self.session = session
+            self.call_log = getattr(session, 'call_log', None) or CallLog()
+            self.call_log_generation = self.call_log.generation
             self.run_source = 'tool'
             self.last_user_text = ''
             self.user_turn = 0
@@ -1505,7 +1605,7 @@ def runtime_types():
             if call.name not in ACTION_TOOLS:
                 return None
             result = frame.result if isinstance(frame, FunctionCallResultFrame) and not frame.error else None
-            ack = action_ack(call.name, call.args, result)
+            ack = action_ack(call.name, call.args, result, call_turn_count=call.call_turn_count)
             # A partial reminder batch succeeds for the items it saved and still needs a follow-up.
             if ack or (call.name == 'reminder_add' and action_ok(result) and result.get('set')):
                 run.succeeded_action = True
@@ -1515,7 +1615,8 @@ def runtime_types():
                 return None
             if call.name in SEND_TOOLS:
                 key = 'prompt' if call.name == 'send_to_chat' else 'item'
-                sent = SendProposal(call.name, str(call.args.get('chat') or ''), str(call.args.get(key) or ''), 0)
+                sent = SendProposal(call.name, str(call.args.get('chat') or ''), str(call.args.get(key) or ''), 0,
+                                    attach=call.name == 'send_to_chat' and bool(call.args.get('attach_call')))
                 self.readback_budget.reset(sent)
                 if (run.proposal is not None and run.proposal.heard
                         and run.proposal is self.session.pending_proposal):
@@ -1619,6 +1720,8 @@ def runtime_types():
                     reply = messages[-1]
                     if reply is not previous_tail and reply['role'] == 'assistant' and not reply.get('tool_calls'):
                         # The aggregator pushes a context frame immediately after committing speech.
+                        # Pipecat commits TTSSpeakFrame text here too, including Friday's ack and read-back.
+                        self.call_log.record_messages((reply,), generation=self.call_log_generation)
                         snapshot = response.request_messages if response is not None else speech_snapshot
                         self._last_reply = (reply, snapshot)
 
@@ -1786,6 +1889,8 @@ def runtime_types():
                     suggestions=suggested_replies(messages) if self.run_source == 'speech' else (),
                     user_turn=self.user_turn, proposal=proposal, declined=declined,
                     replay=replay, readback_debt=getattr(self.session, 'readback_debt', False),
+                    # Async tool calls keep the transcript as of the spoken request.
+                    call_turns=tuple(self.call_log.turns),
                     pending={}, filler_spoken=False, failed_action=False, succeeded_action=False, readback_spoken=False)
             else:
                 self.run_source = 'tool'
@@ -1823,7 +1928,9 @@ def runtime_types():
                     if speak:
                         key = 'prompt' if params.function_name == 'send_to_chat' else 'item'
                         proposal = SendProposal(params.function_name, str(params.arguments.get('chat') or ''),
-                                                str(params.arguments.get(key) or ''), run.user_turn)
+                                                str(params.arguments.get(key) or ''), run.user_turn,
+                                                attach=params.function_name == 'send_to_chat'
+                                                and bool(params.arguments.get('attach_call')))
                         run.readback_spoken = True
                         text, marker_id, cue = self.offer_readback(proposal, params.tool_call_id)
                         properties = FridaySpokenToolResult(run_llm=False, text=text, readback_id=marker_id, cue=cue)
@@ -1834,9 +1941,20 @@ def runtime_types():
                 return
             if run:
                 run.used.add(params.function_name)
+            args = params.arguments
+            call_turn_count = 0
+            if params.function_name == 'send_to_chat' and 'attach_call' in args:
+                params.arguments = dict(args)
+                if params.arguments.pop('attach_call'):
+                    if self.call_log_generation != self.call_log.generation or not run.call_turns:
+                        run.failed_action = True
+                        await params.result_callback({'error': 'There is no call to send yet.'})
+                        return
+                    transcript, call_turn_count = format_call_transcript(run.call_turns)
+                    params.arguments['prompt'] = str(args.get('prompt', '')) + '\n\n' + transcript
             if run and response:
                 run.pending[params.tool_call_id] = SimpleNamespace(
-                    name=params.function_name, args=params.arguments, response=response)
+                    name=params.function_name, args=args, response=response, call_turn_count=call_turn_count)
                 response.tool_output = True
                 self.record_llm_ttft(response)
                 filler = READ_FILLERS.get(params.function_name)
@@ -1860,6 +1978,7 @@ def runtime_types():
 
         async def _process_context(self, context):
             run_messages = context.get_messages()
+            self.call_log.record_messages(run_messages, generation=self.call_log_generation)
             if run_messages and run_messages[-1]['role'] == 'assistant':
                 reply, snapshot = self._last_reply
                 index = len(run_messages) - 1
@@ -2117,7 +2236,7 @@ class Session:
     pending_proposal = None
     readback_debt = False
 
-    def __init__(self, rt, models, connection):
+    def __init__(self, rt, models, connection, call_log=None):
         from pipecat.adapters.llm.schemas.function_schema import FunctionSchema
         from pipecat.adapters.llm.schemas.tools_schema import ToolsSchema
         from pipecat.pipeline.pipeline import Pipeline
@@ -2131,6 +2250,8 @@ class Session:
         from pipecat.transports.base_transport import TransportParams
 
         self.rt, self.models, self.connection = rt, models, connection
+        self.call_log = call_log if call_log is not None else CallLog()
+        self.call_log.start_session()
         self.state = None
         self.notes = []
         self.last_sent = None
@@ -2426,6 +2547,7 @@ def create_app():
     active = None
     retiring = None
     models = None
+    call_log = CallLog()
 
     def clear_active(session):
         nonlocal active, retiring
@@ -2505,7 +2627,7 @@ def create_app():
 
             async def connected(connection):
                 nonlocal active
-                active = Session(rt, models, connection)
+                active = Session(rt, models, connection, call_log)
                 active.on_closed = clear_active
                 models.start_warmup('connection')
                 active.run_task = asyncio.create_task(active.run(), name='friday-pipeline')

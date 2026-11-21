@@ -2031,6 +2031,20 @@
    }
   },
   {
+   "id": "log-send-friday-call-transcript",
+   "group": "send_direct",
+   "split": "dev",
+   "source": "log",
+   "user": "send this the whole log, voice log I had with you to the Friday test session",
+   "expect": {
+    "tool": "send_to_chat",
+    "args": {
+     "chat": "(?i)^friday test$",
+     "attach_call": "^True$"
+    }
+   }
+  },
+  {
    "id": "log2-ask-other-session",
    "group": "send_direct",
    "split": "dev",
