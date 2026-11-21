@@ -199,10 +199,26 @@ case("fixed-no", "deny", D, "no, not now", {"tool": None}, history=FIXED_API, pe
 # Added words are new text: a send of the new text, or Friday's read-back of it, both pass.
 case("fixed-yes-plus-more", "split_turn", D, ["Yes, please do.", "And also check the logs after."],
      {"tool": "send_to_chat", "readback_ok": True, "args": {"chat": "api-server"}}, history=FIXED_API, pending=PENDING_API)
+APPROVAL_CHAT = STATE["needs"][0]["chat"]
+PENDING_APPROVE = {"name": "answer_approval", "chat": APPROVAL_CHAT, "payload": "approve"}
+PENDING_DENY = dict(PENDING_APPROVE, payload="deny")
+FIXED_APPROVE = say("approve it", send_readback(SendProposal(**PENDING_APPROVE, turn=0)))
+FIXED_DENY = say("deny that request", send_readback(SendProposal(**PENDING_DENY, turn=0)))
+ASK_APPROVE = {"tool": None, "readback_chat": APPROVAL_CHAT, "readback_tool": "answer_approval",
+               "args": {"decision": "^approve$"}}
+ASK_DENY = dict(ASK_APPROVE, args={"decision": "^deny$"})
 case("approve", "approval", D, "approve it",
-     {"tool": "answer_approval", "args": {"chat": "(?i)deploy", "decision": "approve"}})
-case("deny-approval", "approval", D, "deny that request",
-     {"tool": "answer_approval", "args": {"chat": "(?i)deploy", "decision": "deny"}})
+     ASK_APPROVE)
+case("deny-approval", "approval", D, "deny that request", ASK_DENY)
+case("fixed-approve-yes", "approval", D, "yes",
+     {"tool": "answer_approval", "args": {"chat": f"^{APPROVAL_CHAT}$", "decision": "^approve$"}},
+     history=FIXED_APPROVE, pending=PENDING_APPROVE)
+case("fixed-deny-deny", "approval", D, "deny",
+     {"tool": "answer_approval", "args": {"chat": f"^{APPROVAL_CHAT}$", "decision": "^deny$"}},
+     history=FIXED_DENY, pending=PENDING_DENY)
+case("fixed-approve-no", "deny", D, "no", {"tool": None}, history=FIXED_APPROVE, pending=PENDING_APPROVE)
+case("approval-unrelated-okay", "approval", D, "Okay", {"tool": None},
+     history=say("What can we do next?", "Would you like to hear the backlog?"))
 case("approval-what", "status", D, "what is deploy check asking for?", {"tool": None, "reply": "(?i)npm|test"})
 case("read-reply", "read_reply", D, "what did the api server say?",
      {"tool": "read_last_reply", "args": {"chat": "(?i)api.server"}})
@@ -260,10 +276,8 @@ case("h-fixed-yes", "confirm", H, "yeah go ahead",
                  send_readback(SendProposal(**PENDING_DOCS, turn=0))))
 case("h-deny-dont", "deny", H, "actually no, don't", {"tool": None},
      history=say("docs site needs a page about the new settings screen", RB_DOCS))
-case("h-approve-allow", "approval", H, "yes allow it",
-     {"tool": "answer_approval", "args": {"decision": "approve"}})
-case("h-deny-reject", "approval", H, "no, reject the deploy check one",
-     {"tool": "answer_approval", "args": {"decision": "deny"}})
+case("h-approve-allow", "approval", H, "yes allow it", ASK_APPROVE)
+case("h-deny-reject", "approval", H, "no, reject the deploy check one", ASK_DENY)
 case("h-read-misheard", "misheard", H, "what did dogs site reply?",
      {"tool": "read_last_reply", "args": {"chat": "(?i)docs.site"}},
      tool_results={"read_last_reply": {"chat": "docs-site", "text": "The links are fixed."}})
@@ -305,6 +319,10 @@ case("log2-already-asked", "read_reply", "dev",
                           "Shall I send the request to go question by question to release-notes?"))
 case("log2-read-the-questions", "read_reply", "dev", "Can you read the questions?",
      {"tool": "read_last_reply", "args": {"chat": "(?i)release.notes"}}, "log", history=QS_CTX, state=QS_STATE, tool_results=QS)
+case("log-send-friday-call-transcript", "send_direct", "dev",
+     "send this the whole log, voice log I had with you to the Friday test session",
+     {"tool": "send_to_chat", "readback_ok": True,
+      "args": {"chat": "(?i)^friday test$", "attach_call": "^True$"}}, "log")
 case("log2-ask-other-session", "send_direct", "dev",
      "Okay ask Friday test uh session to read latest. Uh logs I had. the call with Friday.",
      {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": "(?i)log"}}, "log", history=QS_CTX, state=QS_STATE)
@@ -377,4 +395,5 @@ case("log-ask-friday-test-new-tab", "send_direct", "dev",
 output = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).with_name("cases.json")
 with output.open("w", encoding="utf-8") as stream:
     json.dump({"version": 1, "state": STATE, "tool_results": RESULTS, "cases": cases}, stream, indent=1)
+    stream.write("\n")
 print(len(cases), sum(c["split"] == "dev" for c in cases))

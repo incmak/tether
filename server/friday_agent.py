@@ -98,7 +98,7 @@ SYSTEM_PROMPT = (
     'Outside your tools (GitHub, email, accounts), call no tool in that turn: say you cannot do it directly, even when the user said send; offer '
     'send_to_chat to a named chat or new_chat. Read that prompt back and wait for yes. '
     'Use answer_approval only when a chat in state needs approval and the user clearly said approve or yes, '
-    'or deny or no, to that approval in this turn. A yes to your read-back is not an approval. '
+    'or deny or no, to that approval in this turn. A yes to a send read-back is not an approval. '
     'Use new_chat only when the user asks you to create a chat. If the user asks a chat to start a tab or do work, send it to that chat. '
     'The backlog is the user\'s list of work for later. Each item has an ID like B12; say it as B 12. '
     'Call backlog_list when asked what is on the backlog. Use backlog_add only when the user asks to add work to the backlog. '
@@ -142,9 +142,13 @@ SEND_TOOLS = ('send_to_chat', 'backlog_send')
 ACTION_TOOLS = (*SEND_TOOLS, 'answer_approval', 'new_chat', 'switch_chat', 'show_chat', 'show_session',
                 'backlog_add', 'open_panel', 'reminder_add')
 READBACK_REQUIRED = 'Read the prompt back and ask the user to confirm before sending.'
+APPROVAL_CONFIRM_REQUIRED = 'Ask the user to confirm this approval decision first.'
+APPROVAL_DECLINED = 'The user said no to the approval question. Nothing was decided; do not ask again.'
+APPROVAL_DECLINED_REPLY = 'Okay. I did not approve or deny it.'
 SEND_READBACK_START = 'Not sent yet. Should I send '
 SEND_READBACK_END = '. Yes or no?'
 SEND_READBACK_QUESTION_END = '?' + SEND_READBACK_END.removeprefix('.')
+APPROVAL_READBACK_START = {'approve': 'Not approved yet.', 'deny': 'Not denied yet.'}
 SUGGESTED_REPLY = re.compile(
     r'\b(?:reply|answer|say|send)\s+(?:"([^"]{1,80})"|“([^”]{1,80})”'
     r"|'((?:[^']|(?<=\w)'(?=\w)){1,80})'(?!\w)|‘((?:[^’]|(?<=\w)’(?=\w)){1,80})’(?!\w))", re.I)
@@ -470,6 +474,12 @@ class SendProposal:
     attach: bool = False
     cue: bool = False
 
+    @classmethod
+    def from_args(cls, name, args, turn):
+        key = {'send_to_chat': 'prompt', 'backlog_send': 'item', 'answer_approval': 'decision'}[name]
+        return cls(name, str(args.get('chat') or ''), str(args.get(key) or ''), turn,
+                   attach=name == 'send_to_chat' and bool(args.get('attach_call')))
+
     @property
     def key(self):
         return self.name, self.chat.strip().casefold(), same_text(self.payload), self.attach
@@ -487,7 +497,7 @@ MAX_READBACK_REPLAYS = 2
 
 
 class ReadbackBudget:
-    """Count retries for the same unheard send, even after its proposal clears."""
+    """Count retries for the same unheard read-back, even after its proposal clears."""
 
     def __init__(self):
         self.key = None
@@ -525,6 +535,9 @@ def readback_overlapped(session):
 def send_readback(proposal):
     # The whole name: "Release . Staging" and "Release . Production" must sound different.
     chat = ' '.join(proposal.chat.replace(' . ', ', ').split())
+    if proposal.name == 'answer_approval':
+        decision = proposal.payload
+        return f'{APPROVAL_READBACK_START[decision]} Should I {decision} {chat}{SEND_READBACK_QUESTION_END}'
     if proposal.attach:
         chat += " with this call's transcript"
     if proposal.name == 'backlog_send':
@@ -568,9 +581,9 @@ def same_text(text):
 
 # A yes to a read-back is only these words (and the chat's own name). "Yes, but later",
 # "Okay, once the tests pass" or "Sure, but make it D" hold more, so they are not a plain yes.
-YES_WORDS = frozenset('yes yeah yep yup ok okay sure please send alright absolutely correct ahead'.split())
+YES_WORDS = frozenset('yes yeah yep yup ok okay sure send alright absolutely correct ahead'.split())
 YES_FILLER = frozenset('do it that this go right now thanks thank sounds good great perfect fine '
-                       'uh um and just so then all s to the chat session tab'.split())  # "you" only in "thank you"
+                       'uh um and just so then all s to the chat session tab please'.split())  # "you" only in "thank you"
 
 
 def plain_yes(text):
@@ -613,19 +626,37 @@ def approval_answer(text):
     return None
 
 
+def confirms(proposal, text):
+    if proposal.name != 'answer_approval':
+        return plain_yes(text)
+    if APPROVAL_NEGATION.search(text):
+        return False
+    if plain_yes(text):
+        return True
+    # No or nope with only filler declines either question. An explicit "deny" can confirm a denial.
+    words = set(norm(text).split()) - APPROVAL_FILLER
+    return bool(words - {'no', 'nope'}) and approval_answer(text) == proposal.payload
+
+
+def declines(proposal, text):
+    return bool(APPROVAL_NO.search(text)) and (proposal.name != 'answer_approval' or not confirms(proposal, text))
+
+
 def confirmed_args(name, args, last_user_text, previous_assistant, pending=None, user_turn=0):
-    """On a plain yes to Friday's fixed read-back, the send carries the stored text the user heard.
+    """On a plain yes to Friday's fixed read-back, use the stored payload the user heard.
 
     The model may reword the read-back text in its tool call; the user confirmed the stored proposal.
     Only the server's own proposal binds: a yes to Friday's free-form words gets the fixed read-back.
     """
-    if name not in SEND_TOOLS or not isinstance(args, dict) or pending is None:
+    if (name not in (*SEND_TOOLS, 'answer_approval') or not isinstance(args, dict) or pending is None):
         return args
     chat = str(args.get('chat', '')).strip()
     if not (plain_yes(last_user_text) and pending.live(user_turn)
             and pending.heard and pending.follows(previous_assistant)
             and name == pending.name and chat.casefold() == pending.chat.strip().casefold()):
         return args
+    if name == 'answer_approval':
+        return dict(args, decision=pending.payload)
     if name == 'send_to_chat':
         # Keep a changed attachment visible to check_tool so either mismatch fails consent.
         if bool(args.get('attach_call')) != pending.attach:
@@ -697,7 +728,7 @@ def hotword_text(names):
             for word in words
         ):
             continue
-        if (YES_WORDS.intersection(norm(name).split())
+        if ((YES_WORDS | {'please'}).intersection(norm(name).split())
                 or APPROVAL_YES.search(name) or APPROVAL_NO.search(name)
                 or SEND_WORDS.search(name) or re.search(r'\bcancel\b', name, re.I)):
             continue
@@ -728,12 +759,13 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
     # The yes must answer the read-back the user heard last. Two turns keep a yes split over two runs
     # (the first run interrupted before it spoke).
     live = pending is not None and pending.live(user_turn)
-    follows_readback = live and pending.follows(previous_assistant)
+    live_send = live and pending.name in SEND_TOOLS
+    follows_readback = live_send and pending.follows(previous_assistant)
     has_proposal = follows_readback and pending.heard
     attach = name == 'send_to_chat' and bool(args.get('attach_call'))
     if attach and excludes_call(last_user_text):
         return CALL_NOT_REQUESTED
-    if (source == 'speech' and name in SEND_TOOLS and live
+    if (source == 'speech' and name in SEND_TOOLS and live_send
             and (follows_readback or (not pending.heard and not previous_assistant.strip()))
             and APPROVAL_NO.search(last_user_text)):
         return 'The user declined the proposed send.'
@@ -753,16 +785,32 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                    for key in ('text', 'when')) for item in items):
             return 'Each reminder needs text and a time.'
     if name == 'answer_approval':
-        # A yes to Friday's send question answers that send, not a tool approval in some chat.
-        # Fail-safe boundary: a real approval question that names a send word is refused too; Friday asks again.
-        if (live or previous_assistant.strip().casefold().startswith(SEND_READBACK_START.casefold())
-                or ('?' in previous_assistant and SEND_WORDS.search(previous_assistant))):
+        if live_send or previous_assistant.strip().casefold().startswith(SEND_READBACK_START.casefold()):
             return 'The user answered a send question, not an approval.'
-        if APPROVAL_NEGATION.search(last_user_text):
-            return 'The user did not give unambiguous consent for this decision.'
-        decision = approval_answer(last_user_text)
-        if decision is None or decision != args.get('decision'):
-            return 'The user did not give unambiguous consent for this decision.'
+        decision = args.get('decision')
+        # "No" to "Should I approve docs?" decides nothing: it is not a denial, and Friday does not ask again.
+        if (live and pending.name == name and pending.follows(previous_assistant)
+                and declines(pending, last_user_text)
+                # "No, deny it" to the approve question asks for the other decision; it gets its own question.
+                and not (decision in APPROVAL_READBACK_START and decision != pending.payload
+                         and confirms(replace(pending, payload=decision), last_user_text))):
+            return APPROVAL_DECLINED
+        bound = (live and pending.name == name and pending.heard and pending.follows(previous_assistant)
+                 and str(args.get('chat', '')).strip().casefold() == pending.chat.strip().casefold()
+                 and decision == pending.payload and confirms(pending, last_user_text))
+        if not bound:
+            if '?' in previous_assistant and SEND_WORDS.search(previous_assistant):
+                return 'The user answered a send question, not an approval.'
+            ambiguous = 'The user did not give unambiguous consent for this decision.'
+            if APPROVAL_NEGATION.search(last_user_text) or decision not in ('approve', 'deny'):
+                return ambiguous
+            # The browser approves the only waiting chat for a blank name; the question must name it.
+            if not str(args.get('chat') or '').strip():
+                return 'Name the chat that waits for approval.'
+            answer = approval_answer(last_user_text)
+            if answer is not None and answer != decision:
+                return ambiguous
+            return APPROVAL_CONFIRM_REQUIRED
     if name == 'send_to_chat' and re.search(
             r'\bwhat\s+(?:was|is|did)\b.*\b(?:response|reply|answer|say)\b|\bdid it (?:reply|answer|finish)\b',
             str(args.get('prompt', '')), re.I | re.S):
@@ -789,7 +837,7 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                         return READBACK_REQUIRED
         # A transcript always requires a heard read-back. Other sends take the direct path
         # only for a fresh, explicit request, never for an answer that includes a send word.
-        if (not attach and not (live or readback_debt or answers_question(previous_assistant))
+        if (not attach and not (live_send or readback_debt or answers_question(previous_assistant))
                 and send_intent(last_user_text)):
             return None
         # Only the server's own stored proposal binds a yes. A yes to Friday's free-form words gets
@@ -1669,14 +1717,16 @@ def runtime_types():
             if not ack:
                 return None
             if call.name in SEND_TOOLS:
-                key = 'prompt' if call.name == 'send_to_chat' else 'item'
-                sent = SendProposal(call.name, str(call.args.get('chat') or ''), str(call.args.get(key) or ''), 0,
-                                    attach=call.name == 'send_to_chat' and bool(call.args.get('attach_call')))
-                self.readback_budget.reset(sent)
+                self.readback_budget.reset(SendProposal.from_args(call.name, call.args, 0))
                 if (run.proposal is not None and run.proposal.heard
                         and run.proposal is self.session.pending_proposal):
                     self.session.readback_debt = False
                 self.session.pending_proposal = None
+            if (call.name == 'answer_approval' and run.proposal is not None
+                    and run.proposal.name == 'answer_approval' and run.proposal is self.session.pending_proposal):
+                self.readback_budget.reset(run.proposal)
+                self.session.pending_proposal = None
+                self.session.readback_debt = False
             if (call.response.turn == getattr(self.session, 'turn', None) and call.response.call_count == 1
                     and frame.properties is None and frame.run_llm is None):
                 frame.properties = FridaySpokenToolResult(run_llm=False, text=ack)
@@ -1981,13 +2031,13 @@ def runtime_types():
                     live = proposal is not None and proposal.live(self.user_turn)
                     if not live or (not proposal.follows(previous) and (proposal.heard or previous)):
                         self.session.pending_proposal = proposal = None
-                    elif APPROVAL_NO.search(self.last_user_text):
+                    elif declines(proposal, self.last_user_text):
                         self.session.pending_proposal = None
                         self.session.readback_debt = False
                         self.readback_budget.reset(proposal)
                         declined = True
                     elif not proposal.heard:
-                        replay = plain_yes(self.last_user_text)
+                        replay = confirms(proposal, self.last_user_text)
                         if not replay:
                             self.session.pending_proposal = proposal = None
                 self.tool_run = SimpleNamespace(source=self.run_source,
@@ -2028,21 +2078,26 @@ def runtime_types():
                 if run and run.source == 'speech' and params.function_name in ACTION_TOOLS:
                     run.failed_action = True
                 print(f'Friday blocked {params.function_name}: {reason}', file=sys.stderr, flush=True)
-                if reason == READBACK_REQUIRED:
+                if reason in (READBACK_REQUIRED, APPROVAL_CONFIRM_REQUIRED):
                     speak = (not run.readback_spoken and run is self.tool_run
                              and (not response or response.turn == getattr(self.session, 'turn', None)))
+                    status = (APPROVAL_READBACK_START[params.arguments['decision']]
+                              if reason == APPROVAL_CONFIRM_REQUIRED else 'Not sent yet.')
                     properties = FunctionCallResultProperties(run_llm=False)
                     if speak:
-                        key = 'prompt' if params.function_name == 'send_to_chat' else 'item'
-                        proposal = SendProposal(params.function_name, str(params.arguments.get('chat') or ''),
-                                                str(params.arguments.get(key) or ''), run.user_turn,
-                                                attach=params.function_name == 'send_to_chat'
-                                                and bool(params.arguments.get('attach_call')))
+                        proposal = SendProposal.from_args(params.function_name, params.arguments, run.user_turn)
                         run.readback_spoken = True
                         text, marker_id, cue = self.offer_readback(proposal, params.tool_call_id)
                         properties = FridaySpokenToolResult(run_llm=False, text=text, readback_id=marker_id, cue=cue)
-                    await params.result_callback({'error': 'Not sent yet. Friday asked the user to confirm.'},
+                    await params.result_callback({'error': f'{status} Friday asked the user to confirm.'},
                                                  properties=properties)
+                    return
+                if reason == APPROVAL_DECLINED:
+                    # A fixed reply: the model tends to claim a decision after this refusal ("That's denied").
+                    speak = run is self.tool_run and (not response or response.turn == getattr(self.session, 'turn', None))
+                    properties = (FridaySpokenToolResult(run_llm=False, text=APPROVAL_DECLINED_REPLY) if speak
+                                  else FunctionCallResultProperties(run_llm=False))
+                    await params.result_callback({'error': reason}, properties=properties)
                     return
                 await params.result_callback({'error': reason})
                 return

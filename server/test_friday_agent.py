@@ -37,7 +37,7 @@ class ParakeetHotwordTests(unittest.TestCase):
         names = ('Yes', 'no', 'Send it', 'Okay', 'stop', '👍', '東京', 'one two three four five six',
                  'A' * 60, 'Tether', 'automation tether', 'B12', 'Café-42', "D'Arcy", 'TETHER',
                  'deny-now', 'Nope Tools', 'docs-CANCEL', 'YUP', 'Draft, Review', 'A/B', 'A\tB',
-                 'Message Queue', 'Ahead', 'Approve', 'Sentry')
+                 'Message Queue', 'Ahead', 'Approve', 'Please', 'Please Review', 'Sentry')
         self.assertEqual(friday.hotword_text(names),
                          "Tether/tether/automation tether/B12/b12/Café-42/café-42/D'Arcy/d'arcy/TETHER/Sentry/sentry")
 
@@ -580,28 +580,150 @@ class FridayRulesTests(unittest.TestCase):
     def test_one_action_per_speech_turn(self):
         for name, args, utterance in [
                 ('send_to_chat', {'prompt': 'Fix the login bug'}, 'yes, tell it to fix login'),
-                ('answer_approval', {'decision': 'approve'}, 'yes')]:
-            self.assertIsNone(friday.check_tool(name, args, 'speech', utterance, set()))
+                ('answer_approval', {'chat': 'docs', 'decision': 'approve'}, 'yes')]:
+            pending = friday.SendProposal(name, 'docs', 'approve', 0, heard=True) if name == 'answer_approval' else None
+            previous = friday.send_readback(pending) if pending else ''
+            self.assertIsNone(friday.check_tool(name, args, 'speech', utterance, set(), previous, pending, 1))
             used = {name}
-            self.assertIsNotNone(friday.check_tool(name, args, 'speech', 'yes', used))
+            self.assertIsNotNone(friday.check_tool(name, args, 'speech', 'yes', used, previous, pending, 1))
             self.assertEqual(used, {name})
+
+    def test_please_needs_an_affirmative_word(self):
+        for answer in ("That's all, please", "Please, that's all", 'Please', 'Just that, please'):
+            with self.subTest(answer=answer):
+                self.assertFalse(friday.plain_yes(answer))
+        for answer in ('Yes, please', 'Yes please send it', 'Okay, thanks'):
+            with self.subTest(answer=answer):
+                self.assertTrue(friday.plain_yes(answer))
+        for name, key, payload in (('send_to_chat', 'prompt', 'Check the logs'), ('backlog_send', 'item', 'B12')):
+            proposal = friday.SendProposal(name, 'docs', payload, 0, heard=True)
+            for answer in ("That's all, please", "Please, that's all"):
+                with self.subTest(name=name, answer=answer):
+                    self.assertEqual(friday.check_tool(name, {'chat': 'docs', key: payload}, 'speech', answer,
+                                                       set(), friday.send_readback(proposal), proposal, 1),
+                                     friday.READBACK_REQUIRED)
+
+    def test_approval_needs_its_own_question(self):
+        for previous, answer in (
+                ('Would you like to hear the backlog?', 'Okay'),
+                ('How many approvals are pending?', 'Yeah, just one request'),
+                ('Do you want me to read the last reply from docs?', 'Sure'),
+                ('Is there anything else?', 'Yes'), ('', 'Approve docs')):
+            with self.subTest(previous=previous, answer=answer):
+                self.assertEqual(friday.check_tool('answer_approval', {'chat': 'docs', 'decision': 'approve'},
+                                                   'speech', answer, set(), previous),
+                                 'Ask the user to confirm this approval decision first.')
+
+    def test_no_to_the_approval_question_decides_nothing(self):
+        declined = 'The user said no to the approval question. Nothing was decided; do not ask again.'
+        required = 'Ask the user to confirm this approval decision first.'
+        for asked, answer, decision, reason in (
+                ('approve', 'No', 'deny', declined), ('approve', 'Nope', 'approve', declined),
+                ('approve', 'No, not now', 'deny', declined), ('deny', 'No', 'deny', declined),
+                ('deny', 'No', 'approve', declined),
+                # An explicit word for the other decision gets that decision's own question.
+                ('approve', 'No, deny it', 'deny', required),
+                # "No, approve it" mixes a no word and an approve word: it decides nothing (fail-safe).
+                ('deny', 'No, approve it', 'approve', declined)):
+            proposal = friday.SendProposal('answer_approval', 'docs', asked, 1, heard=True)
+            with self.subTest(asked=asked, answer=answer, decision=decision):
+                self.assertEqual(friday.check_tool('answer_approval', {'chat': 'docs', 'decision': decision},
+                                                   'speech', answer, set(), friday.send_readback(proposal),
+                                                   proposal, 2), reason)
+
+    def test_approval_question_needs_a_chat_name(self):
+        # A blank name would ask "Should I approve ?" and the browser would pick the only waiting chat.
+        for chat in ('', '  ', None):
+            with self.subTest(chat=chat):
+                self.assertEqual(friday.check_tool('answer_approval', {'chat': chat, 'decision': 'approve'},
+                                                   'speech', 'Approve it', set()),
+                                 'Name the chat that waits for approval.')
+
+    def test_approval_question_binds_the_chat_and_decision(self):
+        for chat, decision, answers in (('Docs . Staging', 'approve', ('Yes', 'Yes, approve it', 'Okay.')),
+                                        ('docs', 'deny', ('Deny', 'Yes')),
+                                        ('update-bot', 'approve', ('Yes',)), ('Send Bot', 'approve', ('Yes',))):
+            proposal = friday.SendProposal('answer_approval', chat, decision, 0, heard=True)
+            previous = friday.send_readback(proposal)
+            spoken_chat = 'Docs, Staging' if chat == 'Docs . Staging' else chat
+            status = 'approved' if decision == 'approve' else 'denied'
+            self.assertEqual(previous, f'Not {status} yet. Should I {decision} {spoken_chat}? Yes or no?')
+            args = {'chat': f' {chat.upper()} ', 'decision': decision}
+            for answer in answers:
+                with self.subTest(chat=chat, decision=decision, answer=answer):
+                    self.assertIsNone(friday.check_tool(proposal.name, args, 'speech', answer, set(),
+                                                       previous, proposal, 1))
+
+    def test_approval_rejects_answers_that_do_not_bind_to_the_question(self):
+        proposal = friday.SendProposal('answer_approval', 'docs', 'approve', 1, heard=True)
+        question = 'Not approved yet. Should I approve docs? Yes or no?'
+        required = 'Ask the user to confirm this approval decision first.'
+        ambiguous = 'The user did not give unambiguous consent for this decision.'
+        for chat, decision, answer, previous, pending, turn, reason in (
+                ('other', 'approve', 'Yes', question, proposal, 2, required),
+                ('docs', 'deny', 'Deny', question, proposal, 2, required),
+                ('docs', 'approve', 'Deny', question, proposal, 2, friday.APPROVAL_DECLINED),
+                ('docs', 'approve', 'Yes', question, friday.replace(proposal, heard=False), 2, required),
+                ('docs', 'approve', 'Yes', question, proposal, 4, required),
+                ('docs', 'approve', 'Yes', 'The build finished.', proposal, 2, required),
+                ('docs', 'approve', 'Not yet', question, proposal, 2, ambiguous),
+                ('docs', 'approve', 'Yes, but not now', question, proposal, 2, ambiguous),
+                ('docs', 'approve', "That's all, please", question, proposal, 2, required)):
+            with self.subTest(chat=chat, decision=decision, answer=answer, previous=previous, pending=pending, turn=turn):
+                args = {'chat': chat, 'decision': decision}
+                self.assertEqual(friday.check_tool(proposal.name, args, 'speech', answer, set(), previous, pending, turn),
+                                 reason)
+
+    def test_approval_question_cannot_authorize_a_send(self):
+        proposal = friday.SendProposal('answer_approval', 'docs', 'deny', 0, heard=True)
+        question = 'Not denied yet. Should I deny docs? Yes or no?'
+        for name, key, payload in (('send_to_chat', 'prompt', 'Check the logs'), ('backlog_send', 'item', 'B12')):
+            for answer in ('Yes', 'Yes, send it', 'Deny'):
+                with self.subTest(name=name, answer=answer):
+                    self.assertEqual(friday.check_tool(name, {'chat': 'docs', key: payload}, 'speech', answer,
+                                                       set(), question, proposal, 1), friday.READBACK_REQUIRED)
+
+    def test_confirms_and_declines_distinguish_send_and_approval_answers(self):
+        for name, payload, answer, confirms, declines in (
+                ('send_to_chat', 'Check the logs', 'Yes, please', True, False),
+                ('backlog_send', 'B12', 'Deny', False, True),
+                ('backlog_send', 'B12', 'Please', False, False),
+                ('answer_approval', 'approve', 'Yes, approve it', True, False),
+                ('answer_approval', 'approve', 'No', False, True),
+                ('answer_approval', 'approve', 'Not yet', False, False),
+                ('answer_approval', 'deny', 'Deny', True, False),
+                ('answer_approval', 'deny', 'Yes', True, False),
+                ('answer_approval', 'deny', 'No, thanks', False, True),
+                ('answer_approval', 'deny', 'Nope', False, True),
+                ('answer_approval', 'deny', 'No', False, True),
+                ('answer_approval', 'deny', 'Do not deny it', False, True)):
+            with self.subTest(name=name, payload=payload, answer=answer):
+                proposal = friday.SendProposal(name, 'docs', payload, 0, heard=True)
+                self.assertEqual(friday.confirms(proposal, answer), confirms)
+                self.assertEqual(friday.declines(proposal, answer), declines)
 
     def test_approval_consent(self):
         cases = [('what was the response?', 'approve', False),
                  ('yes approve it', 'approve', True), ('yes approve it', 'deny', False),
-                 ('no', 'deny', True), ('yes but no', 'approve', False),
+                 ('no', 'deny', False), ('yes but no', 'approve', False),
                  ('yes but no', 'deny', False), ('yesterday', 'approve', False),
                  ('nobody', 'deny', False), ('sure', 'invalid', False)]
         for text, decision, allowed in cases:
             with self.subTest(text=text, decision=decision):
-                self.assertEqual(friday.check_tool('answer_approval', {'decision': decision},
-                    'speech', text, set()) is None, allowed)
+                proposal = friday.SendProposal('answer_approval', 'docs', 'approve' if decision == 'invalid' else decision,
+                                               0, heard=True)
+                self.assertEqual(friday.check_tool(proposal.name, {'chat': 'docs', 'decision': decision},
+                    'speech', text, set(), friday.send_readback(proposal), proposal, 1) is None, allowed)
         for decision, words in [('approve', ['approve', 'approved', 'yes', 'yeah', 'yep',
                                             'ok', 'okay', 'sure', 'allow', 'go ahead']),
                                 ('deny', ['deny', 'denied', 'no', 'nope', 'reject', 'stop', "don't"])]:
             for word in words:
-                self.assertIsNone(friday.check_tool('answer_approval', {'decision': decision},
-                    'speech', word.upper() + '!', set()))
+                with self.subTest(word=word):
+                    proposal = friday.SendProposal('answer_approval', 'docs', decision, 0, heard=True)
+                    reason = friday.check_tool(proposal.name, {'chat': 'docs', 'decision': decision},
+                        'speech', word.upper() + '!', set(), friday.send_readback(proposal), proposal, 1)
+                    expected = friday.APPROVAL_DECLINED if word in ('no', 'nope') else None
+                    self.assertEqual(reason, expected)
 
     def test_approval_requires_a_whole_consent_answer(self):
         cases = (
@@ -645,7 +767,7 @@ class FridayRulesTests(unittest.TestCase):
             ('docs', 'Approve', 'approve', True),
             ('docs', 'Yes approve it', 'approve', True),
             ('docs', 'Deny', 'deny', True),
-            ('docs', 'No', 'deny', True),
+            ('docs', 'No', 'deny', False),
             ('docs', 'Go ahead', 'approve', True),
             # "Don't" alone denies; a negated command decides nothing.
             ('docs', "Don't deny.", 'deny', False),
@@ -656,10 +778,10 @@ class FridayRulesTests(unittest.TestCase):
         )
         for chat, text, decision, allowed in cases:
             with self.subTest(chat=chat, text=text, decision=decision):
+                proposal = friday.SendProposal('answer_approval', chat, decision, 0, heard=True)
                 reason = friday.check_tool('answer_approval', {'chat': chat, 'decision': decision},
-                                           'speech', text, set())
-                self.assertEqual(reason, None if allowed else
-                                 'The user did not give unambiguous consent for this decision.')
+                                           'speech', text, set(), friday.send_readback(proposal), proposal, 1)
+                self.assertEqual(reason is None, allowed)
 
     def test_backlog_question_after_readback_does_not_confirm_send(self):
         args = {'chat': 'docs', 'prompt': 'Run the tests'}
@@ -979,8 +1101,9 @@ class FridayRulesTests(unittest.TestCase):
                 self.assertEqual(friday.check_tool('answer_approval', {'chat': 'deploy', 'decision': 'approve'},
                                                    'speech', 'Yes.', set(), previous, pending, 5),
                                  'The user answered a send question, not an approval.')
-        self.assertIsNone(friday.check_tool('answer_approval', {'chat': 'deploy', 'decision': 'approve'},
-                                            'speech', 'Yes, approve it.', set(), 'Deploy wants to run the tests.'))
+        self.assertEqual(friday.check_tool('answer_approval', {'chat': 'deploy', 'decision': 'approve'},
+                                           'speech', 'Yes, approve it.', set(), 'Deploy wants to run the tests.'),
+                         'Ask the user to confirm this approval decision first.')
         # After any send question no answer opens answer_approval, not even the word approve.
         for answer in ('Yes, approve it.', 'Do not approve it.', 'Yes, ask docs to approve the draft.'):
             with self.subTest(answer=answer):
@@ -994,8 +1117,9 @@ class FridayRulesTests(unittest.TestCase):
             with self.subTest(answer=answer, decision=decision):
                 self.assertIsNotNone(friday.check_tool('answer_approval', {'chat': 'deploy', 'decision': decision},
                                                        'speech', answer, set(), 'Deploy wants to run the tests.'))
-        self.assertIsNone(friday.check_tool('answer_approval', {'chat': 'deploy', 'decision': 'deny'},
-                                            'speech', 'No, deny it.', set(), 'Deploy wants to run the tests.'))
+        self.assertEqual(friday.check_tool('answer_approval', {'chat': 'deploy', 'decision': 'deny'},
+                                           'speech', 'No, deny it.', set(), 'Deploy wants to run the tests.'),
+                         'Ask the user to confirm this approval decision first.')
         # Fail-safe boundary: an approval question that names a send word is refused; Friday asks again.
         self.assertIsNotNone(friday.check_tool('answer_approval', {'chat': 'deploy', 'decision': 'approve'},
                                                'speech', 'Yes, approve it.', set(),
@@ -2576,7 +2700,8 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         )
         for calls in cases:
             with self.subTest(calls=calls), patch('sys.stderr'):
-                _, frames = await self.tool_flow('Send it', [('', 1.25, calls)])
+                text = 'Do not approve it. Send it.' if calls[0][0] == 'answer_approval' else 'Send it'
+                _, frames = await self.tool_flow(text, [('', 1.25, calls)])
                 results = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
                 self.assertEqual(len(results), len(calls))
                 self.assertTrue(all(f.properties is None for f in results))
@@ -3837,14 +3962,18 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
 
     async def test_tool_followups_keep_source_consent_and_action_budget(self):
         rtvi = SimpleNamespace(handle_function_call=AsyncMock())
-        service = self.rt.FridayLLM(SimpleNamespace(rtvi=rtvi), friday.brain_config({'TETHER_LLM_URL': 'http://127.0.0.1:7697'}))
+        proposal = friday.SendProposal('answer_approval', 'docs', 'approve', 0, heard=True)
+        session = SimpleNamespace(rtvi=rtvi, pending_proposal=proposal)
+        service = self.rt.FridayLLM(session, friday.brain_config({'TETHER_LLM_URL': 'http://127.0.0.1:7697'}))
         try:
-            messages = [{'role': 'user', 'content': 'yes approve it'}]
+            messages = [{'role': 'assistant', 'content': friday.send_readback(proposal)},
+                        {'role': 'user', 'content': 'yes approve it'}]
             run = service.prepare_run(messages)
             self.assertEqual(service.run_source, 'speech')
             service._active_run.set(run)
             result = AsyncMock()
-            params = SimpleNamespace(function_name='answer_approval', arguments={'decision': 'approve'},
+            params = SimpleNamespace(function_name='answer_approval', tool_call_id='approval',
+                                     arguments={'chat': 'docs', 'decision': 'approve'},
                                      result_callback=result)
             await service.handle_browser_tool(params)
             rtvi.handle_function_call.assert_awaited_once_with(params)
@@ -4519,7 +4648,15 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         if attach:
             chat = 'friday test'
         initial = 'send the whole voice log to friday test' if attach else 'The other chat can take this work.'
-        expected = friday.send_readback(friday.SendProposal(tool, chat, payload, 1, attach=attach))
+        approval = tool == 'answer_approval'
+        if approval:
+            chat, key, payload = 'deploy-check', 'decision', 'deny'
+            initial = 'Deny the request in deploy-check.'
+            expected = 'Not denied yet. Should I deny deploy-check? Yes or no?'
+            proposal_error = 'Not denied yet. Friday asked the user to confirm.'
+        else:
+            expected = friday.send_readback(friday.SendProposal(tool, chat, payload, 1, attach=attach))
+            proposal_error = 'Not sent yet. Friday asked the user to confirm.'
         cue = 'Let me finish, then say yes.'
         cap = 'I could not finish reading it back. Please say the whole request again.'
         started, output_paused, release_output = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -4614,10 +4751,10 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                     or (index > 1 and scenario in ('complete', 'preface', 'replay', 'missing', 'vad',
                                                     'synthesis', 'debt-cleared', 'blip')
                         and friday.plain_yes(text))):
-                args[key] = new_payload
+                args[key] = 'approve' if approval else new_payload
 
             async def chunks():
-                if (text == hold_words or (text == unrelated_words
+                if ((scenario == 'approval-no' and text == 'No.') or text == hold_words or (text == unrelated_words
                         and (scenario == 'heard-reset' or (scenario == 'cap-debt' and index == 3)))):
                     yield self.chunk(content=pause_reply)
                     return
@@ -4763,9 +4900,10 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
             try:
                 async with asyncio.timeout(6):
                     await started.wait()
-                    early = scenario not in ('complete', 'preface', 'debt-cleared', 'heard-reset')
+                    early = scenario not in ('complete', 'preface', 'debt-cleared', 'heard-reset',
+                                             'approval-no', 'approval-no-call')
                     await speak(initial, hold=early)
-                    self.assertIn('Not sent yet', (await results.get())['error'])
+                    self.assertEqual((await results.get())['error'], proposal_error)
                     heard = not early or scenario == 'blip'
                     if not early:
                         await complete(preface=scenario == 'preface')
@@ -4807,7 +4945,29 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                     if scenario != 'debt':
                         self.assertEqual(session.pending_proposal.heard, heard)
 
-                    if scenario in ('complete', 'preface', 'debt-cleared', 'blip'):
+                    if approval:
+                        self.assertEqual(sends, [])
+                        session.llm.readback_budget.offer(session.pending_proposal)
+                        if scenario == 'approval-no':
+                            await speak('No.')
+                            self.assertEqual(await replies.get(), pause_reply)
+                            self.assertEqual(sends, [])
+                        elif scenario == 'approval-no-call':
+                            await speak('No.')
+                            self.assertEqual(await results.get(), {'error': friday.APPROVAL_DECLINED})
+                            await markers.get()
+                            self.assertEqual(await replies.get(), friday.APPROVAL_DECLINED_REPLY)
+                            await finish_device_voice()
+                        else:
+                            await speak('Yes.')
+                            self.assertEqual(await results.get(), {'ok': True})
+                            self.assertEqual(sends, [{'chat': chat, 'decision': 'deny'}])
+                            self.assertEqual(await replies.get(), 'Denied.')
+                        self.assertEqual(speech.count(expected), 1)
+                        self.assertIsNone(session.pending_proposal)
+                        self.assertIsNone(session.llm.readback_budget.key)
+                        self.assertFalse(session.readback_debt)
+                    elif scenario in ('complete', 'preface', 'debt-cleared', 'blip'):
                         if attach:
                             # This key can only reset with the original payload and the attachment flag.
                             session.llm.readback_budget.offer(session.pending_proposal)
@@ -4978,7 +5138,17 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                     await worker.queue_frame(EndFrame())
                 await asyncio.wait_for(asyncio.shield(running), timeout=4)
                 await session.llm._client.close()
+        if scenario == 'approval-no-call':
+            self.assertEqual(sends, [])
+            self.assertEqual(speech.count(friday.APPROVAL_DECLINED_REPLY), 1)
+            self.assertEqual(len(requests), 2)
         return len(requests), len(sends), speech.count(expected)
+
+    async def test_approval_readback_pipeline_binds_yes_and_clears_on_no(self):
+        for mode in ('server', 'client'):
+            for scenario in ('complete', 'approval-no', 'approval-no-call'):
+                with self.subTest(mode=mode, scenario=scenario):
+                    await self.readback_pipeline('answer_approval', mode, scenario)
 
     async def test_readback_pipeline_sends_call_with_one_readback_and_one_ack(self):
         for mode in ('server', 'client'):
