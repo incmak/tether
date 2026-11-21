@@ -8,8 +8,11 @@ import type { MenuOption } from './SelectMenu'
 import { usePolling } from './hooks'
 
 export type ReminderState = 'scheduled' | 'due' | 'done'
-export type Repeat = 'day' | 'weekday' | 'week'
-export interface RepeatRule { every: Repeat; anchor: number; zone: string; origin?: number }
+export type Repeat = 'day' | 'weekday' | 'week' | 'month' | 'year'
+export type RepeatUnit = 'day' | 'week' | 'month' | 'year'
+/** interval: every N units (1 when absent). day: month and year rules, 1–31 or -1 for the last day; a day the month lacks
+ *  moves to its last day. month: year rules, 1–12. The server sets day and month; they outlive a clamped anchor. */
+export interface RepeatRule { every: Repeat; interval?: number; day?: number; month?: number; anchor: number; zone: string; origin?: number }
 export interface ReminderLink { pane?: string; thread?: string; project?: string; item?: string }
 export interface Reminder {
   id: string; text: string; due: number; created: number; by: string; state: ReminderState
@@ -53,20 +56,123 @@ const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
-export function repeatLabel(rule: RepeatRule | null | undefined): string {
-  if (!rule) return ''
-  if (rule.every === 'day') return 'Every day'
-  if (rule.every === 'weekday') return 'Every weekday'
-  return `Every ${WEEKDAYS[parts(rule.anchor).weekday]}`
+/** The largest N for "every N" per unit; each keeps one step within the server's five years ahead. */
+export const INTERVAL_MAX: Record<RepeatUnit, number> = { day: 365, week: 52, month: 60, year: 5 }
+const UNIT_NAMES: Record<RepeatUnit, [string, string]> = { day: ['day', 'days'], week: ['week', 'weeks'], month: ['month', 'months'], year: ['year', 'years'] }
+export const unitName = (unit: RepeatUnit, count: number) => UNIT_NAMES[unit][count === 1 ? 0 : 1]
+
+/** 1st, 2nd, 3rd, 4th, 11th, 12th, 13th, 21st, 22nd, 23rd, 31st. */
+export function ordinal(value: number) {
+  const tens = value % 100, ones = value % 10
+  return value + (tens >= 11 && tens <= 13 ? 'th' : ones === 1 ? 'st' : ones === 2 ? 'nd' : ones === 3 ? 'rd' : 'th')
 }
 
-export function repeatOptions(at: number | null): MenuOption[] {
-  return [
+/** The calendar parts of an instant in a rule's zone. The server keeps a series' zone on a rule-only edit, so a series
+ *  made under another server zone repeats on that zone's dates. An unknown zone falls back to IST, as on the server. */
+const ZONE_DAYS: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }
+function zoneParts(at: number, zone?: string) {
+  if (!zone || zone === ZONE) return parts(at)
+  try {
+    const fields = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: zone, year: 'numeric', month: 'numeric', day: 'numeric', weekday: 'short' })
+      .formatToParts(new Date(at * 1000)).map(part => [part.type, part.value]))
+    return { year: Number(fields.year), month: Number(fields.month) - 1, date: Number(fields.day), weekday: ZONE_DAYS[fields.weekday] }
+  } catch { return parts(at) }
+}
+
+/** The calendar facts a rule repeats on: from the rule's own day and month when it has them, else from a date in
+ *  `zone` (the kept rule's zone; IST for a new rule). */
+interface Target { weekday: number; day: number; month: number }
+function target(at: number, rule?: RepeatRule | null, zone = rule?.zone): Target {
+  const p = zoneParts(at, zone)
+  const keeps = rule && (rule.every === 'month' || rule.every === 'year') && typeof rule.day === 'number'
+  return { weekday: p.weekday, day: keeps ? rule.day! : p.date, month: keeps && rule.every === 'year' && typeof rule.month === 'number' ? rule.month - 1 : p.month }
+}
+const lastDay = (at: number, zone?: string) => { const p = zoneParts(at, zone); return new Date(Date.UTC(p.year, p.month + 1, 0)).getUTCDate() }
+
+function describe(every: Repeat, interval: number, on: Target) {
+  const each = interval > 1 ? `Every ${interval} ${unitName(every === 'weekday' ? 'day' : every, interval)}` : ''
+  if (every === 'day') return each || 'Every day'
+  if (every === 'weekday') return 'Every weekday'
+  if (every === 'week') return each ? `${each} on ${WEEKDAYS[on.weekday]}` : `Every ${WEEKDAYS[on.weekday]}`
+  if (every === 'month') return `${each || 'Every month'} on the ${on.day === -1 ? 'last day' : ordinal(on.day)}`
+  return `${each || 'Every year'} on ${on.day === -1 ? 'the last day of' : on.day} ${MONTHS[on.month]}`
+}
+
+export function repeatLabel(rule: RepeatRule | null | undefined): string {
+  if (!rule) return ''
+  return describe(rule.every, rule.interval ?? 1, target(rule.anchor, rule))
+}
+
+/** What the Repeat picker holds. last: the last day of every month. custom: every `interval` `unit`s;
+ *  lastDay: a custom monthly rule falls on the last day of the month. */
+export type RepeatPick = 'never' | Repeat | 'last' | 'custom'
+export interface RepeatChoice { pick: RepeatPick; unit: RepeatUnit; interval: number; lastDay: boolean }
+export const NO_REPEAT: RepeatChoice = { pick: 'never', unit: 'week', interval: 2, lastDay: false }
+/** The choice falls on the last day of the month. */
+export const onLastDay = (choice: RepeatChoice) => choice.pick === 'last' || (choice.pick === 'custom' && choice.unit === 'month' && choice.lastDay === true)
+
+/** The picker's value for a stored rule. */
+export function choiceOf(rule: RepeatRule | null | undefined): RepeatChoice {
+  if (!rule) return NO_REPEAT
+  const interval = rule.interval ?? 1
+  if (interval > 1 && rule.every !== 'weekday') return { pick: 'custom', unit: rule.every, interval, lastDay: rule.every === 'month' && rule.day === -1 }
+  if (rule.every === 'month' && rule.day === -1) return { ...NO_REPEAT, pick: 'last' }
+  return { ...NO_REPEAT, pick: rule.every }
+}
+
+/** A custom N is a whole number from 1 to the unit's limit; the other picks are always valid. */
+export const choiceValid = (choice: RepeatChoice) => choice.pick !== 'custom'
+  || (Number.isInteger(choice.interval) && choice.interval >= 1 && choice.interval <= INTERVAL_MAX[choice.unit])
+
+/** The `repeat` the server takes: null, a rule name (every 1), or { every, interval?, last_day? }. */
+export type RepeatBody = null | Repeat | { every: RepeatUnit; interval?: number; last_day?: true }
+export function repeatBody(choice: RepeatChoice): RepeatBody {
+  if (choice.pick === 'never') return null
+  if (onLastDay(choice)) return choice.pick === 'custom' && choice.interval > 1
+    ? { every: 'month', interval: choice.interval, last_day: true } : { every: 'month', last_day: true }
+  if (choice.pick !== 'custom') return choice.pick as Repeat
+  return choice.interval === 1 ? choice.unit : { every: choice.unit, interval: choice.interval }
+}
+export const sameChoice = (a: RepeatChoice, b: RepeatChoice) => JSON.stringify(repeatBody(a)) === JSON.stringify(repeatBody(b))
+
+/** The rule a choice makes on a date, in words: "Every 2 weeks on Thursday". rule: the kept rule (an edit that keeps its time). */
+export function choiceLabel(choice: RepeatChoice, at: number, rule?: RepeatRule | null): string {
+  const body = repeatBody(choice)
+  if (body === null) return ''
+  const every = typeof body === 'string' ? body : body.every
+  const last = onLastDay(choice)
+  const on = target(at, keptFor(every, last, rule), rule?.zone)
+  if (last) on.day = -1
+  return describe(every, typeof body === 'object' ? body.interval ?? 1 : 1, on)
+}
+
+/** The kept rule whose own day and month a new rule takes, as the server does: the same unit and the same last-day
+ *  setting. Any other change takes the day from the date. */
+const keptFor = (every: Repeat, last: boolean, rule?: RepeatRule | null) =>
+  rule && rule.every === every && (rule.day === -1) === last ? rule : null
+
+/** The picker's choices. at: the date the rule starts from; rule: the kept rule, whose own day wins over a clamped date. */
+export function repeatOptions(at: number | null, rule?: RepeatRule | null, current?: RepeatPick): MenuOption[] {
+  const zone = rule?.zone
+  const on = at === null ? null : target(at, keptFor('month', false, rule), zone)
+  const yearly = at === null ? null : target(at, keptFor('year', false, rule), zone)
+  const shorter = on && on.day >= 29 ? `, or the last day` : ''
+  const options: MenuOption[] = [
     { value: 'never', label: 'Never' },
     { value: 'day', label: 'Every day' },
     { value: 'weekday', label: 'Every weekday', detail: 'Mon–Fri' },
-    { value: 'week', label: 'Every week', detail: at === null ? 'Same day each week' : `On ${WEEKDAYS[parts(at).weekday]}s` },
+    { value: 'week', label: 'Every week', detail: on ? `On ${WEEKDAYS[on.weekday]}s` : 'Same day each week' },
+    { value: 'month', label: 'Every month', detail: on ? `On the ${ordinal(on.day)}${shorter}` : 'Same date each month' },
   ]
+  // The last day differs from "the same date" only for a date that ends a month shorter than 31 days (30 Nov, 28 Feb).
+  if (current === 'last' || (at !== null && on && on.day === zoneParts(at, zone).date && on.day === lastDay(at, zone) && on.day < 31)) {
+    options.push({ value: 'last', label: 'Last day of every month', detail: 'The 28th to the 31st, as the month ends' })
+  }
+  options.push(
+    { value: 'year', label: 'Every year', detail: yearly ? `On ${yearly.day} ${MONTHS[yearly.month]}${yearly.day === 29 && yearly.month === 1 ? '; 28 Feb in other years' : ''}` : 'Same date each year' },
+    { value: 'custom', label: 'Custom', detail: 'Every N days, weeks, months or years' },
+  )
+  return options
 }
 
 /** "Today 10:00", "Tomorrow 10:00", "Yesterday 18:00", "Wed 25 Nov 10:00", "Wed 25 Nov 2027 10:00". */
