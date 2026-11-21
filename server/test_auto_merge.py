@@ -1001,7 +1001,7 @@ class Modes(Base):
         with mock.patch.dict(os.environ, GIT_CONFIG_GLOBAL=global_config), mock.patch.object(auto_merge, 'RUN', run):
             decision = auto_merge.process(self.job(head))
         self.assertEqual(decision['outcome'], 'would_merge')
-        self.assertEqual(len(helping), 2)
+        self.assertEqual(len(helping), 1)  # one credential read covers ls-remote and fetch
         self.assertEqual(self.origin_main(), before)
         self.assertEqual(self.refs(), refs)
         self.assertFalse(fetch_head.exists())
@@ -2069,6 +2069,47 @@ class CrossWorktree(Base):
         self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['git']))
         self.assertIn('in another repository than the one the review saw', decision['checks'][0]['text'])
         self.assertFalse({'ls-remote', 'fetch'} & {call.args[1] for call in git.call_args_list})
+        # A late refusal logs no root either: Settings would fetch from the replacement.
+        self.assertIsNone(decision['root'])
+        with mock.patch.object(auto_merge, '_trust', return_value=None) as trust:
+            auto_merge.state()
+        self.assertNotIn(str(self.repo), [call.args[0] for call in trust.call_args_list])
+
+    def test_a_repository_replaced_between_network_commands_is_refused(self):
+        # During the credential lookup before ls-remote, or after ls-remote and before fetch.
+        for moment in ('credentials', 'ls-remote'):
+            with self.subTest(moment=moment):
+                head = self.change(text=f'{moment}\n')
+                aside = self.repo / f'.git-{moment}'
+                job = {**self.job(head), 'tab': str(self.repo)}
+                real_git, real_helpers = auto_merge._object_git, auto_merge._credential_helpers
+                steps = []
+
+                def swap():
+                    common = self.repo / '.git'
+                    common.rename(aside)
+                    shutil.copytree(aside, common, symlinks=True)
+
+                def object_git(scratch, *args, **kwargs):
+                    result = real_git(scratch, *args, **kwargs)
+                    steps.append(args[0])
+                    if moment == 'ls-remote' and args[0] == 'ls-remote':
+                        swap()
+                    return result
+
+                def helpers(root):
+                    if moment == 'credentials' and 'ls-remote' not in steps:
+                        swap()
+                    return real_helpers(root)
+
+                with mock.patch.object(auto_merge, '_object_git', side_effect=object_git), \
+                        mock.patch.object(auto_merge, '_credential_helpers', side_effect=helpers):
+                    decision = auto_merge.process(job)
+                self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['git']))
+                self.assertIn('in another repository than the one the review saw', decision['checks'][0]['text'])
+                self.assertNotIn('fetch', steps)
+                self.assertEqual('ls-remote' in steps, moment == 'ls-remote')
+                self.assertIsNone(decision['root'])
 
     def test_a_repository_replaced_after_the_decision_stops_the_push(self):
         self.enforce()
@@ -2140,7 +2181,7 @@ class CrossWorktree(Base):
         self.assertEqual(self.origin_main(), before)
 
     def test_an_approval_that_changes_during_the_remote_check_stops_the_push(self):
-        # The approval moves during the look at the remote main, or during the credential lookup after it.
+        # The approval moves during the look at the remote main, or during the push's credential lookup before it.
         for moment in ('ls-remote', 'credentials'):
             with self.subTest(moment=moment):
                 self.enforce()
@@ -2160,7 +2201,7 @@ class CrossWorktree(Base):
                     return result
 
                 def helpers(root):
-                    if moment == 'credentials' and steps.count('ls-remote') == 2:
+                    if moment == 'credentials' and 'commit-tree' in steps:
                         live.clear()
                     return real_helpers(root)
 
@@ -2171,6 +2212,8 @@ class CrossWorktree(Base):
                 self.assertIn('approval changed', decision['error'])
                 self.assertIn('commit-tree', steps)
                 self.assertNotIn('push', steps)
+                # No network command after the change: the push's look at main runs only when the approval held.
+                self.assertEqual(steps.count('ls-remote'), 1 if moment == 'credentials' else 2)
                 self.assertEqual(self.origin_main(), before)
 
 

@@ -398,21 +398,25 @@ def _push_url(root):
 
 
 def _fetch_target(root, scratch, verify=None):
-    """(push URL, target sha). verify: called after the URL is read and right before the first network command."""
+    """(push URL, target sha). verify: called after the URL and credential settings are read, right before each
+    network command."""
     try:
         url = _push_url(root)
         _check_push_url(root, url)
         # Git treats a colon before the first slash as a transport or an SSH host.
         if not re.match(r'^[^/]*:', url):
             url = str(Path(root) / url)
+        env = _object_env(root)  # the credential lookup runs git in `root`: before the check, not after it
         if verify is not None:
             verify()
-        ref = _object_git(scratch, 'ls-remote', url, TARGET_REF, network=root).stdout
+        ref = _object_git(scratch, 'ls-remote', url, TARGET_REF, network=root, env=env).stdout
         match = re.fullmatch(r'([0-9a-f]{40})\t' + TARGET_REF + r'\n', ref)
         if match is None:
             raise GitError(f'The push repository has no unique {TARGET} branch.')
         sha = match[1]
-        _object_git(scratch, 'fetch', '--no-tags', '--no-write-fetch-head', url, TARGET_REF, network=root)
+        if verify is not None:
+            verify()
+        _object_git(scratch, 'fetch', '--no-tags', '--no-write-fetch-head', url, TARGET_REF, network=root, env=env)
         _object_git(scratch, 'cat-file', '-e', sha + '^{commit}')
     except GitError:
         _target_cache.pop(root, None)
@@ -1154,6 +1158,8 @@ def evaluate(folder, approved, tab=None, repo=None):
 
         def same_repository():
             if repo is not None and _repo_identity(_git_dir(root, '--git-common-dir').resolve()) != repo:
+                decision['root'] = None  # Settings fetches from each logged root
+                decision.pop('repo', None)
                 raise GitError(f'The reviewed folder {folder} is now in another repository than the one the review saw.')
 
         url, target_sha = _fetch_target(root, scratch, same_repository) if tab is not None else _fetch_target(root, scratch)
@@ -1300,22 +1306,25 @@ def _fast_forward_push(root, scratch, url, checked, made, confirm=None):
 
     Before the push: the merge commit must contain the checked main commit as its first parent, and the remote main
     must still be at that commit. A remote that moved, went back or lost the branch is "main moved". Git itself
-    refuses the push when main moved after that look to a commit the merge does not contain. confirm() runs after
-    that look, right before the push, and raises to stop it."""
+    refuses the push when main moved after that look to a commit the merge does not contain. confirm() runs right
+    before each network command (the look and the push) and raises to stop it. The credential settings are read
+    once, before the first confirm(): reading them runs git in `root`."""
     if not _hash(checked) or not _hash(made):
         raise GitError('The push needs two commit hashes.')
     if not _ancestor(scratch, checked, made):
         raise GitError('The merge commit does not contain the checked main commit.')
     if _sha(scratch, made + '^1') != checked:
         raise GitError('The merge commit does not have the checked main commit as its first parent.')
-    seen = _object_git(scratch, 'ls-remote', url, TARGET_REF, network=root).stdout
+    env = _object_env(root)
+    if confirm is not None:
+        confirm()
+    seen = _object_git(scratch, 'ls-remote', url, TARGET_REF, network=root, env=env).stdout
     if seen != f'{checked}\t{TARGET_REF}\n':
         raise MainMoved(f'{REMOTE}/{TARGET} moved after the checks. Tether pushed nothing.')
-    push_env = _object_env(root)  # the credential lookup runs git too: do it before the last check
     if confirm is not None:
         confirm()
     try:
-        _object_git(scratch, *_push_argv(url, made), network=root, env=push_env)
+        _object_git(scratch, *_push_argv(url, made), network=root, env=env)
     except GitError as exc:
         raise MainMoved(f'{REMOTE}/{TARGET} did not accept a plain push, so it moved or refused it. Nothing is forced: {exc}') from exc
 
@@ -1395,7 +1404,6 @@ def merge(plan, reviewer, job):
                 raise NotAuthorized('The reviewer approval changed or is no longer available.')
 
         # Once before the look at the remote main and once after it, right before the push.
-        confirm()
         _fast_forward_push(root, scratch, plan['url'], plan['target_sha'], made, confirm)
     return made
 
