@@ -1816,6 +1816,10 @@ def chat_delta(old, new):
     return delta
 
 
+# Mid-turn states: Claude still holds prompts sent meanwhile in its input queue.
+QUEUE_STATES = ('Working', 'Approval', 'Input needed')
+
+
 def chat_payload(config, shell_mode=False, limit=DEFAULT_WINDOW, preview=False):
     """One chat view: the latest `limit` messages plus how many older ones were left out."""
     before = change_signature(config) if preview else None
@@ -1826,6 +1830,9 @@ def chat_payload(config, shell_mode=False, limit=DEFAULT_WINDOW, preview=False):
         data = dict(data, messages=shell_log.merge(config['id'], data['messages']))
     if data.get('busy') and state['state'] == 'Idle':
         state['state'] = 'Working'
+    if config['agent'] == 'claude' and state['state'] not in QUEUE_STATES:
+        # Claude drains its input queue when idle and keeps it only in memory: an entry left while idle is stale (B331).
+        data = dict(data, queued=[])
     if not (config['agent'] == 'claude' and plan_menu(state.get('approval') or state.get('attention'))):
         data.pop('plan', None)
     ask = data.pop('ask', None) if isinstance(data, dict) else None

@@ -270,6 +270,8 @@ export interface ChatData {
   attention?: Attention | null
   footer?: Footer
   scheduled?: Record<string, ScheduledRun>
+  // Claude only, while it works: prompts waiting in its input queue, from any sender (this browser, Friday, another device, the terminal).
+  queued?: { text: string; time: string | null }[]
 }
 // free: Claude's own-answer row ("Type something."). The answer goes in the message box, not a tap.
 export interface Choice { id: number; text: string; detail?: string; selected?: boolean; free?: boolean }

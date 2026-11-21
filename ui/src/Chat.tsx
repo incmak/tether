@@ -731,7 +731,17 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   const queued = pending.filter(item => !item.terminal && item !== bangItem)
   const notSent = queued.filter(item => item.failed).length
   const waiting = queued.length - notSent
-  const queueLabel = [waiting ? `${waiting} queued` : '', notSent ? `${notSent} not sent` : ''].filter(Boolean).join(' · ')
+  // Prompts in Claude's own input queue (the server sends them only mid-turn). One this message box sent already shows as its own bubble, so show only the rest:
+  // sends from Friday, another device or the terminal. Each local bubble accounts for one queue entry with its text.
+  const mine = queued.filter(item => !item.failed).map(item => sameCommand(item.key))
+  const otherQueued = (data?.queued ?? []).filter(entry => {
+    const at = mine.findIndex(key => sameCommand(squash(entry.text)).includes(key))
+    if (at < 0) return true
+    mine.splice(at, 1)
+    return false
+  })
+  const waitingAll = waiting + otherQueued.length
+  const queueLabel = [waitingAll ? `${waitingAll} queued` : '', notSent ? `${notSent} not sent` : ''].filter(Boolean).join(' · ')
   const setPending = useCallback((update: (list: Pending[]) => Pending[]) => setPendingState(list => { const next = update(list); pendingByPane.set(pane.id, next); savePending(); return next }), [pane.id])
   const dataReceivedAt = useRef(0)
   useEffect(() => { dataReceivedAt.current = received && received !== cachedAtOpen.current ? Date.now() : 0 }, [received])
@@ -858,7 +868,8 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   }
   // Claude: Up pulls every queued message back into its input; Tether clears that input and returns the text to the message box.
   // Codex has no queue to edit, so the × only hides the bubble there.
-  async function unqueue(id: number) {
+  // id null: an entry another sender queued. Claude returns the whole queue, so it lands in the message box the same way.
+  async function unqueue(id: number | null) {
     if (activePane.agent !== 'claude') { setPending(list => list.filter(other => other.id !== id)); return }
     try {
       const { text } = await api<{ text: string }>('unqueue', { session: pane.id, thread: data?.thread ?? null })
@@ -1258,11 +1269,12 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
       { id: 'action', label: data?.plan ? 'Review plan' : data?.approval ? `${agentNames[activePane.agent]} needs permission` : data?.attention?.reason === 'permissions' ? 'Permissions' : data?.attention?.reason === 'side' ? 'Side question' : data?.attention?.reason === 'dialog' ? data.attention.dialog?.title ?? 'Dialog' : data?.attention?.reason === 'panel' || data?.attention?.reason === 'info' ? `${agentNames[activePane.agent]} panel open` : `${agentNames[activePane.agent]} needs attention`, active: !!(data?.approval || data?.attention || data?.plan), content: <>{data && (data.approval != null || data.attention || data.plan) && <ChoiceDock key={(data.approval as Approval | null)?.id ?? data.attention?.id ?? 'choice'} approval={data.approval as Approval | null} attention={data.attention ?? null} plan={data.plan} agent={agentNames[activePane.agent]} disabled={!writable || acting} onChoose={choose} onKey={key => sendKey(key)} onOpenTerminal={openTerminal} permissionsTab={permissionsTab} onAction={action => promptAction(data.attention!, action)} onDialog={action => dialogAction(data.attention!, action)} onPick={pickRow} onAsk={askAnswer} onAskEngage={askEngage} onType={(text, loginUrl) => write('type', { session: activePane.id, thread: data?.thread ?? null, text, enter: true, ...loginUrl ? { login_url: loginUrl } : {} })} />}</> },
       { id: 'heads', label: '✦ Heads up', active: !!footer.heads_up, content: <>{footer.heads_up && <HeadsUp card={footer.heads_up} disabled={!writable || acting} onKey={headsUpKey} onChat={note => { setDraft(note); requestAnimationFrame(() => { const box = panelRef.current?.querySelector<HTMLTextAreaElement>('.composer textarea'); box?.focus(); box?.setSelectionRange(box.value.length, box.value.length) }) }} />}</> },
       { id: 'agents', label: `${background.length} agents running`, active: background.length > 0, content: <>{background.length > 0 && <div className="agents-strip"><ul>{background.map((agent, index) => <li key={index}><strong>{agent.name}</strong><span>{agent.task}</span><small>{agent.detail}</small></li>)}</ul></div>}</> },
-      { id: 'queue', label: queueLabel, active: queued.length > 0, content: <>      {queued.map(item => item.failed ? <div key={item.id} className="user-message pending-message failed-message"><span>{item.text}</span><small role="alert">{item.offline ? <><WifiOff size={12} />Not sent</> : <span className="failed-reason">Not sent: {item.failed}</span>}
+      { id: 'queue', label: queueLabel, active: queued.length + otherQueued.length > 0, content: <>      {queued.map(item => item.failed ? <div key={item.id} className="user-message pending-message failed-message"><span>{item.text}</span><small role="alert">{item.offline ? <><WifiOff size={12} />Not sent</> : <span className="failed-reason">Not sent: {item.failed}</span>}
         <button type="button" className="failed-action" disabled={retrying !== null || !writable} onClick={() => void retry(item)}><RotateCcw size={13} />{retrying === item.id ? 'Sending…' : 'Retry'}</button>
         <button type="button" className="failed-action" onClick={() => editFailed(item)}><Pencil size={13} />Edit</button>
         <button type="button" aria-label="Delete this unsent message" onClick={() => setPending(list => list.filter(other => other.id !== item.id))}><X size={12} /></button></small></div>
-      : <div key={item.id} className="user-message pending-message"><SentContent {...sentContent(item.text, activePane.id)} /><small><Clock3 size={12} />{/^\/btw\s/.test(item.text.trim()) ? 'Asking…' : state === 'Working' ? 'Queued' : 'Sending…'}<button type="button" aria-label={activePane.agent === 'claude' ? 'Cancel this queued message' : 'Hide this queued message'} onClick={() => void unqueue(item.id)}><X size={12} /></button></small></div>)}</> },
+      : <div key={item.id} className="user-message pending-message"><SentContent {...sentContent(item.text, activePane.id)} /><small><Clock3 size={12} />{/^\/btw\s/.test(item.text.trim()) ? 'Asking…' : state === 'Working' ? 'Queued' : 'Sending…'}<button type="button" aria-label={activePane.agent === 'claude' ? 'Cancel this queued message' : 'Hide this queued message'} onClick={() => void unqueue(item.id)}><X size={12} /></button></small></div>)}
+        {otherQueued.map((entry, index) => <div key={`queued-${index}-${entry.time ?? ''}`} className="user-message pending-message"><SentContent {...sentContent(entry.text, activePane.id)} /><small><Clock3 size={12} />Queued<button type="button" aria-label="Cancel this queued message" onClick={() => void unqueue(null)}><X size={12} /></button></small></div>)}</> },
       { id: 'terminal-run', label: notes.length === 1 ? `${commandOf(notes[0].text)} ran in the terminal` : `${notes.length} commands ran in the terminal`, active: notes.length > 0, content: notes.map(item => {
         const command = commandOf(item.text)
         const dismiss = () => setPending(list => list.filter(other => other.id !== item.id))
