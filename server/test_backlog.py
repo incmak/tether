@@ -131,6 +131,31 @@ class BacklogTests(unittest.TestCase):
         backlog.add('New')
         self.assertIn('- [ ] New #B5', self.text())
 
+    def test_done_ids_reads_the_archive_with_the_bounded_reader(self):
+        backlog.save('- [x] Now #B2\n- [ ] Open #B3\n', backlog.read()['version'])
+        archive = backlog.folder() / 'DONE.md'
+        archive.write_text('## Inbox\n- [x] Archived #B1\n')
+        self.assertEqual(backlog.done_ids(), {'B1', 'B2'})
+        with mock.patch.object(backlog, 'ARCHIVE_READ', 10):  # over the limit: refused, as the B303 snapshot does
+            with self.assertRaises(backlog.ProjectError):
+                backlog.done_ids()
+        archive.unlink()
+        os.mkfifo(archive)  # a pipe with no writer: the read must not wait
+        with self.assertRaises(OSError):
+            backlog.done_ids()
+
+    def test_done_ids_never_waits_on_the_list_or_last_id(self):
+        backlog.save('- [x] Now #B2\n', backlog.read()['version'])
+        last = backlog.folder() / 'last-id'
+        last.unlink(missing_ok=True)
+        os.mkfifo(last)  # the done check does not need the next ID: a pipe here must not block it
+        self.assertEqual(backlog.done_ids(), {'B2'})
+        listing = backlog.folder() / 'BACKLOG.md'
+        listing.unlink()
+        os.mkfifo(listing)  # a pipe in place of the list is refused at once
+        with self.assertRaises(OSError):
+            backlog.done_ids()
+
     def test_a_save_over_the_limit_is_kept_when_its_finished_items_can_move(self):
         done = ''.join(f'- [x] Done {n} ' + 'x' * 900 + f' #B{n}\n' for n in range(1, 41))
         open_part = '- [ ] Open ' + 'y' * (backlog.LIMIT - 1000) + ' #B41\n'

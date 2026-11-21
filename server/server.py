@@ -112,6 +112,10 @@ import work_feeds
 import work_jira
 import groups
 import helper_close
+import task_tree
+import task_tree_answer
+import task_tree_api
+import task_tree_close
 import helper_tabs
 import groups_api
 import undo
@@ -500,6 +504,69 @@ def _observe_push(entries):
 
 
 HELPER_CLOSER = helper_close.Closer(scope=lambda entry: review_scope_of(entry, light=True))
+TASK_CLOSER = task_tree_close.Closer()
+TASK_SEND_AT = {}
+TASK_USER_AT = {}
+TASK_AUTOMATED = {}
+TASK_VIEW_AT = {}
+
+
+def live_task_tree(entries=None, status=None):
+    return task_tree_api.Tree(fresh_sessions() if entries is None else entries, subprocess.run, status or fresh_status,
+                              attention.STORE.ask, review_links.escalated, fresh_entries=fresh_sessions)
+
+
+def task_view(pane):
+    with WATCHING_LOCK:
+        last = WATCHED.get(pane)
+        viewing = WATCHING.get(pane, 0) > 0 or (last is not None and time.monotonic() - last < 10)
+        return viewing, max(last or 0, TASK_VIEW_AT.get(pane, 0))
+
+
+def task_activity(entry):
+    version = notification_version(entry)
+    return (version, timeline(entry['id']), TASK_SEND_AT.get(entry['id'])) if version is not None else None
+
+
+def task_close_sweep(entries):
+    if not any(helper_tabs.PANE.fullmatch(entry['id']) for entry in entries):
+        TASK_CLOSER.reset()
+        return
+    try:
+        tree = live_task_tree(entries, shared_status)
+        with SEND_LOCK:
+            for activity in (TASK_SEND_AT, TASK_USER_AT):
+                for pane in activity.keys() - tree.options.keys():
+                    activity.pop(pane, None)
+            for key in list(TASK_AUTOMATED):
+                if key[0] not in tree.options:
+                    TASK_AUTOMATED.pop(key, None)
+        with WATCHING_LOCK:
+            for pane in TASK_VIEW_AT.keys() - tree.options.keys():
+                TASK_VIEW_AT.pop(pane, None)
+        task_tree_close.clear_obsolete_marks(tree, SEND_LOCK, task_user_prompt_at)
+        TASK_CLOSER.observe(tree, live_task_tree, enabled=lambda: prefs_sync.load()['prefs'].get('task_auto_close') is True,
+                            lock=SEND_LOCK, activity=task_activity, viewed=task_view,
+                            draft=lambda entry: _web_draft(entry['id']).strip() or any(prompt_draft(entry, subprocess.run)),
+                            changed=forget_sessions, user_prompt_at=task_user_prompt_at)
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+        TASK_CLOSER.reset()
+        print(f'task close sweep failed: {exc}', file=sys.stderr)
+
+
+def task_answer(body, tree):
+    pane = body.get('pane')
+    entry = tree.bound(pane, body.get('thread'))
+    if pane not in tree.fields:
+        raise helper_tabs.Stale('That tab is no longer a helper. Open its chat to reply.')
+    result = task_tree_answer.answer(body, entry, tree.run, fresh_status, partial(send_text, held=True, user=True),
+                                     reply_turn=notification_reply_turn)
+    if body.get('text') is not None:
+        task_user_delivery(entry)
+    else:
+        TASK_SEND_AT[pane] = time.monotonic()
+    attention.STORE.clear(pane, entry['thread'])
+    return result
 
 
 def monitor_notices():
@@ -563,7 +630,8 @@ def monitor_notices():
         except Exception as exc:  # work board feeds must never stop the monitor
             print(f'work feeds failed: {exc!r}', file=sys.stderr)
         try:
-            HELPER_CLOSER.observe(entries, shared_status, subprocess.run, watching, lock=SEND_LOCK, fresh=fresh_status)
+            HELPER_CLOSER.observe(entries, shared_status, subprocess.run, watching, lock=SEND_LOCK, fresh=fresh_status,
+                                  task_sweep=lambda: task_close_sweep(entries))
         except Exception as exc:  # closing idle helper tabs must never stop the monitor
             print(f'helper close failed: {exc!r}', file=sys.stderr)
         UPKEEP.observe(entries, tab_folder, shared_status, subprocess.run, SEND_LOCK, sessions)  # catches its own errors
@@ -618,13 +686,13 @@ STATUS_LOCK = threading.Lock()
 STATUS_PANE_LOCKS = {}
 
 
-def shared_status(entry):
+def shared_status(entry, *, fresh=False):
     """live_status for the session list and the monitor, which would otherwise each re-read the pane every few seconds."""
     with STATUS_LOCK:
         pane_lock = STATUS_PANE_LOCKS.setdefault(entry['id'], threading.Lock())
     with pane_lock:
         when, status = STATUS_CACHE.get(entry['id'], (0.0, None))
-        if time.monotonic() - when > 1:
+        if fresh or time.monotonic() - when > 1:
             try:
                 status = auto_resume.overlay(entry, live_status(entry))
             except (OSError, ValueError, KeyError, subprocess.SubprocessError):  # a pane that just closed must not fail the whole tab list
@@ -639,8 +707,7 @@ def shared_status(entry):
 
 def fresh_status(entry):
     """shared_status without the one-second cache: for a check that must see a prompt sent a moment ago."""
-    STATUS_CACHE.pop(entry['id'], None)
-    return shared_status(entry)
+    return shared_status(entry, fresh=True)
 
 
 TRANSITIONS = {}  # entry id -> {'state', 'since', 'finished'}: wall-clock times, so the phone can sort and mark finished turns
@@ -711,7 +778,7 @@ def sessions():
 # so a page that refreshes right away sees the new pane (or no longer sees the closed one).
 TMUX_WRITES = {coordinator.PATH, quick_tab.START_PATH, quick_tab.MOVE_PATH, '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/shell', '/mobile/api/session',
                '/mobile/api/tmux-sessions', '/mobile/api/rename', '/mobile/api/pane-name', coordinator.ROLE_PATH, '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/side-shell',
-               '/mobile/api/side-shell/end', '/mobile/api/start', '/mobile/api/merge', '/mobile/api/auto-resume', '/mobile/api/review-stalled', undo_api.PATH} | groups_api.WRITES
+               '/mobile/api/side-shell/end', '/mobile/api/start', '/mobile/api/merge', '/mobile/api/auto-resume', '/mobile/api/review-stalled', undo_api.PATH} | groups_api.WRITES | task_tree_api.WRITES
 
 
 def _web_draft(pane):
@@ -723,7 +790,7 @@ def undo_env():
     """What undo.py reads: the live tabs, their state and unsent text, for its checks and its warnings."""
     return undo.Env(run=subprocess.run, entries=sessions, status=shared_status,
                     draft=lambda entry: prompt_draft(entry, subprocess.run), web_draft=_web_draft,
-                    name_window=name_in_tmux)
+                    name_window=name_in_tmux, fresh=fresh_sessions)
 
 
 def forget_sessions():
@@ -746,9 +813,11 @@ def build_listing():
     except Exception:  # a review-store read error must not hide the session list
         escalations = set()
     try:
-        helper_fields = helper_tabs.listing_fields(subprocess.run, entries)
+        options = helper_tabs.read_panes(subprocess.run)
+        helper_fields = helper_tabs.listing_fields(subprocess.run, entries, options=options)
     except Exception:  # a helper record read error must not hide the session list
-        helper_fields = {}
+        options, helper_fields = {}, {}
+    by_id = {entry['id']: entry for entry in entries}
     for row in rows:
         if links.get(row['id']):
             row['reviewers'] = links[row['id']]
@@ -756,6 +825,10 @@ def build_listing():
         row.update(helper_fields.get(row['id'], {}))
         if row['id'] in escalations:
             row['escalated'] = True
+        if 'task' in row and (digest := task_tree_answer.prompt_digest(by_id[row['id']], row,
+                                                                       reply_turn=notification_reply_turn)):
+            row['answer_digest'] = digest
+    task_tree.annotate_done(rows, by_id, options, task_user_prompt_at)
     listing = {'sessions': rows, 'default_thread': settings()['thread']}
     try:
         found_groups = groups.all_groups()
@@ -1363,6 +1436,27 @@ def _transcript_tail_records(entry, tail_bytes, *, whole=False):
     return (records, start == 0) if whole else records
 
 
+def task_user_prompt_at(entry):
+    """Distinguish a user prompt from a review or another Tether agent's delivery."""
+    pane, thread = entry['id'], entry.get('thread')
+    recent = TASK_AUTOMATED.get((pane, thread), ())
+
+    def source(text, timestamp):
+        text = continuations.unwrap(text)
+        if review := review_links.prompt_source(text):
+            return review
+        if timestamp is not None and recent:
+            digest = helper_tabs.digest(text.strip())
+            if any(saved == digest and start <= timestamp <= end for saved, start, end in recent):
+                return 'tether'
+
+    _, at, _ = notification_priority.turn_source(
+        entry.get('agent'), notification_records(entry), identify=source,
+        distinguish_missing=True, with_time=True, latest_user=True)
+    user_thread, sent = TASK_USER_AT.get(pane, (None, 0))
+    return max(at or 0, sent if user_thread == thread else 0)
+
+
 def notification_context(entry):
     records = notification_records(entry)
     return notification_reply(entry, records), records
@@ -1565,25 +1659,51 @@ def review_reply(entry, request_id):
     return None
 
 
-def submit(message, config=None):
+def submit(message, config=None, *, user=False):
     config = config or settings()
     if not config.get('writable', True):
         raise RuntimeError('Messaging is unavailable for this session. Use Termius.')
     with SEND_LOCK:
-        submit_locked(message, config)
+        submit_locked(message, config, user=user)
 
 
-def submit_locked(message, config):
+def submit_locked(message, config, *, user=False):
     """submit for a caller that holds SEND_LOCK already."""
     wrapped, marker = continuations.prepare(config, message)
     if marker:
         continuations.stage(config, wrapped, marker)
+    started = time.time()
     terminal_submit(config, wrapped)
+    pane, thread = config['id'], helper_tabs.verified_thread(config)
+    TASK_SEND_AT[pane] = time.monotonic()
+    if user:
+        task_user_delivery(config)
+    elif thread:
+        key = (pane, thread)
+        # Match the delivery to a transcript prompt, including its time. A later identical Mak prompt is independent.
+        delivery = (helper_tabs.digest(message.strip()), started, time.time() + 1)
+        TASK_AUTOMATED[key] = (*TASK_AUTOMATED.get(key, ())[-15:], delivery)
     if marker:
         continuations.sent(config, marker)
 
 
-def send_text(config, message, state=None, *, held=False):
+def task_user_delivery(entry):
+    """Clear a conversation’s manual Done mark after a user message reaches it."""
+    pane, thread = entry['id'], helper_tabs.verified_thread(entry)
+    TASK_SEND_AT[pane] = time.monotonic()
+    if not thread:
+        return
+    TASK_USER_AT[pane] = (thread, time.time())
+    try:
+        command = [paths.TMUX, 'display-message', '-p', '-t', pane, '#{pane_id}\t#{@tether_done}']
+        shown = subprocess.run(command, capture_output=True, text=True, timeout=5)
+        if shown.returncode == 0 and shown.stdout.rstrip('\n') == f'{pane}\t{thread}':
+            task_tree.set_marks(pane, subprocess.run, done=None, done_at=None)
+    except (OSError, subprocess.SubprocessError):
+        pass  # The recorded user send still invalidates the mark.
+
+
+def send_text(config, message, state=None, *, held=False, user=False):
     """The chat composer's guarded send to one pane. Returns 'queued' when the agent was working (it takes typed input
     while busy; Tether keeps no queue of its own), else 'submitted'. held: the caller already holds SEND_LOCK."""
     state = state or live_status(config)['state']
@@ -1594,20 +1714,20 @@ def send_text(config, message, state=None, *, held=False):
     before = capture(config) if wants_reply else ''
     note = '' if message.strip().startswith(('/', '!')) else shell_log.folder_note(config['id'], agent_folder(config))
     if held:
-        submit_locked(note + message.strip(), config)
+        submit_locked(note + message.strip(), config, user=user)
     else:
-        submit(note + message.strip(), config)
+        submit(note + message.strip(), config, user=user)
     if wants_reply:  # Codex answers its slash commands on the terminal only
         threading.Thread(target=terminal_replies.record, args=(config, before, capture), daemon=True).start()
     return 'queued' if state == 'Working' else 'submitted'
 
 
-def review_send(config, message, state=None):
+def review_send(config, message, state=None, *, held=False):
     """Deliver a review around a quiet Claude draft, preserving ordinary send guards."""
     config = dict(config, _review=True)
     stashed = stash_quiet_draft(config) if config.get('agent') == 'claude' else None
     try:
-        result = send_text(config, message, state)
+        result = send_text(config, message, state, held=held)
     except Exception as exc:
         try:
             if 'reached the agent input' in str(exc):
@@ -1635,16 +1755,16 @@ def review_send(config, message, state=None):
 def teams_answer(text, item):
     """Deliver one Teams answer (B126) to its tab through the broadcast guards; returns the result row.
     A delivered answer is your answer to that tab, like one typed in Tether: its ask clears."""
-    result = broadcast.deliver(text, [item], entries=sessions, status=live_status, send=send_text)['results'][0]
+    result = broadcast.deliver(text, [item], entries=sessions, status=live_status, send=partial(send_text, user=True))['results'][0]
     if result.get('result') in ('sent', 'sent_busy'):
         attention.STORE.clear(item['pane'], item.get('thread'))
     return result
 
 
-def broadcast_message(body):
+def broadcast_message(body, *, user=False):
     """POST /mobile/api/broadcast: one guarded broker for every multi-pane send (the Agents page and `tether broadcast`)."""
     return broadcast.deliver(body.get('message'), body.get('panes'), via=body.get('via') or 'direct', master=body.get('master'), exclude=body.get('exclude'),
-                             entries=sessions, status=live_status, send=send_text, cli=str(ROOT.parent / 'tether'))
+                             entries=sessions, status=live_status, send=partial(send_text, user=user), cli=str(ROOT.parent / 'tether'))
 
 
 DEFAULT_WINDOW = 150
@@ -1906,6 +2026,7 @@ class Handler(BaseHTTPRequestHandler):
         watched = config.get('id')
         with WATCHING_LOCK:
             WATCHING[watched] = WATCHING.get(watched, 0) + 1
+            TASK_VIEW_AT[watched] = time.monotonic()
         started = discovered = full = wrote = time.monotonic()
         signature = last_body = last_payload = screen = None
         sampled = 0.0
@@ -1960,6 +2081,7 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             with WATCHING_LOCK:
                 WATCHING[watched] = max(0, WATCHING.get(watched, 1) - 1)
+                TASK_VIEW_AT[watched] = time.monotonic()
 
     def deny(self):
         """Answer and return True when the request is not signed in."""
@@ -2298,9 +2420,14 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/mobile/api/shortcuts':
                 self.respond(200, {'shortcuts': shortcuts.load()})
             elif path == '/mobile/api/prefs':
-                self.respond(200, prefs_sync.load())
+                saved = prefs_sync.load()
+                saved['prefs'].setdefault('task_auto_close', False)
+                self.respond(200, saved)
+            elif path == task_tree_api.PLAN:
+                pane = parse_qs(urlsplit(self.path).query).get('pane', [None])[0]
+                task_tree_api.get(self, pane, live_task_tree)
             elif path == undo_api.PATH:
-                undo_api.get(self, undo_env())
+                undo_api.get(self, undo_env(), SEND_LOCK)
             elif path == '/mobile/api/auto-resume':
                 self.respond(200, auto_resume.notice())
             elif path == '/mobile/api/codex-provider':
@@ -2703,7 +2830,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.close_connection = True
                     self.respond(403, {'error': 'Reload the page and try again.'})
             return
-        if not backgrounds.handles(self.path) and self.path not in (factory_history.PATH, '/mobile/api/update', '/mobile/api/history/hide', '/mobile/api/file-check', '/mobile/api/preview', '/mobile/api/dev-preview', '/mobile/api/dev-preview/release', '/mobile/api/dev-preview/stop', '/mobile/api/ask-hook', '/mobile/api/ask-answer', '/mobile/api/ask-engage', '/mobile/api/message', '/mobile/api/broadcast', '/mobile/api/approval', '/mobile/api/menu', '/mobile/api/pick', '/mobile/api/prompt-action', '/mobile/api/start', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/key', '/mobile/api/dialog', '/mobile/api/clear-draft', '/mobile/api/unqueue', '/mobile/api/mode', '/mobile/api/type',
+        if self.path not in task_tree_api.WRITES and not backgrounds.handles(self.path) and self.path not in (factory_history.PATH, '/mobile/api/update', '/mobile/api/history/hide', '/mobile/api/file-check', '/mobile/api/preview', '/mobile/api/dev-preview', '/mobile/api/dev-preview/release', '/mobile/api/dev-preview/stop', '/mobile/api/ask-hook', '/mobile/api/ask-answer', '/mobile/api/ask-engage', '/mobile/api/message', '/mobile/api/broadcast', '/mobile/api/approval', '/mobile/api/menu', '/mobile/api/pick', '/mobile/api/prompt-action', '/mobile/api/start', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/key', '/mobile/api/dialog', '/mobile/api/clear-draft', '/mobile/api/unqueue', '/mobile/api/mode', '/mobile/api/type',
                          '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, *quick_tab.PATHS, suggest_names.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', coordinator.ROLE_PATH, '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not commit_gate.handles(self.path) and not claude_advisor.handles(self.path) and not auto_merge.handles(self.path) and not app_identity.handles(self.path) and not codex_trust.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path) and not reminders.handles(self.path) and not task_sources.handles(self.path) and not activity_time.handles(self.path) and not ui_usage.handles(self.path) and not feedback.handles(self.path) and not undo_api.handles(self.path) and not upkeep_api.handles(self.path) and self.path != coordinator.PATH:
             self.respond(404, {'error': 'Not found'})
             return
@@ -2731,7 +2858,13 @@ class Handler(BaseHTTPRequestHandler):
             work_api.post(self, sessions=sessions, status=shared_status, send=review_send, run=subprocess.run, lock=SEND_LOCK)
             return
         if groups_api.handles(self.path):
-            groups_api.post(self, sessions=sessions)
+            def close_status(entry):
+                pane = entry['id']
+                return dict(fresh_status(entry), ask=attention.STORE.ask(pane, entry.get('thread')),
+                            escalated=pane in review_links.escalated([entry]))
+
+            groups_api.post(self, sessions=sessions, fresh=fresh_sessions, status=close_status,
+                            lock=SEND_LOCK, changed=forget_sessions)
             return
         if undo_api.handles(self.path):
             undo_api.post(self, undo_env(), SEND_LOCK)
@@ -2809,6 +2942,9 @@ class Handler(BaseHTTPRequestHandler):
             message = body.get('message') if isinstance(body, dict) else None
             if not isinstance(body, dict):
                 raise ValueError('Invalid request.')
+            if self.path in task_tree_api.WRITES:
+                task_tree_api.post(self, body, live_task_tree, SEND_LOCK, task_answer, forget_sessions)
+                return
             if approval.handles(self.path):
                 approval.post(self, body)
                 return
@@ -2840,7 +2976,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == agent_tabs.PATH:
                 agent_tabs.serve(self, body, sessions=sessions, fresh=fresh_sessions, folder=agent_folder, snapshot=snapshot,
                                  last_reply=last_reply, run=subprocess.run, lock=SEND_LOCK,
-                                 status=shared_status, send=review_send, timeline=timeline)
+                                 status=shared_status, send=partial(review_send, held=True), timeline=timeline)
                 return
             if self.path == '/mobile/api/dev-preview':
                 # Forward a dev server on this machine (http://localhost:5173/) on a preview port: dev_previews.py.
@@ -2916,7 +3052,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(400, {'error': 'Enter a message first.'})
                 return
             if self.path == '/mobile/api/broadcast':
-                result = broadcast_message(body)
+                result = broadcast_message(body, user=self.headers.get('X-Tether-Client') != 'agent-cli')
                 for row in result.get('results') or []:
                     if row.get('result') in ('sent', 'sent_busy'):
                         attention.STORE.clear(row.get('pane'))  # you answered that tab
@@ -2946,6 +3082,9 @@ class Handler(BaseHTTPRequestHandler):
                         for key in ('order', 'paneOrder'):  # a drag that reorders sessions or tabs
                             if isinstance(body.get('changes'), dict) and key in body['changes']:
                                 undo.record_order(key, before.get(key), saved['prefs'].get(key))
+                    if before.get('task_auto_close', False) != saved['prefs'].get('task_auto_close', False):
+                        TASK_CLOSER.reset()
+                    saved['prefs'].setdefault('task_auto_close', False)
                     self.respond(200, saved)
                 except ValueError as exc:
                     self.respond(400, {'error': str(exc)})
@@ -3468,19 +3607,37 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self.path == '/mobile/api/menu':
                 choice, label, answer = body.get('choice'), body.get('label'), body.get('answer')
+                revision = body.get('revision')
                 if (not isinstance(choice, int) or isinstance(choice, bool) or not (label is None or isinstance(label, str))
-                        or not (answer is None or isinstance(answer, str) and answer.strip())):
+                        or not (answer is None or isinstance(answer, str) and answer.strip())
+                        or not (revision is None or isinstance(revision, str) and re.fullmatch('[a-f0-9]{64}', revision))):
                     raise ValueError('Choose an option first.')
                 if answer is not None and any(ord(c) < 32 and c not in '\n\t' or ord(c) == 127 for c in answer):
                     raise ValueError('The answer contains terminal control characters.')
-                with SEND_LOCK:
-                    menu_choose(config, choice, label=label, answer=answer)
+                from terminal_input import MenuChanged, menu_refusal
+                try:
+                    with SEND_LOCK:
+                        if revision is None:
+                            raise MenuChanged(menu_refusal(config))
+                        menu_choose(config, choice, label=label, answer=answer, revision=revision)
+                        if answer is not None:
+                            task_user_delivery(config)
+                except MenuChanged as exc:
+                    self.respond(409, {'error': str(exc)})
+                    return
                 attention.STORE.clear(config['id'], config.get('thread'))
                 self.respond(200, {'accepted': True})
                 return
             if self.path == '/mobile/api/pick':
-                with SEND_LOCK:
-                    picker_choose(config, body.get('row'), body.get('labels'), then=body.get('then', 'Enter'), heading=body.get('heading'))
+                from terminal_input import MenuChanged
+                try:
+                    with SEND_LOCK:
+                        picker_choose(config, body.get('row'), body.get('labels'), then=body.get('then', 'Enter'),
+                                      heading=body.get('heading'), revision=body.get('revision'),
+                                      ticked=body.get('ticked'))
+                except MenuChanged as exc:
+                    self.respond(409, {'error': str(exc)})
+                    return
                 if body.get('then', 'Enter') == 'Enter':
                     attention.STORE.clear(config['id'], config.get('thread'))
                 self.respond(200, {'accepted': True})
@@ -3488,6 +3645,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/mobile/api/type':
                 with SEND_LOCK:
                     type_text(config, body.get('text'), enter=body.get('enter') is True, login_url=body.get('login_url'))
+                    if body.get('enter') is True and not body.get('login_url'):
+                        task_user_delivery(config)
                 if body.get('enter') is True:
                     attention.STORE.clear(config['id'], config.get('thread'))
                 self.respond(200, {'accepted': True})
@@ -3513,12 +3672,16 @@ class Handler(BaseHTTPRequestHandler):
 
                     respond_approval(config, body.get('approval'), body.get('action'), choice=body.get('choice'),
                                      feedback=body.get('feedback'), on_answer=answer_record)
+                    if body.get('feedback') is not None:
+                        task_user_delivery(config)
                 attention.STORE.clear(config['id'], config.get('thread'))
                 self.respond(200, {'accepted': True})
             else:
-                delivery = send_text(config, message)
+                delivery = send_text(config, message, user=True)
                 attention.STORE.clear(config['id'], config.get('thread'))  # you answered the tab
                 self.respond(200, {'accepted': True, 'delivery': delivery})
+        except undo.CloseInterrupted as exc:
+            task_tree_api.interrupted_response(self, exc)
         except (ValueError, UnicodeError) as exc:
             self.respond(400, {'error': str(exc) if self.path in (*quick_tab.PATHS, coordinator.PATH, '/mobile/api/history/hide', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/broadcast', '/mobile/api/merge', '/mobile/api/model', '/mobile/api/shell', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', coordinator.ROLE_PATH, '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/mode', '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/menu', '/mobile/api/pick', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') else 'Invalid message.'})
         except (OSError, RuntimeError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
@@ -3608,21 +3771,28 @@ class Handler(BaseHTTPRequestHandler):
                         self.respond(404, {'error': 'That chat tab has already ended.'})
                         return
                     entry = None
+                    entries = None
                     if 'thread' in body:  # the page names the chat it saw: refuse when the tab now holds another one
                         forget_sessions()
-                        entry = next((item for item in sessions() if item['id'] == pane), None)
+                        entries = sessions()
+                        entry = next((item for item in entries if item['id'] == pane), None)
                         if entry is None or (body['thread'] or None) != (entry.get('thread') or None):
                             self.respond(409, {'error': 'That tab now holds another chat. Reload and try again.'})
                             return
-                    closed = undo.capture_safe(pane, entries=sessions)
+                    options = helper_tabs.read_panes(subprocess.run)
+                    if any(task_tree.is_child(row.record, row.role, row.group_by)
+                           and helper_tabs.placement_owner(row.record)[0] == pane for row in options.values()):
+                        entries = sessions() if entries is None else entries
+                        by_id = {item['id']: item for item in entries}
+                        placements = task_tree.placements(options, by_id)
+                        if (any(field['task'] == pane for field in placements.values())
+                                or pane in task_tree.pending_roots(options, by_id, placements)):
+                            self.respond(409, {'error': 'This task has helpers. Open its task close dialog.'})
+                            return
+                    closed = undo.capture_safe(pane, entries=sessions if entries is None else entries)
                     name = (closed or {}).get('name') or delegate.source_title(entry or {}, fallback=pane)
-                    auto_resume.forget_pane(pane, run=subprocess.run)
-                    with groups.closing(pane):  # its auto stack goes when empty or root-only
-                        subprocess.run([paths.TMUX, 'kill-pane', '-t', pane], check=True,
-                                       capture_output=True, timeout=5)
+                    undo.close_tab(pane, subprocess.run, closed, name)
                     audit.record('tab.close', f'Closed tab {name}', pane=pane)
-                    review_links.close(pane)
-                    undo.record_tab_close(closed)
                 self.respond(200, {'closed': pane})
                 return
             identifier = body.get('session') if isinstance(body, dict) else None
@@ -3640,13 +3810,15 @@ class Handler(BaseHTTPRequestHandler):
                                        '-f', '#{==:#{window_linked_sessions},1}', '-F', '#{pane_id}'],
                                        check=True, capture_output=True, text=True, timeout=5).stdout.splitlines()
                 saved = undo.capture_session_safe(identifier, entries=sessions)
-                auto_resume.forget_session(identifier, run=subprocess.run)
-                subprocess.run([paths.TMUX, 'kill-session', '-t', identifier], check=True,
-                               capture_output=True, timeout=5)
-                for pane in panes:
-                    review_links.close(pane)
-                undo.record_session_close(saved)
+                def close_session():
+                    auto_resume.forget_session(identifier, run=subprocess.run)
+                    subprocess.run([paths.TMUX, 'kill-session', '-t', identifier], check=True,
+                                   capture_output=True, timeout=5)
+
+                undo.close_session(identifier, subprocess.run, saved, panes, close_session)
             self.respond(200, {'closed': identifier})
+        except undo.CloseInterrupted as exc:
+            task_tree_api.interrupted_response(self, exc)
         except (ValueError, UnicodeError):
             self.respond(400, {'error': 'Invalid request.'})
         except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError):

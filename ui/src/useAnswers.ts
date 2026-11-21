@@ -8,7 +8,10 @@ export async function sendAnswer(api: Api, item: InboxItem, option: Choice) {
   const { pane } = item
   const approval = pane.approval as Approval | null
   if (item.kind === 'approval' && approval?.id) await api('approval', { session: pane.id, thread: pane.thread, approval: approval.id, choice: option.id })
-  else await api('menu', { session: pane.id, thread: pane.thread, choice: option.id, label: option.text })
+  else {
+    const revision = pane.attention?.menu_verified
+    if (revision) await api('menu', { session: pane.id, thread: pane.thread, choice: option.id, label: option.text, revision })
+  }
 }
 
 export function answerError(error: unknown) {

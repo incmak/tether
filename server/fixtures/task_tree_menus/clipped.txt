@@ -1,0 +1,26 @@
+──────────────────────────────────────────────
+ ☐ Data
+
+Which data for the live screenshots?
+
+❯ 1. Mask the real org
+     Codex masks names and numbers in every
+     PNG; you open every PNG before commit and
+     list the demo data so it can be deleted.
+  2. New test org on UAT
+     Codex creates a separate demo
+     organisation with the super-admin account
+     and captures only there. Cleanest data,
+     but may need your MFA.
+  3. Local seeded stack
+     Capture on a local stack with seeded demo
+     data, as the help-site README already
+     plans. No real data, but slower to set
+     up.
+↓
+  4. Type something.
+──────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to
+cancel

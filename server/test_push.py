@@ -133,7 +133,8 @@ class HelperPushTests(unittest.TestCase):
         ]
         helper = {'owner_pane': '%2', 'sent_at': 0, 'kind': 'helper'}
         own = dict(helper, kind='own')
-        listing = f'%1\t\t\t{json.dumps(helper)}\n%2\t\t\t{json.dumps(own)}\n%3\tuser\t\t{json.dumps(helper)}\n'
+        listing = ''.join(f'{pane}\t{group_by}\t\t{json.dumps(record)}\t$1\t\t\t\n'
+                          for pane, group_by, record in (('%1', '', helper), ('%2', '', own), ('%3', 'user', helper)))
         self.listing = SimpleNamespace(returncode=0, stdout=listing)
         self.run = self.enterContext(patch.object(server.subprocess, 'run', return_value=self.listing))
         self.context = Mock(return_value=('', []))

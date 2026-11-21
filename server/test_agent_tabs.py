@@ -255,6 +255,7 @@ class AgentTabsTests(unittest.TestCase):
 
     def test_self_owner_starts_unstacked_and_saves_its_own_root(self):
         self.mock_placement()
+        self.run.return_value = subprocess.CompletedProcess([], 0, stdout='%15\t\n')
         with patch.object(delegate, 'new_window_after', return_value='%15') as window, \
                 patch.object(delegate, 'write_prompt', return_value=self.root / 'prompt.md'):
             reply = self.request({'action': 'start', 'owner': 'self', 'agent': 'claude',
@@ -289,7 +290,7 @@ class AgentTabsTests(unittest.TestCase):
                     self.assertEqual(start.call_args.kwargs['owner']['home_pane'], '%13')
         self.entries.append(dict(id='%15', agent='claude', registry='/fake/15.json', thread=THREAD, writable=True))
         with patch.object(agent_tabs.helper_tabs, 'load', return_value=(True, record)), \
-                patch.object(agent_tabs.helper_tabs, 'save'), \
+                patch.object(agent_tabs.helper_tabs, 'write_record'), \
                 patch.object(server, 'shared_status', return_value={'state': 'Idle'}), \
                 patch.object(server, 'timeline', return_value={}), \
                 patch.object(server, 'review_send', return_value='queued') as send, \
@@ -537,6 +538,7 @@ class AgentTabsTests(unittest.TestCase):
                 review_links.FILE.write_text('[]')
                 self.stop_review_at(0, paused=True, unreadable=True)
                 if start:
+                    self.run.return_value = subprocess.CompletedProcess([], 0, stdout='%15\t\n')
                     with patch.object(delegate, 'new_window_after', return_value='%15'), \
                             patch.object(delegate, 'write_prompt', return_value=self.root / 'prompt'):
                         status, result = self.request({'action': 'start', 'review': 'new', 'message': '',

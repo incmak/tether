@@ -1,0 +1,40 @@
+[48;5;237m  [38;5;231m(description 'Save [39m
+  [38;5;231mthings') and 'Sync'[39m
+  [38;5;231m(description [39m
+  [38;5;231m'Share things'). [39m
+  [38;5;231mAfter I answer, [39m
+  [38;5;231mcall [39m
+  [38;5;231mAskUserQuestion [39m
+  [38;5;231magain with the [39m
+  [38;5;231mexact same [39m
+  [38;5;231mquestion. After the[39m
+  [38;5;231msecond answer, [39m
+  [38;5;231mreply 'done' and [39m
+  [38;5;231mstop.[39m
+
+[38;5;246m[49m●[39m Answered Claude's
+  questions:
+[38;5;246m  ⎿  · Which features
+[39m     [38;5;246mdo you want? → [39m
+     [38;5;246mSearch[39m
+[38;5;246m──────────────────────
+← [38;5;16m[48;5;153m ☒ … [39m[49m ✔ Submit  →
+
+[1m[38;5;231mWhich features do you
+want?[0m
+
+[38;5;153m❯[39m [38;5;246m1.[39m [38;5;114m[✔][39m [38;5;153mSearch[39m
+         [38;5;246mFind things[39m
+  [38;5;246m2.[39m [ ] Export
+         [38;5;246mSave things[39m
+  [38;5;246m3.[39m [ ] Sync
+         [38;5;246mShare things[39m
+  [38;5;246m4. [39m[ ] [38;5;246mType [39m
+         [38;5;246msomething[39m
+     [1mSubmit[0m
+[38;5;246m──────────────────────
+[39m  5. Chat about this
+
+[38;5;246mEnter to select · ↑/↓
+to navigate · Esc to [39m
+[38;5;246mcancel[39m

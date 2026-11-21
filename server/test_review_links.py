@@ -8241,8 +8241,7 @@ class ApprovalTurnWorktreeTests(ApprovalTurnFixture):
         self.worker_turn()
         self.assertEqual(self.send.call_count, 2)
 
-        self.enterContext(patch.object(undo, "capture_safe"))
-        self.enterContext(patch.object(undo, "record_tab_close"))
+        self.enterContext(patch.object(undo, "capture_safe", return_value=None))
         self.enterContext(patch.object(helper_close.auto_resume, "forget_pane"))
         self.enterContext(patch.object(helper_close.groups, "closing", return_value=nullcontext()))
         panes = MockPanes(self.worker, self.reviewer)

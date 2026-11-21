@@ -874,7 +874,7 @@ class AnswerEndpointTest(unittest.TestCase):
     def test_message_clears_only_after_success(self):
         self.send_text.return_value = 'submitted'
         self.assertEqual(self.post('message', message='Use default'), 200)
-        self.send_text.assert_called_once_with(self.config, 'Use default')
+        self.send_text.assert_called_once_with(self.config, 'Use default', user=True)
         self.clear.assert_called_once_with('%1', 't1')
         self.clear.reset_mock()
         self.send_text.side_effect = RuntimeError('refused')
@@ -889,8 +889,9 @@ class AnswerEndpointTest(unittest.TestCase):
         self.clear.assert_called_once_with('%1', 't1')
 
     def test_menu_preserves_the_free_text_answer_and_clears(self):
-        self.assertEqual(self.post('menu', choice=1, answer='Default'), 200)
-        self.menu_choose.assert_called_once_with(self.config, 1, label=None, answer='Default')
+        revision = 'a' * 64
+        self.assertEqual(self.post('menu', choice=1, answer='Default', revision=revision), 200)
+        self.menu_choose.assert_called_once_with(self.config, 1, label=None, answer='Default', revision=revision)
         self.clear.assert_called_once_with('%1', 't1')
 
     def test_approval_preserves_optional_typed_feedback_and_clears(self):

@@ -205,22 +205,15 @@ class NarrowControlTests(unittest.TestCase):
         self.assertEqual(pending['options'][-1]['text'], 'No, explain the reason')
         self.assertNotEqual(pending['id'], terminal.approval(screen.replace('the reason', 'a new reason'))['id'])
 
-    def test_menu_scroll_rechecks_the_target_id_before_enter(self):
-        frames = iter(['Choose\n❯ 1. One\n  3. Three\nEnter to select · Esc to cancel',
-                       'Choose\n  1. One\n❯ 2. Two\n  3. Three\nEnter to select · Esc to cancel',
-                       'Choose\n  1. One\n  2. Two\n❯ 3. Three\nEnter to select · Esc to cancel'])
-        run = Screen('', 80)
-        keys = []
-
-        def commands(argv, **kwargs):
-            if argv[1] == 'send-keys':
-                keys.append(argv[-1])
-                return subprocess.CompletedProcess(argv, 0, '', '')
-            return run(argv, **kwargs)
-
-        with patch.object(terminal, 'verify'), patch.object(terminal, 'capture', side_effect=lambda *args, **kwargs: next(frames)):
-            terminal.menu_choose({'id': '%test', 'agent': 'claude'}, 3, label='Three', run=commands, sleep=lambda _: None)
-        self.assertEqual(keys, ['Down', 'Down', 'Enter'])
+    def test_menu_missing_an_option_refuses_to_scroll(self):
+        frame = ('────────────────────\n ☐ Picker\n\nChoose\n\n'
+                 '❯ 1. One\n  3. Three\n  4. Type something.\n────────────────────\n'
+                 '  5. Chat about this\n\nEnter to select · ↑/↓ to navigate · Esc to cancel')
+        for frame in (frame, frame.replace('❯ 1. One', '❯ 2. Two')):
+            run = Screen(frame, 40)
+            with self.subTest(frame=frame), patch.object(terminal, 'verify'), self.assertRaises(terminal.MenuChanged):
+                terminal.menu_choose({'id': '%test', 'agent': 'claude'}, 3, label='Three', run=run, sleep=lambda _: None)
+            self.assertTrue(all(command[1] == 'capture-pane' for command in run.commands))
 
     def test_missing_prompt_in_narrow_or_short_pane_tries_tether_sizing_once(self):
         # Only window_size.apply (Tether's own window sizes) may run; it never touches a split.

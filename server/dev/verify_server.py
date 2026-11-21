@@ -96,6 +96,7 @@ REFUSED = {
         'claude-advisor', 'codex-level', 'codex-provider', 'commit-gate', 'groups/context',
         'history', 'history/hidden', 'live', 'projects/advisor-entry', 'projects/advisor-log',
         'projects/note', 'search', 'side-shells', 'stream', 'subagent', 'subagent-task', 'subagent-tool', 'tool',
+        'task-tree/close-plan',
     },
     # These can close a pane or session.
     'DELETE': {'session', 'tmux-sessions'},
@@ -105,12 +106,14 @@ REFUSED = {
         # These can type into, start, stop, or reconfigure a terminal or agent.
         'approval', 'ask-answer', 'ask-engage', 'attention/digest', 'attention/handled',
         'attention/opened', 'attention/snooze', 'auto-resume', 'broadcast', 'clear-draft',
-        'continue', 'continue-preview', 'coordinator-role', 'delegate', 'dialog', 'fork', 'key', 'live/summary',
+        'continue', 'continue-preview', 'coordinator-role', 'delegate', 'dialog', 'fork', 'groups/close', 'key',
+        'live/summary',
         'menu', 'merge', 'message', 'mode', 'model', 'model-options', 'pane-icon', 'pane-icon/draw',
         'pane-name', 'pick', 'projects/backlog-start', 'prompt-action', 'quick-tab/move',
         'quick-tab/route', 'quick-tab/start', 'rename', 'resume', 'review-link', 'review-stop',
         'side-shell', 'side-shell/end', 'split', 'start', 'stop-task', 'subagent-stop',
         'suggest-groups', 'suggest-name', 'tab-brief', 'task-models', 'tmux-sessions', 'type', 'unqueue',
+        'task-tree/answer', 'task-tree/close', 'task-tree/done', 'task-tree/move',
         # These access live browsers, host services, login flows, or external workers.
         'accounts/refresh', 'accounts/switch', 'browser/ack', 'browser/agents', 'browser/agents/setup',
         'browser/ask/dismiss', 'browser/close', 'browser/device', 'browser/extension/pair',

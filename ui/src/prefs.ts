@@ -64,7 +64,7 @@ export interface Prefs {
   archived: Record<string, string>
   // Archived tabs: pane id -> thread and dir when archived. Match dir and known threads, so a reused id stays out.
   archivedTabs: Record<string, ArchivedTab>
-  // Hide reviewer, advisor and worker tabs that agents open for their own work (helperTabs.ts). On by default.
+  // Legacy B400 preferences. Keep them in sync for older clients.
   hideHelpers: boolean
   // Helper tabs you chose to always show: pane id -> thread and dir, bound like archivedTabs.
   shownHelpers: Record<string, ArchivedTab>

@@ -82,12 +82,11 @@ class NativeAskTests(unittest.TestCase):
                     attention = terminal.attention(config, plain, False, now=4, styled_screen=styled)
                     status.return_value = {'state': 'Input needed', 'approval': None, 'attention': attention}
                     payload = server.chat_payload(config)['attention']
+                    self.assertEqual(payload['ask'], ask)
                     if name == 'clipped':
-                        self.assertEqual(payload['ask'], ask)
                         self.assertNotIn('ask_current', payload)
                     else:
                         self.assertEqual(payload['ask_current']['index'], 0)
-                        self.assertNotIn('ask', payload)
 
 
 class NativeAskKeyRouteTests(unittest.TestCase):

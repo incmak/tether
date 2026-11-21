@@ -2,6 +2,7 @@
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import os
+import time
 from pathlib import Path
 import select
 import signal
@@ -105,6 +106,7 @@ class IsolatedZoom(unittest.TestCase):
         self.tmux = self.private.tmux
         self.binary = shutil.which('tmux')
         self.tmux('new-session', '-d', '-s', 'zoom-test', '-x', '120', '-y', '40').check_returncode()
+        self.addCleanup(self.stop_server)
         self.pane = self.tmux('display-message', '-p', '-t', 'zoom-test', '#{pane_id}').stdout.strip()
         self.home = self.tmux('display-message', '-p', '-t', self.pane, '#{window_id}').stdout.strip()
         self.tmux('split-window', '-h', '-t', self.pane).check_returncode()
@@ -114,6 +116,22 @@ class IsolatedZoom(unittest.TestCase):
                             patch.object(pane_view.paths, 'CACHE', Path(self.folder.name) / 'cache')):
             replacement.start()
             self.addCleanup(replacement.stop)
+
+    def stop_server(self):
+        # kill-server returns before the pane shells exit, and a shell can still write into HOME (the
+        # temporary folder) while the folder cleanup runs. Wait until every pane process has gone.
+        listed = self.tmux('list-panes', '-a', '-F', '#{pane_pid}').stdout.split()
+        self.tmux('kill-server')
+        deadline = time.monotonic() + 5
+        for pid in map(int, listed):
+            while True:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                if time.monotonic() > deadline:
+                    self.fail(f'tmux pane process {pid} did not exit after kill-server')
+                os.sched_yield()
 
     def dimensions(self):
         return self.tmux('display-message', '-p', '-t', self.pane, '#{window_width} #{window_height}').stdout.strip()

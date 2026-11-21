@@ -177,7 +177,7 @@ class EndpointTests(unittest.TestCase):
         entries = [pane('%1'), pane('%2', 'codex'), pane('%3')]
         states = {'%1': 'Idle', '%2': 'Working', '%3': 'Approval'}
         for name, value in (('sessions', lambda: entries), ('live_status', lambda entry: {'state': states[entry['id']]}),
-                            ('submit', lambda message, config: self.sent.append((config['id'], message))),
+                            ('terminal_submit', lambda config, message: self.sent.append((config['id'], message))),
                             ('agent_folder', lambda entry: '/w')):
             patcher = patch.object(server, name, value)
             patcher.start()
