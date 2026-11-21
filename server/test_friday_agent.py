@@ -1571,6 +1571,20 @@ class FridayRulesTests(unittest.TestCase):
                      'I could not show it.', "I haven't opened it."):
             self.assertFalse(friday.false_success(text), text)
 
+    def test_spoken_failure_normalizes_and_bounds_the_reason(self):
+        for reason, suffix in (
+                ('  Missing\n\t chat  ', ' Missing chat.'),
+                ('Missing chat.', ' Missing chat.'),
+                ('Try again!', ' Try again!'),
+                ('Which chat?', ' Which chat?'),
+                ('x' * 300, ' ' + 'x' * 300 + '.'),
+                ('x' * 301, ''),
+                (' \n\t ', ''),
+                (None, ''),
+                (404, '')):
+            with self.subTest(reason=reason):
+                self.assertEqual(friday.spoken_failure(reason), 'That did not go through.' + suffix)
+
     def test_stray_text(self):
         for text in ('層', '사', 'あ', 'ｱ', 'ก', 'ش'):
             self.assertTrue(friday.stray_text(text), text)
@@ -2703,9 +2717,15 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
             data = message.data
             frames.append(('dispatch', data.function_name))
             session.last_dispatch = data.args
+            result = browser_results[data.tool_call_id]
+            if isinstance(result, Exception):
+                await llm.process_frame(self.rt.FunctionCallResultFrame(
+                    function_name=data.function_name, tool_call_id=data.tool_call_id,
+                    arguments=data.args, result=None, error=str(result)), direction)
+                return
             await session.rtvi._handle_function_call_result(SimpleNamespace(
                 function_name=data.function_name, tool_call_id=data.tool_call_id,
-                arguments=data.args, result=browser_results[data.tool_call_id]))
+                arguments=data.args, result=result))
 
         async def run_handlers(items):
             # Let the first browser result arrive before the second handler starts.
@@ -2963,6 +2983,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
             params.result_callback.assert_awaited_once_with({'error': 'The prompt is too long to add the call.'})
             session.rtvi.handle_function_call.assert_not_awaited()
             self.assertTrue(run.failed_action)
+            self.assertEqual(run.failed_reason, 'The prompt is too long to add the call.')
             self.assertFalse(run.pending)
         finally:
             llm._active_run.reset(token)
@@ -3192,20 +3213,21 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], [reply])
 
     async def test_false_success_replaces_complete_reply_after_failed_or_blocked_action(self):
+        failed_send = ('send_to_chat', {'chat': 'Docs', 'prompt': 'Fix docs'}, {'error': 'Missing chat'})
         cases = (
-            ('Send this', ('send_to_chat', {'chat': 'Docs', 'prompt': 'Fix docs'}, {'error': 'Missing chat'})),
-            ('What was the reply?', ('send_to_chat', {'chat': 'Docs', 'prompt': 'What was the reply?'}, {'ok': True})),
+            ('Send this', failed_send, 'That did not go through. Missing chat.'),
+            ('What was the reply?', ('send_to_chat', {'chat': 'Docs', 'prompt': 'What was the reply?'}, {'ok': True}),
+             'That did not go through.'),
         )
-        for user, action in cases:
-            with self.subTest(action=action[0]), patch('sys.stderr') as stderr:
+        for user, action, correction in cases:
+            with self.subTest(user=user), patch('sys.stderr') as stderr:
                 _, frames = await self.tool_flow(user, [
                     ('', 1, [action]), (['I have s', 'ent that.'], 1, [])])
                 self.assertNotIn('I have s', [f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)])
-                self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)],
-                                 ['That did not go through.'])
+                self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)], [correction])
                 self.assertIn('Friday corrected false success', ''.join(c.args[0] for c in stderr.write.call_args_list))
-        _, frames = await self.tool_flow(cases[0][0], [
-            ('', 1, [cases[0][1]]), (['The prompt was sent', ' to neither chat, not even Docs.'], 1, [])])
+        _, frames = await self.tool_flow('Send this', [
+            ('', 1, [failed_send]), (['The prompt was sent', ' to neither chat, not even Docs.'], 1, [])])
         self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)],
                          ['The prompt was sent', ' to neither chat, not even Docs.'])
 
@@ -3220,11 +3242,65 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(name=name), patch('sys.stderr'):
                 _, frames = await self.tool_flow(user, [action, (claim, 1, [])])
                 self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)],
-                                 ['That did not go through.'])
+                                 ['That did not go through. Friday can act in Tether is off in Settings.'])
                 self.assertFalse(any(isinstance(f, self.rt.LLMTextFrame) for f in frames))
                 _, frames = await self.tool_flow(user, [action, (error['error'], 1, [])])
                 self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)],
                                  [error['error']])
+
+    async def test_false_success_uses_only_the_last_failure_reason(self):
+        show = ('show_chat', {'chat': 'Docs'}, {'error': 'Could not show Docs.'})
+        switch = ('switch_chat', {'chat': 'Docs'}, {'error': 'No chat called Docs.'})
+        for prior_actions in ([], [show]):
+            with self.subTest(prior_actions=prior_actions), patch('sys.stderr'):
+                _, frames = await self.tool_flow('Switch to Docs', [
+                    ('', 1, [*prior_actions, switch]), ('Switched to Docs.', 1, [])])
+                self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)],
+                                 ['That did not go through. No chat called Docs.'])
+                self.assertFalse(any(isinstance(f, self.rt.LLMTextFrame) for f in frames))
+
+    async def test_unspeakable_last_failure_clears_the_previous_reason(self):
+        show = ('show_chat', {'chat': 'Docs'}, {'error': 'Could not show Docs.'})
+        args = {'chat': 'Docs'}
+        cases = (
+            ('switch_chat', args, RuntimeError('Private exception text')),
+            ('switch_chat', args, {'error': 404}),
+            ('switch_chat', args, {'error': 'x' * 301}),
+            ('reminder_add', {'reminders': [{'text': 'Check Docs', 'when': 'tomorrow'}]}, {'ok': True, 'set': []}),
+            ('send_to_chat', {'chat': 'Docs', 'prompt': 'What was the reply?'}, {'ok': True}),
+        )
+        for action in cases:
+            with self.subTest(action=action), patch('sys.stderr'):
+                _, frames = await self.tool_flow('Show Docs and remind me to check it tomorrow', [
+                    ('', 1, [show, action]), ('Done.', 1, [])])
+                results = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
+                self.assertEqual(results[-1].function_name, action[0])
+                if isinstance(action[2], Exception):
+                    self.assertEqual(results[-1].error, 'Private exception text')
+                    self.assertIsNone(results[-1].result)
+                self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)],
+                                 ['That did not go through.'])
+                self.assertFalse(any(isinstance(f, self.rt.LLMTextFrame) for f in frames))
+
+    async def test_successful_action_after_failure_keeps_the_reply(self):
+        failed = ('switch_chat', {'chat': 'Docs'}, {'error': 'No chat called Docs.'})
+        shown = ('show_chat', {'chat': 'API'}, {'ok': True, 'chat': 'API'})
+        reply = 'Showing API.'
+        _, frames = await self.tool_flow('Switch to Docs and show API', [
+            ('', 1, [failed, shown]), (reply, 1, [])])
+        self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], [reply])
+        self.assertFalse(any(isinstance(f, self.rt.TTSSpeakFrame) for f in frames))
+
+    async def test_false_success_speaks_the_empty_call_attachment_error(self):
+        args = {'chat': 'Docs', 'prompt': 'Review it.', 'attach_call': True}
+        proposal, confirmation = self.attachment_confirmation(args)
+        with patch.object(friday.CallLog, 'record_messages'), patch('sys.stderr'):
+            _, frames = await self.tool_flow(confirmation, [
+                ('', 1, [('send_to_chat', args, {})]), ('Sent to Docs.', 1, [])], proposal)
+        self.assertNotIn(('dispatch', 'send_to_chat'), frames)
+        self.assertFalse(any(isinstance(f, self.rt.LLMTextFrame) for f in frames))
+        self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)],
+                         ['That did not go through. There is no call to send yet.'])
 
     async def test_successful_send_reply_survives_blocked_second_send(self):
         send = ('send_to_chat', {'chat': 'Docs', 'prompt': 'Fix docs'}, {'ok': True, 'chat': 'Docs'})

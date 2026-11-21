@@ -604,6 +604,15 @@ def false_success(text):
             and not re.search(r'\bnot\b|n[’\']t|\?', text, re.I))
 
 
+def spoken_failure(reason):
+    reason = ' '.join(reason.split()) if isinstance(reason, str) else None
+    if not reason or len(reason) > 300:
+        return 'That did not go through.'
+    if not reason.endswith(('.', '!', '?')):
+        reason += '.'
+    return 'That did not go through. ' + reason
+
+
 DECISION_WORD = r'(?:approved|denied|rejected|allowed|accepted|declined|sent|done|handled)\b'
 DECISION_CLAIM = re.compile(
     r"(?:^|[.!?;]\s*)(?:(?:okay|ok|alright|sure|right|got it|no problem|all set)[,.!]?\s+)*" + DECISION_WORD
@@ -1927,6 +1936,8 @@ def runtime_types():
                 run.succeeded_action = True
             elif run.source == 'speech':
                 run.failed_action = True
+                reason = result.get('error') if isinstance(result, dict) else None
+                run.failed_reason = reason if isinstance(reason, str) else None
             if not ack:
                 return None
             if call.name in SEND_TOOLS:
@@ -2269,7 +2280,8 @@ def runtime_types():
                     replay=replay, readback_debt=getattr(self.session, 'readback_debt', False),
                     # Async tool calls keep the transcript as of the spoken request.
                     call_turns=tuple(self.call_log.turns),
-                    pending={}, filler_spoken=False, failed_action=False, succeeded_action=False, readback_spoken=False)
+                    pending={}, filler_spoken=False, failed_action=False, failed_reason=None,
+                    succeeded_action=False, readback_spoken=False)
             else:
                 self.run_source = 'tool'
                 if self.tool_run and self.tool_run.source == 'speech':
@@ -2298,6 +2310,7 @@ def runtime_types():
             if reason:
                 if run and run.source == 'speech' and params.function_name in ACTION_TOOLS:
                     run.failed_action = True
+                    run.failed_reason = None
                 print(f'Friday blocked {params.function_name}: {reason}', file=sys.stderr, flush=True)
                 if reason in (READBACK_REQUIRED, APPROVAL_CONFIRM_REQUIRED):
                     speak = (not run.readback_spoken and run is self.tool_run
@@ -2348,14 +2361,16 @@ def runtime_types():
                 if params.arguments.pop('attach_call'):
                     if self.call_log_generation != self.call_log.generation or not run.call_turns:
                         run.failed_action = True
-                        await params.result_callback({'error': 'There is no call to send yet.'})
+                        run.failed_reason = 'There is no call to send yet.'
+                        await params.result_callback({'error': run.failed_reason})
                         return
                     prompt = str(args.get('prompt', '')) + '\n\n'
                     budget = min(CALL_TRANSCRIPT_LIMIT, CALL_PROMPT_LIMIT - len(json.dumps(prompt)))
                     transcript, call_turn_count = format_call_transcript(run.call_turns, budget)
                     if not transcript:
                         run.failed_action = True
-                        await params.result_callback({'error': 'The prompt is too long to add the call.'})
+                        run.failed_reason = 'The prompt is too long to add the call.'
+                        await params.result_callback({'error': run.failed_reason})
                         return
                     params.arguments['prompt'] = prompt + transcript
             if run and response:
@@ -2475,7 +2490,7 @@ def runtime_types():
                             await self.push_frame(TTSSpeakFrame(APPROVAL_DECLINED_REPLY))
                         elif run.failed_action and not run.succeeded_action and false_success(spoken):
                             print('Friday corrected false success', file=sys.stderr, flush=True)
-                            await self.push_frame(TTSSpeakFrame('That did not go through.'))
+                            await self.push_frame(TTSSpeakFrame(spoken_failure(run.failed_reason)))
                         else:
                             for frame in response.buffered_text:
                                 await super().push_frame(frame)
