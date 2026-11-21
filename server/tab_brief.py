@@ -90,7 +90,7 @@ def turns(messages):
     commands or tool output). A turn is complete when a text reply follows its prompt."""
     pairs, prompts, current, reply = [], 0, None, []
     for message in messages or []:
-        if not isinstance(message, dict) or message.get('kind'):
+        if not isinstance(message, dict) or message.get('kind') or message.get('source') == 'tether':
             continue
         text = _clean(message.get('text'))
         if not text:

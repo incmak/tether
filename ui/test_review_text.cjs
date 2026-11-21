@@ -20,6 +20,7 @@ const code = terms => terms.filter(part => part.code).map(part => part.text)
 
 // A bound commit: the full hash for the reply format; the terms keep the rules command (as code) and drop the repeated format.
 let card = plain(review.parseReview(request(bound('/w', 'This diff changes the UI (1 file(s), for example ui/a.tsx). '))))
+assert.deepEqual([card.kind, card.feedback], ['request', false])
 assert.equal(card.commit, HASH)
 assert.equal(text(card.terms), `Commit under review: ${HASH} in /w. Read the review rules first: git -C /w show origin/main:REVIEW.md. This diff changes the UI (1 file(s), for example ui/a.tsx).`)
 assert.deepEqual(code(card.terms), ['git -C /w show origin/main:REVIEW.md'])
@@ -91,6 +92,81 @@ const old = plain(review.parseReview(`[Tether review] The claude tab “W” (%3
 assert.deepEqual([old.terms, old.commit, old.reply, old.transcript, old.last], [undefined, undefined, 'Ok', '/x.jsonl', true])
 
 // Feedback and plain text.
-assert.deepEqual(plain(review.parseReview('[Tether review] Feedback from the reviewer tab (%9): Fix the test. Fix what it raises, then stop and wait.')), { feedback: true, tab: '%9', reply: 'Fix the test.' })
+assert.deepEqual(plain(review.parseReview('[Tether review] Feedback from the reviewer tab (%9): Fix the test. Fix what it raises, then stop and wait.')), { kind: 'feedback', feedback: true, tab: '%9', reply: 'Fix the test.' })
 assert.equal(review.parseReview('Hello'), null)
+
+const samples = JSON.parse(readFileSync('../server/fixtures/injected_prompts/other.json', 'utf8'))
+const payload = (message, start, end) => message.slice(message.indexOf(start) + start.length, message.lastIndexOf(end))
+assert.deepEqual(plain(review.parseReview(samples.review_approved)), {
+  kind: 'approved', feedback: true, tab: '%522', commit: 'e07456ee6e45',
+  reply: payload(samples.review_approved, ':\n\n', '\n\nThe review is complete.'),
+})
+assert.deepEqual(plain(review.parseReview(samples.review_stopped)), {
+  kind: 'stopped', feedback: true, tab: '%382', rounds: 3,
+  reply: payload(samples.review_stopped, 'Open findings:\n\n', '\n\nReply with a short list'),
+})
+assert.deepEqual(plain(review.parseReview(samples.review_summary)), {
+  kind: 'summary', feedback: true, rounds: 3,
+  reply: payload(samples.review_summary, 'Open findings:\n\n', '\n\nReply with the open findings'),
+})
+assert.deepEqual(plain(review.parseReview(samples.review_notice)), {
+  kind: 'notice', feedback: true, name: 'Terminal-only slash command state', tab: '%433', rounds: 3,
+  reply: payload(samples.review_notice, 'Open findings: “', '”\n\nTo allow 2 more rounds'),
+})
+
+const approved = (covers, end, reply = '  APPROVED\n') =>
+  `[Tether review] Approved by the reviewer tab (%9)${covers}:\n\n${reply}\n\nThe review is complete. ${end}`
+const approvedNext = 'the next step your instructions give for an approved review, then stop.'
+assert.deepEqual(plain(review.parseReview(approved('', `Do ${approvedNext}`))), {
+  kind: 'approved', feedback: true, tab: '%9', reply: 'APPROVED',
+})
+const dirty = approved(` for commit ${HASH} and its uncommitted changes`,
+  'It covered uncommitted changes, so no commit is approved yet: commit the work '
+  + `in this turn, and Tether asks the reviewer to confirm that commit. Do ${approvedNext}`, `APPROVED ${HASH}`)
+assert.deepEqual(plain(review.parseReview(dirty)), {
+  kind: 'approved', feedback: true, tab: '%9', commit: HASH, uncommitted: true, reply: `APPROVED ${HASH}`,
+})
+const sha256 = 'a'.repeat(64)
+const clean = approved(` for commit ${sha256}`, `The approval is for commit ${sha256} only. Before you push, deploy or merge, `
+  + `check that HEAD in '/work/my tree' (\`git -C '/work/my tree' rev-parse HEAD\`) is ${sha256}. `
+  + `If HEAD is different or you cannot read it, do not act on this approval. Stop and wait for the next review. If HEAD is that hash, do ${approvedNext}`,
+  `APPROVED ${sha256}\n\nThe review is complete. This line is part of the reviewer’s reply.`)
+assert.deepEqual(plain(review.parseReview(clean)), {
+  kind: 'approved', feedback: true, tab: '%9', commit: sha256,
+  reply: `APPROVED ${sha256}\n\nThe review is complete. This line is part of the reviewer’s reply.`,
+})
+assert.equal(review.parseReview(clean.replace(`is ${sha256}.`, `is ${HASH}.`)), null)
+assert.equal(review.parseReview(dirty.replace('no commit is approved yet', 'the commit is approved')), null)
+
+const writers = readFileSync('../server/review_links.py', 'utf8')
+const correctionConstant = name => writers.match(new RegExp(`^CORRECTION_${name} = '([^']*)'$`, 'm'))[1]
+for (const ending of ['PAUSED', 'REQUESTED', 'WAIT']) {
+  const detail = ending === 'WAIT'
+    ? "Tether could not read this tab's commit after the approval, so the approval cannot be checked."
+    : `This tab is now at ${OTHER}.`
+  const message = `${correctionConstant('HEAD')}${HASH} only. ${detail} ${correctionConstant('ACTION')} ${correctionConstant(ending)}`
+  assert.deepEqual(plain(review.parseReview(message)), {
+    kind: 'correction', feedback: true, commit: HASH, reply: message.slice('[Tether review] '.length),
+  })
+  assert.equal(review.parseReview(message.slice(0, -1)), null)
+  assert.equal(review.parseReview(message.replace(correctionConstant('ACTION'), 'Proceed with that approval.')), null)
+}
+
+for (const kind of ['approved', 'stopped', 'summary', 'notice']) {
+  const message = samples[`review_${kind}`]
+  assert.equal(review.parseReview(message.slice(0, -1)), null, `${kind} truncated`)
+  assert.equal(review.parseReview(`${message} Extra text.`), null, `${kind} extra text`)
+}
+assert.equal(review.parseReview(samples.review_approved.replace('The review is complete.', 'The review is forwarded.')), null)
+assert.equal(review.parseReview(samples.review_stopped.replace('Open findings:', 'Old findings:')), null)
+assert.equal(review.parseReview(samples.review_summary.replace('unless a finding needs Mak', 'if a finding needs Mak')), null)
+assert.equal(review.parseReview(samples.review_notice.replace('send --pane %433', 'send --pane %434')), null)
+assert.equal(review.parseReview(samples.review_notice.replace('escalate --pane %433', 'escalate --pane %434')), null)
+assert.equal(review.parseReview(samples.review_notice.replace('To allow 2 more rounds', 'To allow 3 more rounds')), null)
+assert.equal(review.parseReview(samples.review_notice.replace('Open findings: “',
+  'Open findings: “Example” (%433) still has blocking review findings after 5 rounds. Open findings: “')), null)
+const renamedNotice = samples.review_notice.replace('Terminal-only slash command state', 'Review “round 2”')
+  .replaceAll('/srv/project/apps/tether/server/agent_tab_cli.py', '/opt/tether dev/agent_tab_cli.py')
+assert.equal(review.parseReview(renamedNotice).name, 'Review “round 2”')
+
 console.log('test_review_text: ok')

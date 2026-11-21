@@ -76,7 +76,8 @@ def validate(entry, body, state):
 
 def brief(entry, messages, goal=None):
     """Use original task, current goal and recent conversation. Exclude tools and runtime notices."""
-    useful = [m for m in messages if m.get('role') in ('user', 'assistant') and not m.get('kind') and isinstance(m.get('text'), str)]
+    useful = [m for m in messages if m.get('role') in ('user', 'assistant') and not m.get('kind')
+              and m.get('source') != 'tether' and isinstance(m.get('text'), str)]
     picked = []
     first = next((m for m in useful if m['role'] == 'user'), None)
     if first:
@@ -141,7 +142,8 @@ def save_link(target, source, destination, messages, context, native):
     archived = [message for message in messages if str(message.get('id', '')).startswith('continuation:')] if native else messages
     if archived:
         for message in reversed(archived[-HISTORY_LIMIT:]):
-            item = {key: value for key, value in message.items() if key in ('role', 'kind', 'title', 'text', 'time', 'count')}
+            item = {key: value for key, value in message.items()
+                    if key in ('role', 'kind', 'title', 'text', 'time', 'count', 'source', 'prompt', 'tabs', 'legacy')}
             item['id'] = f"continuation:{identifier}:{len(kept)}"
             item['text'] = str(item.get('text', ''))[:20000]
             size = len(json.dumps(item).encode()) + 2
@@ -195,6 +197,9 @@ def decorate(entry, data):
             old = _history(link['history'])
         except (OSError, ValueError):
             old = []
+        if old:
+            from injected_prompts import mark  # a saved history has timestamps and may already carry receipt metadata
+            old = mark({}, old)
         notice = {'id': 'continuation:' + link['id'], 'role': 'assistant', 'kind': 'notice', 'title': 'Continued with ' + TARGETS[link['target']],
                   'text': 'Native history retained.' if link['native'] else 'Earlier messages stay here. A bounded context brief goes with your next message. Goals and running tasks stay in the original session.',
                   'time': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(link['at']))}

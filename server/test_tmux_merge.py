@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+import groups
 import paths
 import projects
 import side_shells
@@ -82,7 +83,8 @@ class FakeTmux:
             pane = target if target in panes else next(iter(panes), '')
             return self.format(args[-1], session, window, pane) + '\n'
         if command == 'list-panes':
-            return ''.join(self.format(args[-1], session, pane=pane) + '\n' for pane in self.panes(session))
+            return ''.join(self.format(args[-1], session, window, pane) + '\n'
+                           for window, panes in self.sessions[session].items() for pane in panes)
         if command == 'list-windows':
             return ''.join(window + '\n' for window in self.sessions[session])
         if command == 'kill-pane':
@@ -92,8 +94,8 @@ class FakeTmux:
             self.remove_pane(pane)
             self.sessions[session]['@5'] = [pane]
         elif command == 'move-window':
-            window = args[args.index('-s') + 1]
-            source, _ = self.where(window)
+            source, _, window = args[args.index('-s') + 1].rpartition(':')
+            source = source or self.where(window)[0]
             self.sessions[session][window] = self.sessions[source].pop(window)
             self.drop_empty_session(source)
         elif command == 'set-option':
@@ -109,6 +111,7 @@ class FakeTmux:
         fields = {'session_id': session, 'session_name': self.names.get(session, ''), 'window_id': window,
                   'pane_id': pane, 'pane_current_path': '/tmp', '@chat_name': self.pane_names.get(pane, ''),
                   '@project': self.projects.get(session, ''), '@tether_breakout': self.markers.get(pane, '')}
+        fields.update({'@groups': '', '@tether_role': ''})
         return '\t'.join(fields[field[2:-1]] for field in fmt.split('\t'))
 
     def remove_pane(self, pane):
@@ -521,7 +524,8 @@ class TmuxMergeRecoveryTests(unittest.TestCase):
         self.fake.fail('move-window', applied=True)
 
         def run(argv, **kwargs):
-            if argv[1] == 'display-message' and '#{window_id}\t#{session_id}' in argv:
+            # The check after the move reads the window lists of both sessions (tmux_merge._window_left).
+            if argv[1] == 'list-windows' and any(call[1] == 'move-window' for call in self.fake.calls):
                 raise subprocess.TimeoutExpired(argv, 5)
             return self.fake.run(argv, **kwargs)
 
@@ -683,6 +687,277 @@ class TmuxMergeTests(unittest.TestCase):
         self.assertEqual(result, {'session': self.b, 'name': 'beta', 'pane': pane})
         self.assertIn(pane, self.panes(self.b))
         self.assertNotIn(pane, self.panes(self.a))
+
+    def roles(self, session):
+        shown = self.tmux('list-panes', '-s', '-t', session + ':', '-F', '#{pane_id}\t#{@tether_role}')
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        return dict(line.split('\t') for line in shown.stdout.splitlines())
+
+    def test_move_pane_clears_only_a_duplicate_coordinator_mark(self):
+        resident, = self.panes(self.b)
+        self.tmux('set-option', '-p', '-t', resident, '@tether_role', 'coordinator-off')
+        for pane, role in zip(self.panes(self.a), ('coordinator', 'coordinator-needs', 'coordinator-off')):
+            with self.subTest(role=role):
+                self.tmux('set-option', '-p', '-t', pane, '@tether_role', role)
+                tmux_merge.move_pane(pane, self.b, self.run_tmux)
+                self.assertEqual(self.roles(self.b)[pane], '')
+                self.assertEqual(self.roles(self.b)[resident], 'coordinator-off')
+
+    def test_move_pane_keeps_the_only_coordinator_mark(self):
+        pane = self.panes(self.a)[0]
+        self.tmux('set-option', '-p', '-t', pane, '@tether_role', 'coordinator-needs')
+        tmux_merge.move_pane(pane, self.b, self.run_tmux)
+        self.assertEqual(self.roles(self.b)[pane], 'coordinator-needs')
+
+    def test_move_pane_keeps_helper_roles(self):
+        resident, = self.panes(self.b)
+        self.tmux('set-option', '-p', '-t', resident, '@tether_role', 'coordinator')
+        for pane, role in zip(self.panes(self.a), ('reviewer', 'advisor')):
+            with self.subTest(role=role):
+                self.tmux('set-option', '-p', '-t', pane, '@tether_role', role)
+                tmux_merge.move_pane(pane, self.b, self.run_tmux)
+                self.assertEqual(self.roles(self.b)[pane], role)
+        self.assertEqual(self.roles(self.b)[resident], 'coordinator')
+
+    def test_move_pane_preserves_a_role_changed_during_the_move(self):
+        pane = self.panes(self.a)[0]
+        resident, = self.panes(self.b)
+        for tab in (pane, resident):
+            self.tmux('set-option', '-p', '-t', tab, '@tether_role', 'coordinator')
+
+        def run(argv, **kwargs):
+            result = self.run_tmux(argv, **kwargs)
+            if argv[1] == 'break-pane':
+                self.tmux('set-option', '-p', '-t', pane, '@tether_role', 'reviewer')
+            return result
+
+        tmux_merge.move_pane(pane, self.b, run)
+        self.assertEqual(self.roles(self.b)[pane], 'reviewer')
+
+    def test_merge_session_keeps_only_the_target_coordinator(self):
+        pane, reviewer, other = self.panes(self.a)
+        resident, = self.panes(self.b)
+        for tab, role in ((pane, 'coordinator'), (reviewer, 'reviewer'), (resident, 'coordinator-needs')):
+            self.tmux('set-option', '-p', '-t', tab, '@tether_role', role)
+        tmux_merge.merge_session(self.a, self.b, self.run_tmux)
+        self.assertEqual(self.roles(self.b), {resident: 'coordinator-needs', pane: '', reviewer: 'reviewer', other: ''})
+
+    def test_merge_session_keeps_the_only_coordinator(self):
+        pane = self.panes(self.a)[0]
+        self.tmux('set-option', '-p', '-t', pane, '@tether_role', 'coordinator-off')
+        tmux_merge.merge_session(self.a, self.b, self.run_tmux)
+        self.assertEqual(self.roles(self.b)[pane], 'coordinator-off')
+
+    def test_partial_merge_cleans_up_only_the_panes_that_moved(self):
+        first, second = self.tmux('list-windows', '-t', self.a + ':', '-F', '#{window_id}').stdout.split()
+        moving = self.tmux('list-panes', '-t', first, '-F', '#{pane_id}').stdout.split()
+        staying, = self.tmux('list-panes', '-t', second, '-F', '#{pane_id}').stdout.split()
+        resident, = self.panes(self.b)
+        for pane in (moving[0], staying, resident):
+            self.tmux('set-option', '-p', '-t', pane, '@tether_role', 'coordinator')
+        stacks = [groups.create(self.a, f'Stack {pane}', self.run_tmux, auto=True, root=pane)
+                  for pane in (*moving, staying)]
+
+        def run(argv, **kwargs):
+            if argv[1] == 'move-window' and argv[argv.index('-s') + 1].rpartition(':')[2] == second:
+                return subprocess.CompletedProcess(argv, 1, '', 'Could not move the second window.')
+            return self.run_tmux(argv, **kwargs)
+
+        with self.assertRaisesRegex(RuntimeError, r'^Only part of the session moved\. Check both sessions\.$'):
+            tmux_merge.merge_session(self.a, self.b, run)
+        self.assertCountEqual(self.panes(self.b), [resident, *moving])
+        self.assertEqual(self.roles(self.b), {resident: 'coordinator', **dict.fromkeys(moving, '')})
+        self.assertEqual(self.roles(self.a), {staying: 'coordinator'})
+        self.assertEqual([stack.get('root') for stack in groups.read(self.a, self.run_tmux)],
+                         [None, None, staying])
+        target_stacks = groups.read(self.b, self.run_tmux)
+        for stack in stacks[:-1]:
+            self.assertIn(stack, target_stacks)
+        names = tmux_merge._names(self.run_tmux, self.b)
+        self.assertEqual([names[pane] for pane in moving], ['alpha', 'alpha 2'])
+        self.assertEqual(tmux_merge._names(self.run_tmux, self.a), {staying: ''})
+
+    def test_failed_merge_keeps_the_root_of_a_linked_window_that_never_moved(self):
+        first, second = self.tmux('list-windows', '-t', self.a + ':', '-F', '#{window_id}').stdout.split()
+        linked, = self.tmux('list-panes', '-t', second, '-F', '#{pane_id}').stdout.split()
+        self.assertEqual(self.tmux('link-window', '-s', second, '-t', self.b + ':').returncode, 0)
+        stack = groups.create(self.a, 'Linked', self.run_tmux, auto=True, root=linked)
+
+        def run(argv, **kwargs):
+            if argv[1] == 'move-window' and argv[argv.index('-s') + 1].rpartition(':')[2] == first:
+                return subprocess.CompletedProcess(argv, 1, '', 'Could not move the first window.')
+            return self.run_tmux(argv, **kwargs)
+
+        with self.assertRaisesRegex(RuntimeError, 'Could not move the first window'):
+            tmux_merge.merge_session(self.a, self.b, run)
+        roots = {g['id']: g.get('root') for g in groups.read(self.a, self.run_tmux)}
+        self.assertEqual(roots[stack['id']], linked)
+
+    def test_failed_move_of_a_window_linked_into_the_target_keeps_its_root(self):
+        first, _ = self.tmux('list-windows', '-t', self.a + ':', '-F', '#{window_id}').stdout.split()
+        linked = self.tmux('list-panes', '-t', first, '-F', '#{pane_id}').stdout.split()[0]
+        self.assertEqual(self.tmux('link-window', '-s', first, '-t', self.b + ':').returncode, 0)
+        stack = groups.create(self.a, 'Linked', self.run_tmux, auto=True, root=linked)
+
+        def run(argv, **kwargs):
+            if argv[1] == 'move-window' and argv[argv.index('-s') + 1].rpartition(':')[2] == first:
+                return subprocess.CompletedProcess(argv, 1, '', 'Could not move the first window.')
+            return self.run_tmux(argv, **kwargs)
+
+        with self.assertRaisesRegex(RuntimeError, 'Could not move the first window'):
+            tmux_merge.merge_session(self.a, self.b, run)
+        roots = {g['id']: g.get('root') for g in groups.read(self.a, self.run_tmux)}
+        self.assertEqual(roots[stack['id']], linked)
+
+    def test_merge_moves_the_source_link_of_a_window_linked_into_the_target(self):
+        first, _ = self.tmux('list-windows', '-t', self.a + ':', '-F', '#{window_id}').stdout.split()
+        self.assertEqual(self.tmux('link-window', '-s', first, '-t', self.b + ':').returncode, 0)
+
+        tmux_merge.merge_session(self.a, self.b, self.run_tmux)
+        sessions = self.tmux('list-sessions', '-F', '#{session_id}').stdout.split()
+        self.assertNotIn(self.a, sessions)  # every source link left, so the source closed
+        self.assertIn(first, self.tmux('list-windows', '-t', self.b + ':', '-F', '#{window_id}').stdout.split())
+
+    def test_merge_cleans_up_confirmed_moves_when_the_pending_check_errors(self):
+        first, second = self.tmux('list-windows', '-t', self.a + ':', '-F', '#{window_id}').stdout.split()
+        pane = self.tmux('list-panes', '-t', first, '-F', '#{pane_id}').stdout.split()[0]
+        resident, = self.panes(self.b)
+        for tab in (pane, resident):
+            self.tmux('set-option', '-p', '-t', tab, '@tether_role', 'coordinator')
+        stack = groups.create(self.a, 'Root', self.run_tmux, auto=True, root=pane)
+        state = {'second': False}
+
+        def run(argv, **kwargs):
+            if argv[1] == 'move-window' and argv[argv.index('-s') + 1].rpartition(':')[2] == second:
+                state['second'] = True
+                raise subprocess.TimeoutExpired(argv, 5)
+            if state['second'] and argv[1] == 'list-windows':
+                raise OSError('tmux is gone')  # the check of the pending window fails
+            return self.run_tmux(argv, **kwargs)
+
+        with self.assertRaises((RuntimeError, OSError)):
+            tmux_merge.merge_session(self.a, self.b, run)
+        self.assertEqual(self.roles(self.b)[resident], 'coordinator')
+        self.assertEqual(self.roles(self.b)[pane], '')
+        roots = {g['id']: g.get('root') for g in groups.read(self.a, self.run_tmux)}
+        self.assertIsNone(roots.get(stack['id']))
+
+    def test_merge_cleans_up_a_move_that_landed_before_its_timeout(self):
+        first, _ = self.tmux('list-windows', '-t', self.a + ':', '-F', '#{window_id}').stdout.split()
+        pane = self.tmux('list-panes', '-t', first, '-F', '#{pane_id}').stdout.split()[0]
+        resident, = self.panes(self.b)
+        for tab in (pane, resident):
+            self.tmux('set-option', '-p', '-t', tab, '@tether_role', 'coordinator')
+        stack = groups.create(self.a, 'Root', self.run_tmux, auto=True, root=pane)
+        state = {'moved': False, 'checks': 0}
+
+        def run(argv, **kwargs):
+            if argv[1] == 'move-window' and not state['moved']:
+                state['moved'] = True
+                self.run_tmux(argv, **kwargs)  # the move lands, but the reply times out
+                raise subprocess.TimeoutExpired(argv, 5)
+            if state['moved'] and argv[1] == 'list-windows' and state['checks'] == 0:
+                state['checks'] += 1
+                raise subprocess.TimeoutExpired(argv, 5)  # the first check also times out
+            return self.run_tmux(argv, **kwargs)
+
+        with self.assertRaisesRegex(RuntimeError, 'Could not confirm the move'):
+            tmux_merge.merge_session(self.a, self.b, run)
+        self.assertEqual(self.roles(self.b)[resident], 'coordinator')
+        self.assertEqual(self.roles(self.b)[pane], '')
+        roots = {g['id']: g.get('root') for g in groups.read(self.a, self.run_tmux)}
+        self.assertIsNone(roots.get(stack['id']))
+
+    def test_merge_cleans_up_when_a_later_target_listing_fails(self):
+        pane = self.panes(self.a)[0]
+        resident, = self.panes(self.b)
+        for tab in (pane, resident):
+            self.tmux('set-option', '-p', '-t', tab, '@tether_role', 'coordinator')
+        moves = []
+
+        def run(argv, **kwargs):
+            if argv[1] == 'move-window':
+                moves.append(argv)
+            elif moves and argv[1] == 'list-panes' and self.b + ':' in argv:
+                raise subprocess.TimeoutExpired(argv, 5)
+            return self.run_tmux(argv, **kwargs)
+
+        try:
+            tmux_merge.merge_session(self.a, self.b, run)
+        except RuntimeError:
+            pass  # the final listing may fail the reply; the confirmed moves still get their cleanup
+        self.assertEqual(self.roles(self.b)[resident], 'coordinator')
+        self.assertEqual(self.roles(self.b)[pane], '')
+
+    def test_move_pane_finishes_other_cleanup_when_coordinator_unset_fails(self):
+        pane = self.panes(self.a)[0]
+        resident, = self.panes(self.b)
+        stack = groups.create(self.a, 'Stack', self.run_tmux, pane=pane, auto=True, root=pane)
+        for tab in (pane, resident):
+            self.tmux('set-option', '-p', '-t', tab, '@tether_role', 'coordinator')
+
+        def run(argv, **kwargs):
+            if argv[1:] == ['set-option', '-p', '-u', '-t', pane, '@tether_role']:
+                return subprocess.CompletedProcess(argv, 1, '', 'Could not unset the role.')
+            return self.run_tmux(argv, **kwargs)
+
+        with self.assertRaisesRegex(RuntimeError, 'The pane moved to “beta”, but Tether could not finish') as error:
+            tmux_merge.move_pane(pane, self.b, run)
+        self.assertEqual(str(error.exception.__cause__), 'Could not change the coordinator mark.')
+        self.assertIn(pane, self.panes(self.b))
+        self.assertEqual(self.roles(self.b)[pane], 'coordinator')
+        stack.pop('root')
+        self.assertEqual(groups.read(self.a, self.run_tmux), [stack])
+        self.assertEqual(self.tmux('display-message', '-p', '-t', pane, '#{@group}').stdout.strip(), '')
+        self.assertEqual(tmux_merge._names(self.run_tmux, self.b)[pane], 'alpha')
+
+    def check_departing_roots(self, kind, *, unstacked=False):
+        run = self.run_tmux
+        pane, member, other = self.panes(self.a)
+        stack = groups.create(self.a, 'Stack', run, pane=pane, auto=True, root=pane)
+        groups.move(self.a, member, stack['id'], run)
+        also_rooted = groups.create(self.a, 'Also rooted', run, auto=True, root=pane)
+        unrelated = groups.create(self.a, 'Other root', run, pane=other, auto=True, root=other)
+        self.tmux('set-option', '-p', '-t', pane, '@tether_role', 'coordinator-off')
+        if unstacked:
+            groups.move(self.a, pane, '', run, by_user=True)
+            self.assertEqual(groups.group_of_pane(pane, run), (self.a, None))
+
+        moved = tmux_merge.merge(kind, pane, self.b if kind == 'pane' else None, run)
+
+        self.assertEqual(moved['pane'], pane)
+        self.assertEqual(self.roles(moved['session'])[pane], 'coordinator-off')
+        stack.pop('root')
+        also_rooted.pop('root')
+        found = groups.read(self.a, run)
+        self.assertEqual(found, [stack, also_rooted, unrelated])
+        self.assertEqual(groups.group_of_pane(member, run), (self.a, stack))
+
+    def test_move_pane_clears_departing_roots(self):
+        self.check_departing_roots('pane')
+
+    def test_break_out_clears_departing_roots(self):
+        self.check_departing_roots('break')
+
+    def test_move_pane_clears_a_root_in_unstacked(self):
+        self.check_departing_roots('pane', unstacked=True)
+
+    def test_break_out_clears_a_root_in_unstacked(self):
+        self.check_departing_roots('break', unstacked=True)
+
+    def test_move_reports_a_stack_lock_failure_after_the_pane_moves(self):
+        pane = self.panes(self.a)[0]
+        with mock.patch.object(groups, 'LOCK', side_effect=groups.GroupError(503, groups.LOCK_FAILED)):
+            with self.assertRaisesRegex(RuntimeError, 'The pane moved to “beta”, but Tether could not finish'):
+                tmux_merge.move_pane(pane, self.b, self.run_tmux)
+        self.assertIn(pane, self.panes(self.b))
+
+    def test_move_last_pane_closes_source_with_a_stack_root(self):
+        pane, = self.panes(self.b)
+        groups.create(self.b, 'Stack', self.run_tmux, pane=pane, auto=True, root=pane)
+        result = tmux_merge.move_pane(pane, self.a, self.run_tmux)
+        self.assertEqual(result, {'session': self.a, 'name': 'alpha', 'pane': pane})
+        self.assertEqual(self.sessions(), ['alpha'])
 
     def test_break_out_makes_a_new_session_with_only_that_pane(self):
         pane = self.panes(self.a)[0]

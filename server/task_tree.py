@@ -2,6 +2,7 @@
 import re
 
 import helper_tabs
+import injected_prompts
 import paths
 
 BACKLOG_ID = re.compile(r'\bB\d{1,5}\b')
@@ -92,7 +93,17 @@ def manual_mark(entry, options, user_prompt_at=None):
         return False
     if options.done_at and user_prompt_at is not None:
         try:
-            return user_prompt_at(entry) <= float(options.done_at)
+            done_at = float(options.done_at)
+        except (ValueError, TypeError):
+            return True
+        try:
+            return user_prompt_at(entry) <= done_at
+        except injected_prompts.ProvenanceUnknown as exc:
+            if exc.user_at > done_at:
+                return False  # a proven user prompt after Done
+            if exc.at is not None and exc.at <= done_at:
+                return True  # the unknown prompt came before Done, so the mark still holds
+            raise  # an unknown prompt after Done: the caller cannot decide yet
         except (ValueError, TypeError):
             pass
     return True
@@ -102,8 +113,11 @@ def is_done(entry, row, children, options, backlog_done, user_prompt_at=None):
     thread = helper_tabs.verified_thread(entry)
     if not thread or any(state(member) != 'idle' for member in (row, *children)):
         return False
-    if manual_mark(entry, options, user_prompt_at):
-        return True
+    try:
+        if manual_mark(entry, options, user_prompt_at):
+            return True
+    except injected_prompts.ReceiptsUnreadable:
+        return False
     if options is not None and options.reopened == thread:
         return False
     ids = BACKLOG_ID.findall(helper_tabs.visible_name(entry) or '')
@@ -135,9 +149,13 @@ def annotate_done(rows, entries, options, user_prompt_at=None):
             continue
         marks = options.get(pane)
         entry = entries[pane]
-        prompt = user_prompt_at(entry) if marks and marks.done_at and marks.done else None
-        read_prompt = (lambda _: prompt) if prompt is not None else None
-        if manual_mark(entry, marks, read_prompt):
+        try:
+            holds = manual_mark(entry, marks, user_prompt_at)
+        except injected_prompts.ReceiptsUnreadable:
+            continue  # unknown: neither Done nor a Done mark on this read
+        # Replay that decision in is_done without a second transcript read.
+        read_prompt = (lambda _: 0) if holds else (lambda _: float('inf'))
+        if holds:
             row['done_mark'] = True
         if pane not in pending and is_done(entry, row, children.get(pane, []), marks, done, read_prompt):
             row['done'] = True

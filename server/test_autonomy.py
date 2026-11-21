@@ -790,7 +790,9 @@ class Learning(Base):
         for prompt in ('[Tether status] wrong', 'You are the advisor wrong', 'wrong' + 'x' * 300, 'Do the task.'):
             self.assertNotIn('This message may correct', text(prompt))
             self.assertNotIn('If this message confirms a choice', text(prompt))
-        self.assertIn('--avoid --source reviewer.', text('[Tether review] wrong'))
+        for suffix in ('', '\n\n[Tether id 0123456789abcdef]'):
+            self.assertIn('--avoid --source reviewer.', text('[Tether review] wrong' + suffix))
+            self.assertNotIn('This message may correct', text('[Tether status] wrong' + suffix))
         for index in range(9):
             self.add(f'When case {index} occurs, inspect its exact output.')
         self.assertIn(f'More lessons: {lessons.path(PID)}.', text(''))
