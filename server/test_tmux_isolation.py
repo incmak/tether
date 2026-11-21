@@ -4,6 +4,7 @@ import ast
 import os
 from pathlib import Path
 import re
+import select
 import shutil
 import signal
 import subprocess
@@ -24,6 +25,9 @@ def _tmux_env(env=None):
     return result
 
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
 class PrivateTmux:
     def __init__(self, folder, env=None):
         self.folder = folder
@@ -32,7 +36,7 @@ class PrivateTmux:
 
     def run(self, argv, **kwargs):
         kwargs.setdefault('env', self.env)
-        if os.path.basename(argv[0]) == 'tmux':
+        if argv and (argv[0] == paths.TMUX or os.path.basename(argv[0]) == 'tmux'):  # paths.TMUX may be an override
             argv = [argv[0], '-S', self.socket, '-f', '/dev/null', *argv[1:]]
             kwargs['env'] = _tmux_env(kwargs['env'])
             kwargs['env']['TMUX_TMPDIR'] = self.folder
@@ -44,14 +48,23 @@ class PrivateTmux:
 
 FOLDER_PREFIX = 'ttx-'  # Every private test server folder starts with this, so a later run can find leftovers.
 OWNER = 'owner'  # "pid start" of the test process that made the folder.
-_reaped = False
+_started = False
 
 
-def _owner_alive(text):
+def _identity(pid):
+    return f'{pid} {procinfo.start_ticks(pid)}'
+
+
+def _owner_state(text):
+    """True: the owner runs. False: it is gone. None: not a whole record (being written, or not ours)."""
     try:
         pid, start = text.split()
-        return str(procinfo.start_ticks(int(pid))) == start
-    except (OSError, ValueError, IndexError):
+        pid = int(pid)
+    except ValueError:
+        return None
+    try:
+        return str(procinfo.start_ticks(pid)) == start
+    except (OSError, IndexError):
         return False
 
 
@@ -64,32 +77,70 @@ def reap_dead_runs(root='/tmp'):
             owner = (folder / OWNER).read_text()
         except OSError:
             continue  # Another run may be making or removing it.
-        if _owner_alive(owner):
+        if _owner_state(owner) is not False:
             continue
         stop_server(str(folder / 'tmux.sock'))
         shutil.rmtree(folder, ignore_errors=True)
 
 
+def watch(pid, start):
+    """Run detached: wait until the test process ends, then stop the servers its cleanups did not stop."""
+    owner = f'{pid} {start}'
+    if hasattr(os, 'pidfd_open'):
+        try:
+            handle = os.pidfd_open(pid)
+        except ProcessLookupError:
+            handle = None
+        if handle is not None and _owner_state(owner):  # Checked after the open, so the handle is the owner.
+            select.select([handle], [], [])
+    while _owner_state(owner):  # No pidfd (macOS): check once a second.
+        time.sleep(1)
+    reap_dead_runs()
+
+
+WATCH = ("import sys, types\n"
+         "sys.modules['unittest_isolated'] = types.ModuleType('unittest_isolated')  # no isolate() here\n"
+         "sys.path.insert(0, sys.argv[1])\n"
+         "import test_tmux_isolation\n"
+         "test_tmux_isolation.watch(int(sys.argv[2]), sys.argv[3])\n")
+DETACH = ("import subprocess, sys\n"
+          "subprocess.Popen(sys.argv[1:], start_new_session=True, stdin=subprocess.DEVNULL,\n"
+          "                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n")
+
+
+def _start_watch():
+    """A process outside the runner's group stops this run's servers if `timeout` or a crash skips the cleanups."""
+    pid, start = _identity(os.getpid()).split()
+    subprocess.run([sys.executable, '-c', DETACH, sys.executable, '-c', WATCH, HERE, pid, start],
+                   stdin=subprocess.DEVNULL, capture_output=True, timeout=10, check=True)
+
+
 def private_tmux(case, prefix, env=None):
-    global _reaped
-    if not _reaped:
-        _reaped = True
+    global _started
+    if not _started:
+        _started = True
         reap_dead_runs()
+        _start_watch()
     # Short paths fit in a Unix socket address.
     folder = tempfile.mkdtemp(prefix=FOLDER_PREFIX + prefix, dir='/tmp')
     case.addCleanup(shutil.rmtree, folder, ignore_errors=True)
-    Path(folder, OWNER).write_text(f'{os.getpid()} {procinfo.start_ticks(os.getpid())}')
+    draft = Path(folder, OWNER + '.new')
+    draft.write_text(_identity(os.getpid()))
+    os.replace(draft, Path(folder, OWNER))  # A reader sees no record or a whole one.
     tmux = PrivateTmux(folder, env)
     case.addCleanup(stop_server, tmux.socket)
     return tmux
 
 
 def _matches_socket(pid, socket):
+    """A tmux process started with exactly `-S socket` (not a mention of the path elsewhere)."""
     try:
         argv = procinfo.argv(pid)
     except OSError:  # The process exited or belongs to another user.
         return False
-    return bool(argv and os.path.basename(argv[0]) == b'tmux' and socket in argv[1:])
+    if not argv or not os.path.basename(argv[0]).startswith(b'tmux'):
+        return False
+    return any(flag == b'-S' and value == socket for flag, value in zip(argv[1:], argv[2:]))
 
 
 def server_pids(socket):
@@ -106,6 +157,8 @@ def server_pids(socket):
 
 
 def _request_stop(socket):
+    if os.path.islink(socket):
+        return  # A link could lead to another server, such as the user's.
     env = _tmux_env({**os.environ, 'TMUX_TMPDIR': os.path.dirname(socket)})
     try:
         subprocess.run([paths.TMUX, '-S', socket, '-f', '/dev/null', 'kill-server'],
@@ -114,15 +167,28 @@ def _request_stop(socket):
         pass
 
 
+def _kill(pid, socket):
+    """SIGKILL pid only while it still is the server of socket. A pidfd pins the process, so a reused pid is safe."""
+    if not hasattr(os, 'pidfd_open'):
+        if _matches_socket(pid, socket):
+            os.kill(pid, signal.SIGKILL)
+        return
+    handle = os.pidfd_open(pid)
+    try:
+        if _matches_socket(pid, socket):  # Checked after the open: the handle is this process.
+            signal.pidfd_send_signal(handle, signal.SIGKILL)
+    finally:
+        os.close(handle)
+
+
 def stop_server(socket):
     socket = os.fspath(socket)
     _request_stop(socket)
     for pid in server_pids(socket):
-        if _matches_socket(pid, os.fsencode(socket)):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        try:
+            _kill(pid, os.fsencode(socket))
+        except ProcessLookupError:
+            pass
 
     deadline = time.monotonic() + 5
     while pids := server_pids(socket):
@@ -180,35 +246,77 @@ class IsolationTests(unittest.TestCase):
         self.assertEqual(server_pids(decoy.socket), decoy_pids)
 
     @unittest.skipUnless(shutil.which(paths.TMUX), 'tmux is not installed')
-    def test_next_run_stops_the_server_of_a_killed_run(self):
-        """SIGTERM or SIGKILL from `timeout` skips every cleanup; the next run must stop that server."""
+    def test_watch_stops_the_server_when_the_runner_is_killed(self):
+        """SIGTERM or SIGKILL from `timeout` skips every cleanup; the run's watch process stops the server."""
+        out = tempfile.mkdtemp(prefix='ttw', dir='/tmp')
+        self.addCleanup(shutil.rmtree, out, ignore_errors=True)
+        code = WATCH.split('test_tmux_isolation.watch')[0] + (
+            'import os, unittest\n'
+            'case = unittest.TestCase()\n'
+            "private = test_tmux_isolation.private_tmux(case, 'kid')\n"
+            "private.tmux('new-session', '-d', '/bin/sh').check_returncode()\n"
+            "open(sys.argv[2], 'w').write(private.socket)\n"
+            'os.kill(os.getpid(), 9)\n')
+        record = os.path.join(out, 'socket')
+        child = subprocess.run([sys.executable, '-c', code, HERE, record], env=_tmux_env(),
+                               stdin=subprocess.DEVNULL, capture_output=True, timeout=20)
+        self.assertEqual(child.returncode, -signal.SIGKILL, child.stderr)
+        socket = Path(record).read_text()
+        self.addCleanup(stop_server, socket)  # Only if the watch fails.
+        deadline = time.monotonic() + 10
+        while (server_pids(socket) or os.path.exists(os.path.dirname(socket))) and time.monotonic() < deadline:
+            time.sleep(.05)
+        self.assertEqual(server_pids(socket), [])
+        self.assertFalse(os.path.exists(os.path.dirname(socket)))
+
+    @unittest.skipUnless(shutil.which(paths.TMUX), 'tmux is not installed')
+    def test_reap_stops_only_dead_owners(self):
         root = tempfile.mkdtemp(prefix='ttr', dir='/tmp')
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
-        # The child owns the folder like private_tmux does, starts a server, and dies without cleanups.
-        code = ('import os, subprocess, sys\n'
-                'sys.path.insert(0, sys.argv[3])\n'
-                'import procinfo\n'
-                'folder, owner = sys.argv[1], sys.argv[2]\n'
-                "owner = owner or f'{os.getpid()} {procinfo.start_ticks(os.getpid())}'\n"
-                "open(os.path.join(folder, 'owner'), 'w').write(owner)\n"
-                "subprocess.run([sys.argv[4], '-S', os.path.join(folder, 'tmux.sock'), '-f', '/dev/null',\n"
-                "                'new-session', '-d', '/bin/sh'], check=True, timeout=5, stdin=subprocess.DEVNULL)\n"
-                'os.kill(os.getpid(), 9)\n')
-        dead = os.path.join(root, FOLDER_PREFIX + 'dead')
-        live = os.path.join(root, FOLDER_PREFIX + 'live')
-        for folder, owner in ((dead, ''), (live, f'{os.getpid()} {procinfo.start_ticks(os.getpid())}')):
+        servers = {}
+        for name, owner in (('dead', '1 0'), ('live', _identity(os.getpid())), ('partial', ''), ('linked', '1 0')):
+            folder = os.path.join(root, FOLDER_PREFIX + name)
             os.mkdir(folder)
-            self.addCleanup(stop_server, os.path.join(folder, 'tmux.sock'))
-            child = subprocess.run([sys.executable, '-c', code, folder, owner, str(Path(__file__).parent), paths.TMUX],
-                                   env=_tmux_env(), stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
-            self.assertEqual(child.returncode, -signal.SIGKILL, child.stderr)
-        self.assertTrue(server_pids(os.path.join(dead, 'tmux.sock')))
-        live_pids = server_pids(os.path.join(live, 'tmux.sock'))
-        self.assertTrue(live_pids)
+            Path(folder, OWNER).write_text(owner)
+            if name == 'linked':  # A dead owner whose socket name leads to another server.
+                os.symlink(servers['live'], os.path.join(folder, 'tmux.sock'))
+                continue
+            servers[name] = os.path.join(folder, 'tmux.sock')
+            self.addCleanup(stop_server, servers[name])
+            started = subprocess.run([paths.TMUX, '-S', servers[name], '-f', '/dev/null', 'new-session', '-d', '/bin/sh'],
+                                     env=_tmux_env(), stdin=subprocess.DEVNULL, capture_output=True, timeout=5)
+            self.assertEqual(started.returncode, 0, started.stderr)
+        before = {name: server_pids(socket) for name, socket in servers.items()}
+        self.assertTrue(all(before.values()))
         reap_dead_runs(root)
-        self.assertEqual(server_pids(os.path.join(dead, 'tmux.sock')), [])
-        self.assertFalse(os.path.exists(dead))
-        self.assertEqual(server_pids(os.path.join(live, 'tmux.sock')), live_pids)  # A live run keeps its server.
+        self.assertEqual(server_pids(servers['dead']), [])
+        self.assertFalse(os.path.exists(os.path.dirname(servers['dead'])))
+        self.assertEqual(server_pids(servers['live']), before['live'])  # A live run keeps its server,
+        self.assertEqual(server_pids(servers['partial']), before['partial'])  # a half-written owner is not "dead",
+        self.assertTrue(os.path.exists(os.path.join(root, FOLDER_PREFIX + 'partial')))  # and a link is never followed.
+
+    def test_only_the_socket_flag_marks_a_server(self):
+        target = os.path.join(tempfile.mkdtemp(prefix='ttm', dir='/tmp'), 'tmux.sock')
+        self.addCleanup(shutil.rmtree, os.path.dirname(target), ignore_errors=True)
+        # argv is "tmux -c 'sleep 60; :' <target>": a tmux name that mentions the path, not as -S.
+        other = subprocess.Popen(['tmux', '-c', 'sleep 60; :', target], executable='/bin/sh', stdin=subprocess.DEVNULL)
+        self.addCleanup(other.wait)
+        self.addCleanup(other.kill)
+        deadline = time.monotonic() + 5
+        while os.fsencode(target) not in procinfo.argv(other.pid) and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertIn(os.fsencode(target), procinfo.argv(other.pid))
+        self.assertEqual(server_pids(target), [])
+        with mock.patch(f'{__name__}._request_stop'):
+            stop_server(target)
+        self.assertIsNone(other.poll())
+
+    def test_a_tmux_override_still_gets_the_private_socket_and_no_config(self):
+        private = PrivateTmux('/tmp/ttx-example')
+        with mock.patch.object(paths, 'TMUX', '/opt/bin/tmux-3.4'), \
+                mock.patch(f'{__name__}.subprocess.run') as run:
+            private.tmux('new-session', '-d')
+        self.assertEqual(run.call_args.args[0][:5], ['/opt/bin/tmux-3.4', '-S', private.socket, '-f', '/dev/null'])
 
     def test_real_tmux_tests_use_cleanup_instead_of_teardown_or_finally(self):
         for file in sorted(Path(__file__).parent.glob('test_*.py')):
