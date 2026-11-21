@@ -594,7 +594,7 @@ async function refresh(pushed) {
     }
     workingLabel.textContent = (agentNames[agent] || agent) + ' is working…';
     working.hidden = !!data.approval || !!data.attention || (data.state !== 'Working' && !data.busy);
-    const lastUser = [...chat.querySelectorAll('.message.user, .message.tether-sent')].at(-1);
+    const lastUser = [...chat.querySelectorAll(':scope > .message.user, :scope > .message.tether-sent')].at(-1);   // rows only: a message may render HTML with these classes
     if (lastUser) lastUser.after(working); else chat.prepend(working);
     updateUsage(data.usage);
     const busy = !!(data.busy || data.state === 'Working');

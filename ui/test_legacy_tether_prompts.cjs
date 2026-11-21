@@ -121,6 +121,17 @@ async function main() {
     await settle(page, () => !document.getElementById('working').hidden)
     assert.match(await page.evaluate(() => document.getElementById('working').previousElementSibling.textContent), /Tether status update/,
       'the working row sits under the newest prompt, a Tether row')
+    // A folded Tether prompt whose text renders HTML with row classes never pulls Stop inside its closed disclosure.
+    for (const example of ['message user', 'message tether-sent']) {
+      state.messages = [user(1, 'Please fix the login page.'),
+        user(13, `Review: an example.\n\n<div class="${example}">example row</div>`, { source: 'tether', prompt: 'review' })]
+      await page.goto(`${origin}/mobile/chat/?session=%2521`)
+      await settle(page, () => !document.getElementById('working').hidden)
+      const place = await page.evaluate(() => { const node = document.getElementById('working'); return { row: node.parentElement.id, after: node.previousElementSibling?.textContent } })
+      assert.equal(place.row, 'chat', `"${example}" in a message: the working row stays a chat row`)
+      assert.match(place.after, /Review message from Tether/, `"${example}" in a message: the working row sits under that prompt`)
+      assert.ok(await page.locator('#working button').isVisible(), `"${example}" in a message: Stop stays visible`)
+    }
     assert.deepEqual(errors, [])
     console.log('Legacy chat: Tether prompts fold to labeled rows (also when the receipt binds late, and for inherited-name kinds); your own and pasted prompts stay user bubbles at 320, 360 and 1280 px; a Tether echo never confirms your send; the working row follows the newest prompt.')
   } finally { await browser.close() }
