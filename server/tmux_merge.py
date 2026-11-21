@@ -267,7 +267,8 @@ def merge_session(source, target, run=subprocess.run, keep=None):
     try:
         for moved_count, window in enumerate(windows.stdout.split()):
             pending = window
-            moved = _try_tmux(run, 'move-window', '-d', '-s', window, '-t', target + ':')
+            # source:window names the source's link: a bare window id may pick the link in another session.
+            moved = _try_tmux(run, 'move-window', '-d', '-s', f'{source}:{window}', '-t', target + ':')
             if moved is None or moved.returncode:
                 left = _window_left(run, window, source, target)
                 if left is None:
@@ -279,8 +280,11 @@ def merge_session(source, target, run=subprocess.run, keep=None):
             confirmed |= window_panes.get(window, set())
             pending = None
     except CLEANUP_ERRORS as exc:
-        if pending is not None and _window_left(run, pending, source, target):
-            confirmed |= window_panes.get(pending, set())  # it moved, though the first check could not say so
+        try:
+            if pending is not None and _window_left(run, pending, source, target):
+                confirmed |= window_panes.get(pending, set())  # it moved, though the first check could not say so
+        except CLEANUP_ERRORS:
+            pass  # unknown: the confirmed moves still get their cleanup below
         try:
             _merge_cleanup(run, source, confirmed, coordinators, plan)
         except CLEANUP_ERRORS as cleanup_error:
