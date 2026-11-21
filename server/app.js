@@ -6,6 +6,8 @@ window.fetch = async (...args) => {
   return response;
 };
 const chat = document.querySelector('#chat');
+// Fold labels for prompts Tether sent, by the receipt's prompt kind (server/injected_prompts.py track_send).
+const TETHER_PROMPTS = {status: 'Tether status update', review: 'Review message from Tether', rules: 'Coordinator rules from Tether'};
 const status = document.querySelector('#status');
 const tabs = document.querySelector('#tabs');
 const latest = document.querySelector('#latest');
@@ -510,11 +512,14 @@ async function refresh(pushed) {
       if (message.kind === 'notice') article.classList.add('agent-notice');
       if (message.kind === 'banner') article.classList.add('agent-banner');
       const carried = message.role === 'user' && /^This session is being continued from a previous conversation/.test(message.text);
-      if (carried) {
-        // The summary Claude Code inserts after a context reset: not something you wrote, so it stays folded.
-        article.className = 'message agent-actions';
+      // A prompt Tether sent (the server proved it with a send receipt): never shown as your words.
+      const sent = message.role === 'user' && message.source === 'tether';
+      if (carried || sent) {
+        // The summary Claude Code inserts after a context reset, or a Tether prompt: not something you wrote, so it stays folded.
+        article.className = 'message agent-actions' + (sent ? ' tether-sent' : '');
         const details = document.createElement('details'), summary = document.createElement('summary'), body = document.createElement('div');
-        summary.textContent = 'Summary of the earlier conversation'; body.className = 'carried-summary';
+        summary.textContent = carried ? 'Summary of the earlier conversation' : TETHER_PROMPTS[message.prompt] || 'Sent by Tether';
+        body.className = 'carried-summary';
         details.append(summary, body); article.append(details); format(body, message.text);
         rendered.set(message.id, {text: message.text, element: article, role: message.role});
         if (existing) existing.element.replaceWith(article); else if (next) next.before(article); else chat.append(article);
