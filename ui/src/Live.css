@@ -280,5 +280,6 @@
 .live .live-held-clear[data-armed="true"] { border-color: var(--error); background: var(--error); color: var(--surface); font-weight: 500; }
 @media (hover: hover) { .live .live-held-clear:not([data-armed="true"]):hover { background: var(--hover); } }
 .live-held-sheet button:disabled { opacity: .6; cursor: progress; }
-.live-held-problem { margin: 10px 0 0; font-size: 13px; color: var(--error); }
+.live-held-top { position: sticky; z-index: 1; top: -12px; margin: -12px -14px 0; padding: 12px 14px 2px; background: var(--surface); }
+.live-held-problem { margin: 0 0 6px; font-size: 13px; line-height: 1.35; color: var(--error); }
 @media (pointer: coarse) { .live .live-held-remove { min-width: 40px; height: 36px; } .live .live-held-clear { min-height: 44px; } }

@@ -213,6 +213,9 @@ def drop(topic, note=None, now=None, *, topic_id=None, text=None, count=None):
                 raise NotesError('Those notes changed. Look at the list again.', 409)
             saved['notes'].pop(note - 1)
             saved['updated'] = now
+            if not saved['notes']:
+                # An empty topic would hide from the chip yet still count toward the open-topic limit.
+                topics.remove(saved)
             result = {'dropped': 'note', 'topic': saved['title'], 'left': len(saved['notes'])}
         _save(folder, data)
         return result
@@ -231,8 +234,12 @@ def pinned(now=None, budget=4000):
     # Each topic keeps its latest note even if those notes alone exceed the budget.
     older = []
     for i, topic in enumerate(topics):
-        by_age = sorted((note['at'], j) for j, note in enumerate(topic['notes']))
-        older.extend((at, -i, j) for at, j in by_age[:-1])
+        # Cut a topic's notes from the front only, so "more": N always means notes 1..N are hidden
+        # and the first shown note is number N+1 (drop_notes counts from the stored order).
+        oldest = float('-inf')
+        for j, note in enumerate(topic['notes'][:-1]):
+            oldest = max(oldest, note['at'])
+            older.append((oldest, -i, j))
     dropped = [set() for _ in topics]
     for _, reverse_i, j in sorted(older):
         i = -reverse_i

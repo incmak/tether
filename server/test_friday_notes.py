@@ -88,7 +88,7 @@ class FridayNotesTests(unittest.TestCase):
             self.hold('Topic-19')
         self.assertEqual(len(notes.listing()['topics']), 20)
 
-    def test_drop_uses_one_based_numbers_and_leaves_empty_topics_open(self):
+    def test_drop_uses_one_based_numbers_and_removes_a_topic_with_its_last_note(self):
         self.hold('Server', ['First', 'Second'])
         for invalid in (0, 3, -1, True, '1', 1.0):
             with self.subTest(invalid=invalid), self.assertRaises(notes.NotesError) as exc:
@@ -98,11 +98,16 @@ class FridayNotesTests(unittest.TestCase):
         saved, = notes.listing()['topics']
         self.assertEqual(saved['notes'], [{'text': 'First', 'at': NOW}])
         self.assertEqual(saved['updated'], NOW + 1)
-        self.assertEqual(notes.drop('server', 1, now=NOW + 2)['left'], 0)
-        self.assertEqual(notes.pinned(), [{'topic': 'Server', 'notes': []}])
-        self.assertEqual(notes.drop('server', now=NOW + 3), {'dropped': 'topic', 'topic': 'Server', 'left': 0})
+        self.assertEqual(notes.drop('server', 1, now=NOW + 2), {'dropped': 'note', 'topic': 'Server', 'left': 0})
+        self.assertEqual(notes.pinned(), [])
         self.assertEqual(notes.listing(), {'topics': []})
         self.assertEqual(self.hold('Server')['id'], 'T2')
+        self.assertEqual(notes.drop('server', now=NOW + 3), {'dropped': 'topic', 'topic': 'Server', 'left': 0})
+        # Emptying a topic frees its place: 20 topics emptied note by note leave room for a new one.
+        for i in range(20):
+            self.hold(f'Topic {i}')
+            notes.drop(f'Topic {i}', 1, now=NOW + 4)
+        self.assertEqual(self.hold('Fresh idea')['title'], 'Fresh idea')
 
     def test_missing_topic_lists_at_most_five_open_titles(self):
         for i in range(6):
@@ -205,6 +210,14 @@ class FridayNotesTests(unittest.TestCase):
         self.assertEqual(notes.pinned()[1]['notes'], [first, 'Middle', 'Newest first'])
         self.assertEqual(self.path.read_bytes(), before)
 
+    def test_pinned_cuts_from_the_front_even_when_the_clock_stepped_back(self):
+        # drop_notes counts from the stored order: "more": N must hide exactly notes 1..N.
+        self.hold('Clock', ['One ' + 'x' * 200], now=NOW + 10)
+        self.hold('Clock', ['Two ' + 'y' * 200], now=NOW)  # The clock stepped back.
+        self.hold('Clock', ['Three'], now=NOW + 20)
+        cut = notes.pinned(budget=300)
+        self.assertEqual(cut, [{'topic': 'Clock', 'notes': ['Two ' + 'y' * 200, 'Three'], 'more': 1}])
+
     def test_lock_serializes_writes_and_atomic_save_cleans_up(self):
         self.hold('Concurrent', ['Start'])
         with ThreadPoolExecutor(max_workers=4) as pool:
@@ -255,12 +268,13 @@ class FridayNotesTests(unittest.TestCase):
         self.assertEqual(request('GET', '?topic=Missing')[0], 404)
         self.assertEqual(request('POST', '/drop', {'topic': 'urgent call spec', 'note': 1}),
                          (200, {'dropped': 'note', 'topic': 'Urgent Call Spec', 'left': 0}))
-        self.assertEqual(request('POST', '/hold', batch)[0], 200)
-        exact = {'id': 'T1', 'note': 1, 'text': batch['notes'][0]}
+        status, again = request('POST', '/hold', batch)
+        self.assertEqual((status, again['id']), (200, 'T2'))  # The emptied topic T1 is gone.
+        exact = {'id': 'T2', 'note': 1, 'text': batch['notes'][0]}
         before = self.path.read_bytes()
         for body in ({**exact, 'id': 1}, {**exact, 'text': ['Keep my answer.']},
                      {**exact, 'id': None, 'topic': batch['topic']}, {**exact, 'text': None},
-                     {'id': 'T1', 'count': '1'}, {'id': 'T1', 'count': True}, {'id': 'T1', 'count': None}):
+                     {'id': 'T2', 'count': '1'}, {'id': 'T2', 'count': True}, {'id': 'T2', 'count': None}):
             with self.subTest(body=body):
                 self.assertEqual(request('POST', '/drop', body)[0], 400)
                 self.assertEqual(self.path.read_bytes(), before)

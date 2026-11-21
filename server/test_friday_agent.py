@@ -619,12 +619,16 @@ class FridayRulesTests(unittest.TestCase):
         args = {'topic': 'Auth'}
         for words in ("Don't delete the auth notes.", "Don't... drop the auth notes.",
                       'Never mind, do not clear them.', 'No, never drop those.',
-                      'I can\u2019t remove them yet.', 'Dont forget the auth notes.'):
+                      'I can\u2019t remove them yet.', 'Dont forget the auth notes.',
+                      # Review of ce70816: these deleted a whole topic before the read-back path.
+                      'I cant remove them yet', 'Wont delete those', 'Delete nothing', 'Drop none of them'):
             with self.subTest(words=words):
                 self.assertEqual(friday.check_tool('drop_notes', args, 'speech', words, set()),
                                  'The user did not clearly ask to delete notes. Ask which notes to drop.')
         for words in ('Drop the auth notes.', 'Clear note 2 from auth.', 'Delete the topic now.',
-                      'Never mind, drop them.', 'Nevermind, drop them.'):
+                      'Never mind, drop them.', 'Nevermind, drop them.',
+                      # A negation the regex misses still only gets a read-back; no first call deletes.
+                      'Hold off, delete them after the call.', 'Delete them later, after the call.'):
             with self.subTest(words=words):
                 self.assertEqual(friday.check_tool('drop_notes', args, 'speech', words, set()),
                                  friday.READBACK_REQUIRED)

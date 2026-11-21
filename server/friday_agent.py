@@ -144,7 +144,8 @@ APPROVAL_YES = re.compile(r'\b(?:approve|approved|yes|yeah|yep|ok|okay|sure|allo
 APPROVAL_NO = re.compile(r"\b(?:deny|denied|no|nope|reject|stop|don['’]?t)\b", re.I)
 # "Do not approve it" or "Not yet" decides nothing: a negation refuses answer_approval, never denies.
 APPROVAL_NEGATION = re.compile(r"\b(?:not|never)\b", re.I)
-DROP_NEGATION = re.compile(r"\b(?:not|never|no|dont|cannot)\b|n['’]t\b", re.I)
+# An extra guard only: every drop still needs a heard read-back and a yes.
+DROP_NEGATION = re.compile(r"\b(?:not|never|no|none|nothing|neither|nor|dont|cant|wont|cannot)\b|n['’]t\b", re.I)
 SEND_TOOLS = ('send_to_chat', 'backlog_send')
 CONSENT_TOOLS = (*SEND_TOOLS, 'drop_notes')
 ACTION_TOOLS = (*SEND_TOOLS, 'answer_approval', 'new_chat', 'switch_chat', 'show_chat', 'show_session',
@@ -1106,7 +1107,9 @@ def tool_schemas():
         ('read_notes', 'Read saved topic notes. Without topic, list the topics.', {'topic': string}, []),
         ('drop_notes', 'Delete a saved note or a whole topic, only when the user asks to drop, clear, delete, or forget notes.',
          {'topic': string, 'note': {'type': 'integer', 'minimum': 1,
-                                   'description': 'The note number, starting at 1. Omit to drop the whole topic.'}}, ['topic']),
+                                   'description': 'The note number, starting at 1 with the oldest saved note. When topic_notes shows '
+                                                  '"more": N for the topic, its first shown note is number N+1. '
+                                                  'Omit to drop the whole topic.'}}, ['topic']),
     ]
     return [{'type': 'function', 'function': {'name': name, 'description': description,
              'parameters': {'type': 'object', 'properties': properties, 'required': required}}}

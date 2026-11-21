@@ -1,29 +1,61 @@
 // The "Held for …" chip in Live: topic notes Friday keeps until they are sent or cleared. Tap to read or clear.
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { StickyNote, X } from 'lucide-react'
 import { errorText, type Api } from './api'
 import { chipLabel, NOTES_PATH as PATH, type HeldTopic } from './fridayNotes'
+type HeldNote = HeldTopic['notes'][number]
 
-type Pending = { topic: string; note?: number } | null
+// A note is armed by what it says, not by its place: a refresh can shift places under the finger.
+const noteKey = (topic: HeldTopic, note: HeldNote) => `${topic.id}\n${note.at}\n${note.text}`
+const clearKey = (topic: HeldTopic) => `${topic.id}\nclear`
+const FOCUSABLE = 'button:not(:disabled), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
 
-export function HeldNotes({ api, topics, refresh }: { api: Api; topics: HeldTopic[]; refresh: () => Promise<void> }) {
+type Props = { api: Api; topics: HeldTopic[]; refresh: () => Promise<void>; onEmpty?: () => void }
+
+export function HeldNotes({ api, topics, refresh, onEmpty }: Props) {
   const [open, setOpen] = useState(false)
-  const [armed, setArmed] = useState<Pending>(null)
+  const [arming, setArming] = useState({ key: '', shape: '' })
   const [problem, setProblem] = useState('')
   const [busy, setBusy] = useState(false)
   const chip = useRef<HTMLButtonElement>(null)
   const sheet = useRef<HTMLDivElement>(null)
+  // Where focus goes after a remove: the first of these keys still on screen, else the sheet.
+  const focusNext = useRef<string[] | null>(null)
   const sheetId = useId()
+  const shape = JSON.stringify(topics.map(topic => [topic.id, topic.notes.map(note => [note.at, note.text])]))
 
   const close = useCallback((focus = true) => {
-    setOpen(false); setArmed(null); setProblem('')
+    setOpen(false); setArming({ key: '', shape: '' }); setProblem('')
     if (focus) chip.current?.focus()
   }, [])
+
+  // Any change to the list disarms: a second tap must confirm what the user saw armed.
+  const armed = arming.shape === shape ? arming.key : ''
+
+  useLayoutEffect(() => {
+    const keys = focusNext.current
+    if (!keys || busy) return
+    focusNext.current = null
+    if (!topics.length) { onEmpty?.(); return }
+    const buttons = [...(sheet.current?.querySelectorAll<HTMLElement>('[data-key]') ?? [])]
+    const target = keys.map(key => buttons.find(button => button.dataset.key === key)).find(Boolean)
+    ;(target ?? sheet.current)?.focus()
+  }, [shape, busy, topics.length, onEmpty])
 
   useEffect(() => {
     if (!open) return
     sheet.current?.focus()
-    const key = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.stopPropagation(); close() } }
+    const key = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.stopPropagation(); close(); return }
+      // The sheet covers the call controls, so Tab stays inside it until it closes.
+      if (event.key !== 'Tab' || !sheet.current) return
+      const items = [...sheet.current.querySelectorAll<HTMLElement>(FOCUSABLE)]
+      if (!items.length) return
+      const first = items[0], last = items[items.length - 1], at = document.activeElement
+      const inside = at instanceof Node && sheet.current.contains(at)
+      if (event.shiftKey && (!inside || at === first || at === sheet.current)) { event.preventDefault(); last.focus() }
+      else if (!event.shiftKey && (!inside || at === last)) { event.preventDefault(); first.focus() }
+    }
     const away = (event: PointerEvent) => {
       const target = event.target as Node
       if (!sheet.current?.contains(target) && !chip.current?.contains(target)) close(false)
@@ -35,21 +67,42 @@ export function HeldNotes({ api, topics, refresh }: { api: Api; topics: HeldTopi
 
   if (!topics.length) return null
   const { lead, count } = chipLabel(topics)
-  const isArmed = (topic: string, note?: number) => armed?.topic === topic && armed.note === note
 
-  async function remove(topic: HeldTopic, note?: number) {
-    if (!isArmed(topic.id, note)) { setArmed({ topic: topic.id, note }); setProblem(''); return }
+  // Focus order after a remove: the next note, the one before, this topic's clear button, then the next topics.
+  function afterRemove(topicIndex: number, noteIndex?: number) {
+    const topic = topics[topicIndex]
+    const keys: string[] = []
+    if (noteIndex !== undefined) {
+      const rest = topic.notes.filter((_, i) => i !== noteIndex)
+      const next = rest[noteIndex] ?? rest[noteIndex - 1]
+      if (next) keys.push(noteKey(topic, next), clearKey(topic))
+    }
+    for (const other of [...topics.slice(topicIndex + 1), ...topics.slice(0, topicIndex).reverse()]) {
+      if (other.notes[0]) keys.push(noteKey(other, other.notes[0]))
+      keys.push(clearKey(other))
+    }
+    return keys
+  }
+
+  async function remove(topicIndex: number, noteIndex?: number) {
+    const topic = topics[topicIndex]
+    const key = noteIndex === undefined ? clearKey(topic) : noteKey(topic, topic.notes[noteIndex])
+    if (armed !== key) { setArming({ key, shape }); setProblem(''); return }
     setBusy(true)
+    const next = afterRemove(topicIndex, noteIndex)
     try {
-      await api(`${PATH}/drop`, note === undefined ? { id: topic.id, count: topic.notes.length } : { id: topic.id, note: note + 1, text: topic.notes[note].text })
-      setArmed(null); setProblem('')
-      const last = topics.length === 1 && (note === undefined || topic.notes.length === 1)
-      if (last) close(false)
+      await api(`${PATH}/drop`, noteIndex === undefined
+        ? { id: topic.id, count: topic.notes.length }
+        : { id: topic.id, note: noteIndex + 1, text: topic.notes[noteIndex].text })
+      setArming({ key: '', shape: '' }); setProblem('')
+      focusNext.current = next
     } catch (failure) {
       setProblem(errorText(failure))
+      // The tapped button was disabled while busy; bring focus back to it, or its neighbour if it is gone.
+      focusNext.current = [key, ...next]
     } finally {
-      setBusy(false)
       await refresh()
+      setBusy(false)
     }
   }
 
@@ -58,24 +111,31 @@ export function HeldNotes({ api, topics, refresh }: { api: Api; topics: HeldTopi
       aria-label={`${lead}: ${count} ${count === '1' ? 'note' : 'notes'}. Show held notes.`} onClick={() => open ? close() : setOpen(true)}>
       <StickyNote size={14} aria-hidden="true" /><span className="live-held-lead">{lead}</span><b>{count}</b>
     </button>
-    {open && <div ref={sheet} id={sheetId} className="live-held-sheet" role="dialog" aria-label="Held notes" tabIndex={-1}>
-      <header><h3>Held notes</h3><button type="button" className="live-held-x" aria-label="Close held notes" onClick={() => close()}><X size={16} aria-hidden="true" /></button></header>
+    {open && <div ref={sheet} id={sheetId} className="live-held-sheet" role="dialog" aria-modal="true" aria-label="Held notes" tabIndex={-1}>
+      {/* The title, close button and any error stay in view while the notes scroll under them. */}
+      <div className="live-held-top">
+        <header><h3>Held notes</h3><button type="button" className="live-held-x" aria-label="Close held notes" onClick={() => close()}><X size={16} aria-hidden="true" /></button></header>
+        {problem && <p className="live-held-problem" role="alert">{problem}</p>}
+      </div>
       <p className="live-held-hint">Friday keeps these across calls until you send or clear them.</p>
-      {topics.map(topic => <section key={topic.id} aria-label={topic.title}>
+      {topics.map((topic, topicIndex) => <section key={topic.id} aria-label={topic.title}>
         <h4><span>{topic.title}</span>{topic.chat && <small>for {topic.chat}</small>}</h4>
         <ol>
-          {topic.notes.map((note, index) => <li key={`${note.at}-${index}`}>
-            <span>{note.text}</span>
-            <button type="button" className="live-held-remove" data-armed={isArmed(topic.id, index)} disabled={busy}
-              aria-label={isArmed(topic.id, index) ? `Confirm: remove note ${index + 1}` : `Remove note ${index + 1}`}
-              onClick={() => void remove(topic, index)}>{isArmed(topic.id, index) ? 'Remove' : <X size={14} aria-hidden="true" />}</button>
-          </li>)}
+          {topic.notes.map((note, index) => {
+            const key = noteKey(topic, note), on = armed === key
+            return <li key={`${note.at}-${index}`}>
+              <span>{note.text}</span>
+              <button type="button" className="live-held-remove" data-key={key} data-armed={on} disabled={busy}
+                aria-label={on ? `Confirm: remove note ${index + 1}` : `Remove note ${index + 1}`}
+                onClick={() => void remove(topicIndex, index)}>{on ? 'Remove' : <X size={14} aria-hidden="true" />}</button>
+            </li>
+          })}
         </ol>
-        <button type="button" className="live-held-clear" data-armed={isArmed(topic.id)} disabled={busy} onClick={() => void remove(topic)}>
-          {isArmed(topic.id) ? `Tap again to clear ${topic.notes.length} ${topic.notes.length === 1 ? 'note' : 'notes'}` : 'Clear topic'}
+        <button type="button" className="live-held-clear" data-key={clearKey(topic)} data-armed={armed === clearKey(topic)} disabled={busy}
+          onClick={() => void remove(topicIndex)}>
+          {armed === clearKey(topic) ? `Tap again to clear ${topic.notes.length} ${topic.notes.length === 1 ? 'note' : 'notes'}` : 'Clear topic'}
         </button>
       </section>)}
-      {problem && <p className="live-held-problem" role="alert">{problem}</p>}
     </div>}
   </div>
 }
