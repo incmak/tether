@@ -2038,6 +2038,7 @@
    "user": "send this the whole log, voice log I had with you to the Friday test session",
    "expect": {
     "tool": "send_to_chat",
+    "readback_ok": true,
     "args": {
      "chat": "(?i)^friday test$",
      "attach_call": "^True$"
