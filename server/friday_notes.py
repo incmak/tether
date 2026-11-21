@@ -183,8 +183,11 @@ def hold(topic, notes, chat=None, now=None):
         return public(saved)
 
 
-def drop(topic, note=None, now=None, *, topic_id=None, text=None, count=None):
-    """topic_id and text (from the screen) make the drop exact: a list that changed since it showed gets 409."""
+def drop(topic, note=None, now=None, *, topic_id=None, text=None, count=None, texts=None):
+    """topic_id and text (from the screen) make the drop exact: a list that changed since it showed gets 409.
+
+    A topic drop with texts deletes only those notes in that order: one note removed and one added keeps the
+    count, but not the texts, so a note the user never saw or heard is never deleted."""
     title = _title(topic)
     if not title and topic_id is None:
         raise NotesError('Provide a topic name.')
@@ -202,7 +205,8 @@ def drop(topic, note=None, now=None, *, topic_id=None, text=None, count=None):
             if saved is None:
                 raise missing(topics, title)
         if note is None:
-            if count is not None and count != len(saved['notes']):
+            if ((count is not None and count != len(saved['notes']))
+                    or (texts is not None and list(texts) != [item['text'] for item in saved['notes']])):
                 raise NotesError('Those notes changed. Look at the list again.', 409)
             topics.remove(saved)
             result = {'dropped': 'topic', 'topic': saved['title'], 'left': 0}
@@ -290,8 +294,10 @@ def serve(handler, body):
                 raise NotesError('Use text for the topic id and note.')
             if 'count' in body and type(body['count']) is not int:
                 raise NotesError('Use a whole number for the note count.')
+            if 'texts' in body and not (isinstance(body['texts'], list) and all(isinstance(item, str) for item in body['texts'])):
+                raise NotesError('Use a list of note texts.')
             result = drop(body.get('topic'), body.get('note'), topic_id=body.get('id'), text=body.get('text'),
-                          count=body.get('count'))
+                          count=body.get('count'), texts=body.get('texts'))
         else:
             raise NotesError('Not found', 404)
         handler.respond(200, result)

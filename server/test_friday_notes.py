@@ -138,7 +138,16 @@ class FridayNotesTests(unittest.TestCase):
                     notes.drop(None, now=NOW, topic_id=opened['id'], count=count)
                 self.assertEqual(exc.exception.status, 409)
                 self.assertEqual(self.path.read_bytes(), before)
-        self.assertEqual(notes.drop(None, now=NOW, topic_id=opened['id'], count=1),
+        # Same count, other notes: one note removed and one added since the list showed refuses the drop.
+        current = [note['text'] for topic in notes.listing(NOW)['topics'] if topic['id'] == opened['id']
+                   for note in topic['notes']]
+        for texts in (['A note the user never saw'], [], current * 2):
+            with self.subTest(texts=texts):
+                with self.assertRaises(notes.NotesError) as exc:
+                    notes.drop(None, now=NOW, topic_id=opened['id'], count=1, texts=texts)
+                self.assertEqual(exc.exception.status, 409)
+                self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(notes.drop(None, now=NOW, topic_id=opened['id'], count=1, texts=current),
                          {'dropped': 'topic', 'topic': 'Open', 'left': 0})
         self.assertEqual([topic['id'] for topic in notes.listing(NOW)['topics']], [sent['id']])
 
@@ -274,7 +283,9 @@ class FridayNotesTests(unittest.TestCase):
         before = self.path.read_bytes()
         for body in ({**exact, 'id': 1}, {**exact, 'text': ['Keep my answer.']},
                      {**exact, 'id': None, 'topic': batch['topic']}, {**exact, 'text': None},
-                     {'id': 'T2', 'count': '1'}, {'id': 'T2', 'count': True}, {'id': 'T2', 'count': None}):
+                     {'id': 'T2', 'count': '1'}, {'id': 'T2', 'count': True}, {'id': 'T2', 'count': None},
+                     {'id': 'T2', 'count': 1, 'texts': 'Keep my answer.'}, {'id': 'T2', 'count': 1, 'texts': [1]},
+                     {'id': 'T2', 'count': 1, 'texts': None}):
             with self.subTest(body=body):
                 self.assertEqual(request('POST', '/drop', body)[0], 400)
                 self.assertEqual(self.path.read_bytes(), before)

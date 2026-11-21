@@ -556,7 +556,7 @@ def readback_overlapped(session):
 
 def send_readback(proposal):
     if proposal.name == 'drop_notes':
-        _, note, _ = proposal.target
+        note = proposal.target[1]
         if note is None:
             count = proposal.payload.split()[0]
             notes = 'its note' if count == '1' else f'all {count} of its notes'
@@ -589,8 +589,9 @@ def drop_readback_proposal(args, turn, topics):
         raise friday_notes.missing(topics, name)
     if 'note' not in args:
         count = len(topic['notes'])
+        # The texts bind the delete to the notes as they were read back, not only to their number.
         return SendProposal('drop_notes', topic['title'], f"{count} notes", turn,
-                            target=(topic['id'], None, count))
+                            target=(topic['id'], None, count, tuple(note['text'] for note in topic['notes'])))
     note = args['note']
     if type(note) is not int or not 1 <= note <= len(topic['notes']):
         raise friday_notes.NotesError('Choose one of the note numbers in that topic.')
@@ -797,7 +798,7 @@ def confirmed_args(name, args, last_user_text, previous_assistant, pending=None,
             and pending.heard and pending.follows(previous_assistant) and name == pending.name):
         return args
     if name == 'drop_notes':
-        topic_id, note, text = pending.target
+        topic_id, note, text = pending.target[:3]
         if not drop_note_matches(args, note):
             return args
         confirmed = dict(args, id=topic_id)
@@ -805,6 +806,7 @@ def confirmed_args(name, args, last_user_text, previous_assistant, pending=None,
             # The topic drop deletes only the notes the user heard counted: a note added since gets a 409.
             confirmed.pop('text', None)
             confirmed['count'] = text
+            confirmed['texts'] = list(pending.target[3])
         else:
             confirmed.update(note=note, text=text)
         return confirmed
@@ -962,7 +964,8 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
         else:
             if (follows_drop and pending.heard and drop_yes(last_user_text)
                     and drop_note_matches(args, pending.target[1]) and args.get('id') == pending.target[0]
-                    and (args.get('count') == pending.target[2] and 'text' not in args if pending.target[1] is None
+                    and (args.get('count') == pending.target[2] and 'text' not in args
+                         and args.get('texts') == list(pending.target[3]) if pending.target[1] is None
                          else args.get('text') == pending.target[2])):
                 return None
             if plain_yes(last_user_text) and (drop_followup or (pending and pending.name == name)

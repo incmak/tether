@@ -682,17 +682,21 @@ class FridayRulesTests(unittest.TestCase):
 
     def test_drop_readback_names_the_topic_and_note_count_or_the_first_40_words(self):
         for count, words in ((1, 'its note'), (2, 'all 2 of its notes')):
-            proposal = friday.SendProposal('drop_notes', 'Auth', f'{count} notes', 1, target=('T8', None, count))
+            texts = ('Rotate the key', 'Keep the old key for a day')[:count]
+            proposal = friday.SendProposal('drop_notes', 'Auth', f'{count} notes', 1,
+                                           target=('T8', None, count, texts))
             readback = friday.send_readback(proposal)
             self.assertEqual(readback, f'Not deleted yet. Should I delete Auth and {words}? Yes or no?')
             heard = replace(proposal, heard=True)
             confirmed = friday.confirmed_args('drop_notes', {'topic': 'auth', 'text': 'forged'}, 'yes',
                                               readback, heard, 2)
-            self.assertEqual(confirmed, {'topic': 'auth', 'id': 'T8', 'count': count})
+            self.assertEqual(confirmed, {'topic': 'auth', 'id': 'T8', 'count': count, 'texts': list(texts)})
             self.assertIsNone(friday.check_tool('drop_notes', confirmed, 'speech', 'yes', set(), readback, heard, 2))
             # The count binds the topic drop: a note added after the read-back is never deleted unheard.
+            # The texts bind it too: one note removed and one added keeps the count but not the texts.
             for changed in (dict(confirmed, count=count + 1), {'topic': 'auth', 'id': 'T8'},
-                            dict(confirmed, text='')):
+                            dict(confirmed, text=''), dict(confirmed, texts=['Unheard note', *texts[1:]]),
+                            {key: value for key, value in confirmed.items() if key != 'texts'}):
                 with self.subTest(changed=changed):
                     self.assertEqual(friday.check_tool('drop_notes', changed, 'speech', 'yes', set(), readback,
                                                        heard, 2), friday.READBACK_REQUIRED)

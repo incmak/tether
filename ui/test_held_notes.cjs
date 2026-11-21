@@ -50,9 +50,9 @@ test('Friday sends the confirmed ID and uses the exact text for a note drop', as
     return { dropped: body.note === undefined ? 'topic' : 'note', topic: 'API', left: 0 }
   }
   assert.equal((await dropNotes(request, { topic: 'unused', id: 'T2', note: 1, text: 'Keep the route.' })).ok, true)
-  assert.equal((await dropNotes(request, { id: 'T2', count: 2 })).ok, true)
+  assert.equal((await dropNotes(request, { id: 'T2', count: 2, texts: ['A', 'B'] })).ok, true)
   assert.deepEqual(calls, [
     ['friday-notes/drop', { id: 'T2', note: 1, text: 'Keep the route.' }],
-    ['friday-notes/drop', { id: 'T2', count: 2 }],
+    ['friday-notes/drop', { id: 'T2', count: 2, texts: ['A', 'B'] }],
   ])
 })
