@@ -1039,10 +1039,15 @@ def codex_state():
     return {'messages': [], 'dropped': 0, 'busy': False, 'usage': None, 'model': '', 'effort': '', 'tier': '', 'credits': None}
 
 
-def settings_time(stamp):
-    """Seconds of a rollout timestamp ("2026-11-17T18:01:43.678Z"), or None when it does not parse."""
+def transcript_time(stamp, *, require_timezone=False):
+    """Epoch seconds for an ISO transcript timestamp, or None when it does not parse."""
+    if not isinstance(stamp, str):
+        return None
     try:
-        return datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp() if isinstance(stamp, str) else None
+        when = datetime.fromisoformat(stamp[:-1] + '+00:00' if stamp.endswith('Z') else stamp)
+        if require_timezone and when.tzinfo is None:
+            return None
+        return when.timestamp()
     except ValueError:
         return None
 
@@ -1061,7 +1066,7 @@ def codex_consume(state, index, entry, *, offset=None):
         if not isinstance(settings, dict):
             return
         stamp = entry.get('timestamp')
-        when = settings_time(stamp)
+        when = transcript_time(stamp)
         last_index, last_when = state.get('settings_at', (None, None))
         adjacent = last_index == index - 1 and when is not None and last_when is not None and abs(when - last_when) <= 2
         state['settings_at'] = (index, when)
@@ -1860,16 +1865,44 @@ def chat_delta(old, new):
     return delta
 
 
+# Mid-turn states: Claude still holds prompts sent meanwhile in its input queue.
+QUEUE_STATES = ('Working', 'Approval', 'Input needed')
+# A stale entry can show again after a backend restart clears this memory.
+STALE_QUEUE = {}
+STALE_QUEUE_LOCK = threading.Lock()
+
+
 def chat_payload(config, shell_mode=False, limit=DEFAULT_WINDOW, preview=False):
     """One chat view: the latest `limit` messages plus how many older ones were left out."""
     before = change_signature(config) if preview else None
     shell = config['agent'] == 'shell' and shell_mode
+    sampled = time.time() if config['agent'] == 'claude' else None
     state = {'state': 'Shell', 'approval': None} if shell else auto_resume.overlay(config, live_status(config))
     data = shell_snapshot(config) if shell else marked_snapshot(config)
     if not shell and isinstance(data.get('messages'), list):
         data = dict(data, messages=shell_log.merge(config['id'], data['messages']))
     if data.get('busy') and state['state'] == 'Idle':
         state['state'] = 'Working'
+    if config['agent'] == 'claude':
+        transcript = config.get('transcript')
+        queued = data.get('queued', ())
+        if state['state'] not in QUEUE_STATES:
+            # Claude drains its input queue when idle. A later enqueue can still appear in this snapshot.
+            if state['state'] == 'Idle' and transcript:
+                stale = set()
+                for item in queued:
+                    when = transcript_time(item.get('time'), require_timezone=True)
+                    if when is not None and when < sampled:
+                        stale.add(item['id'])
+                with STALE_QUEUE_LOCK:
+                    STALE_QUEUE[transcript] = stale
+                    if len(STALE_QUEUE) > 200:
+                        del STALE_QUEUE[next(iter(STALE_QUEUE))]
+            queued = []
+        else:
+            stale = STALE_QUEUE.get(transcript, ()) if transcript else ()
+            queued = [item for item in queued if item['id'] not in stale]
+        data = dict(data, queued=queued[-50:])
     if not (config['agent'] == 'claude' and plan_menu(state.get('approval') or state.get('attention'))):
         data.pop('plan', None)
     ask = data.pop('ask', None) if isinstance(data, dict) else None
