@@ -124,8 +124,27 @@ function load(): Prefs {
 }
 
 const SYNCED = ['pinned', 'sidePins', 'order', 'paneOrder', 'sort', 'colors', 'groups', 'groupOf', 'groupBy', 'seen', 'collapsed', 'showPaths', 'tmuxWords', 'liveReplyPreview', 'voiceOff', 'fridayActs', 'voiceSound', 'theme', 'scheme', 'drafts', 'archived', 'archivedTabs', 'hideHelpers', 'shownHelpers', 'hosts', 'layout', 'autoResume', 'attention', 'waitingOrder', 'imagePromptTuned', 'mainModel', 'activity', 'activityAgents', 'uiUsage', 'timeZone'] as const
-type Shared = Partial<Pick<Prefs, typeof SYNCED[number]>>
+type SharedKey = typeof SYNCED[number]
+type Shared = Partial<Pick<Prefs, SharedKey>>
+// User text and arrangements stay local after rejection; all other synced keys are settings.
+const USER_CONTENT = new Set<SharedKey>(['pinned', 'sidePins', 'order', 'paneOrder', 'groups', 'groupOf', 'drafts', 'hosts', 'layout'])
 const PENDING_KEY = 'tmux-chat.prefs.pending'
+const REJECTED_KEY = 'tmux-chat.prefs.rejected'
+
+function loadRejections() {
+  try {
+    const keys: unknown = JSON.parse(localStorage.getItem(REJECTED_KEY) ?? '[]')
+    if (Array.isArray(keys)) return new Set(SYNCED.filter(key => keys.includes(key)))
+  } catch { /* keep no rejection markers */ }
+  return new Set<SharedKey>()
+}
+
+function saveRejections(keys: Set<SharedKey>) {
+  try {
+    if (keys.size) localStorage.setItem(REJECTED_KEY, JSON.stringify([...keys]))
+    else localStorage.removeItem(REJECTED_KEY)
+  } catch { /* private mode: keep it for this visit only */ }
+}
 
 export function loadPending(): Shared {
   try {
@@ -173,7 +192,7 @@ export function rejectedKeep(changes: Record<string, unknown>, error: unknown): 
 export function usePrefs({ syncZone = true } = {}) {
   const [prefs, setPrefs] = useState<Prefs>(load)
   const [serverZone, setServerZone] = useState<{ name?: string; preference?: string }>()
-  const [zoneRejection, setZoneRejection] = useState<{ attempted: string; restored?: string }>()
+  const [rejectedZone, setZoneRejection] = useState<string>()
   // The server decides the zone once it answered for this choice. A name this browser cannot format falls back below.
   const confirmedZone = prefs.timeZone === serverZone?.preference && serverZone?.name && canFormat(serverZone.name) ? serverZone.name : undefined
   const effectiveZone = confirmedZone ?? pickZone(prefs.timeZone, serverZone?.name)
@@ -185,6 +204,8 @@ export function usePrefs({ syncZone = true } = {}) {
   }, [syncZone])
   const latest = useRef(prefs)
   const lastStored = useRef<Stored>(undefined)
+  // Keep rejected content until a later save accepts it. A rejected setting only waits for a server copy.
+  const localRejections = useRef(loadRejections())
   const pending = useRef<Shared>(loadPending())  // changed here, not saved yet
   const busy = useRef(false)
   const sending = useRef<Shared>({})  // sent, no answer yet; kept on disk until the server takes it
@@ -192,12 +213,37 @@ export function usePrefs({ syncZone = true } = {}) {
   const timer = useRef(0)
   const flushRef = useRef<() => Promise<void>>(async () => {})
 
-  // Take the server copy, but keep keys this device changed and has not saved yet.
-  const apply = useCallback((stored: Stored) => {
+  const forgetRejections = useCallback((keys: SharedKey[]) => {
+    const rejected = localRejections.current
+    const size = rejected.size
+    for (const key of keys) rejected.delete(key)
+    if (rejected.size !== size) saveRejections(rejected)
+  }, [])
+
+  const mergeLocal = useCallback((incoming: Shared) => {
+    if (!Object.keys(incoming).length) return
+    setPrefs(current => {
+      const next = { ...current, ...incoming }
+      if (JSON.stringify(pick(next)) === JSON.stringify(pick(current))) return current
+      store(next)
+      latest.current = next
+      return next
+    })
+  }, [])
+
+  const apply = useCallback((stored: Stored, fromPull = false) => {
     lastStored.current = stored
-    const incoming = Object.fromEntries(Object.entries(stored.prefs).filter(([key]) => !(key in pending.current))) as Shared
-    // The shared copy may have no override. Drop a cached override when the server uses its default.
-    if (!('timeZone' in pending.current)) incoming.timeZone = stored.prefs.timeZone
+    const rejected = localRejections.current
+    const restoredKeys = fromPull ? [...rejected].filter(key => !USER_CONTENT.has(key)) : []
+    const incoming = Object.fromEntries(SYNCED.flatMap(key => {
+      if (key in pending.current) return []
+      if (rejected.has(key)) {
+        return restoredKeys.includes(key) ? [[key, stored.prefs[key] ?? DEFAULTS[key]]] : []
+      }
+      // A missing time zone override means the server uses its default.
+      return key === 'timeZone' || key in stored.prefs ? [[key, stored.prefs[key]]] : []
+    })) as Shared
+    forgetRejections(restoredKeys)
     // Drafts: keep the newer copy per pane. A local edit the server has not seen (say, a reload right after typing) goes back up.
     if (incoming.drafts) {
       const local = keptDrafts(latest.current.drafts)
@@ -208,31 +254,31 @@ export function usePrefs({ syncZone = true } = {}) {
       if (newer.length > 0) { pending.current.drafts = merged; persist(); window.clearTimeout(timer.current); timer.current = window.setTimeout(() => void flushRef.current(), 400) }
       incoming.drafts = merged
     }
-    if (!Object.keys(incoming).length) return
-    setPrefs(current => {
-      const next = { ...current, ...incoming }
-      if (JSON.stringify(pick(next)) === JSON.stringify(pick(current))) return current
-      store(next)
-      latest.current = next
-      return next
-    })
-  }, [persist])
+    mergeLocal(incoming)
+  }, [forgetRejections, mergeLocal, persist])
 
-  const restoreRejected = useCallback((changes: Shared, kept: Shared) => {
-    const keys = SYNCED.filter(key => key in changes && !(key in kept) && !(key in pending.current))
-    if (!keys.length) return
-    const serverPrefs = lastStored.current?.prefs
-    const restored = Object.fromEntries(keys.map(key => [key, serverPrefs?.[key] ?? DEFAULTS[key]]))
-    if (keys.includes('timeZone') && changes.timeZone) {
-      setZoneRejection({ attempted: changes.timeZone, restored: serverPrefs?.timeZone })
+  const restoreRejected = useCallback(async (changes: Shared) => {
+    const keys = SYNCED.filter(key => key in changes && !(key in pending.current))
+    const stored = lastStored.current
+    const settings = keys.filter(key => !USER_CONTENT.has(key))
+    const keepLocal = stored ? keys.filter(key => USER_CONTENT.has(key)) : keys
+    if (keepLocal.length) {
+      for (const key of keepLocal) localRejections.current.add(key)
+      saveRejections(localRejections.current)
     }
-    setPrefs(current => {
-      const next = { ...current, ...restored }
-      latest.current = next
-      store(next)
-      return next
-    })
-  }, [])
+    if (settings.includes('timeZone') && changes.timeZone) setZoneRejection(changes.timeZone)
+    if (!settings.length) return
+    if (stored) {
+      mergeLocal(Object.fromEntries(settings.map(key => [key, stored.prefs[key] ?? DEFAULTS[key]])))
+      forgetRejections(settings)
+      return
+    }
+    try {
+      const serverCopy = await request<Stored>('prefs')
+      rememberZone(serverCopy)
+      apply(serverCopy, true)
+    } catch { /* offline: keep this device's copy until the next successful pull */ }
+  }, [apply, forgetRejections, mergeLocal, rememberZone])
 
   const flush = useCallback(async function flush() {
     if (busy.current || !Object.keys(pending.current).length) return
@@ -244,6 +290,7 @@ export function usePrefs({ syncZone = true } = {}) {
     if (changes.drafts) changes.drafts = keptDrafts(changes.drafts)
     try {
       const stored = await request<Stored>('prefs', { changes })
+      forgetRejections(SYNCED.filter(key => key in changes))
       rememberZone(stored)
       apply(stored)
       sending.current = {}
@@ -251,15 +298,16 @@ export function usePrefs({ syncZone = true } = {}) {
     } catch (error) {
       sending.current = {}
       const rejected = rejectedKeep(changes, error)
-      const kept = rejected ?? changes
-      if (rejected !== null) restoreRejected(changes, kept)
-      pending.current = { ...kept, ...pending.current }
+      pending.current = { ...(rejected ?? changes), ...pending.current }
       persist()
-      if (rejected !== null && error instanceof ApiError) console.warn('Preference save rejected:', error.status, error.message)
+      if (rejected !== null) {
+        if (error instanceof ApiError) console.warn('Preference save rejected:', error.status, error.message)
+        await restoreRejected(changes)
+      }
     }
     busy.current = false
     if (Object.keys(pending.current).length) timer.current = window.setTimeout(flush, 2000)
-  }, [apply, persist, rememberZone, restoreRejected])
+  }, [apply, forgetRejections, persist, rememberZone, restoreRejected])
   useLayoutEffect(() => { flushRef.current = flush }, [flush])
 
   const pull = useCallback(async () => {
@@ -272,16 +320,19 @@ export function usePrefs({ syncZone = true } = {}) {
       // A queued local write can defer the shared prefs, but the server's fallback zone is still usable.
       rememberZone(stored)
       if (busy.current || Object.keys(pending.current).length) return
+      const needsRestore = [...localRejections.current].some(key => !USER_CONTENT.has(key))
       // A device's first sync adds its own choices to the shared copy, so nothing set before sync is lost.
       if (!firstSyncDone()) {
         lastStored.current = stored
         pending.current = stored.version === 0 ? pick(latest.current) : joined(stored.prefs, latest.current)
+        for (const key of localRejections.current) delete pending.current[key]
         persist()
+        if (needsRestore) apply(stored, true)
         try { localStorage.setItem(SYNCED_KEY, '1') } catch { /* private mode: merge again next visit, which is harmless */ }
         void flush()
         return
       }
-      if (stored.version !== lastStored.current?.version) apply(stored)
+      if (stored.version !== lastStored.current?.version || needsRestore) apply(stored, true)
     } catch { /* offline: keep this device's copy */ }
   }, [apply, flush, persist, rememberZone])
 
@@ -309,6 +360,5 @@ export function usePrefs({ syncZone = true } = {}) {
       return next
     })
   }, [flush, persist])
-  const rejectedZone = prefs.timeZone === zoneRejection?.restored ? zoneRejection?.attempted : undefined
   return [prefs, update, rejectedZone] as const
 }

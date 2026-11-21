@@ -25,7 +25,7 @@ export function TimeZoneSetting({ onChange, rejectedZone }: { onChange: (zone: s
   return <fieldset className="choice time-zone-setting">
     <legend>Time zone</legend>
     <SelectMenu id="time-zone" label="Time zone" value={zone} options={options} onChange={onChange} triggerLabel={`${spoken(zone)} · ${offsetLabel(zone, clock)}`} searchLabel="Search time zones" emptyText="No time zone matches." />
-    <div role="status">{rejectedZone && <p className="setting-note">Tether could not use {spoken(rejectedZone)} on the server. It still uses {spoken(zone)}.</p>}</div>
+    <div role="status">{rejectedZone && <p className="setting-note">Tether could not use {spoken(rejectedZone)} on the server.{rejectedZone === zone ? ' It will use the server’s zone once it reconnects.' : ` It still uses ${spoken(zone)}.`}</p>}</div>
     <p className="setting-note">Reminders, the daily summary, the daily ops report and every time Tether shows use this zone. It is {fmtTime(clock, { hour: 'numeric', minute: '2-digit' })} there now.</p>
     {device && device !== zone && <button type="button" className="secondary time-zone-device" onClick={applyDevice}>Use this device’s zone ({spoken(device)})</button>}
   </fieldset>

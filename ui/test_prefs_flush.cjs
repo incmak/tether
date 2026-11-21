@@ -94,6 +94,8 @@ async function testFlush(error, newer, expected, retries, warns) {
   const warnings = []
   const context = {
     pending, busy, sending, persist, timer: { current: 0 }, rejectedKeep, savePending, ApiError: api.ApiError,
+    SYNCED: Object.keys(changes),
+    forgetRejections() {},
     restoreRejected() {},
     setZoneRejection() {},
     request: async (path, body) => {
@@ -126,10 +128,9 @@ async function testFlush(error, newer, expected, retries, warns) {
   if (warns) assert.deepEqual(warnings[0].slice(1), [error.status, error.message])
 }
 
-function zonePrefs(initial, get, post) {
-  const localStorage = storage()
+function prefsHarness(initial, get, post, localStorage = storage()) {
   localStorage.setItem('tmux-chat.prefs.synced', '1')
-  localStorage.setItem(prefsKey, JSON.stringify({ timeZone: initial }))
+  if (initial) localStorage.setItem(prefsKey, JSON.stringify(initial))
   const slots = []
   let slot = 0
   let pull
@@ -162,6 +163,7 @@ function zonePrefs(initial, get, post) {
     return result
   }
   return {
+    localStorage,
     render,
     pull: async () => {
       render()
@@ -171,8 +173,11 @@ function zonePrefs(initial, get, post) {
     },
     flush: () => flush(),
     saved: () => JSON.parse(localStorage.getItem(prefsKey)),
+    queued: () => localStorage.getItem(pendingKey),
   }
 }
+
+const zonePrefs = (timeZone, get, post) => prefsHarness({ timeZone }, get, post)
 
 test('prefs shows the server zone for a confirmed fixed-offset preference', async () => {
   const prefs = zonePrefs('+05:30', { prefs: { timeZone: '+05:30' }, version: 1, zone: 'Pacific/Auckland' })
@@ -249,8 +254,8 @@ test('prefs restores the previous zone and saves a valid key from the rejected b
   const attempted = 'America/Coyhaique'
   const prefs = zonePrefs(undefined, stored, changes => {
     batches.push(changes)
-    if ('timeZone' in changes) throw new api.ApiError(400, 'Invalid preference: timeZone.')
-    return { ...stored, prefs: { ...stored.prefs, ...changes }, version: 2 }
+    if (changes.timeZone === attempted) throw new api.ApiError(400, 'Invalid preference: timeZone.')
+    return { prefs: { ...stored.prefs, ...changes }, version: batches.length, zone: changes.timeZone ?? stored.zone }
   })
   const [, update] = await prefs.pull()
   update(() => ({ timeZone: attempted, theme: 'dark' }))
@@ -262,6 +267,11 @@ test('prefs restores the previous zone and saves a valid key from the rejected b
   await prefs.flush()
   assert.deepEqual(batches, [{ timeZone: attempted, theme: 'dark' }, { theme: 'dark' }])
   assert.equal(prefs.render()[0].theme, 'dark')
+  assert.equal(prefs.render()[2], attempted)
+  update(() => ({ timeZone: 'Europe/London' }))
+  await prefs.flush()
+  assert.equal(prefs.render()[2], undefined)
+  assert.equal(zone.tetherZone(), 'Europe/London')
 })
 
 test('prefs restores another rejected key and keeps a valid time zone from that batch', async () => {
@@ -287,21 +297,127 @@ test('prefs restores another rejected key and keeps a valid time zone from that 
   assert.equal(zone.tetherZone(), choice)
 })
 
-test('Time zone settings renders a live status below the menu after rejection', () => {
+test('prefs keeps all 20,001 characters of a rejected draft and drops the write', async () => {
+  const drafts = { '%1': { text: 'Last synced draft', at: 1 } }
+  const stored = { prefs: { drafts }, version: 1 }
+  const text = 'x'.repeat(20_001)
+  const prefs = prefsHarness({}, stored, changes => {
+    assert.equal(changes.drafts['%1'].text, text)
+    throw new api.ApiError(400, 'Invalid preference: drafts.')
+  })
+  const [, update] = await prefs.pull()
+  update(() => ({ drafts: { '%1': { text, at: 2 } } }))
+  await prefs.flush()
+  assert.equal(prefs.render()[0].drafts['%1'].text === text, true, 'all draft text stays in the composer')
+  assert.equal(prefs.saved().drafts['%1'].text === text, true, 'all draft text stays in local storage')
+  assert.equal(prefs.queued(), null)
+
+  const reloaded = prefsHarness(undefined, stored, undefined, prefs.localStorage)
+  const [current] = await reloaded.pull()
+  assert.equal(current.drafts['%1'].text === text, true, 'reload keeps all the text after a server pull')
+  assert.equal(reloaded.queued(), null, 'pull does not requeue the rejected draft')
+})
+
+test('prefs keeps a rejected pin note when another key syncs and sends a later edit', async () => {
+  const serverPins = [{ pane: '%1', note: 'Last synced note' }]
+  const localPins = [{ pane: '%1', note: 'x'.repeat(61) }]
+  const editedPins = [{ pane: '%1', note: 'Shorter note' }]
+  const stored = { prefs: { sidePins: serverPins, theme: 'light' }, version: 1 }
+  const batches = []
+  const prefs = prefsHarness({}, stored, changes => {
+    batches.push(changes)
+    if (changes.sidePins?.[0].note.length > 60) throw new api.ApiError(400, 'Invalid preference: sidePins.')
+    return { prefs: { ...stored.prefs, ...changes }, version: batches.length }
+  })
+  const [, update] = await prefs.pull()
+  update(() => ({ sidePins: localPins, theme: 'dark' }))
+  await prefs.flush()
+  assert.deepEqual(prefs.saved().sidePins, localPins)
+  assert.deepEqual(JSON.parse(prefs.queued()), { theme: 'dark' })
+  await prefs.flush()
+  assert.deepEqual(plain(prefs.render()[0].sidePins), localPins)
+  assert.deepEqual(prefs.saved().sidePins, localPins)
+  assert.equal(prefs.queued(), null)
+  update(() => ({ sidePins: editedPins }))
+  await prefs.flush()
+  assert.deepEqual(batches, [{ sidePins: localPins, theme: 'dark' }, { theme: 'dark' }, { sidePins: editedPins }])
+  assert.deepEqual(prefs.saved().sidePins, editedPins)
+  assert.equal(prefs.queued(), null)
+})
+
+function reloadZone(attempted, get) {
+  const localStorage = storage()
+  const changes = { timeZone: attempted }
+  localStorage.setItem(pendingKey, JSON.stringify(changes))
+  const calls = []
+  const prefs = prefsHarness(changes, () => {
+    calls.push('GET')
+    return get()
+  }, posted => {
+    calls.push('POST')
+    assert.deepEqual(posted, changes)
+    throw new api.ApiError(400, 'Invalid preference: timeZone.')
+  }, localStorage)
+  return { prefs, calls }
+}
+
+test('prefs restores Auckland after the reload POST is rejected, before polling', async () => {
+  const attempted = 'America/Coyhaique'
+  const { prefs, calls } = reloadZone(attempted, () => ({
+    prefs: { timeZone: 'Pacific/Auckland', theme: 'dark' }, version: 1, zone: 'Pacific/Auckland',
+  }))
+  const [current, , rejectedZone] = await prefs.pull()
+  assert.equal(zone.tetherZone(), 'Pacific/Auckland')
+  assert.equal(current.timeZone, 'Pacific/Auckland')
+  assert.equal(current.theme, 'dark')
+  assert.equal(prefs.saved().timeZone, 'Pacific/Auckland')
+  assert.equal(prefs.queued(), null)
+  assert.deepEqual(calls, ['POST', 'GET'])
+  assert.match(renderTimeZoneSetting(rejectedZone), /Tether could not use America\/Coyhaique on the server\. It still uses Pacific\/Auckland\./)
+})
+
+test('prefs keeps the attempted zone when the recovery GET fails and reports the zone after the next pull', async () => {
+  const attempted = 'America/Coyhaique'
+  let online = false
+  const { prefs, calls } = reloadZone(attempted, () => {
+    if (!online) throw new Error('Offline')
+    return { prefs: {}, version: 1, zone: 'Pacific/Auckland' }
+  })
+  const [current, , rejectedZone] = await prefs.pull()
+  assert.equal(zone.tetherZone(), attempted)
+  assert.equal(current.timeZone, attempted)
+  assert.equal(prefs.saved().timeZone, attempted)
+  assert.equal(prefs.queued(), null)
+  assert.deepEqual(calls, ['POST', 'GET'])
+  assert.match(renderTimeZoneSetting(rejectedZone), /Tether could not use America\/Coyhaique on the server\. It will use the server’s zone once it reconnects\./)
+
+  online = true
+  const [restored, , rejectionAfterPull] = await prefs.pull()
+  assert.equal(restored.timeZone, undefined)
+  assert.equal(zone.tetherZone(), 'Pacific/Auckland')
+  assert.equal(prefs.saved().timeZone, undefined)
+  assert.deepEqual(calls, ['POST', 'GET', 'GET'])
+  assert.match(renderTimeZoneSetting(rejectionAfterPull), /Tether could not use America\/Coyhaique on the server\. It still uses Pacific\/Auckland\./)
+})
+
+function renderTimeZoneSetting(rejectedZone) {
   const React = require('react')
   const { renderToStaticMarkup } = require('react-dom/server')
   const setting = { exports: {} }
   const imports = {
     react: React, 'react/jsx-runtime': require('react/jsx-runtime'),
     './SelectMenu': { SelectMenu: () => React.createElement('button', {}, 'Time zone menu') },
-    './zone': { ...zone, useTetherZone: () => 'Pacific/Auckland' },
+    './zone': { ...zone, useTetherZone: zone.tetherZone },
   }
   runInNewContext(ts.transpileModule(readFileSync('src/TimeZoneSetting.tsx', 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX },
   }).outputText, { exports: setting.exports, require: name => imports[name] })
-  const html = renderToStaticMarkup(React.createElement(setting.exports.TimeZoneSetting, {
-    onChange() {}, rejectedZone: 'America/Coyhaique',
-  }))
+  return renderToStaticMarkup(React.createElement(setting.exports.TimeZoneSetting, { onChange() {}, rejectedZone }))
+}
+
+test('Time zone settings renders a live status below the menu after rejection', () => {
+  zone.setTetherZone('Pacific/Auckland')
+  const html = renderTimeZoneSetting('America/Coyhaique')
   assert.match(html, /<\/button><div role="status"><p[^>]*>Tether could not use America\/Coyhaique on the server\. It still uses Pacific\/Auckland\.<\/p><\/div>/)
 })
 
