@@ -112,10 +112,10 @@ async function main() {
     '%7': 'spec', '%8': 'done', '%9': 'build',
   }).map(([id, phase]) => [id, [{ phase, at: NOW - 60000 }]]))
   history.B71 = [{ phase: 'inbox', at: NOW - 26 * 3600000 }, { phase: 'build', at: NOW - 2 * 3600000 }]
-  const state = { panes, moved: false, factory: 'ok', delay: 0, factoryPoll: 0, rejectHistory: false, reports: [], history }
+  const state = { panes, moved: false, factory: 'ok', factoryPoll: 0, rejectHistory: false, reports: [], history }
   const reportsDeploy = body => body.moves.some(move => move.task === 'B71' && move.phase === 'deploy')
   const deployReports = () => state.reports.filter(({ body }) => reportsDeploy(body))
-  let sessionGate, historyRetryGate
+  let sessionGate, historyRetryGate, factoryGate
   const setupPage = async page => {
     page.setDefaultTimeout(10000)
     page.on('pageerror', error => pageErrors.push(error.stack))
@@ -150,7 +150,7 @@ async function main() {
           return route.fulfill({ json: { sessions: state.panes, default_thread: '%1' } })
         }
         if (endpoint === 'factory') {
-          if (state.delay) await new Promise(resolve => setTimeout(resolve, state.delay))
+          await factoryGate
           if (state.factory === 'down') return route.fulfill({ status: 502, json: { error: 'Bad gateway' } })
           state.factoryPoll++
           const facts = state.factory === 'empty' ? { now: NOW / 1000, tools: {}, deployed: [], commits: [] } : factoryData(state.moved)
@@ -193,11 +193,12 @@ async function main() {
 
     // Loading, then the floor from the command URL.
     await page.setViewportSize({ width: 1280, height: 800 })
-    state.delay = 1500
+    let showFactory
+    factoryGate = new Promise(resolve => { showFactory = resolve })
     await page.goto(`${ORIGIN}/chat/?go=factory`)
     await view.locator('.factory-loading').waitFor()
     check('loading state shows', await view.locator('.factory-loading').isVisible())
-    state.delay = 0
+    showFactory()
     await station('build').waitFor()
     check('seven stations, left to right', JSON.stringify(await page.locator('.factory-station-name').allInnerTexts()) === JSON.stringify(['Inbox', 'Spec', 'Build', 'Review', 'Verify', 'Deploy', 'Done']), JSON.stringify(await page.locator('.factory-station-name').allInnerTexts()))
     check('B191 is in Verify: its worker last ran tsc', (await station('verify').innerText()).includes('B191'), await station('verify').innerText())
@@ -266,13 +267,16 @@ async function main() {
     check('a breadcrumb button zooms out to that level', JSON.stringify(await crumbs()) === '["Factory"]')
 
     // Wheel: ctrl+wheel up on a token zooms in, down zooms out.
-    await page.waitForTimeout(400)  // the zoom's view transition ends; during it, the pointer hits the root
+    await zoomSettled(page)  // during the zoom's view transition, the pointer hits the root
     const box = await page.locator('[data-key="task:B190"]').boundingBox()
     await page.mouse.move(box.x + 20, box.y + 10)
     await page.keyboard.down('Control'); await page.mouse.wheel(0, -100); await page.keyboard.up('Control')
     await page.locator('.factory-task').waitFor()
+    const zoomedAt = await page.evaluate(() => Date.now())
     check('pinch or ctrl+wheel zooms in on the item under the pointer', JSON.stringify(await crumbs()) === '["Factory","Build","B190"]', JSON.stringify(await crumbs()))
-    await page.waitForTimeout(500)
+    await zoomSettled(page)
+    // Factory.tsx drops a wheel within 450 ms of the last one, by the page clock.
+    await page.waitForFunction(at => Date.now() - at >= 450, zoomedAt)
     await page.keyboard.down('Control'); await page.mouse.wheel(0, 100); await page.keyboard.up('Control')
     await page.locator('.factory-phase').waitFor()
     check('ctrl+wheel down zooms out one level, to the phase', JSON.stringify(await crumbs()) === '["Factory","Build"]', JSON.stringify(await crumbs()))
@@ -517,8 +521,11 @@ async function main() {
         check(`${width}: Enter opens the linked worker`, (await crumbs()).at(-1) === 'Factory helper')
         await page.locator('.factory-crumbs button', { hasText: 'Factory', exact: true }).first().click()
         await page.locator('.factory-floor').waitFor()
+        await zoomSettled(page)
       }
       await page.locator('[data-key="task:B71"]').click()
+      await page.locator('.factory-task').waitFor()
+      await zoomSettled(page)
       await page.locator('.factory-agents button').first().click()
       await page.locator('.factory-screen').waitFor()
       check(`${width}: no sideways scroll on the agent level`, !(await overflow()))
