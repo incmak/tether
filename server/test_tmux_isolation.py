@@ -230,6 +230,38 @@ def server_pids(path):
     return sorted(found)
 
 
+def _tokens(text):
+    return [a or b or c for a, b, c in re.findall(r"""'([^']*)'|"([^"]*)"|([^\s'"(),;]+)""", text)]
+
+
+def _signatures(tokens):
+    """Yield the index before each private-client signature: -S X -f /dev/null, or -f /dev/null -S X."""
+    for i, token in enumerate(tokens):
+        if token == '-S' and tokens[i + 2:i + 4] == ['-f', '/dev/null']:
+            yield i - 1
+        elif token == '-f' and tokens[i + 1:i + 3] == ['/dev/null', '-S']:
+            yield i - 1
+
+
+def unguarded_clients(source, filename='<test>'):
+    """Lines with a tmux call on a private socket that lacks -N (or -D, the watcher start)."""
+    tree = ast.parse(source, filename=filename)
+    parts = {id(part) for node in ast.walk(tree) if isinstance(node, ast.JoinedStr) for part in node.values}
+    lines = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.List, ast.Tuple)):
+            tokens = [item.value if isinstance(item, ast.Constant) else '{}' for item in node.elts]
+        elif isinstance(node, ast.JoinedStr):
+            tokens = _tokens(''.join(part.value if isinstance(part, ast.Constant) else ' {} ' for part in node.values))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in parts:
+            tokens = _tokens(node.value)
+        else:
+            continue
+        if any(before < 0 or tokens[before] not in ('-N', '-D') for before in _signatures(tokens)):
+            lines.append(node.lineno)
+    return lines
+
+
 class IsolationTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which(paths.TMUX), 'tmux is not installed')
     def test_failed_setup_stops_each_fixture_server(self):
@@ -476,28 +508,27 @@ os.killpg(0, signal.SIGKILL)
             self.assertEqual(control.recv(1), b'')
 
     def test_private_tmux_clients_cannot_start_a_server(self):
-        # Only the watcher starts a test server (-D). Every other private-socket client passes -N.
-        def client(words):
-            return '-S' in words and '/dev/null' in words and '-N' not in words and '-D' not in words
-        found = []
-        for file in sorted(Path(__file__).parent.glob('test_*.py')):
-            tree = ast.parse(file.read_text(encoding='utf-8'), filename=str(file))
-            parts = {id(part) for node in ast.walk(tree) if isinstance(node, ast.JoinedStr) for part in node.values}
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.List, ast.Tuple)):
-                    words = [item.value for item in node.elts if isinstance(item, ast.Constant)]
-                elif isinstance(node, ast.JoinedStr):
-                    words = ast.unparse(node).split()
-                elif isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in parts:
-                    # Python source in a string (quoted words), or a shell command that runs tmux.
-                    words = re.findall(r"'([^']*)'", node.value)
-                    if 'tmux' in node.value.split():
-                        words += node.value.split()
-                else:
-                    continue
-                if client(words):
-                    found.append(f'{file.name}:{node.lineno}')
+        # This file holds the guard samples; a mock test checks the argv of PrivateTmux.run.
+        found = [f'{file.name}:{line}' for file in sorted(Path(__file__).parent.glob('test_*.py'))
+                 if file.name != Path(__file__).name
+                 for line in unguarded_clients(file.read_text(encoding='utf-8'), str(file))]
         self.assertEqual(found, [], 'Add -N so a test client cannot start an unwatched tmux server.')
+
+    def test_client_guard_checks_each_tmux_call(self):
+        samples = {
+            "subprocess.run([tmux, '-S', sock, '-f', '/dev/null', 'ls'])": [1],
+            "subprocess.run([tmux, '-N', '-f', '/dev/null', '-S', sock, 'ls'])": [],
+            "subprocess.run([tmux, '-D', '-S', sock, '-f', '/dev/null'])": [],
+            'code = """run([a, "-S", s, "-f", "/dev/null"])"""': [1],
+            "code = 'tmux -N -S s -f /dev/null ls; tmux -S s -f /dev/null ls'": [1],
+            "cmd = f'{tmux} -S {sock} -f /dev/null ls'": [1],
+            "cmd = f'{tmux} -N -S {sock} -f /dev/null ls'": [],
+            "subprocess.run(['curl', '-S', '-o', '/dev/null', url])": [],
+            "script = '[ \"$1\" = -S ] && [ \"$3\" = -f ] && [ \"$4\" = /dev/null ]'": [],
+        }
+        for source, lines in samples.items():
+            with self.subTest(source=source):
+                self.assertEqual(unguarded_clients(source), lines)
 
     def test_real_tmux_tests_use_cleanup_instead_of_teardown_or_finally(self):
         for file in sorted(Path(__file__).parent.glob('test_*.py')):
