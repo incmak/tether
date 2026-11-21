@@ -1878,19 +1878,20 @@ def chat_payload(config, shell_mode=False, limit=DEFAULT_WINDOW, preview=False):
         state['state'] = 'Working'
     if config['agent'] == 'claude':
         transcript = config.get('transcript')
+        queued = data.get('queued', ())
         if state['state'] not in QUEUE_STATES:
             # Claude drains its input queue when idle, so any entries still in the transcript are stale.
-            if transcript:
-                stale = {item['id'] for item in data.get('queued', ())}
+            if state['state'] == 'Idle' and transcript:
+                stale = {item['id'] for item in queued}
                 with STALE_QUEUE_LOCK:
                     STALE_QUEUE[transcript] = stale
                     if len(STALE_QUEUE) > 200:
                         del STALE_QUEUE[next(iter(STALE_QUEUE))]
-            data = dict(data, queued=[])
-        elif transcript:
-            stale = STALE_QUEUE.get(transcript, ())
-            if stale:
-                data = dict(data, queued=[item for item in data.get('queued', ()) if item['id'] not in stale])
+            queued = []
+        else:
+            stale = STALE_QUEUE.get(transcript, ()) if transcript else ()
+            queued = [item for item in queued if item['id'] not in stale]
+        data = dict(data, queued=queued[-50:])
     if not (config['agent'] == 'claude' and plan_menu(state.get('approval') or state.get('attention'))):
         data.pop('plan', None)
     ask = data.pop('ask', None) if isinstance(data, dict) else None

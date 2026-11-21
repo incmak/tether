@@ -14,6 +14,9 @@ const shown = (entries, mine) => foreignQueued(entries.map(entry), mine.map(loca
 
 // A local text inside a longer entry does not hide that entry (the review case).
 assert.deepEqual(shown(['Do not run the tests until Friday', 'run the tests'], ['run the tests']), ['Do not run the tests until Friday'])
+// A short local text never takes a longer entry, even when it is the only entry (round 2 review cases).
+assert.deepEqual(shown(['run the tests after Friday'], ['run the tests']), ['run the tests after Friday'])
+assert.deepEqual(shown(['check the logs for production'], ['check the logs']), ['check the logs for production'])
 // Two prompts that share their first 80 characters: the exact text decides.
 const head = 'x'.repeat(80)
 assert.deepEqual(shown([`${head} first`, `${head} second`], [`${head} second`]), [`${head} first`])

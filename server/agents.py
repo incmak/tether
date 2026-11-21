@@ -1123,16 +1123,22 @@ def claude_queue(state, index, record):
         elif operation == 'dequeue' and queue:
             first = next((i for i, item in enumerate(queue)
                           if not item['text'].lstrip().startswith('<task-notification>')), 0)
-            taken.append(queue.pop(first)['text'])
+            taken.append([queue.pop(first)['text'], 0])
         elif operation == 'popAll':
             queue.clear()
+            taken.clear()
         elif operation == 'remove':
             for i, item in enumerate(queue):
                 if item['text'] == text:
-                    taken.append(queue.pop(i)['text'])
+                    taken.append([queue.pop(i)['text'], 0])
                     break
         if len(taken) > 50:
             del taken[0]
+        return
+    if kind == 'system' and record.get('subtype') == 'turn_duration':
+        # A dequeued prompt can arrive just after the turn end that took it (227 of 604 delivered prompts in local
+        # transcripts), and most taken texts never arrive with the same text. Keep each one through one turn end.
+        taken[:] = [[text, turns + 1] for text, turns in taken if turns < 1]
         return
     if not (queue or taken):
         return
@@ -1149,7 +1155,7 @@ def claude_queue(state, index, record):
     if isinstance(text, str):
         prefix = 'Another Claude session sent a message:\n'
         text = text.removeprefix(prefix)
-        for i, removed in enumerate(taken):
+        for i, (removed, _) in enumerate(taken):
             if removed.removeprefix(prefix) == text:
                 del taken[i]
                 return
@@ -1226,4 +1232,4 @@ def claude_snapshot(entry, clean):
                   model=(metrics.get('model') or {}).get('display_name') or (metrics.get('model') or {}).get('id') or '')
     return {'messages': merge_quota_notices(dict(entry, agent='claude'), messages), 'dropped': state['dropped'],
             'busy': entry.get('busy', False), 'usage': report, 'plan': state.get('plan'), 'ask': state.get('ask'), 'claude_name': state.get('name'),
-            'scheduled': {key: dict(value) for key, value in state.get('scheduled', {}).items()}, 'queued': queued[-50:]}
+            'scheduled': {key: dict(value) for key, value in state.get('scheduled', {}).items()}, 'queued': queued}

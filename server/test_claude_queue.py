@@ -53,6 +53,13 @@ class ClaudeQueueTests(unittest.TestCase):
             agents.claude_queue(state, index, record)
         return [entry['text'] for entry in state['queue']]
 
+    def payload_status(self):
+        status = self.enterContext(patch.object(server, 'live_status'))
+        self.enterContext(patch.object(server, 'snapshot', side_effect=lambda _: self.snapshot()))
+        self.enterContext(patch.object(server.shell_log, 'merge', side_effect=lambda _, messages: messages))
+        self.enterContext(patch.object(server.reply_preview, 'sample', return_value=('', 80)))
+        return status
+
     def test_enqueue_shows_display_text_and_time_without_adding_a_message(self):
         self.append(enqueue('<pasted_content id="1">Queued prompt</pasted_content>'),
                     enqueue('  '))
@@ -86,6 +93,22 @@ class ClaudeQueueTests(unittest.TestCase):
         for extra in ({}, {'content': 'A'}):
             with self.subTest(extra=extra):
                 self.assertEqual(self.fold(enqueue('A'), enqueue('B'), operation('popAll', **extra)), [])
+
+    def test_pop_all_clears_taken_before_a_later_delivery(self):
+        self.assertEqual(self.fold(enqueue('A'), operation('dequeue'), operation('popAll'),
+                                   enqueue('A'), attachment('A')), [])
+
+    def test_taken_lasts_through_one_turn_end_of_the_same_chain(self):
+        turn_end = dict(type='system', subtype='turn_duration')
+        side_end = dict(turn_end, isSidechain=True)
+        # A prompt dequeued in one turn can arrive just after that turn ends: it must not take a later copy.
+        self.assertEqual(self.fold(enqueue('A'), operation('dequeue'), turn_end, enqueue('A'), user('A')), ['A'])
+        # Two turn ends later, an undelivered taken text is gone, so the delivery repairs the queue.
+        self.assertEqual(self.fold(enqueue('A'), operation('dequeue'), turn_end, turn_end,
+                                   enqueue('A'), user('A')), [])
+        # Sidechain turn ends do not count.
+        self.assertEqual(self.fold(enqueue('A'), operation('dequeue'), turn_end, side_end, side_end,
+                                   enqueue('A'), user('A')), ['A'])
 
     def test_enqueue_requires_string_content(self):
         self.append(operation('enqueue'), operation('enqueue', content=None), operation('enqueue', content=42))
@@ -139,15 +162,15 @@ class ClaudeQueueTests(unittest.TestCase):
             user('A', isSidechain=True), attachment('A', isSidechain=True),
         ), ['A'])
 
-    def test_snapshot_caps_queue_after_filtering_and_dequeue_uses_the_full_queue(self):
+    def test_snapshot_keeps_all_person_prompts_and_dequeue_uses_the_full_queue(self):
         records = [enqueue(str(index)) for index in range(1, 52)] + [enqueue(NOTICE), enqueue('  ')]
         self.append(*records)
-        expected = [str(index) for index in range(2, 52)]
+        expected = [str(index) for index in range(1, 52)]
         self.assertEqual([entry['text'] for entry in self.snapshot()['queued']], expected)
         dequeue = operation('dequeue')
-        self.assertEqual(self.fold(*records, dequeue), expected + [NOTICE, '  '])
+        self.assertEqual(self.fold(*records, dequeue), expected[1:] + [NOTICE, '  '])
         self.append(dequeue)
-        self.assertEqual([entry['text'] for entry in self.snapshot()['queued']], expected)
+        self.assertEqual([entry['text'] for entry in self.snapshot()['queued']], expected[1:])
 
     def test_incremental_read_preserves_queue_without_sharing_output(self):
         self.append(enqueue(NOTICE), enqueue('A'), enqueue('B'))
@@ -202,6 +225,36 @@ class ClaudeQueueTests(unittest.TestCase):
             status.return_value = {'state': 'Idle', 'approval': None}
             self.assertEqual(server.chat_payload(self.entry)['queued'], [])
             self.assertEqual(server.STALE_QUEUE[self.entry['transcript']], {1})
+
+    def test_unknown_hides_the_queue_without_marking_entries_stale(self):
+        self.append(enqueue('A'))
+        status = self.payload_status()
+        queued = [{'id': 0, 'text': 'A', 'time': TIME}]
+        for live, expected in (('Working', queued), ('Unknown', []), ('Working', queued)):
+            with self.subTest(live=live):
+                status.return_value = {'state': live, 'approval': None}
+                self.assertEqual(server.chat_payload(self.entry)['queued'], expected)
+                self.assertNotIn(self.entry['transcript'], server.STALE_QUEUE)
+
+    def test_idle_marks_even_entries_outside_the_display_cap_stale(self):
+        self.append(*(enqueue(str(index)) for index in range(51)))
+        status = self.payload_status()
+        status.return_value = {'state': 'Idle', 'approval': None}
+        self.assertEqual(server.chat_payload(self.entry)['queued'], [])
+
+        self.append(operation('remove', content='50'))
+        status.return_value = {'state': 'Working', 'approval': None}
+        self.assertEqual(server.chat_payload(self.entry)['queued'], [])
+        self.append(enqueue('B'))
+        self.assertEqual(server.chat_payload(self.entry)['queued'], [{'id': 52, 'text': 'B', 'time': TIME}])
+
+    def test_payload_shows_the_newest_50_live_entries(self):
+        self.append(*(enqueue(str(index)) for index in range(60)))
+        status = self.payload_status()
+        status.return_value = {'state': 'Working', 'approval': None}
+        self.assertEqual(server.chat_payload(self.entry)['queued'], [
+            {'id': index, 'text': str(index), 'time': TIME} for index in range(10, 60)
+        ])
 
     def test_stale_cache_evicts_the_oldest_transcript_and_skips_missing_paths(self):
         server.STALE_QUEUE.update({f'transcript-{index}': {0} for index in range(200)})

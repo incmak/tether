@@ -738,8 +738,9 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   // sends from Friday, another device or the terminal.
   const otherQueued = foreignQueued(data?.queued ?? [], queued.filter(item => !item.failed))
   const waitingAll = waiting + otherQueued.length
-  // Claude's "edit queued" pulls back its whole queue. With more than one entry, the cancel button says so.
-  const cancelLabel = activePane.agent !== 'claude' ? 'Hide this queued message' : waitingAll > 1 ? `Cancel all ${waitingAll} queued messages` : 'Cancel this queued message'
+  // Claude's "edit queued" pulls back its whole queue. With more than one entry, the cancel button says so, without a
+  // count: the server shows at most 50 entries.
+  const cancelLabel = activePane.agent !== 'claude' ? 'Hide this queued message' : waitingAll > 1 ? 'Cancel all queued messages' : 'Cancel this queued message'
   const queueLabel = [waitingAll ? `${waitingAll} queued` : '', notSent ? `${notSent} not sent` : ''].filter(Boolean).join(' · ')
   const setPending = useCallback((update: (list: Pending[]) => Pending[]) => setPendingState(list => { const next = update(list); pendingByPane.set(pane.id, next); savePending(); return next }), [pane.id])
   const dataReceivedAt = useRef(0)
