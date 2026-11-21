@@ -24,6 +24,13 @@ for (const more of [{ state: 'Approval' }, { state: 'Input needed' }, { ask: { n
 assert.equal(helpers.needsMak(tab('%1', { state: 'Working' })), false)
 assert.equal(helpers.helperCount(1), '1 helper')
 assert.equal(helpers.helperCount(4), '4 helpers')
+assert.equal(helpers.fromLabel('B292 review'), 'B292')
+assert.equal(helpers.fromLabel('B446'), 'B446')
+assert.equal(helpers.fromLabel('B12: fix'), 'B12')
+assert.equal(helpers.fromLabel('tether main'), 'tether main')
+assert.equal(helpers.fromLabel('B12x tab'), 'B12x tab')
+assert.equal(helpers.fromLabel('b12 tab'), 'b12 tab')
+assert.equal(helpers.fromLabel('  B7 x'), 'B7')
 
 const root = tab('%1', { group: 'g1' })
 const child = tab('%2', { task: '%1', group: 'g2', task_role: 'Worker' })

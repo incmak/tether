@@ -14,9 +14,10 @@
 .task-dot.stopped { border-radius: 1px; }
 .task-check { color: var(--done); }
 .task-from, .task-count, .task-role { color: var(--muted); font-size: 11px; }
-.task-from, .task-count { border: 1px solid var(--line); padding: 0 5px; border-radius: var(--radius-sm); }
-.task-from { min-width: 0; max-width: 12ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.task-count { flex: none; border-radius: 9px; font-variant-numeric: tabular-nums; }
+.task-from, .task-count { flex: none; border: 1px solid var(--line); white-space: nowrap; }
+/* fromLabel keeps it short ("from B446"), so it is never cut. */
+.task-from { padding: 0 5px; border-radius: var(--radius-sm); }
+.task-count { padding: 0 6px; border-radius: 9px; font-variant-numeric: tabular-nums; }
 .task-role { flex-shrink: 1; min-width: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task-row.needs .task-role { color: color-mix(in srgb, var(--muted) 75%, var(--text)); }
 
@@ -37,7 +38,6 @@
 .task-kids .task-row, .pane-stack-tabs .task-kids .task-row, .task-done .task-row { margin-left: 0; }
 .pane-children .task-row > .task-row-main { flex: 1; min-width: 0; gap: 5px; padding: 0 4px 0 6px; color: var(--text); }
 .task-row.child .pane-child-name { flex: 1 1 auto; min-width: 6ch; }
-.task-row.needs { box-shadow: inset 2px 0 var(--attention); }
 .task-row.needs.child { background: color-mix(in srgb, var(--attention) 13%, var(--sidebar)); }
 .pane-children .task-row.child .task-row-main.selected:not(.picked, :hover) { background: transparent; font-weight: 600; }
 .pane-children .task-row.done > .task-row-main { color: var(--muted); }
