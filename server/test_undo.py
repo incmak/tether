@@ -807,6 +807,33 @@ class MergeTests(TmuxBase):
         self.undo(confirmed=True)
         self.assertEqual(self.show(self.a2, '#{session_id}'), self.a)
 
+    def test_undo_restores_roots_of_an_unstacked_tab_and_redo_refreshes_them(self):
+        run = self.run_tmux
+        for kind, count in (('break', 1), ('break', 2), ('pane', 2)):
+            with self.subTest(kind=kind, stacks=count):
+                source = self.new(f'{kind}-{count}')
+                self.tmux('new-window', '-t', source + ':', '-c', self.folder)
+                _, pane = self.panes(source)
+                target = self.b if kind == 'pane' else None
+                stacks = [groups.create(source, f'Stack {i}', run, auto=True, root=pane) for i in range(count)]
+                self.assertEqual(self.label(pane), '')
+                noted = undo.record_merge(kind, pane, target, run)
+                noted(tmux_merge.merge(kind, pane, target, run))
+                self.assertNotEqual(self.show(pane, '#{session_id}'), source)
+                self.assertEqual([stack.get('root') for stack in groups.read(source, run)], [None] * count)
+                self.assertEqual(self.undo(confirmed=True)['status'], 'done')
+                self.assertEqual(self.show(pane, '#{session_id}|#{@group}'), f'{source}|')
+                self.assertEqual(groups.read(source, run), stacks)
+
+                with groups.LOCK():
+                    stacks[0].pop('root')
+                    groups.write(source, stacks, run)
+                stacks.append(groups.create(source, 'New stack', run, auto=True, root=pane))
+                self.assertEqual(self.redo(confirmed=True)['status'], 'done')
+                self.assertEqual([stack.get('root') for stack in groups.read(source, run)], [None] * len(stacks))
+                self.assertEqual(self.undo(confirmed=True)['status'], 'done')
+                self.assertEqual(groups.read(source, run), stacks)
+
     def test_redo_of_breakout_returns_its_warning(self):
         run = self.run_tmux
         noted = undo.record_merge('break', self.a2, None, run)

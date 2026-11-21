@@ -746,6 +746,57 @@ class TmuxMergeTests(unittest.TestCase):
         tmux_merge.merge_session(self.a, self.b, self.run_tmux)
         self.assertEqual(self.roles(self.b)[pane], 'coordinator-off')
 
+    def test_partial_merge_cleans_up_only_the_panes_that_moved(self):
+        first, second = self.tmux('list-windows', '-t', self.a + ':', '-F', '#{window_id}').stdout.split()
+        moving = self.tmux('list-panes', '-t', first, '-F', '#{pane_id}').stdout.split()
+        staying, = self.tmux('list-panes', '-t', second, '-F', '#{pane_id}').stdout.split()
+        resident, = self.panes(self.b)
+        for pane in (moving[0], staying, resident):
+            self.tmux('set-option', '-p', '-t', pane, '@tether_role', 'coordinator')
+        stacks = [groups.create(self.a, f'Stack {pane}', self.run_tmux, auto=True, root=pane)
+                  for pane in (*moving, staying)]
+
+        def run(argv, **kwargs):
+            if argv[1] == 'move-window' and argv[argv.index('-s') + 1] == second:
+                return subprocess.CompletedProcess(argv, 1, '', 'Could not move the second window.')
+            return self.run_tmux(argv, **kwargs)
+
+        with self.assertRaisesRegex(RuntimeError, r'^Only part of the session moved\. Check both sessions\.$'):
+            tmux_merge.merge_session(self.a, self.b, run)
+        self.assertCountEqual(self.panes(self.b), [resident, *moving])
+        self.assertEqual(self.roles(self.b), {resident: 'coordinator', **dict.fromkeys(moving, '')})
+        self.assertEqual(self.roles(self.a), {staying: 'coordinator'})
+        self.assertEqual([stack.get('root') for stack in groups.read(self.a, self.run_tmux)],
+                         [None, None, staying])
+        target_stacks = groups.read(self.b, self.run_tmux)
+        for stack in stacks[:-1]:
+            self.assertIn(stack, target_stacks)
+        names = tmux_merge._names(self.run_tmux, self.b)
+        self.assertEqual([names[pane] for pane in moving], ['alpha', 'alpha 2'])
+        self.assertEqual(tmux_merge._names(self.run_tmux, self.a), {staying: ''})
+
+    def test_move_pane_finishes_other_cleanup_when_coordinator_unset_fails(self):
+        pane = self.panes(self.a)[0]
+        resident, = self.panes(self.b)
+        stack = groups.create(self.a, 'Stack', self.run_tmux, pane=pane, auto=True, root=pane)
+        for tab in (pane, resident):
+            self.tmux('set-option', '-p', '-t', tab, '@tether_role', 'coordinator')
+
+        def run(argv, **kwargs):
+            if argv[1:] == ['set-option', '-p', '-u', '-t', pane, '@tether_role']:
+                return subprocess.CompletedProcess(argv, 1, '', 'Could not unset the role.')
+            return self.run_tmux(argv, **kwargs)
+
+        with self.assertRaisesRegex(RuntimeError, 'The pane moved to “beta”, but Tether could not finish') as error:
+            tmux_merge.move_pane(pane, self.b, run)
+        self.assertEqual(str(error.exception.__cause__), 'Could not change the coordinator mark.')
+        self.assertIn(pane, self.panes(self.b))
+        self.assertEqual(self.roles(self.b)[pane], 'coordinator')
+        stack.pop('root')
+        self.assertEqual(groups.read(self.a, self.run_tmux), [stack])
+        self.assertEqual(self.tmux('display-message', '-p', '-t', pane, '#{@group}').stdout.strip(), '')
+        self.assertEqual(tmux_merge._names(self.run_tmux, self.b)[pane], 'alpha')
+
     def check_departing_roots(self, kind, *, unstacked=False):
         run = self.run_tmux
         pane, member, other = self.panes(self.a)

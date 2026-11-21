@@ -22,6 +22,7 @@ GONE = 'That session or pane is gone. Refresh the list and try again.'
 BREAKOUT_MARKER = '@tether_breakout'
 BREAKOUT_IDS = re.compile(r'(\$[0-9]+)\t(%[0-9]+)')
 ROLE_FIELDS = '#{pane_id}\t#{@tether_role}'
+CLEANUP_ERRORS = (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError)
 
 
 def _tmux(run, *args, command=None):
@@ -146,10 +147,24 @@ def _name_plan(run, source, target, panes):
     return plan
 
 
-def _apply_names(run, plan):
+def _set_name(run, pane, name):
     """No @chat_name_at is set, so the name counts as the oldest: a name given later in Claude or Codex still wins."""
-    for pane, name in plan.items():
-        _check(_try_tmux(run, 'set-option', '-p', '-t', pane, '@chat_name', name), 'Could not name the pane.')
+    _check(_try_tmux(run, 'set-option', '-p', '-t', pane, '@chat_name', name), 'Could not name the pane.')
+
+
+def _cleanup(run, *steps):
+    """Try every cleanup step after a move and report the first failure."""
+    first = None
+    for action, *args in steps:
+        try:
+            action(run, *args)
+        except CLEANUP_ERRORS as exc:
+            if first is None:
+                first = exc
+    if isinstance(first, OSError):
+        raise RuntimeError(str(first)) from first
+    if first is not None:
+        raise first
 
 
 KEEP = ('source', 'target')
@@ -192,6 +207,20 @@ def _apply_project(run, target, kept, dropped):
             print(f'merge: project {dropped} not archived: {exc}', file=sys.stderr, flush=True)
 
 
+def _merge_cleanup(run, source, target, source_panes, coordinators, plan):
+    try:
+        moved = source_panes.keys() & _names(run, target).keys()
+    except OSError as exc:
+        raise RuntimeError('Could not confirm the moved panes.') from exc
+    if moved:
+        _cleanup(
+            run,
+            *((_clear_coordinator, pane) for pane in sorted(coordinators & moved)),
+            (_drop_root, source, moved),
+            *((_set_name, pane, name) for pane, name in plan.items() if pane in moved),
+        )
+
+
 def merge_session(source, target, run=subprocess.run, keep=None):
     """Move every window of source into target, with its layout. The emptied source session closes;
     its name stays on the moved panes. keep ('source' or 'target') says whose project the merged session keeps;
@@ -205,24 +234,30 @@ def merge_session(source, target, run=subprocess.run, keep=None):
     target_coordinators = coordinator_panes(run, target) if source_coordinators else set()
     windows = _tmux(run, 'list-windows', '-t', source + ':', '-F', '#{window_id}')
     _check(windows, GONE)
-    plan = _name_plan(run, source, target, list(_names(run, source)))
+    source_panes = _names(run, source)
+    plan = _name_plan(run, source, target, source_panes)
+    coordinators = source_coordinators - target_coordinators if target_coordinators else set()
     groups.merge_into(source, target, run)  # before the move, so no moved pane points to a missing group
-    for moved_count, window in enumerate(windows.stdout.split()):
-        moved = _try_tmux(run, 'move-window', '-d', '-s', window, '-t', target + ':')
-        if moved is None or moved.returncode:
-            current = _target_session(run, window, gone='')
-            if current is None:
-                raise RuntimeError('Could not confirm the move. Refresh the list.')
-            if current == target:
-                continue
-            if moved_count:
-                raise RuntimeError('Only part of the session moved. Check both sessions.')
-            _check(moved, 'Could not move the window.')
     try:
-        if target_coordinators:
-            for pane in sorted(source_coordinators - target_coordinators):
-                _clear_coordinator(run, pane)
-        _apply_names(run, plan)
+        for moved_count, window in enumerate(windows.stdout.split()):
+            moved = _try_tmux(run, 'move-window', '-d', '-s', window, '-t', target + ':')
+            if moved is None or moved.returncode:
+                current = _target_session(run, window, gone='')
+                if current is None:
+                    raise RuntimeError('Could not confirm the move. Refresh the list.')
+                if current == target:
+                    continue
+                if moved_count:
+                    raise RuntimeError('Only part of the session moved. Check both sessions.')
+                _check(moved, 'Could not move the window.')
+    except CLEANUP_ERRORS as exc:
+        try:
+            _merge_cleanup(run, source, target, source_panes, coordinators, plan)
+        except CLEANUP_ERRORS as cleanup_error:
+            raise exc from cleanup_error
+        raise
+    try:
+        _merge_cleanup(run, source, target, source_panes, coordinators, plan)
         _apply_project(run, target, kept, dropped)
         return _moved(run, target, None)
     except (subprocess.TimeoutExpired, RuntimeError, ValueError) as exc:
@@ -245,11 +280,13 @@ def move_pane(pane, target, run=subprocess.run):
         if current != target:
             _check(moved, 'Could not move the pane.')
     try:
-        if clear_coordinator:
-            _clear_coordinator(run, pane)
-        _drop_root(run, source, pane)
-        _ungroup(run, pane)
-        _apply_names(run, plan)
+        coordinator_steps = [(_clear_coordinator, pane)] if clear_coordinator else []
+        _cleanup(
+            run, *coordinator_steps,
+            (_drop_root, source, {pane}),
+            (_ungroup, pane),
+            *((_set_name, tab, tab_name) for tab, tab_name in plan.items()),
+        )
         return _moved(run, target, pane)
     except (subprocess.TimeoutExpired, RuntimeError, ValueError) as exc:
         raise RuntimeError(f'The pane moved to “{name}”, but Tether could not finish. Refresh the list.') from exc
@@ -260,8 +297,8 @@ def _ungroup(run, pane):
     _check(_try_tmux(run, 'set-option', '-p', '-u', '-t', pane, '@group'), 'Could not clear the pane group.')
 
 
-def _drop_root(run, session_id, pane):
-    """A stack can name the departing pane as its root even if the pane is in Unstacked."""
+def _drop_root(run, session_id, panes):
+    """A stack can name a departing pane as its root even if the pane is in Unstacked."""
     with groups.LOCK():
         try:
             stacks = groups.read(session_id, run)
@@ -269,7 +306,7 @@ def _drop_root(run, session_id, pane):
             if exc.status == 404:  # The session disappears when its last pane moves.
                 return
             raise
-        rooted = [stack for stack in stacks if stack.get('root') == pane]
+        rooted = [stack for stack in stacks if stack.get('root') in panes]
         if rooted:
             for stack in rooted:
                 del stack['root']
@@ -384,8 +421,7 @@ def break_out(pane, run=subprocess.run):
     elif not removed:
         warning = 'The pane moved, but its new session kept an extra shell tab. Close it from the sidebar.'
     try:
-        _drop_root(run, source, pane)
-        _ungroup(run, pane)
+        _cleanup(run, (_drop_root, source, {pane}), (_ungroup, pane))
         result = _moved(run, session_id, pane)
     except (subprocess.TimeoutExpired, RuntimeError, ValueError) as exc:
         message = f'The pane moved to “{name}”, but Tether could not finish. Refresh the list.'
