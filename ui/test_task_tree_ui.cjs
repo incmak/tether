@@ -32,6 +32,7 @@ function fixture(id = '%1', thread = 'root-thread') {
         approval: { id: 'approval-digest', text: 'Apply the task tree changes?', actionable: true, options: [{ id: 1, text: 'Yes, apply' }, { id: 2, text: 'No' }] } }),
       make('%87', doneName, { done: true, done_mark: true }),
       make('%88', 'B401 Sidebar fix', { group: 'bugs' }),
+      make('%90', 'Scratch', { tmux_session: '$2', label: 'scratch', group: undefined }),   // a single-tab session
     ],
     default_thread: thread,
     groups: { $1: [{ id: 'tree', name: 'Task tree', project: '' }, { id: 'bugs', name: 'Tether bugs', project: '' }] },
@@ -298,6 +299,9 @@ async function main() {
     assert(await separateActions.isVisible(), 'Keyboard focus on the row shows its •••')
     const actionsBox = await separateActions.boundingBox()
     assert(actionsBox.width >= 24 && actionsBox.height >= 24, 'The row actions button has a 24 × 24 px target')
+    await page.evaluate(() => document.activeElement?.blur())
+    assert(await side().locator('button[aria-label="Actions for stack Task tree"]').isVisible(), 'Mouse: the open stack keeps its ••• with the pointer and focus elsewhere')
+    assert.equal(await side().locator('button[aria-label="Actions for stack Tether bugs"]').isVisible(), false, 'Mouse: another stack hides its •••')
     await openActions(separateName)
     await dialog.getByRole('button', { name: 'Move into task…' }).click()
     assert.equal(await dialog.getByRole('button', { name: /B401 Sidebar fix/ }).count(), 0)
@@ -420,6 +424,13 @@ async function main() {
     assert(await touchActions(reviewName).isVisible(), 'Touch: the open row shows its •••')
     assert.equal(await touchActions(separateName).isVisible(), false, 'Touch: another row hides its •••')
     assert(await drawer.getByRole('button', { name: 'Actions for stack Task tree', exact: true }).isVisible(), 'Touch: the stack heading keeps its •••')
+    assert(await drawer.locator('button[aria-label="Actions for stack Tether bugs"]').isVisible(), 'Touch: a stack that is not open keeps its •••')
+    const scratchActions = drawer.locator('.session-list > li[data-id="$2"] .session-row > .task-row-actions')
+    assert(await scratchActions.count() === 1 && !await scratchActions.isVisible(), 'Touch: a closed single-tab session hides its •••')
+    await touchActions(separateName).locator('xpath=..').locator('.task-row-main').focus()
+    await page.keyboard.press('Tab')
+    await assertFocus(touchActions(separateName))
+    await page.evaluate(() => document.activeElement?.blur())
     const heldRow = touchActions(separateName).locator('xpath=..').locator('.task-row-main')
     await heldRow.scrollIntoViewIfNeeded()
     const held = await heldRow.boundingBox()

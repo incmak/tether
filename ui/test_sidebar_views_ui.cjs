@@ -182,6 +182,11 @@ async function main() {
     check('its row opens it', await page.locator(`${SIDE} .session-list > li[data-id="$3"] .pane-children`).count() === 1)
     await page.locator(`${SIDE} .session-list > li[data-id="$3"] .session-main`).click()
     check('and folds it again', await page.locator(`${SIDE} .session-list > li[data-id="$3"] .pane-children`).count() === 0)
+    // B474: a single-tab session row hides its ••• until it is open, hovered or focused (touch: test_task_tree_ui).
+    const briskActions = page.locator(`${SIDE} .session-list > li[data-id="$2"] .session-row > .task-row-actions`)
+    await page.mouse.move(0, 0)
+    await page.evaluate(() => document.activeElement?.blur())
+    check('mouse: a closed single-tab session hides its •••', await briskActions.count() === 1 && !await briskActions.isVisible())
     await page.screenshot({ path: path.join(SHOTS, '1280-sessions.png') })
 
     // 3. Active only folds quiet sessions and quiet tabs.
