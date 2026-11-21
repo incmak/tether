@@ -22,6 +22,7 @@ from unittest.mock import ANY, Mock, patch
 
 import audit
 import helper_close
+import injected_prompts
 import review_links
 import review_scope
 import server
@@ -57,6 +58,11 @@ def write_records(path, records, mode='w'):
         transcript.writelines(json.dumps(record) + '\n' for record in records)
 
 
+def legacy_prompt(record):
+    key = 'created_at' if record.get('type') == 'USER_INPUT' else 'timestamp'
+    return dict(record, **{key: datetime.now(timezone.utc).isoformat()})
+
+
 def guard_subprocess(test):
     for name in ('run', 'Popen'):
         process = test.enterContext(patch.object(
@@ -86,6 +92,11 @@ class ReviewLinksTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.file = Path(temporary.name) / 'cache' / 'review-links.json'
         self.enterContext(patch.object(review_links, 'FILE', self.file))
+        receipts = Path(temporary.name) / 'receipts'
+        self.enterContext(patch.object(injected_prompts.paths, 'CACHE', receipts))
+        self.enterContext(patch.object(injected_prompts, 'ROOT', receipts / 'injected'))
+        # Existing mock sends have no receipts. Timed historical fixtures precede the cutover.
+        injected_prompts._write(receipts / 'injected-since.json', {'since_ms': 4_102_444_800_000})
         self.enterContext(patch.object(review_links, '_last_sent', {}))
         self.enterContext(patch.object(review_links, '_feedback_in_flight', {}))
         self.clock = self.enterContext(own_time(review_links, monotonic=Mock(return_value=1000)))
@@ -1594,7 +1605,7 @@ class ReviewLinksTests(unittest.TestCase):
                 if not summary_finished:
                     summary = next(call.args[1] for call in reversed(self.send.call_args_list)
                                    if call.args[0] == self.worker)
-                    records = [codex('user', summary), codex('assistant', 'Open findings.')]
+                    records = [legacy_prompt(codex('user', summary)), codex('assistant', 'Open findings.')]
                     self.turn_source = server.review_turn_source
                     with patch.object(server, 'notification_records', return_value=records):
                         self.request_review()
@@ -1648,7 +1659,7 @@ class ReviewLinksTests(unittest.TestCase):
         parent = self.add_parent()
         self.fail_to_limit()
         summary = next(call.args[1] for call in reversed(self.send.call_args_list) if call.args[0] == self.worker)
-        records = [codex('user', summary), codex('assistant', 'Open findings.')]
+        records = [legacy_prompt(codex('user', summary)), codex('assistant', 'Open findings.')]
         self.turn_source = server.review_turn_source
         self.enterContext(patch.object(server, 'notification_records', return_value=records))
         self.observe(**{'%13': 'Working'})
@@ -1689,9 +1700,9 @@ class ReviewLinksTests(unittest.TestCase):
                 summary = next(call.args[1] for call in reversed(self.send.call_args_list)
                                if call.args[0] == self.worker)
                 if agent == 'claude':
-                    records = [{'type': 'attachment', 'attachment': {'type': 'queued_command', 'prompt': summary}}]
+                    records = [legacy_prompt({'type': 'attachment', 'attachment': {'type': 'queued_command', 'prompt': summary}})]
                 else:
-                    records = [{'type': 'event_msg', 'payload': {'type': 'user_message', 'message': summary}}]
+                    records = [legacy_prompt({'type': 'event_msg', 'payload': {'type': 'user_message', 'message': summary}})]
                     self.work_mark.return_value = 'changed tree'
                 self.turn_source = server.review_turn_source
                 with patch.object(server, 'notification_records', return_value=records):
@@ -1715,7 +1726,7 @@ class ReviewLinksTests(unittest.TestCase):
         parent = self.add_parent()
         self.fail_to_limit()
         summary = next(call.args[1] for call in reversed(self.send.call_args_list) if call.args[0] == self.worker)
-        records = [codex('user', summary)]
+        records = [legacy_prompt(codex('user', summary))]
         self.turn_source = server.review_turn_source
         self.states['%13'] = 'Working'
         review_links.agent_prompt('%13', parent['id'], parent['thread'])
@@ -1740,7 +1751,7 @@ class ReviewLinksTests(unittest.TestCase):
                 self.worker['agent'] = agent
                 self.fail_to_limit()
                 summary = self.send.call_args.args[1]
-                records = [message('user', summary)]
+                records = [legacy_prompt(message('user', summary))]
                 self.turn_source = server.review_turn_source
                 with patch.object(server, 'notification_records', return_value=records):
                     self.observe(**{'%13': 'Working'})
@@ -3691,7 +3702,7 @@ class ReviewLinksTests(unittest.TestCase):
         now = int(time.time())
         started_at, finished_at = now + 1, now + 2
         if agent == 'antigravity':
-            records = [dict(type='USER_INPUT', step_index=1, content=f'<USER_REQUEST>{prompt}</USER_REQUEST>')]
+            records = [legacy_prompt(dict(type='USER_INPUT', step_index=1, content=f'<USER_REQUEST>{prompt}</USER_REQUEST>'))]
             if output_size:
                 records.append(dict(type='PLANNER_RESPONSE', step_index=2, content='x' * output_size))
             records.append(dict(type='AGENT_RESPONSE', step_index=3, content='Done.'))
@@ -3904,7 +3915,7 @@ class ReviewLinksTests(unittest.TestCase):
         legacy.pop('feedback_turn', None)
         self.file.write_text(json.dumps([legacy]))
         self.turn_source = server.review_turn_source
-        records = [codex('user', stop), codex('assistant', 'Open findings.')]
+        records = [legacy_prompt(codex('user', stop)), codex('assistant', 'Open findings.')]
         self.send.reset_mock()
         with patch.object(server, 'notification_records', return_value=records):
             self.request_review()
@@ -4606,7 +4617,7 @@ class ReviewLinksTests(unittest.TestCase):
             self.observe(**{'%11': 'Idle'})
             self.assertTrue(self.links()[1]['paused'])
             prefixed = '[Working directory changed to /work. Run commands and resolve relative paths there.] ' + notice
-            records.extend([{'type': 'attachment', 'attachment': {'type': 'queued_command', 'prompt': prefixed}},
+            records.extend([legacy_prompt({'type': 'attachment', 'attachment': {'type': 'queued_command', 'prompt': prefixed}}),
                             ASSISTANT])
             self.observe(**{'%11': 'Working'})
             self.observe(**{'%11': 'Idle'})
@@ -4702,7 +4713,7 @@ class ReviewLinksTests(unittest.TestCase):
                 self.observe()  # Mak's earlier prompt finished after Tether sent the notice
                 self.assertIn('review_prompts', self.links()[1])
                 write_records(transcript, [
-                    message('user', notice),
+                    dict(message('user', notice), timestamp='1970-01-01T00:16:40.750Z'),
                     dict(message('assistant', 'Read.'), timestamp='1970-01-01T00:16:41Z'),
                 ], 'a')
                 if short_mak:
@@ -4904,6 +4915,33 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertEqual(self.send.call_args.args[0], self.reviewer)
         self.assertTrue(self.links()[0]['awaiting'])
         self.turn_source.assert_called_with(self.worker)
+
+    def test_persons_summary_paste_resumes_paused_review_but_bound_relay_does_not(self):
+        summary = review_links.PARENT_SUMMARY + '\n\nCheck the rows.\n\n' + review_links.PARENT_SUMMARY_END
+        for agent, native in (('claude', claude), ('codex', codex)):
+            with self.subTest(agent=agent):
+                transcript = self.file.parent / f'{agent}.jsonl'
+                self.stopped_review_prompt(agent, 3)
+                self.worker['transcript'] = str(transcript)
+                now = int(time.time())
+                stamp = lambda seconds: datetime.fromtimestamp(now + seconds, timezone.utc).isoformat()
+                with patch.object(injected_prompts.paths, 'CACHE', self.file.parent / 'post-cutover'), \
+                        patch.object(injected_prompts, 'ROOT', self.file.parent / agent), \
+                        own_time(injected_prompts, time_ns=lambda: now * 1_000_000_000):
+                    injected_prompts.initialize()
+                    with injected_prompts.track_send(self.worker, summary, 'review') as delivery:
+                        write_records(transcript, [dict(native('user', delivery), uuid=THREAD, timestamp=stamp(1)),
+                                                   dict(native('assistant', 'Read.'), timestamp=stamp(2))])
+                    self.assertEqual(self.turn_source(self.worker)[0], 'review-summary')
+                    self.request_review()
+                    self.assertTrue(self.links()[0]['paused'])
+                    self.send.assert_not_called()
+                    write_records(transcript, [dict(native('user', summary), uuid=WORKER_THREAD, timestamp=stamp(3)),
+                                               dict(native('assistant', 'Read again.'), timestamp=stamp(4))], 'a')
+                    self.assertEqual(self.turn_source(self.worker)[0], 'user')
+                    self.request_review()
+                    self.assertNotIn('paused', self.links()[0])
+                    self.assertTrue(self.links()[0]['awaiting'])
 
     def test_background_turns_do_not_restart_or_reset_rounds(self):
         # A Monitor event, a finished background shell or a scheduled job is not a new task from Mak.
@@ -5811,7 +5849,7 @@ class ReviewLinksTests(unittest.TestCase):
                     'If HEAD is different or you cannot read it, do not act on this approval. '
                     'Stop and wait for the next review. If HEAD is that hash, do the next step your instructions '
                     'give for an approved review, then stop.', 'Idle')
-                self.assertEqual(review_links.prompt_source(self.send.call_args.args[1]), 'review-feedback')
+                self.assertEqual(review_links._relay_source(self.send.call_args.args[1]), 'review-feedback')
                 link = self.links()[0]
                 self.assertEqual((link['approved_commit'], link['approved_at']), (self.HASH, 1700000000))
                 self.assertEqual(review_links.approved_commits(),
@@ -5827,7 +5865,7 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertIn(f'for commit {commit}:', text)
         self.assertIn(f"HEAD in this tab's worktree (`git rev-parse HEAD`) is {commit}.", text)
         self.assertNotIn('/work/a different tree', text)
-        self.assertEqual(review_links.prompt_source(text), 'review-feedback')
+        self.assertEqual(review_links._relay_source(text), 'review-feedback')
 
     def test_approval_of_uncommitted_work_is_forwarded_but_not_recorded_as_an_approved_commit(self):
         self.bind()
@@ -5841,7 +5879,7 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertIn(f'(%12) for commit {self.HASH} and its uncommitted changes:', text)
         self.assertIn('Tether asks the reviewer to confirm that commit.', text)
         self.assertNotIn('rev-parse HEAD', text)
-        self.assertEqual(review_links.prompt_source(text), 'review-feedback')
+        self.assertEqual(review_links._relay_source(text), 'review-feedback')
         self.assertNotIn('approved_commit', self.links()[0])
         self.assertEqual(review_links.approved_commits(), {})
 
@@ -6068,7 +6106,7 @@ class ReviewLinksTests(unittest.TestCase):
             '“Fix the bug”: 3 approvals in a row could not be verified for the current commit. '
             'Tether could not read the tab\'s commit for the latest approval. Answer in that tab to restart reviews.',
             '%13')
-        self.turn_source = lambda entry: (review_links.prompt_source(text), None, None)
+        self.turn_source = lambda entry: (review_links._relay_source(text), None, None)
         self.observe(**{'%13': 'Working'})
         self.observe(**{'%13': 'Idle'})
         self.assertEqual(self.links()[0]['stale_rounds'], review_links.MAX_ROUNDS)
@@ -6113,6 +6151,7 @@ class ReviewLinksTests(unittest.TestCase):
                         dict(type='USER_INPUT', step_index=1, content=f'<USER_REQUEST>{text}</USER_REQUEST>'),
                         dict(type='AGENT_RESPONSE', step_index=2, content='Done'),
                     ]
+                records[0] = legacy_prompt(records[0])
                 with patch.object(server, 'notification_records', return_value=records):
                     self.assertEqual(server.review_turn_source(entry)[0], 'review-correction')
                     self.turn_source = server.review_turn_source

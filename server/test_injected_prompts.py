@@ -241,11 +241,66 @@ class InjectedPromptTests(unittest.TestCase):
                 entry = self.entry(agent)
                 with injected_prompts.track_send(entry, 'Missing delivery', 'review') as delivery:
                     pass
+                self.append(entry, 'Unrelated prompt')
                 self.now += 7 * 24 * 60 * 60 + 1
-                self.append(entry, delivery)
                 self.assertEqual(self.sources(entry), [None])
                 receipt = injected_prompts._file(entry['transcript'])
                 self.assertEqual(json.loads(receipt.read_text())['receipts'], [])
+                self.append(entry, delivery)
+                self.assertEqual(self.sources(entry), [None, None])
+
+    def test_first_chat_read_eight_days_after_delivery_marks_and_strips_id(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                entry = self.entry(agent)
+                self.send(entry, 'Delivered promptly')
+                self.now += 8 * 24 * 60 * 60
+                marked, = self.messages(entry)
+                self.assertEqual((marked.get('source'), marked['text']), ('tether', 'Delivered promptly'))
+
+    def test_new_send_binds_old_delivery_before_pruning_undelivered_receipts(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                entry = self.entry(agent)
+                with injected_prompts.track_send(entry, 'Never delivered', 'review'):
+                    pass
+                self.send(entry, 'Old delivery')
+                self.now += 8 * 24 * 60 * 60
+                self.send(entry, 'New delivery')
+                receipt = injected_prompts._file(entry['transcript'])
+                saved = json.loads(receipt.read_text())['receipts']
+                self.assertEqual(len(saved), 2)
+                old, new = saved
+                self.assertIn('id', old)
+                self.assertEqual(new['at'], self.now * 1000)
+                self.assertEqual([m['text'] for m in self.messages(entry)], ['Old delivery', 'New delivery'])
+                self.assertEqual(self.sources(entry), ['tether', 'tether'])
+
+    def test_initialize_binds_eight_day_old_delivery_before_pruning(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                entry = self.entry(agent)
+                with injected_prompts.track_send(entry, 'Never delivered', 'review'):
+                    pass
+                self.send(entry, 'Delivered before restart')
+                self.now += 8 * 24 * 60 * 60
+                receipt = injected_prompts._file(entry['transcript'])
+                self.assertTrue(all('id' not in r for r in json.loads(receipt.read_text())['receipts']))
+                injected_prompts.initialize()
+                self.assertTrue(receipt.exists())
+                bound, = json.loads(receipt.read_text())['receipts']
+                self.assertIn('id', bound)
+                marked, = self.messages(entry)
+                self.assertEqual((marked.get('source'), marked['text']), ('tether', 'Delivered before restart'))
+
+    def test_unreadable_transcript_defers_age_pruning(self):
+        self.send(self.chat, 'Old delivery')
+        self.now += 8 * 24 * 60 * 60
+        with patch.object(injected_prompts, '_bind', side_effect=PermissionError):
+            self.assertEqual(injected_prompts.bindings(self.chat), {})
+            self.send(self.chat, 'Another delivery')
+            injected_prompts.initialize()
+        self.assertEqual(self.sources(), ['tether', 'tether'])
 
     def test_binding_does_not_use_the_native_timestamp(self):
         with injected_prompts.track_send(self.chat, 'Clock skew', 'review') as delivery:
@@ -365,6 +420,7 @@ class InjectedPromptTests(unittest.TestCase):
                 self.assertNotIn('source', pasted)
 
     def test_review_source_recognises_tagged_feedback_summary_notice_and_correction(self):
+        injected_prompts.initialize()
         samples = json.loads((FIXTURES / 'other.json').read_text())
         feedback = '[Tether review] Feedback from the reviewer tab (%2):\n\nCheck the rows.\n\nFix what it raises, then stop and wait.'
         correction = (f"{review_links.CORRECTION_HEAD}{'1' * 40} only. This tab is now at {'2' * 40}. "
@@ -395,11 +451,78 @@ class InjectedPromptTests(unittest.TestCase):
                                 },
                             }})
                     self.append(entry, 'Reviewed.', assistant=True)
-                    self.assertEqual(review_links.prompt_source(prefix + delivery), source)
                     self.assertEqual(server.review_turn_source(entry)[0], source)
                     self.assertEqual(notification_priority.classify('finished', agent,
                                      server.notification_records(entry), 'Reviewed.'),
                                      ('important', 'Reviewed.'))
+
+    def test_review_source_requires_a_binding_for_summary_and_feedback_pastes(self):
+        summary = json.loads((FIXTURES / 'other.json').read_text())['review_summary']
+        feedback = ('[Tether review] Feedback from the reviewer tab (%2):\n\nCheck the rows.\n\n'
+                    'Fix what it raises, then stop and wait.')
+        injected_prompts.initialize()
+        for agent in ('claude', 'codex'):
+            for label, text in [('summary', summary), ('feedback', feedback)]:
+                with self.subTest(agent=agent, label=label):
+                    entry = self.entry(agent, self.folder / f'{agent}-paste-{label}.jsonl')
+                    self.append(entry, text)
+                    self.append(entry, 'Read.', assistant=True)
+                    self.assertEqual(server.review_turn_source(entry)[0], 'user')
+                    self.assertEqual(self.sources(entry), [None, None])
+
+    def test_review_source_uses_legacy_rule_only_before_cutover(self):
+        summary = json.loads((FIXTURES / 'other.json').read_text())['review_summary']
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                entry = self.entry(agent)
+                self.append(entry, summary)
+                self.append(entry, 'Read.', assistant=True)
+                self.now += 1
+                injected_prompts.initialize()
+                self.assertEqual(server.review_turn_source(entry)[0], 'review-summary')
+                self.append(entry, summary, timestamp=False)
+                self.append(entry, 'Read again.', assistant=True)
+                self.assertEqual(server.review_turn_source(entry)[0], 'user')
+                (self.folder / 'injected-since.json').unlink()
+
+    def test_review_source_keeps_the_text_rule_where_tether_keeps_no_receipts(self):
+        # track_send records nothing for Antigravity or an unsettled conversation, so a relay there has no receipt.
+        summary = json.loads((FIXTURES / 'other.json').read_text())['review_summary']
+        injected_prompts.initialize()
+        late = {'timestamp': '2099-01-01T00:00:00.000Z', 'created_at': '2099-01-01T00:00:00.000Z', 'uuid': 'u1'}
+        cases = [{'agent': 'antigravity', 'transcript': str(self.folder / 'steps.json')},
+                 dict(self.entry('claude'), pending_conversation=True), dict(self.entry('codex'), ambiguous=True)]
+        for entry in cases:
+            with self.subTest(entry=entry.get('agent')):
+                self.assertEqual(review_links.prompt_source(entry, late, summary), 'review-summary')
+        # Where Tether keeps receipts, the same unbound text after the cutover is the person's.
+        self.assertIsNone(review_links.prompt_source(self.entry('claude'), late, summary))
+
+    def test_review_source_finds_codex_binding_at_nonzero_offset_in_both_tails(self):
+        summary = json.loads((FIXTURES / 'other.json').read_text())['review_summary']
+        injected_prompts.initialize()
+        entry = self.entry('codex')
+        self.append(entry, 'An earlier task é ' + 'x' * server.NOTIFICATION_TAIL_BYTES)
+        self.send(entry, summary)
+        self.append(entry, 'Short reply.', assistant=True)
+        self.assertEqual(server.review_turn_source(entry)[0], 'review-summary')
+        self.append(entry, 'x' * server.NOTIFICATION_TAIL_BYTES, assistant=True)
+        self.append(entry, 'Final reply.', assistant=True)
+        self.assertEqual(server.review_turn_source(entry)[0], 'review-summary')
+
+    def test_review_source_keeps_bound_status_and_rules_out_of_user_turns(self):
+        samples = json.loads((FIXTURES / 'other.json').read_text())
+        injected_prompts.initialize()
+        for agent in ('claude', 'codex'):
+            entry = self.entry(agent)
+            for kind, text in [('status', '[Tether status] An update'), ('rules', samples['coordinator_rules'])]:
+                with self.subTest(agent=agent, kind=kind):
+                    self.send(entry, text, kind, tabs=[])
+                    self.append(entry, 'Read.', assistant=True)
+                    self.assertEqual(server.review_turn_source(entry)[0], 'tether')
+                    self.append(entry, text)
+                    self.append(entry, 'Read again.', assistant=True)
+                    self.assertEqual(server.review_turn_source(entry)[0], 'user')
 
     def test_tagged_review_request_still_starts_a_claude_turn_and_gets_its_reply(self):
         request_id = '0a1b2c3d'

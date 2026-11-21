@@ -1223,7 +1223,7 @@ button.live-chip:active { background: var(--line); }
 .status-rows { margin-top: 4px; }
 .status-when { display: none; }
 /* A phone or a narrow pane: short words, no separators, and the time moves inside the open card, so the line stays one line. */
-@container (max-width: 520px) {
+@container (max-width: 680px) {
   .status-summary { gap: 0 10px; }
   .status-summary .long { display: none; }
   .status-summary .short { display: inline; }

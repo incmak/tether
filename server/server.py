@@ -289,10 +289,11 @@ REVIEW_SOURCE_TAIL_BYTES = 8 * 1024 * 1024
 def review_turn_source(entry):
     """Return the source and transcript times of the latest turn for the review watcher."""
     def classify(records, **options):
-        return notification_priority.turn_source(entry.get('agent'), records, identify=review_links.prompt_source,
+        identify = partial(review_links.prompt_source, entry)
+        return notification_priority.turn_source(entry.get('agent'), records, identify=identify,
                                                  distinguish_missing=True, with_time=True, **options)
 
-    result = classify(notification_records(entry))
+    result = classify(notification_records(entry, with_offset=True))
     if entry.get('agent') == 'antigravity':
         if result[0] in ('user', 'unknown', 'unknown-background'):
             # Exports rewrite old steps out of order, so a tail can bring back an older prompt.
@@ -305,7 +306,7 @@ def review_turn_source(entry):
     elif result[0] in ('unknown', 'unknown-background'):
         # latest_turn: a prompt after the latest reply starts a turn with no reply yet.
         # The wider tail must not credit an earlier turn's prompt to it.
-        result = classify(_transcript_tail_records(entry, REVIEW_SOURCE_TAIL_BYTES), latest_turn=True)
+        result = classify(_transcript_tail_records(entry, REVIEW_SOURCE_TAIL_BYTES, with_offset=True), latest_turn=True)
     return result
 
 
@@ -1339,12 +1340,12 @@ def codex_metrics(config, reported_usage, model='', effort='', credits=None, *, 
 NOTIFICATION_TAIL_BYTES = 256 * 1024
 
 
-def notification_records(entry):
+def notification_records(entry, *, with_offset=False):
     """Read a bounded tail without tmux or history cache locks."""
-    return _transcript_tail_records(entry, NOTIFICATION_TAIL_BYTES)
+    return _transcript_tail_records(entry, NOTIFICATION_TAIL_BYTES, with_offset=with_offset)
 
 
-def _transcript_tail_records(entry, tail_bytes, *, whole=False):
+def _transcript_tail_records(entry, tail_bytes, *, whole=False, with_offset=False):
     """Read the last tail_bytes. With whole, also return whether the read started at the file start."""
     records, start = [], None
     if entry.get('agent') in ('claude', 'codex', 'antigravity') and not entry.get('ambiguous'):
@@ -1354,15 +1355,20 @@ def _transcript_tail_records(entry, tail_bytes, *, whole=False):
                 start = max(0, size - tail_bytes)
                 stream.seek(start)
                 tail = stream.read(tail_bytes)
+            offset = start
             if start:
-                tail = tail.partition(b'\n')[2]  # discard a record clipped by the byte limit
-            for line in tail.splitlines():
+                prefix, newline, tail = tail.partition(b'\n')  # discard a record clipped by the byte limit
+                offset += len(prefix) + len(newline)
+            for line in tail.splitlines(keepends=True):
                 try:
                     record = json.loads(line)
                 except (ValueError, UnicodeError):
-                    continue
+                    record = None
                 if isinstance(record, dict):
+                    if with_offset and entry['agent'] == 'codex':
+                        record['_offset'] = offset
                     records.append(record)
+                offset += len(line)
         except (OSError, KeyError, ValueError):
             records, start = [], None
     return (records, start == 0) if whole else records

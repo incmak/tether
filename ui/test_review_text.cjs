@@ -122,18 +122,18 @@ assert.deepEqual(plain(review.parseReview(approved('', `Do ${approvedNext}`))), 
 })
 const dirty = approved(` for commit ${HASH} and its uncommitted changes`,
   'It covered uncommitted changes, so no commit is approved yet: commit the work '
-  + `in this turn, and Tether asks the reviewer to confirm that commit. Do ${approvedNext}`)
+  + `in this turn, and Tether asks the reviewer to confirm that commit. Do ${approvedNext}`, `APPROVED ${HASH}`)
 assert.deepEqual(plain(review.parseReview(dirty)), {
-  kind: 'approved', feedback: true, tab: '%9', commit: HASH, uncommitted: true, reply: 'APPROVED',
+  kind: 'approved', feedback: true, tab: '%9', commit: HASH, uncommitted: true, reply: `APPROVED ${HASH}`,
 })
 const sha256 = 'a'.repeat(64)
 const clean = approved(` for commit ${sha256}`, `The approval is for commit ${sha256} only. Before you push, deploy or merge, `
   + `check that HEAD in '/work/my tree' (\`git -C '/work/my tree' rev-parse HEAD\`) is ${sha256}. `
   + `If HEAD is different or you cannot read it, do not act on this approval. Stop and wait for the next review. If HEAD is that hash, do ${approvedNext}`,
-  'APPROVED\n\nThe review is complete. This line is part of the reviewer’s reply.')
+  `APPROVED ${sha256}\n\nThe review is complete. This line is part of the reviewer’s reply.`)
 assert.deepEqual(plain(review.parseReview(clean)), {
   kind: 'approved', feedback: true, tab: '%9', commit: sha256,
-  reply: 'APPROVED\n\nThe review is complete. This line is part of the reviewer’s reply.',
+  reply: `APPROVED ${sha256}\n\nThe review is complete. This line is part of the reviewer’s reply.`,
 })
 assert.equal(review.parseReview(clean.replace(`is ${sha256}.`, `is ${HASH}.`)), null)
 assert.equal(review.parseReview(dirty.replace('no commit is approved yet', 'the commit is approved')), null)

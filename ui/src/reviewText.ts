@@ -37,8 +37,11 @@ const APPROVED = new RegExp(String.raw`^\[Tether review\] Approved by the review
   + String.raw`(?: for commit (${HASH})( and its uncommitted changes)?)?:\n\n`)
 // review_links approves a reply when raw.strip().upper().startswith('APPROVED').
 const APPROVED_REPLY = /^APPROVED/i
-// Match NAMED in review_links.py. Hashes elsewhere in the reply do not name the approved commit.
-const NAMED_COMMIT = /^APPROVED[\s:,.(`*\u2013\u2014-]*(?:for\s+)?(?:commit\s+)?[`*]*([0-9a-f]{7,64})\b/i
+const LEGACY_NAMED_COMMIT = /^APPROVED[\s:,.(`*\u2013\u2014-]*(?:for\s+)?(?:commit\s+)?[`*]*([0-9a-f]{7,64})\b/i
+// Match Python's strip and NAMED in review_links.py, including Unicode whitespace and word boundaries.
+const SPACE = String.raw`\p{White_Space}\x1c-\x1f`
+const NAMED_COMMIT = new RegExp(String.raw`^[${SPACE}]*APPROVED[${SPACE}:,.(\x60*\u2013\u2014-]*`
+  + String.raw`(?:for[${SPACE}]+)?(?:comm[iİı]t[${SPACE}]+)?[\x60*]*([0-9a-f]{7,64})(?![\p{L}\p{N}_])`, 'iu')
 const APPROVED_MARK = '\n\nThe review is complete. '
 const APPROVED_END = 'the next step your instructions give for an approved review, then stop.'
 const APPROVED_DIRTY = 'It covered uncommitted changes, so no commit is approved yet: commit the work '
@@ -95,13 +98,17 @@ export function parseReview(text: string): Review | null {
     const end = message.lastIndexOf(APPROVED_MARK)
     if (end < approved[0].length) return null
     const footer = message.slice(end + APPROVED_MARK.length)
-    const reply = message.slice(approved[0].length, end).trim()
-    if (!APPROVED_REPLY.test(reply)) return null
+    const rawReply = message.slice(approved[0].length, end)
+    const reply = rawReply.trim()
     // Older relays used a 12-digit hash with the same footer as an unbound approval.
     const legacy = commit?.length === 12
-    if (legacy && dirty) return null
-    const named = NAMED_COMMIT.exec(reply)?.[1].toLowerCase()
-    if (commit && named && (legacy ? !named.startsWith(commit) : named !== commit)) return null
+    if (commit && !legacy) {
+      if (NAMED_COMMIT.exec(rawReply)?.[1].toLowerCase() !== commit) return null
+    } else {
+      if (!APPROVED_REPLY.test(reply) || legacy && dirty) return null
+      const named = LEGACY_NAMED_COMMIT.exec(reply)?.[1].toLowerCase()
+      if (legacy && named && !named.startsWith(commit)) return null
+    }
     const matches = commit && !legacy && !dirty ? APPROVED_CLEAN.exec(footer)?.[1] === commit
       : footer === `${dirty ? APPROVED_DIRTY : ''}Do ${APPROVED_END}`
     if (!matches) return null

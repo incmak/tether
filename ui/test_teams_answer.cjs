@@ -82,6 +82,19 @@ for (const approval of [
   assert.equal(parseReview(approval), null, 'the approval names a different commit')
   assert(render(approval, { source: 'tether', prompt: 'review' }).includes('class="user-message"'))
 }
+for (const [reply, expected] of [
+  ['APPROVED. The regression tests pass.', null],
+  [`APPROVED.\n\nI checked ${HASH}.`, null],
+  [`APPROVED ${HASH.slice(0, 39)}`, null],
+  [`APPROVED ${HASH}é`, null],
+  [`aPpRoVeD\u0085for COMMIT **${HASH.toUpperCase()}**`, 'approved'],
+]) {
+  const approval = approve(` for commit ${HASH}`, reply, clean)
+  assert.equal(parseReview(approval)?.kind ?? null, expected, reply)
+  if (expected === null) assert(render(approval, { source: 'tether', prompt: 'review' }).includes('class="user-message"'))
+}
+assert.equal(parseReview(approve(` for commit ${HASH} and its uncommitted changes`, 'APPROVED', dirty)), null)
+assert.equal(parseReview(approve(` for commit ${HASH.slice(0, 12)}`, 'APPROVED', unbound))?.kind, 'approved')
 
 const samples = JSON.parse(readFileSync('../server/fixtures/injected_prompts/other.json', 'utf8'))
 const wrongScript = samples.review_notice.replaceAll('/agent_tab_cli.py', '/sample.py')

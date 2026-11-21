@@ -49,7 +49,7 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
         return (source, _timestamp(record) if record is not None else None, finished_at) if with_time else source
 
     def prompt_source(record, text, background=False):
-        return result('background' if background else (identify(text) if identify else None) or 'user', record)
+        return result('background' if background else (identify(record, text) if identify else None) or 'user', record)
 
     if agent == 'antigravity':
         # Exports update old steps out of order. Keep each step's newest version.

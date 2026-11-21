@@ -171,8 +171,8 @@ async function main() {
       const toggle = card.locator('.status-toggle')
       const summary = await toggle.innerText()
       check(`${at} starts folded`, await toggle.getAttribute('aria-expanded') === 'false' && !(await card.locator('ul').isVisible()))
-      check(`${at} folded line names the count`, summary.includes(width < 600 ? '4 updates' : 'Tether status · 4 tab updates'), summary)
-      check(`${at} folded line says what waits`, (width < 600 ? /1\s*waits/ : /1\s*waits on you/).test(summary), summary)
+      check(`${at} folded line names the count`, (/Tether status/.test(summary) ? summary.includes('Tether status · 4 tab updates') : summary.includes('4 updates')), summary)
+      check(`${at} folded line says what waits`, (/Tether status/.test(summary) ? /1\s*waits on you/ : /1\s*waits/).test(summary), summary)
       check(`${at} folded line has the attention style`, await card.evaluate(node => node.classList.contains('has-needs'))
         && await toggle.evaluate(node => getComputedStyle(node).backgroundColor !== 'rgba(0, 0, 0, 0)'))
       // One line at every width: the summary is a single row of text, and nothing in it is cut off.
@@ -276,6 +276,19 @@ async function main() {
       await live('section.chat-panel[data-pane="%18"]').waitFor()
       check(`${at} the link opens the tab`, true)
     }
+
+    // Every width, not only the shot widths: the folded line never clips, in its long or its short form.
+    await page.setViewportSize({ width: 320, height: 720 })
+    await open()
+    const clipped = []
+    for (let width = 320; width <= 1600; width += 10) {
+      await page.setViewportSize({ width, height: 900 })
+      const fit = await card.locator('.status-summary').evaluate(node => ({
+        cut: node.scrollWidth > node.clientWidth + 1,
+        tall: node.getBoundingClientRect().height >= parseFloat(getComputedStyle(node).lineHeight) * 1.5 }))
+      if (fit.cut || fit.tall) clipped.push(width)
+    }
+    check('the folded line fits from 320 to 1600 px', clipped.length === 0, clipped.join(', '))
     check('no page errors', pageErrors.length === 0, pageErrors.join('; '))
     check('no writes beyond prefs', writes.every(item => /prefs|ui-usage|seen|read/.test(item)), writes.join(', '))
   } catch (error) {

@@ -99,7 +99,7 @@ class ClassifierTests(unittest.TestCase):
 
     def test_identified_prompt_survives_a_blocked_stop_hook(self):
         hook = {'type': 'attachment', 'attachment': {'type': 'hook_blocking_error', 'blockingError': 'Check failed'}}
-        identify = lambda text: 'review-summary' if text == 'Summary prompt' else None
+        identify = lambda record, text: 'review-summary' if text == 'Summary prompt' else None
         for prompt, expected in (('Summary prompt', 'review-summary'), ('Fix it', 'user')):
             with self.subTest(prompt=prompt):
                 records = [claude('user', prompt), ASSISTANT, hook, ASSISTANT]

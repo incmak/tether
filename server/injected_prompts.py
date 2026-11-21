@@ -31,6 +31,11 @@ def _transcript(entry):
     return Path(os.path.abspath(path))
 
 
+def keeps_receipts(entry):
+    """Whether track_send records a receipt for this tab. Elsewhere only the text can say who sent a prompt."""
+    return _transcript(entry) is not None
+
+
 def _file(path):
     return ROOT / (hashlib.sha256(os.fsencode(path)).hexdigest() + '.json')
 
@@ -78,17 +83,20 @@ def initialize():
                 if not isinstance(path, str):
                     continue
                 receipts = data.get('receipts', [])
-                kept = _live_receipts(receipts, now)
+                path = Path(path)
                 try:
-                    Path(path).stat()
+                    path.stat()
                 except FileNotFoundError:
                     # A send can precede creation of its transcript. Keep its zero anchor.
-                    kept = [r for r in kept if 'id' not in r and r['file'] is None]
+                    kept = [r for r in receipts if 'id' not in r and r.get('delivery_id') and r['file'] is None]
+                    changed = len(kept) != len(receipts)
                 except OSError:
                     continue
+                else:
+                    kept, _, changed = _resolve(path, None, receipts, now)
                 if not kept:
                     file.unlink(missing_ok=True)
-                elif len(kept) != len(receipts):
+                elif changed:
                     _write(file, dict(data, receipts=kept))
     except OSError as exc:
         logging.warning('Could not initialize Tether prompt receipts: %s', exc.strerror)
@@ -105,6 +113,16 @@ def timestamp_ms(value):
     except (ValueError, OverflowError, OSError):
         pass
     return None
+
+
+def cutover_ms():
+    since = _read(paths.CACHE / 'injected-since.json').get('since_ms')
+    return since if type(since) is int else None
+
+
+def is_legacy(timestamp, cutover):
+    stamp = timestamp_ms(timestamp) if cutover is not None else None
+    return stamp is not None and stamp < cutover
 
 
 def anchor(entry):
@@ -140,16 +158,12 @@ def strip_delivery_id(text):
     return _split_delivery(text)[0]
 
 
-def _live_receipts(receipts, now):
-    return [r for r in receipts if 'id' in r or r.get('delivery_id') and now - r['at'] <= PENDING_MAX_AGE_MS]
-
-
-def _record(path, text, kind, *, before, delivery_id, tabs):
+def _record(path, text, kind, *, agent, before, delivery_id, tabs):
     file = _file(path)
     metadata = {'prompt': kind, **({'tabs': tabs} if kind == 'status' else {})}
     with _lock:
         try:
-            receipts = _live_receipts(_read(file).get('receipts', []), before['at'])
+            receipts, _, _ = _resolve(path, agent, _read(file).get('receipts', []), before['at'])
             receipts.append(dict(before, delivery_id=delivery_id, hash=_hash(_text(text)), metadata=metadata))
             _write(file, {'transcript': str(path), 'receipts': receipts})
         except OSError as exc:
@@ -170,7 +184,7 @@ def track_send(entry, text, kind, *, tabs=None):
             return
         delivery_id = secrets.token_hex(8)
         yield f'{text}\n\n[Tether id {delivery_id}]'
-        _record(path, text, kind, before=before, delivery_id=delivery_id, tabs=tabs)
+        _record(path, text, kind, agent=entry['agent'], before=before, delivery_id=delivery_id, tabs=tabs)
 
 
 def revision(entry):
@@ -198,6 +212,8 @@ def codex_parts(record):
 
 
 def _candidate(agent, offset, record):
+    if agent is None:  # Existing receipt files store a path but no agent.
+        agent = 'codex' if record.get('type') == 'response_item' else 'claude'
     if agent == 'codex':
         return codex_id(offset, record.get('timestamp')), codex_parts(record)
     identifier = record.get('uuid')
@@ -244,6 +260,19 @@ def _bind(path, agent, pending, bound):
                 continue
 
 
+def _resolve(path, agent, receipts, now):
+    bound = {r['id']: r for r in receipts if 'id' in r}
+    pending = [r for r in receipts if 'id' not in r and r.get('delivery_id')]
+    previous = len(bound)
+    if pending:
+        try:
+            _bind(path, agent, pending, bound)
+        except OSError:
+            return receipts, bound, len(bound) != previous  # An unread delivery may still bind later.
+    kept = [r for r in receipts if 'id' in r or r.get('delivery_id') and now - r['at'] <= PENDING_MAX_AGE_MS]
+    return kept, bound, len(kept) != len(receipts) or len(bound) != previous
+
+
 def bindings(entry):
     """Return receipts by native record id, binding a successful send at most once."""
     path = _transcript(entry)
@@ -252,16 +281,8 @@ def bindings(entry):
     file = _file(path)
     with _send_lock(path), _lock:
         data = _read(file)
-        receipts = data.get('receipts', [])
-        kept = _live_receipts(receipts, time.time_ns() // 1_000_000)
-        bound = {r['id']: r for r in kept if 'id' in r}
-        pending = [r for r in kept if 'id' not in r]
-        if pending:
-            try:
-                _bind(path, entry['agent'], pending, bound)
-            except OSError:
-                pass
-        if len(kept) != len(receipts) or any('id' in r for r in pending):
+        kept, bound, changed = _resolve(path, entry['agent'], data.get('receipts', []), time.time_ns() // 1_000_000)
+        if changed:
             try:
                 _write(file, dict(data, receipts=kept))
             except OSError as exc:
@@ -272,8 +293,8 @@ def bindings(entry):
 def mark(entry, messages):
     """Decorate user records without changing the cached transcript."""
     bound = bindings(entry)
-    cutover = _read(paths.CACHE / 'injected-since.json').get('since_ms')
-    if not bound and type(cutover) is not int and not any('_record_id' in message for message in messages):
+    cutover = cutover_ms()
+    if not bound and cutover is None and not any('_record_id' in message for message in messages):
         return messages
     result = []
     for message in messages:
@@ -282,8 +303,7 @@ def mark(entry, messages):
             message = {key: value for key, value in message.items() if key != '_record_id'}
         if message.get('role') == 'user' and not message.get('kind'):
             match = bound.get(identifier)
-            stamp = timestamp_ms(message.get('time')) if type(cutover) is int else None
-            if stamp is not None and stamp < cutover:
+            if is_legacy(message.get('time'), cutover):
                 message = dict(message, legacy=True)
             if match:
                 text = _text(message['text'])

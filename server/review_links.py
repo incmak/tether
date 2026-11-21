@@ -1230,7 +1230,23 @@ CORRECTION_REQUESTED = 'Tether asked the reviewer to review the current commit.'
 CORRECTION_WAIT = 'Wait for the next review.'
 
 
-def prompt_source(text):
+def prompt_source(entry, record, text):
+    """Classify a native prompt with the same provenance and cutover as chat."""
+    if not injected_prompts.keeps_receipts(entry):
+        return _relay_source(text)  # Antigravity or an unsettled conversation: no receipt can exist
+    identifier = record.get('uuid') if entry.get('agent') == 'claude' else None
+    if entry.get('agent') == 'codex' and type(record.get('_offset')) is int:
+        identifier = injected_prompts.codex_id(record['_offset'], record.get('timestamp'))
+    receipt = injected_prompts.bindings(entry).get(identifier) if isinstance(identifier, str) else None
+    if receipt is not None:
+        return (_relay_source(text) if receipt['metadata']['prompt'] == 'review' else None) or 'tether'
+    timestamp = record.get('created_at' if entry.get('agent') == 'antigravity' else 'timestamp')
+    if injected_prompts.is_legacy(timestamp, injected_prompts.cutover_ms()):
+        return _relay_source(text)
+    return None
+
+
+def _relay_source(text):
     text = injected_prompts.strip_delivery_id(shell_log.strip_folder_note(continuations.unwrap(text)))
     if text.startswith(PARENT_SUMMARY) and text.rstrip().endswith(PARENT_SUMMARY_END):
         return 'review-summary'
