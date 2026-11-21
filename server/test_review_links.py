@@ -1,6 +1,7 @@
 """Watcher transitions use isolated stores and mocked sends, never live panes."""
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from contextlib import nullcontext
+from copy import deepcopy
 import hashlib
 import importlib.util
 import io
@@ -100,6 +101,10 @@ class ReviewLinksTests(unittest.TestCase):
         injected_prompts._write(receipts / 'injected-since.json', {'since_ms': 4_102_444_800_000})
         self.enterContext(patch.object(review_links, '_last_sent', {}))
         self.enterContext(patch.object(review_links, '_feedback_in_flight', {}))
+        # B368: the repository of each review folder. Fixture folders are not real checkouts.
+        self.repos = {}
+        self.enterContext(patch.object(review_links.review_scope, 'repo_identity',
+                                       side_effect=lambda folder: deepcopy(self.repos.get(folder))))
         self.clock = self.enterContext(own_time(review_links, monotonic=Mock(return_value=1000)))
         transcript = Path(temporary.name) / 'worker.jsonl'
         transcript.touch()
@@ -5974,6 +5979,7 @@ class ReviewLinksTests(unittest.TestCase):
 
     HASH = '1f0e' * 10
     NEXT = '2a9d' * 10
+    REPO = {'path': '/srv/project/.git', 'dev': 2049, 'ino': 77}
 
     def bind(self, commit=None, *, dirty=False, rules=True, mark='worktree fingerprint', **scope_fields):
         """The worker's folder is at `commit`. The request and the approval check read it from here."""
@@ -6135,6 +6141,7 @@ class ReviewLinksTests(unittest.TestCase):
                 self.add()
                 self.send.reset_mock()
                 self.bind()
+                self.repos['/work/my tree'] = self.REPO
                 self.request_review()
                 with patch.object(review_links.time, 'time', return_value=1700000000.9):
                     self.finish_review(reply)
@@ -6151,7 +6158,8 @@ class ReviewLinksTests(unittest.TestCase):
                 self.assertEqual((link['approved_commit'], link['approved_at'], link['approved_folder']),
                                  (self.HASH, 1700000000, '/work/my tree'))
                 self.assertEqual(review_links.approved_commits(),
-                                 {'%13': {'%12': {'commit': self.HASH, 'at': 1700000000, 'folder': '/work/my tree'}}})
+                                 {'%13': {'%12': {'commit': self.HASH, 'at': 1700000000, 'folder': '/work/my tree',
+                                                  'repo': self.REPO}}})
 
     def test_clean_approval_uses_the_worktree_when_the_bound_folder_is_missing(self):
         commit = '1f0e' * 16
@@ -6177,7 +6185,8 @@ class ReviewLinksTests(unittest.TestCase):
         self.request_review()
         self.scope = lambda entry: {'commit': self.NEXT, 'dirty': False, 'mark': 'worktree fingerprint'}
         self.finish_review(f'APPROVED {self.NEXT}')
-        self.assertEqual(review_links.approved_commits()['%13']['%12'], {'commit': self.NEXT, 'at': ANY, 'folder': None})
+        self.assertEqual(review_links.approved_commits()['%13']['%12'],
+                         {'commit': self.NEXT, 'at': ANY, 'folder': None, 'repo': None})
 
     def test_approved_folder_is_saved_only_when_the_clean_read_names_the_requested_worktree(self):
         self.bind()
@@ -6193,9 +6202,48 @@ class ReviewLinksTests(unittest.TestCase):
             with self.subTest(stored=stored):
                 self.file.write_text(json.dumps([dict(link, **stored)]))
                 self.assertEqual(review_links.approved_commits(), {'%13': {'%12': {'commit': 'a' * 40, 'at': 5,
-                                                                                   'folder': None}}})
+                                                                                   'folder': None, 'repo': None}}})
         self.file.write_text(json.dumps([dict(link, approved_folder='/work/b')]))
         self.assertEqual(review_links.approved_commits()['%13']['%12']['folder'], '/work/b')
+        # A stored repository identity must have exactly path, dev and ino, with integer dev and ino.
+        for repo in ({'path': '/srv/a/.git'}, {**self.REPO, 'dev': '1'}, {**self.REPO, 'ino': True},
+                     {**self.REPO, 'extra': 1}, ['/srv/a/.git', 1, 2], 'x'):
+            with self.subTest(repo=repo):
+                self.file.write_text(json.dumps([dict(link, approved_folder='/work/b', approved_repo=repo)]))
+                self.assertIsNone(review_links.approved_commits()['%13']['%12']['repo'])
+        self.file.write_text(json.dumps([dict(link, approved_folder='/work/b', approved_repo=self.REPO)]))
+        self.assertEqual(review_links.approved_commits()['%13']['%12']['repo'], self.REPO)
+
+    def test_approved_repo_is_the_repository_of_the_request_read_again_at_the_approval(self):
+        self.bind()
+        self.repos['/work/my tree'] = self.REPO
+        self.request_review()
+        self.assertEqual(self.links()[0]['review_repo'], self.REPO)
+        self.finish_review(f'APPROVED {self.HASH}')
+        self.assertEqual(json.loads(self.file.read_text())[0]['approved_repo'], self.REPO)
+        self.assertEqual(review_links.approved_commits()['%13']['%12']['repo'], self.REPO)
+        # Another checkout takes the folder path during the review: same path, another repository.
+        for other in ({**self.REPO, 'ino': self.REPO['ino'] + 1}, {**self.REPO, 'path': '/srv/b/.git'}, None):
+            with self.subTest(other=other):
+                self.bind(self.NEXT)
+                self.repos['/work/my tree'] = self.REPO
+                self.request_review()
+                self.repos['/work/my tree'] = other
+                self.scope = lambda entry: {'commit': self.NEXT, 'dirty': False, 'folder': '/work/my tree',
+                                            'mark': 'worktree fingerprint'}
+                self.finish_review(f'APPROVED {self.NEXT}')
+                approval = review_links.approved_commits()['%13']['%12']
+                self.assertEqual((approval['commit'], approval['folder'], approval['repo']),
+                                 (self.NEXT, '/work/my tree', None))
+                self.assertNotIn('approved_repo', self.links()[0])
+
+    def test_a_request_whose_repository_cannot_be_read_saves_no_repository(self):
+        self.bind()
+        self.request_review()  # self.repos has no entry: the identity is unreadable
+        self.assertNotIn('review_repo', self.links()[0])
+        self.repos['/work/my tree'] = self.REPO  # readable later does not count: the request did not see it
+        self.finish_review(f'APPROVED {self.HASH}')
+        self.assertIsNone(review_links.approved_commits()['%13']['%12']['repo'])
 
     def test_approval_of_uncommitted_work_is_forwarded_but_not_recorded_as_an_approved_commit(self):
         self.bind()

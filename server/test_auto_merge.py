@@ -6,6 +6,7 @@ import json
 import os
 import re
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -13,6 +14,7 @@ import unittest
 from unittest import mock
 
 import auto_merge
+import review_scope
 import paths
 
 RULES = {'version': 1, 'areas': [
@@ -116,11 +118,16 @@ class Base(unittest.TestCase):
     def failed(self, decision):
         return [item['key'] for item in decision['checks'] if not item['ok']]
 
+    def repo_of(self, folder=None):
+        """The repository identity a review of `folder` saves (review_scope.repo_identity)."""
+        return review_scope.repo_identity(str(folder or self.work))
+
     def job(self, head, at='now'):
         at = int(auto_merge.time.time()) + 5 if at == 'now' else at
-        return {'folder': str(self.work), 'tab': str(self.work), 'commit': head, 'approved_at': at,
+        repo = self.repo_of()
+        return {'folder': str(self.work), 'repo': repo, 'tab': str(self.work), 'commit': head, 'approved_at': at,
                 'worker': '%1', 'name': 'Worker', 'reviewer': '%2', 'reviewer_agent': 'codex',
-                'current': lambda: {'%1': {'%2': {'commit': head, 'at': at, 'folder': str(self.work)}}}}
+                'current': lambda: {'%1': {'%2': {'commit': head, 'at': at, 'folder': str(self.work), 'repo': repo}}}}
 
     def origin_main(self):
         return self.git(self.origin, 'rev-parse', 'main')
@@ -1963,13 +1970,16 @@ class CrossWorktree(Base):
     def test_an_approval_without_a_folder_is_refused_without_a_guess(self):
         head = self.change()
         before = self.origin_main()
-        with mock.patch.object(auto_merge, 'evaluate') as evaluate:
-            decision = auto_merge.process({**self.job(head), 'folder': None})
-        evaluate.assert_not_called()
-        self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['approval']))
-        self.assertIn('does not name the folder it reviewed', decision['checks'][0]['text'])
-        self.assertEqual((decision['root'], decision['head']), (None, head))
-        self.assertEqual(self.origin_main(), before)
+        # No folder, or a folder with no repository identity (the request could not read it).
+        for missing in ({'folder': None}, {'repo': None}):
+            with self.subTest(missing=missing):
+                with mock.patch.object(auto_merge, 'evaluate') as evaluate:
+                    decision = auto_merge.process({**self.job(head), **missing})
+                evaluate.assert_not_called()
+                self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['approval']))
+                self.assertIn('does not name the folder and repository it reviewed', decision['checks'][0]['text'])
+                self.assertEqual((decision['root'], decision['head']), (None, head))
+                self.assertEqual(self.origin_main(), before)
 
     def test_a_gone_review_folder_is_refused(self):
         head = self.change()
@@ -2003,6 +2013,64 @@ class CrossWorktree(Base):
             auto_merge.state()
         self.assertNotIn(str(self.root / 'clone-wt'), [call.args[0] for call in trust.call_args_list])
 
+    def clone_at(self, head, where):
+        """A clean checkout of another repository (a clone of the same origin) at `head` on branch work."""
+        self.git(self.root, 'clone', '-q', str(self.origin), str(where))
+        self.git(where, 'fetch', '-q', str(self.repo), 'work')
+        self.git(where, 'checkout', '-q', '-b', 'work', head)
+        return where
+
+    def test_a_checkout_of_another_repository_at_the_reviewed_path_is_refused_before_any_fetch(self):
+        # Round-3 review case: the tab and the review share one path. After the approval, another repository's clean
+        # checkout at the same commit takes that path. Every live check agrees; only the saved identity differs.
+        head = self.change()
+        job = self.job(head)
+        self.work.rename(self.work.with_name('work-aside'))
+        self.clone_at(head, self.root / 'b-repo').rename(self.work)
+        with mock.patch.object(auto_merge, '_fetch_target') as fetch:
+            decision = auto_merge.process(job)
+        fetch.assert_not_called()
+        self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['git']))
+        self.assertIn('in another repository than the one the review saw', decision['checks'][0]['text'])
+
+    def test_a_repository_replaced_at_the_same_git_path_is_refused(self):
+        # The common Git directory keeps its path but is another directory (here a copy): its inode differs.
+        head = self.change()
+        job = {**self.job(head), 'tab': str(self.repo)}
+        common = self.repo / '.git'
+        common.rename(self.repo / '.git-aside')
+        shutil.copytree(self.repo / '.git-aside', common, symlinks=True)
+        self.assertEqual(self.repo_of()['path'], job['repo']['path'])
+        with mock.patch.object(auto_merge, '_fetch_target') as fetch:
+            decision = auto_merge.process(job)
+        fetch.assert_not_called()
+        self.assertIn('in another repository than the one the review saw', decision['checks'][0]['text'])
+
+    def test_a_repository_replaced_after_the_decision_stops_the_push(self):
+        self.enforce()
+        head = self.change()
+        before = self.origin_main()
+        job = {**self.job(head), 'tab': str(self.repo)}
+        real = auto_merge._object_git
+        steps = []
+
+        def object_git(scratch, *args, **kwargs):
+            result = real(scratch, *args, **kwargs)
+            steps.append(args[0])
+            if args[0] == 'commit-tree':
+                common = self.repo / '.git'
+                common.rename(self.repo / '.git-aside')
+                shutil.copytree(self.repo / '.git-aside', common, symlinks=True)
+            return result
+
+        with mock.patch.object(auto_merge, '_object_git', side_effect=object_git):
+            decision = auto_merge.process(job)
+        self.assertEqual(decision['outcome'], 'failed')
+        self.assertIn('in another repository than the one the review saw', decision['error'])
+        self.assertIn('commit-tree', steps)
+        self.assertNotIn('push', steps)
+        self.assertEqual(self.origin_main(), before)
+
     def link_to(self, link, target):
         tmp = link.with_name(link.name + '.tmp')
         tmp.symlink_to(target)
@@ -2016,7 +2084,7 @@ class CrossWorktree(Base):
         with mock.patch.object(auto_merge, 'evaluate', side_effect=real) as check:
             decision = auto_merge.process({**self.job(head), 'folder': str(link), 'tab': str(self.repo)})
         self.assertEqual((decision['outcome'], self.failed(decision)), ('would_merge', []))
-        _, plan = real(str(link), head, tab=str(self.repo))
+        _, plan = real(str(link), head, tab=str(self.repo), repo=self.repo_of())
         self.assertEqual(plan['folder'], str(self.work))
         check.assert_called_once()
 
@@ -2054,7 +2122,7 @@ class CrossWorktree(Base):
                 self.enforce()
                 head = self.change(text=f'{moment}\n')
                 before = self.origin_main()
-                live = {'commit': head, 'at': None, 'folder': str(self.work)}
+                live = {'commit': head, 'at': None, 'folder': str(self.work), 'repo': self.repo_of()}
                 job = {**self.job(head), 'tab': str(self.repo), 'current': lambda: {'%1': {'%2': dict(live)}}}
                 live['at'] = job['approved_at']
                 real, real_helpers = auto_merge._object_git, auto_merge._credential_helpers
@@ -2085,16 +2153,17 @@ class CrossWorktree(Base):
 class Watcher(Base):
     def test_each_approval_is_queued_once_with_the_reviewer_agent(self):
         entries = [{'id': '%1', 'name': 'Worker', 'agent': 'claude'}, {'id': '%2', 'agent': 'codex'}]
-        approvals = {'%1': {'%2': {'commit': 'a' * 40, 'at': 5, 'folder': str(self.work)}},
+        repo = self.repo_of()
+        approvals = {'%1': {'%2': {'commit': 'a' * 40, 'at': 5, 'folder': str(self.work), 'repo': repo}},
                      '%9': {'%2': {'commit': 'b' * 40, 'at': 5}},
                      '%2': {'%1': {'commit': 'short', 'at': 5}}}
         def current():
             return approvals
 
         jobs = auto_merge.observe(entries, approvals, lambda entry: str(self.repo), start=False, current=current)
-        self.assertEqual(jobs, [{'folder': str(self.work), 'tab': str(self.repo), 'commit': 'a' * 40, 'approved_at': 5,
-                                 'worker': '%1', 'name': 'Worker', 'reviewer': '%2', 'reviewer_agent': 'codex',
-                                 'current': current}])
+        self.assertEqual(jobs, [{'folder': str(self.work), 'repo': repo, 'tab': str(self.repo), 'commit': 'a' * 40,
+                                 'approved_at': 5, 'worker': '%1', 'name': 'Worker', 'reviewer': '%2',
+                                 'reviewer_agent': 'codex', 'current': current}])
         self.assertEqual(auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False), [])
         approvals['%1']['%2']['at'] = 6
         renewed = auto_merge.observe(entries, approvals, lambda entry: str(self.repo), start=False, current=current)

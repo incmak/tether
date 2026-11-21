@@ -299,6 +299,15 @@ def _git_dir(folder, option):
     return Path(path)
 
 
+def _repo_identity(common):
+    """{'path', 'dev', 'ino'} of a resolved common Git directory: the form review_scope.repo_identity saves."""
+    try:
+        info = os.stat(common)
+    except (OSError, ValueError) as exc:
+        raise GitError('Could not read the repository of the reviewed folder.') from exc
+    return {'path': str(common), 'dev': info.st_dev, 'ino': info.st_ino}
+
+
 def main_checkout(folder):
     common = _git_dir(folder, '--git-common-dir')
     return str(common.parent if common.name == '.git' else common)
@@ -1096,11 +1105,12 @@ def _trial_merge(scratch, target_sha, head):
     return tree
 
 
-def evaluate(folder, approved, tab=None):
+def evaluate(folder, approved, tab=None, repo=None):
     """(decision, plan) for the branch in `folder`. Git can write objects during fetch and trial merge.
 
     tab: the worker tab's own folder. When given (B368), `folder` is resolved once to its real path and must be a
-    checkout of the tab's repository (one `--git-common-dir`), checked before any fetch. A refused folder is not
+    checkout of the tab's repository (one `--git-common-dir`), and that repository must be `repo`, the one the review
+    saw (review_scope.repo_identity), both checked before any fetch. A refused folder is not
     logged as `root`: Settings reads trust from each logged root. decision: the record for the log and the Settings
     page. plan: what merge() needs, or None when a check failed."""
     decision = {'at': int(time.time()), 'folder': str(folder), 'approved': approved if isinstance(approved, str) else None,
@@ -1127,6 +1137,8 @@ def evaluate(folder, approved, tab=None):
                 raise GitError(f'The reviewed folder {folder} is gone.') from exc
             if _git_dir(real, '--git-common-dir').resolve() != own:
                 raise GitError(f"The reviewed folder {folder} is not a checkout of the tab's repository {own_root}.")
+            if _repo_identity(own) != repo:
+                raise GitError(f'The reviewed folder {folder} is now in another repository than the one the review saw.')
             folder = real  # every later read uses this one path, so a moved symlink cannot switch repositories
         root = main_checkout(folder)
         if own_root is not None and root != own_root:
@@ -1342,6 +1354,13 @@ def merge(plan, reviewer, job):
                     raise NotAuthorized('The reviewed folder now points to another worktree.')
             except (OSError, RuntimeError, TypeError) as exc:
                 raise NotAuthorized('The reviewed folder is gone.') from exc
+            if job.get('tab') is not None:
+                try:
+                    same = _repo_identity(_git_dir(folder, '--git-common-dir').resolve()) == job.get('repo')
+                except (GitError, OSError, RuntimeError) as exc:
+                    raise NotAuthorized(str(exc)) from exc
+                if not same:
+                    raise NotAuthorized('The reviewed folder is now in another repository than the one the review saw.')
             try:
                 head = _head(folder)
                 branch = _git(folder, 'symbolic-ref', '--quiet', '--short', 'HEAD').stdout.strip()
@@ -1359,7 +1378,8 @@ def merge(plan, reviewer, job):
             current = job.get('current')
             try:
                 live = current().get(job.get('worker'), {}).get(job.get('reviewer')) if callable(current) else None
-                matches = live == {'commit': head, 'at': job['approved_at'], 'folder': job['folder']}
+                matches = live == {'commit': head, 'at': job['approved_at'], 'folder': job['folder'],
+                                   'repo': job.get('repo')}
             except Exception as exc:
                 raise NotAuthorized('Could not read the current reviewer approval.') from exc
             if not matches:
@@ -1377,18 +1397,19 @@ _merge_lock = threading.Lock()
 def process(job, alert=None):
     """Decide one approved commit and, in enforce mode, merge it. Returns the recorded decision, or None.
 
-    job: {'folder' (the approved worktree, or None), 'tab' (the tab's own folder), 'commit', 'approved_at', 'worker', 'name', 'reviewer', 'reviewer_agent', 'current'}.
+    job: {'folder' (the approved worktree, or None), 'repo' (its repository identity, or None), 'tab' (the tab's own
+    folder), 'commit', 'approved_at', 'worker', 'name', 'reviewer', 'reviewer_agent', 'current'}.
     The mode is read here, when the work runs, not when the approval was seen."""
     setting = read_setting()
     if setting['mode'] == 'off':
         return None
-    if job.get('folder'):
-        decision, plan = evaluate(job['folder'], job.get('commit'), tab=job.get('tab'))
+    if job.get('folder') and (job.get('repo') is not None or job.get('tab') is None):
+        decision, plan = evaluate(job['folder'], job.get('commit'), tab=job.get('tab'), repo=job.get('repo'))
     else:
-        # B368: the approval does not name the worktree it checked (saved before B368). Do not guess a folder.
+        # B368: the approval does not name the worktree and repository it checked. Do not guess.
         decision = {'at': int(time.time()), 'folder': None, 'approved': job.get('commit'), 'areas': {},
                     'outcome': 'wait', 'checks': [{'key': 'approval', 'ok': False, 'text':
-                    'The approval does not name the folder it reviewed. Ask the reviewer to review the commit again.'}]}
+                    'The approval does not name the folder and repository it reviewed. Ask the reviewer to review the commit again.'}]}
         plan = None
     if decision['outcome'] == 'already':
         return None
@@ -1479,7 +1500,9 @@ def observe(entries, approvals, folder_of, alert=None, start=True, current=None)
             # B368: merge the worktree the approval checked; the tab's own folder only names the repository.
             folder = approval.get('folder')
             _seen.add(key)
-            jobs.append({'folder': folder if isinstance(folder, str) and folder else None, 'tab': tab, 'commit': commit, 'approved_at': at, 'worker': worker,
+            repo = approval.get('repo')
+            jobs.append({'folder': folder if isinstance(folder, str) and folder else None,
+                         'repo': repo if isinstance(repo, dict) else None, 'tab': tab, 'commit': commit, 'approved_at': at, 'worker': worker,
                          'name': str(entry.get('name') or '')[:80], 'reviewer': reviewer,
                          'reviewer_agent': (by_pane.get(reviewer) or {}).get('agent'), 'current': current})
     if jobs and start:

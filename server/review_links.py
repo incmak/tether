@@ -186,6 +186,9 @@ def _sanitize(row):
     for field in ('review_folder', 'follow_up_folder', 'approved_folder'):
         if not isinstance(row.get(field), str):
             row.pop(field, None)
+    for field in ('review_repo', 'approved_repo'):
+        if not _is_repo(row.get(field)):
+            row.pop(field, None)
     stage = row.pop('parent_stage', None)
     if (isinstance(stage, dict) and isinstance(stage.get('pane'), str) and isinstance(stage.get('notice'), str)
             and (stage.get('thread') is None or isinstance(stage['thread'], str))):
@@ -641,17 +644,25 @@ def _reviewers(*, paused_only=False):
         return result
 
 
+def _is_repo(value):
+    """A repository identity from review_scope.repo_identity."""
+    return (isinstance(value, dict) and value.keys() == {'path', 'dev', 'ino'} and isinstance(value['path'], str)
+            and type(value['dev']) is int and type(value['ino']) is int)
+
+
 def approved_commits():
-    """{worker: {reviewer: {'commit': full hash, 'at': Unix seconds, 'folder': worktree or None}}} for approvals bound
-    to a commit with a clean tree. 'folder' is the worktree whose clean HEAD the approval checked; an approval saved
-    before B368 has None. An approval of uncommitted work, or of a folder with no readable commit, is not listed."""
+    """{worker: {reviewer: {'commit': full hash, 'at': Unix seconds, 'folder': worktree or None, 'repo': identity or
+    None}}} for approvals bound to a commit with a clean tree. 'folder' is the worktree whose clean HEAD the approval
+    checked; 'repo' is its repository (review_scope.repo_identity), the same when the request was sent and at the
+    approval. An approval saved before B368 has None. An approval of uncommitted work, or of a folder with no readable
+    commit, is not listed."""
     with _lock:
         result = {}
         for link in _read():
             if _is_link(link) and isinstance(link.get('approved_commit'), str):
                 result.setdefault(link['worker'], {})[link['reviewer']] = {
                     'commit': link['approved_commit'], 'at': link.get('approved_at'),
-                    'folder': link.get('approved_folder')}
+                    'folder': link.get('approved_folder'), 'repo': deepcopy(link.get('approved_repo'))}
         return result
 
 
@@ -1782,7 +1793,8 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                                          if owner != reviewer_key}
                         _clear_restart_counts(cap, reviewer_key, COUNTS)
                         _clear_follow_up(link)
-                        for key in ('stale_commit', 'approved_commit', 'approved_at', 'approved_folder', 'stale_delivered',
+                        for key in ('stale_commit', 'approved_commit', 'approved_at', 'approved_folder', 'approved_repo',
+                                    'stale_delivered',
                                     'confirm_commit', 'stale_unreadable', 'stale_correction'):
                             link.pop(key, None)
                         # Proof of an approved commit needs a clean tree and a reply at the transcript anchor of this
@@ -1798,6 +1810,11 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                                 named = link.get('review_folder')
                                 if isinstance(named, str) and named and now.get('folder') == named:
                                     link['approved_folder'] = named
+                                    # The same repository as when the request was sent: a checkout of another
+                                    # repository can take the folder path in between. Read fresh, not from the cache.
+                                    repo = link.get('review_repo')
+                                    if _is_repo(repo) and review_scope.repo_identity(named) == repo:
+                                        link['approved_repo'] = deepcopy(repo)
                         if uncommitted:
                             link['approved_dirty'] = bound
                         link['awaiting'] = False
@@ -1955,7 +1972,8 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                     return link
                 # Still unreadable. A timeout does not show that an approval is for the current commit: the review
                 # stops and the user decides. The user's next prompt restarts reviews without the old binding.
-                for key in ('review_commit', 'review_clean', 'review_folder', 'stale_commit', 'stale_delivered',
+                for key in ('review_commit', 'review_clean', 'review_folder', 'review_repo', 'stale_commit',
+                            'stale_delivered',
                             'stale_unreadable', 'confirm_commit', 'follow_up_folder', *SCOPE_RETRY_FIELDS):
                     link.pop(key, None)
                 cap['unreadable'] = True
@@ -2038,11 +2056,14 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             for key in SCOPE_RETRY_FIELDS:
                 link.pop(key, None)
             link.pop('review_folder', None)
+            link.pop('review_repo', None)
             if target is not None:
                 link['review_commit'] = target['commit']
                 link['review_clean'] = target.get('dirty') is False
                 if isinstance(target.get('folder'), str):
                     link['review_folder'] = target['folder']
+                    if (repo := review_scope.repo_identity(target['folder'])) is not None:
+                        link['review_repo'] = repo
                 if (correction := link.get('stale_correction')) and correction['now'] in (None, target['commit']):
                     link['stale_correction'] = {**correction, 'requested': True}
             else:
