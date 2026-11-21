@@ -34,6 +34,7 @@ def attachment(text, **fields):
 
 class ClaudeQueueTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch.object(server, 'STALE_QUEUE', {}))
         folder = self.enterContext(tempfile.TemporaryDirectory())
         self.path = Path(folder) / 'chat.jsonl'
         self.entry = {'id': '%fixture', 'agent': 'claude', 'thread': 'fixture', 'transcript': str(self.path)}
@@ -47,16 +48,16 @@ class ClaudeQueueTests(unittest.TestCase):
         return agents.claude_snapshot(self.entry, server.display_text)
 
     def fold(self, *records):
-        state = {'queue': []}
-        for record in records:
-            agents.claude_queue(state, record)
+        state = {'queue': [], 'taken': []}
+        for index, record in enumerate(records):
+            agents.claude_queue(state, index, record)
         return [entry['text'] for entry in state['queue']]
 
     def test_enqueue_shows_display_text_and_time_without_adding_a_message(self):
         self.append(enqueue('<pasted_content id="1">Queued prompt</pasted_content>'),
                     enqueue('  '))
         data = self.snapshot()
-        self.assertEqual(data['queued'], [{'text': 'Queued prompt', 'time': TIME}])
+        self.assertEqual(data['queued'], [{'id': 0, 'text': 'Queued prompt', 'time': TIME}])
         self.assertEqual(data['messages'], [])
 
     def test_dequeue_prefers_the_first_person_prompt(self):
@@ -100,6 +101,33 @@ class ClaudeQueueTests(unittest.TestCase):
         self.assertEqual(self.fold(enqueue(PEER), user(PEER_PREFIX + PEER)), [])
         self.assertEqual(self.fold(enqueue(PEER_PREFIX + PEER), attachment(PEER)), [])
 
+    def test_dequeue_and_delivery_take_only_one_copy(self):
+        for delivered in (attachment('A'), user('A'), user([{'type': 'text', 'text': 'A'}])):
+            with self.subTest(delivered=delivered):
+                self.assertEqual(self.fold(enqueue('A'), enqueue('A'), operation('dequeue'), delivered), ['A'])
+        self.assertEqual(self.fold(enqueue(PEER_PREFIX + PEER), enqueue(PEER), operation('dequeue'),
+                                   attachment(PEER)), [PEER])
+
+    def test_delivery_matches_taken_once_and_can_still_repair_the_queue(self):
+        self.assertEqual(self.fold(enqueue('A'), enqueue('B'), operation('dequeue'),
+                                   attachment('A'), user('B')), [])
+        self.assertEqual(self.fold(enqueue('A'), operation('dequeue'), attachment('A'),
+                                   enqueue('A'), user('A')), [])
+
+    def test_remove_and_delivery_take_only_one_copy(self):
+        self.assertEqual(self.fold(enqueue('A'), enqueue('A'), operation('remove', content='A'),
+                                   attachment('A')), ['A'])
+
+    def test_non_string_attachment_prompt_does_not_repair_the_queue(self):
+        self.assertEqual(self.fold(enqueue('A'), attachment(['A'])), ['A'])
+
+    def test_taken_keeps_only_the_latest_50_explicit_removals(self):
+        texts = [str(index) for index in range(51)]
+        records = [enqueue(text) for text in texts] + [operation('dequeue')] * len(texts)
+        records.extend((enqueue('0'), enqueue('1'), attachment('0'), attachment('1')))
+        self.assertEqual(self.fold(*records), ['1'])
+        self.assertEqual(self.fold(enqueue('A'), operation('popAll'), enqueue('A'), attachment('A')), [])
+
     def test_peer_entry_is_not_shown(self):
         self.append(enqueue(PEER))
         self.assertEqual(self.snapshot()['queued'], [])
@@ -111,20 +139,28 @@ class ClaudeQueueTests(unittest.TestCase):
             user('A', isSidechain=True), attachment('A', isSidechain=True),
         ), ['A'])
 
-    def test_queue_keeps_the_latest_50_entries_in_order(self):
-        self.assertEqual(self.fold(*(enqueue(str(index)) for index in range(52))),
-                         [str(index) for index in range(2, 52)])
+    def test_snapshot_caps_queue_after_filtering_and_dequeue_uses_the_full_queue(self):
+        records = [enqueue(str(index)) for index in range(1, 52)] + [enqueue(NOTICE), enqueue('  ')]
+        self.append(*records)
+        expected = [str(index) for index in range(2, 52)]
+        self.assertEqual([entry['text'] for entry in self.snapshot()['queued']], expected)
+        dequeue = operation('dequeue')
+        self.assertEqual(self.fold(*records, dequeue), expected + [NOTICE, '  '])
+        self.append(dequeue)
+        self.assertEqual([entry['text'] for entry in self.snapshot()['queued']], expected)
 
     def test_incremental_read_preserves_queue_without_sharing_output(self):
         self.append(enqueue(NOTICE), enqueue('A'), enqueue('B'))
         first = self.snapshot()['queued']
-        self.assertEqual(first, [{'text': 'A', 'time': TIME}, {'text': 'B', 'time': TIME}])
+        self.assertEqual(first, [{'id': 1, 'text': 'A', 'time': TIME}, {'id': 2, 'text': 'B', 'time': TIME}])
         first[1]['text'] = 'changed by caller'
         added = [operation('dequeue'), enqueue('C')]
         self.append(*added)
         with patch.object(agents, 'claude_queue', wraps=agents.claude_queue) as consume:
-            self.assertEqual(self.snapshot()['queued'], [{'text': 'B', 'time': TIME}, {'text': 'C', 'time': TIME}])
-        self.assertEqual([call.args[1] for call in consume.call_args_list], added)
+            self.assertEqual(self.snapshot()['queued'], [
+                {'id': 2, 'text': 'B', 'time': TIME}, {'id': 4, 'text': 'C', 'time': TIME},
+            ])
+        self.assertEqual([call.args[1:] for call in consume.call_args_list], list(enumerate(added, 3)))
 
     def test_payload_only_exposes_queue_while_claude_is_working(self):
         self.append(enqueue('A'))
@@ -133,14 +169,53 @@ class ClaudeQueueTests(unittest.TestCase):
              patch.object(server.shell_log, 'merge', side_effect=lambda _, messages: messages), \
              patch.object(server.reply_preview, 'sample', return_value=('', 80)):
             for live, busy, expected in (('Working', False, 'Working'), ('Idle', True, 'Working'),
-                                         ('Idle', False, 'Idle'), ('Approval', False, 'Approval'),
-                                         ('Input needed', False, 'Input needed'), ('Unknown', False, 'Unknown')):
+                                         ('Approval', False, 'Approval'), ('Input needed', False, 'Input needed'),
+                                         ('Idle', False, 'Idle'), ('Unknown', False, 'Unknown')):
                 with self.subTest(live=live, busy=busy):
                     status.return_value = {'state': live, 'approval': None}
                     data = server.chat_payload(dict(self.entry, busy=busy))
                     self.assertEqual(data['state'], expected)
-                    self.assertEqual(data['queued'], [{'text': 'A', 'time': TIME}] if expected in server.QUEUE_STATES else [])
+                    self.assertEqual(data['queued'], [{'id': 0, 'text': 'A', 'time': TIME}]
+                                     if expected in server.QUEUE_STATES else [])
                     self.assertEqual(data['messages'], [])
+
+    def test_payload_hides_stale_entries_on_the_next_turn(self):
+        self.append(enqueue('A'))
+        first = self.snapshot()
+        queued_a = {'id': 0, 'text': 'A', 'time': TIME}
+        with patch.object(server, 'live_status') as status, \
+             patch.object(server, 'snapshot', return_value=first) as snapshot, \
+             patch.object(server.shell_log, 'merge', side_effect=lambda _, messages: messages), \
+             patch.object(server.reply_preview, 'sample', return_value=('', 80)):
+            for live, expected in (('Working', [queued_a]), ('Idle', []), ('Working', [])):
+                with self.subTest(live=live, queued=expected):
+                    status.return_value = {'state': live, 'approval': None}
+                    self.assertEqual(server.chat_payload(self.entry)['queued'], expected)
+                    self.assertEqual(first['queued'], [queued_a])
+            self.append(enqueue('B'))
+            snapshot.return_value = self.snapshot()
+            self.assertEqual(server.chat_payload(self.entry)['queued'], [{'id': 1, 'text': 'B', 'time': TIME}])
+            self.assertEqual(len(snapshot.return_value['queued']), 2)
+
+            self.append(operation('remove', content='A'))
+            snapshot.return_value = self.snapshot()
+            status.return_value = {'state': 'Idle', 'approval': None}
+            self.assertEqual(server.chat_payload(self.entry)['queued'], [])
+            self.assertEqual(server.STALE_QUEUE[self.entry['transcript']], {1})
+
+    def test_stale_cache_evicts_the_oldest_transcript_and_skips_missing_paths(self):
+        server.STALE_QUEUE.update({f'transcript-{index}': {0} for index in range(200)})
+        with patch.object(server, 'live_status', return_value={'state': 'Idle', 'approval': None}), \
+             patch.object(server, 'snapshot', return_value={'messages': [], 'queued': [{'id': 0}]}), \
+             patch.object(server.shell_log, 'merge', side_effect=lambda _, messages: messages):
+            server.chat_payload(dict(self.entry, transcript=None))
+            self.assertIn('transcript-0', server.STALE_QUEUE)
+            self.assertNotIn(None, server.STALE_QUEUE)
+            server.chat_payload(self.entry)
+        self.assertEqual(len(server.STALE_QUEUE), 200)
+        self.assertNotIn('transcript-0', server.STALE_QUEUE)
+        self.assertIn('transcript-1', server.STALE_QUEUE)
+        self.assertEqual(server.STALE_QUEUE[self.entry['transcript']], {0})
 
     def test_payload_leaves_other_agents_and_shell_mode_alone(self):
         with patch.object(server, 'live_status', return_value={'state': 'Idle', 'approval': None}), \

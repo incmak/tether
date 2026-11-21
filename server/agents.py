@@ -1105,31 +1105,31 @@ def claude_model(thread):
     return str(model.get('display_name') or model.get('id') or '') if isinstance(model, dict) else ''
 
 
-def claude_queue(state, record):
+def claude_queue(state, index, record):
     """Fold one transcript record into Claude's pending input queue."""
     if record.get('isSidechain'):
         return
-    queue = state['queue']
+    queue, taken = state['queue'], state['taken']
     kind = record.get('type')
     if kind == 'queue-operation':
         operation, text = record.get('operation'), record.get('content')
         if operation == 'enqueue' and isinstance(text, str):
-            queue.append({'text': text, 'time': record.get('timestamp')})
-            if len(queue) > 50:
-                del queue[0]
+            queue.append({'id': index, 'text': text, 'time': record.get('timestamp')})
         elif operation == 'dequeue' and queue:
-            index = next((i for i, item in enumerate(queue)
+            first = next((i for i, item in enumerate(queue)
                           if not item['text'].lstrip().startswith('<task-notification>')), 0)
-            del queue[index]
+            taken.append(queue.pop(first)['text'])
         elif operation == 'popAll':
             queue.clear()
         elif operation == 'remove':
-            for index, item in enumerate(queue):
+            for i, item in enumerate(queue):
                 if item['text'] == text:
-                    del queue[index]
+                    taken.append(queue.pop(i)['text'])
                     break
+        if len(taken) > 50:
+            del taken[0]
         return
-    if not queue:
+    if not (queue or taken):
         return
     if kind == 'user':
         text = (record.get('message') or {}).get('content')
@@ -1143,15 +1143,20 @@ def claude_queue(state, record):
         return
     if isinstance(text, str):
         prefix = 'Another Claude session sent a message:\n'
-        for index, item in enumerate(queue):
-            if item['text'] == text or item['text'].removeprefix(prefix) == text.removeprefix(prefix):
-                del queue[index]
+        text = text.removeprefix(prefix)
+        for i, removed in enumerate(taken):
+            if removed.removeprefix(prefix) == text:
+                del taken[i]
+                return
+        for i, item in enumerate(queue):
+            if item['text'].removeprefix(prefix) == text:
+                del queue[i]
                 break
 
 
 def claude_snapshot(entry, clean):
     def consume(state, index, record):
-        claude_queue(state, record)
+        claude_queue(state, index, record)
         claude_consume(state['messages'], index, record, clean)
         scheduled_runs(state, index, record)
         if record.get('type') == 'custom-title' and isinstance(record.get('customTitle'), str):
@@ -1170,14 +1175,16 @@ def claude_snapshot(entry, clean):
             elif part.get('type') == 'tool_result' and part.get('tool_use_id') == (state.get('plan') or {}).get('id'):
                 state['plan'] = None  # A finished request must not pair with a later menu.
             _update_claude_ask(state, part, record['type'])
-    state = history.read(entry['transcript'], lambda: {'messages': [], 'dropped': 0, 'plan': None, 'ask': None, 'queue': []}, consume)
+    state = history.read(entry['transcript'], lambda: {
+        'messages': [], 'dropped': 0, 'plan': None, 'ask': None, 'queue': [], 'taken': [],
+    }, consume)
     messages = activity.group_actions(activity.merge(list(state['messages'])))
     queued = []
     for item in list(state['queue']):
         if task_notice(item['text'], 0, None) is None:
             display = tidy_user_text(clean(item['text']))
             if display.strip():
-                queued.append({'text': display, 'time': item['time']})
+                queued.append({'id': item['id'], 'text': display, 'time': item['time']})
     metrics = {}
     try:
         metrics = json.loads((METRICS / (entry['thread'] + '.json')).read_text())
@@ -1214,4 +1221,4 @@ def claude_snapshot(entry, clean):
                   model=(metrics.get('model') or {}).get('display_name') or (metrics.get('model') or {}).get('id') or '')
     return {'messages': merge_quota_notices(dict(entry, agent='claude'), messages), 'dropped': state['dropped'],
             'busy': entry.get('busy', False), 'usage': report, 'plan': state.get('plan'), 'ask': state.get('ask'), 'claude_name': state.get('name'),
-            'scheduled': {key: dict(value) for key, value in state.get('scheduled', {}).items()}, 'queued': queued}
+            'scheduled': {key: dict(value) for key, value in state.get('scheduled', {}).items()}, 'queued': queued[-50:]}

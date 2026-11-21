@@ -1818,6 +1818,9 @@ def chat_delta(old, new):
 
 # Mid-turn states: Claude still holds prompts sent meanwhile in its input queue.
 QUEUE_STATES = ('Working', 'Approval', 'Input needed')
+# A stale entry can show again after a backend restart clears this memory.
+STALE_QUEUE = {}
+STALE_QUEUE_LOCK = threading.Lock()
 
 
 def chat_payload(config, shell_mode=False, limit=DEFAULT_WINDOW, preview=False):
@@ -1830,9 +1833,21 @@ def chat_payload(config, shell_mode=False, limit=DEFAULT_WINDOW, preview=False):
         data = dict(data, messages=shell_log.merge(config['id'], data['messages']))
     if data.get('busy') and state['state'] == 'Idle':
         state['state'] = 'Working'
-    if config['agent'] == 'claude' and state['state'] not in QUEUE_STATES:
-        # Claude drains its input queue when idle and keeps it only in memory: an entry left while idle is stale (B331).
-        data = dict(data, queued=[])
+    if config['agent'] == 'claude':
+        transcript = config.get('transcript')
+        if state['state'] not in QUEUE_STATES:
+            # Claude drains its input queue when idle, so any entries still in the transcript are stale.
+            if transcript:
+                stale = {item['id'] for item in data.get('queued', ())}
+                with STALE_QUEUE_LOCK:
+                    STALE_QUEUE[transcript] = stale
+                    if len(STALE_QUEUE) > 200:
+                        del STALE_QUEUE[next(iter(STALE_QUEUE))]
+            data = dict(data, queued=[])
+        elif transcript:
+            stale = STALE_QUEUE.get(transcript, ())
+            if stale:
+                data = dict(data, queued=[item for item in data.get('queued', ()) if item['id'] not in stale])
     if not (config['agent'] == 'claude' and plan_menu(state.get('approval') or state.get('attention'))):
         data.pop('plan', None)
     ask = data.pop('ask', None) if isinstance(data, dict) else None

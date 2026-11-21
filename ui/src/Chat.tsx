@@ -76,6 +76,7 @@ import { codexRunItems, useCodexRuns } from './CodexRuns'
 import { CodexTrustCard } from './CodexTrust'
 import { useCodexTrust } from './codexTrustState'
 import { HOLD_MS } from './gesture'
+import { foreignQueued } from './queueMatch'
 
 
 interface ChatProps { liveReplyPreview: boolean; /** Desktop: a trackpad swipe over the stack row or tab strip scrolls it, not Back/Forward (Settings). */ headerSwipe?: boolean; pane: Pane; session: Session | undefined; api: Api; onMenu: () => void; onUpdate: () => void; draft: string; setDraft: (text: string) => void; onOpenPane: (pane: Pane) => void; onSessionActions: (at?: Anchor) => void; onPaneActions: (pane: string, at?: Anchor) => void; onSplit: (direction: 'right' | 'down') => void; onFork: () => void; onContinued: (id: string) => void; onReorder: (ids: string[]) => void; micOk: boolean; chime: boolean; readAloud: boolean; handsFree: boolean; slot?: SlotControls; running?: number; sidePin?: SidePinControls; allPanes: Pane[]; headerExtra?: ReactNode; askBar?: ReactNode; groupHooks?: GroupHooks; onDropGroup?: (pane: string, group: string) => void; onBacklogAdd?: (text: string, pane: Pane) => void; /** The × close and multi-select on the tab strip (tabSelection.ts). */ tabPick?: TabPickControls }
@@ -732,15 +733,11 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   const notSent = queued.filter(item => item.failed).length
   const waiting = queued.length - notSent
   // Prompts in Claude's own input queue (the server sends them only mid-turn). One this message box sent already shows as its own bubble, so show only the rest:
-  // sends from Friday, another device or the terminal. Each local bubble accounts for one queue entry with its text.
-  const mine = queued.filter(item => !item.failed).map(item => sameCommand(item.key))
-  const otherQueued = (data?.queued ?? []).filter(entry => {
-    const at = mine.findIndex(key => sameCommand(squash(entry.text)).includes(key))
-    if (at < 0) return true
-    mine.splice(at, 1)
-    return false
-  })
+  // sends from Friday, another device or the terminal.
+  const otherQueued = foreignQueued(data?.queued ?? [], queued.filter(item => !item.failed))
   const waitingAll = waiting + otherQueued.length
+  // Claude's "edit queued" pulls back its whole queue. With more than one entry, the cancel button says so.
+  const cancelLabel = activePane.agent !== 'claude' ? 'Hide this queued message' : waitingAll > 1 ? `Cancel all ${waitingAll} queued messages` : 'Cancel this queued message'
   const queueLabel = [waitingAll ? `${waitingAll} queued` : '', notSent ? `${notSent} not sent` : ''].filter(Boolean).join(' · ')
   const setPending = useCallback((update: (list: Pending[]) => Pending[]) => setPendingState(list => { const next = update(list); pendingByPane.set(pane.id, next); savePending(); return next }), [pane.id])
   const dataReceivedAt = useRef(0)
@@ -1273,8 +1270,8 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
         <button type="button" className="failed-action" disabled={retrying !== null || !writable} onClick={() => void retry(item)}><RotateCcw size={13} />{retrying === item.id ? 'Sending…' : 'Retry'}</button>
         <button type="button" className="failed-action" onClick={() => editFailed(item)}><Pencil size={13} />Edit</button>
         <button type="button" aria-label="Delete this unsent message" onClick={() => setPending(list => list.filter(other => other.id !== item.id))}><X size={12} /></button></small></div>
-      : <div key={item.id} className="user-message pending-message"><SentContent {...sentContent(item.text, activePane.id)} /><small><Clock3 size={12} />{/^\/btw\s/.test(item.text.trim()) ? 'Asking…' : state === 'Working' ? 'Queued' : 'Sending…'}<button type="button" aria-label={activePane.agent === 'claude' ? 'Cancel this queued message' : 'Hide this queued message'} onClick={() => void unqueue(item.id)}><X size={12} /></button></small></div>)}
-        {otherQueued.map((entry, index) => <div key={`queued-${index}-${entry.time ?? ''}`} className="user-message pending-message"><SentContent {...sentContent(entry.text, activePane.id)} /><small><Clock3 size={12} />Queued<button type="button" aria-label="Cancel this queued message" onClick={() => void unqueue(null)}><X size={12} /></button></small></div>)}</> },
+      : <div key={item.id} className="user-message pending-message"><SentContent {...sentContent(item.text, activePane.id)} /><small><Clock3 size={12} />{/^\/btw\s/.test(item.text.trim()) ? 'Asking…' : state === 'Working' ? 'Queued' : 'Sending…'}<button type="button" aria-label={cancelLabel} title={cancelLabel} onClick={() => void unqueue(item.id)}><X size={12} /></button></small></div>)}
+        {otherQueued.map((entry, index) => <div key={`queued-${entry.id ?? index}`} className="user-message pending-message"><SentContent {...sentContent(entry.text, activePane.id)} /><small><Clock3 size={12} />Queued<button type="button" aria-label={cancelLabel} title={cancelLabel} onClick={() => void unqueue(null)}><X size={12} /></button></small></div>)}</> },
       { id: 'terminal-run', label: notes.length === 1 ? `${commandOf(notes[0].text)} ran in the terminal` : `${notes.length} commands ran in the terminal`, active: notes.length > 0, content: notes.map(item => {
         const command = commandOf(item.text)
         const dismiss = () => setPending(list => list.filter(other => other.id !== item.id))
