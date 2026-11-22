@@ -156,6 +156,7 @@ class RestartTests(unittest.TestCase):
 
     def test_draft_is_preserved(self):
         for agent, screen in [('claude', '────────────────\n❯ unsent text\n────────────────\n'),
+                              ('claude', '───────── Name ─\n❯ unsent text\n────────────────\n'),
                               ('codex', '› Ask Codex to do anything\n\n  ? for shortcuts\n')]:
             with self.subTest(agent=agent), patch.dict(self.entry, agent=agent):
                 self.screen = screen
@@ -165,6 +166,11 @@ class RestartTests(unittest.TestCase):
         # Claude's narrow capture is a real 50-column screen from the agent-bar fixtures. idle_50col is a real Codex screen
         # on an isolated tmux server (the running Tether keeps live windows wide).
         for agent, capture in [('claude', 'claude_2.1.330_restart/idle.ansi'), ('claude', 'claude_2.1.330_agent_bar/narrow_after_escape.txt'),
+                               ('claude', 'claude_2.1.330_named_rule/idle.ansi'),
+                               ('claude', 'claude_2.1.330_named_rule/short_name_120col.ansi'),
+                               ('claude', 'claude_2.1.330_named_rule/short_name_50col.ansi'),
+                               ('claude', 'claude_2.1.330_named_rule/long_name_50col.ansi'),
+                               ('claude', 'claude_2.1.330_named_rule/wide_chars_60col.ansi'),
                                ('codex', 'codex_0.170.0_restart/idle.ansi'), ('codex', 'codex_0.170.0_restart/idle_narrow.ansi'),
                                ('codex', 'codex_0.170.0_restart/idle_50col.ansi')]:
             with self.subTest(capture=capture), patch.dict(self.entry, agent=agent):
@@ -172,6 +178,25 @@ class RestartTests(unittest.TestCase):
                 terminal_input.empty_prompt(self.entry, self.events.run, read_only=True)
                 self.assertEqual(self.events.run.call_args.args[0],
                                  [paths.TMUX, 'capture-pane', '-e', '-p', '-t', '%7'])
+        self.assertEqual(self.writes(), [])
+
+    def test_named_rule_needs_a_matching_input_box(self):
+        capture = (FIXTURES / 'claude_2.1.330_named_rule/short_name_120col.ansi').read_text()
+        lines = terminal_input.ANSI_SGR.sub('', capture).splitlines()
+        row = next(i for i, line in enumerate(lines) if line.startswith('❯'))
+        top, _, closing = lines[row - 1:row + 2]
+        for case, screen in [
+            ('missing closing rule', [top, '❯']),
+            ('menu hint', [top, '❯', closing, 'Enter to select · Esc to cancel']),
+            ('width mismatch', [' some text ─', '❯', closing]),
+            ('blank closing rule', [top, '❯', ' ' * len(closing)]),
+            ('wrong closing rule', [top, '❯', '━' * len(closing)]),
+        ]:
+            with self.subTest(case=case):
+                self.screen = '\n'.join(screen)
+                with self.assertRaisesRegex(RuntimeError, 'cannot verify the Claude input box') as raised:
+                    terminal_input.empty_prompt(self.entry, self.events.run, read_only=True)
+                self.assertNotIsInstance(raised.exception, terminal_input.DraftError)
         self.assertEqual(self.writes(), [])
 
     def test_styled_update_prompt_refuses_as_a_menu(self):

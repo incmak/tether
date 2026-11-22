@@ -32,6 +32,7 @@ ORIGINALS = [
     ('terminal_input', ('common', 'PICKER_MORE'), 'PICKER_MORE', (r'^\s*([↑↓])\s+(\d+)\s+more\s*$'), 0),
     ('terminal_input', ('common', 'PICKER_HINT'), 'PICKER_HINT', (r'^Enter to .+[·•].*\bEsc to \S'), re.I),
     ('terminal_input', ('claude', 'SETTINGS_TABS'), 'SETTINGS_TABS', (r'^\s*Settings\s+Status\b'), 0),
+    ('terminal_input', ('claude', 'INPUT_NAMED_RULE'), 'CLAUDE_NAMED_RULE', (r'^─* \S(?:.*\S)? ─$'), 0),
     ('terminal_input', ('claude', 'PANEL_CLOSE'), 'PANEL_CLOSE', (r'Esc to (?:cancel|close|exit|go back)|esc (?:Close|to close)'), re.I),
     ('terminal_input', ('antigravity', 'AGY_MODE_HINT'), 'AGY_MODE_HINT', (r'\bmode\b.*(?:\(shift\+tab to cycle\)|\.\.\.|…)\s*$'), re.I),
     ('terminal_input', ('antigravity', 'AGY_PANEL'), 'AGY_PANEL', (r'esc Close|↑/↓ Scroll|\(\d+–\d+ of \d+ lines\)|general\s+commands\s+shortcuts'), re.I),
