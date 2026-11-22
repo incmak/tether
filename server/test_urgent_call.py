@@ -443,6 +443,28 @@ class PlannerTest(unittest.TestCase):
         self.assertIsNone(self.planner.tick([ask])['placed'])
         self.assertEqual(self.state()['asks']['a']['hold_slot'], 'used')
 
+    def test_calls_back_on_after_the_clock_moves_back_keeps_a_valid_state(self):
+        ask = self.candidate()
+        self.assertTrue(self.planner.finish(self.planner.tick([ask])['placed'], 'declined'))
+        self.planner.set_dnd(self.clock.now + 600)
+        self.clock.advance(-1)
+        self.planner.calls_back_on()
+        self.assertTrue(all(start < until for _, start, until in self.state()['blocks']))
+        self.planner = self.load()
+        self.assertEqual(self.planner.status()['dnd_until'], 0)
+        self.clock.advance(1)
+        self.assertEqual(self.planner.tick([self.candidate('b')])['placed'], 'call-2')
+
+    def test_ended_overlapping_blocks_report_dnd_before_hold(self):
+        first = self.candidate()
+        self.assertTrue(self.planner.finish(self.planner.tick([first])['placed'], 'declined'))
+        other = self.candidate('b', grace_end=self.clock.now + urgent_call.HOLD - 120)
+        self.planner.set_dnd(self.clock.now + urgent_call.HOLD - 60)
+        self.clock.now = first['grace_end'] + urgent_call.HOLD + 1
+        self.log.reset_mock()
+        self.assertIsNone(self.planner.tick([other])['placed'])
+        self.log.assert_any_call('decide', ask='b', pane='%1', slot=0, result='dnd', rule='dnd')
+
     def test_slot_blocked_while_save_fails_does_not_ring_when_the_block_ends(self):
         ask = self.candidate()
         self.planner.set_dnd(self.clock.now + 60)

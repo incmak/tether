@@ -150,7 +150,8 @@ class Planner:
     def _blocked_at(self, at, now):
         """The rule of an ended block that covered time at, or None. A slot that fell inside do-not-disturb or the
         hold stays blocked even if no tick ran before the block ended (C2). Active blocks are checked in tick."""
-        return next((rule for rule, start, until in self.state['blocks'] if start <= at < until <= now), None)
+        rules = {rule for rule, start, until in self.state['blocks'] if start <= at < until <= now}
+        return next((rule for rule in ('dnd', 'hold') if rule in rules), None)
 
     def _block(self, rule, now, until, extend):
         """Start or change the active block of this rule, keeping ended blocks a slot may still need."""
@@ -372,8 +373,10 @@ class Planner:
             before = deepcopy(self.state)
             now = self.clock()
             # End both blocks now. A pending hold slot is due on the next tick (C6).
+            # Keep from <= until when the clock moved back, and drop a block that is then empty.
             for block in self.state['blocks']:
-                block[2] = min(block[2], now)
+                block[2] = max(block[1], min(block[2], now))
+            self.state['blocks'] = [b for b in self.state['blocks'] if b[1] < b[2]]
             self.state.update(dnd_until=min(self.state['dnd_until'], now),
                               hold_until=min(self.state['hold_until'], now), released_at=now)
             self._commit(before)
