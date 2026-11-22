@@ -2135,6 +2135,87 @@ class CrossWorktree(Base):
         self.assertIn('commit-tree', steps)
         self.assertNotIn('push', steps)
         self.assertEqual(self.origin_main(), before)
+        self.assertNoTrustRoot(decision, self.repo)
+
+    def test_a_tab_folder_replaced_after_the_decision_stops_the_push(self):
+        # The tab works in a sibling worktree. After commit-tree it becomes a checkout of repository B; the reviewed
+        # folder and A's main checkout stay. The push still needs the whole binding.
+        self.enforce()
+        head = self.change()
+        before = self.origin_main()
+        tab = self.other_worktree()
+        job = {**self.job(head), 'tab': str(tab)}
+        real = auto_merge._object_git
+        steps = []
+
+        def object_git(scratch, *args, **kwargs):
+            result = real(scratch, *args, **kwargs)
+            steps.append(args[0])
+            if args[0] == 'commit-tree':
+                tab.rename(tab.with_name(tab.name + '-aside'))
+                self.clone_at(head, self.root / 'b-tab').rename(tab)
+            return result
+
+        with mock.patch.object(auto_merge, '_object_git', side_effect=object_git):
+            decision = auto_merge.process(job)
+        self.assertEqual(decision['outcome'], 'failed')
+        self.assertIn('in another repository than the one the review saw', decision['error'])
+        self.assertNotIn('push', steps)
+        self.assertEqual(self.origin_main(), before)
+        self.assertNoTrustRoot(decision, self.repo)
+
+    def assertNoTrustRoot(self, decision, path):
+        # Settings reads trust (and fetches) from each logged root: a refused repository must not become one.
+        self.assertIsNone(decision['root'])
+        with mock.patch.object(auto_merge, '_trust', return_value=None) as trust:
+            auto_merge.state()
+        self.assertNotIn(str(path), [call.args[0] for call in trust.call_args_list])
+
+    def test_a_late_binding_failure_runs_no_network_command_and_logs_no_root(self):
+        # After the first checks: during scratch setup the reviewed worktree becomes a clean checkout of repository B
+        # (the tab and A's main checkout stay), or right before the check A's common Git directory is briefly absent.
+        for case in ('worktree from B', 'tab from B', 'repository absent'):
+            with self.subTest(case=case):
+                head = self.change(text=f'{case}\n')
+                tab = self.other_worktree() if case == 'tab from B' else self.repo
+                job = {**self.job(head), 'tab': str(tab)}
+                real, real_env = auto_merge._scratch, auto_merge._object_env
+                aside = self.root / f'aside-{len(case)}'
+
+                def scratch(root):
+                    made = real(root)
+                    if case == 'worktree from B':
+                        self.work.rename(aside)
+                        self.clone_at(head, self.root / 'b-late').rename(self.work)
+                    elif case == 'tab from B':
+                        tab.rename(aside)
+                        self.clone_at(head, self.root / 'b-late-tab').rename(tab)
+                    return made
+
+                def object_env(*args, **kwargs):  # the last step before the check
+                    env = real_env(*args, **kwargs)
+                    if case == 'repository absent':
+                        (self.repo / '.git').rename(aside)
+                    return env
+
+                with mock.patch.object(auto_merge, '_scratch', side_effect=scratch), \
+                        mock.patch.object(auto_merge, '_object_env', side_effect=object_env), \
+                        mock.patch.object(auto_merge, '_object_git', wraps=auto_merge._object_git) as git:
+                    decision = auto_merge.process(job)
+                self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['git']))
+                self.assertFalse({'ls-remote', 'fetch'} & {call.args[1] for call in git.call_args_list})
+                self.assertNoTrustRoot(decision, self.repo)
+                if case == 'worktree from B':
+                    self.assertIn('in another repository than the one the review saw', decision['checks'][0]['text'])
+                    shutil.rmtree(self.work)
+                    aside.rename(self.work)
+                elif case == 'tab from B':
+                    self.assertIn('in another repository than the one the review saw', decision['checks'][0]['text'])
+                    shutil.rmtree(tab)
+                    aside.rename(tab)
+                else:
+                    self.assertIn('Could not read the repository', decision['checks'][0]['text'])
+                    aside.rename(self.repo / '.git')
 
     def link_to(self, link, target):
         tmp = link.with_name(link.name + '.tmp')

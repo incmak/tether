@@ -107,6 +107,11 @@ class NotAuthorized(GitError):
     pass
 
 
+class RepositoryChanged(NotAuthorized):
+    """The reviewed folder or the tab is no longer bound to the repository the review saw.
+    A decision that ends on this logs no root: Settings fetches from each logged root."""
+
+
 # ---- the mode ----
 
 def mode_path():
@@ -306,6 +311,25 @@ def _repo_identity(common):
     except (OSError, ValueError) as exc:
         raise GitError('Could not read the repository of the reviewed folder.') from exc
     return {'path': str(common), 'dev': info.st_dev, 'ino': info.st_ino}
+
+
+def _check_bound(named, real, repo, *others):
+    """Raise RepositoryChanged unless `named` still resolves to `real`, and `real` and each of `others` (the tab) still
+    read the repository identity `repo`. A read that fails is a refusal too. The main checkout needs no check of its
+    own: it is the folder's common Git directory or that directory's parent."""
+    try:
+        moved = str(Path(named).resolve(strict=True)) != str(real)
+    except (OSError, RuntimeError, TypeError) as exc:
+        raise RepositoryChanged('The reviewed folder is gone.') from exc
+    if moved:
+        raise RepositoryChanged('The reviewed folder now points to another worktree.')
+    for path in (real, *others):
+        try:
+            same = _repo_identity(_git_dir(path, '--git-common-dir').resolve()) == repo
+        except (GitError, OSError, RuntimeError) as exc:
+            raise RepositoryChanged(f'Could not read the repository of {path} again: {exc}') from exc
+        if not same:
+            raise RepositoryChanged(f'The reviewed folder {named} is now in another repository than the one the review saw.')
 
 
 def main_checkout(folder):
@@ -1128,6 +1152,7 @@ def evaluate(folder, approved, tab=None, repo=None):
         checks.append({'key': key, 'ok': bool(ok), 'text': text})
         return bool(ok)
 
+    named = folder
     try:
         own_root = None
         if tab is not None:
@@ -1139,7 +1164,7 @@ def evaluate(folder, approved, tab=None, repo=None):
             own_root = str(own.parent if own.name == '.git' else own)
             # Before the root is logged: Settings fetches from each logged root.
             if _repo_identity(own) != repo:
-                raise GitError(f'The reviewed folder {folder} is now in another repository than the one the review saw.')
+                raise RepositoryChanged(f'The reviewed folder {folder} is now in another repository than the one the review saw.')
             decision.update(root=own_root, repo=Path(own_root).name)
             try:
                 real = Path(folder).resolve(strict=True)
@@ -1157,10 +1182,7 @@ def evaluate(folder, approved, tab=None, repo=None):
         scratch = _scratch(root)
 
         def same_repository():
-            if repo is not None and _repo_identity(_git_dir(root, '--git-common-dir').resolve()) != repo:
-                decision['root'] = None  # Settings fetches from each logged root
-                decision.pop('repo', None)
-                raise GitError(f'The reviewed folder {folder} is now in another repository than the one the review saw.')
+            _check_bound(named, folder, repo, tab)
 
         url, target_sha = _fetch_target(root, scratch, same_repository) if tab is not None else _fetch_target(root, scratch)
         if _ancestor(scratch, head, target_sha):
@@ -1170,6 +1192,9 @@ def evaluate(folder, approved, tab=None, repo=None):
         if not SHA.fullmatch(base):
             raise GitError('The branch shares no history with the main branch.')
     except GitError as exc:
+        if isinstance(exc, RepositoryChanged):
+            decision['root'] = None
+            decision.pop('repo', None)
         check('git', False, str(exc))
         return decision, None
     if not isinstance(approved, str) or not SHA.fullmatch(approved):
@@ -1367,18 +1392,8 @@ def merge(plan, reviewer, job):
             problem = _authorization_problem(read_setting(), job.get('approved_at'))
             if problem:
                 raise NotAuthorized(problem)
-            try:
-                if job.get('tab') is not None and str(Path(job['folder']).resolve(strict=True)) != str(folder):
-                    raise NotAuthorized('The reviewed folder now points to another worktree.')
-            except (OSError, RuntimeError, TypeError) as exc:
-                raise NotAuthorized('The reviewed folder is gone.') from exc
             if job.get('tab') is not None:
-                try:
-                    same = _repo_identity(_git_dir(folder, '--git-common-dir').resolve()) == job.get('repo')
-                except (GitError, OSError, RuntimeError) as exc:
-                    raise NotAuthorized(str(exc)) from exc
-                if not same:
-                    raise NotAuthorized('The reviewed folder is now in another repository than the one the review saw.')
+                _check_bound(job.get('folder'), folder, job.get('repo'), job['tab'])
             try:
                 head = _head(folder)
                 branch = _git(folder, 'symbolic-ref', '--quiet', '--short', 'HEAD').stdout.strip()
@@ -1452,6 +1467,9 @@ def process(job, alert=None):
             except GitError as exc:
                 decision['outcome'] = 'failed'
                 decision['error'] = str(exc)
+                if isinstance(exc, RepositoryChanged):
+                    decision['root'] = None  # Settings fetches from each logged root
+                    decision.pop('repo', None)
     added = record(decision)
     if added and alert is not None and decision['outcome'] in ('merged', 'failed'):
         name = decision.get('name') or decision.get('branch') or 'A branch'
