@@ -157,14 +157,20 @@ export function Settings({ api, prefs, update, rejectedZone, onReload, onClose, 
   const group = SETTINGS_GROUPS.find(group => group.id === current)
   // Opened from /chat/?go=notifications: show the notification switch, not the top of its group.
   useEffect(() => { if (start === 'notifications') body.current?.querySelector('[data-setting="notifications"]')?.scrollIntoView({ block: 'start' }) }, [start])
-  // On a phone the tapped row leaves the screen: focus goes to the new page's title, and Back returns it to the row.
-  useEffect(() => { if (!wide && selected) heading.current?.focus({ preventScroll: true }) }, [wide, selected])
+  // When the control you used leaves the screen (a phone index row, or a search result), focus goes to the new page's
+  // title, and Back on a phone returns it to the row.
+  const focusHeading = useRef(false)
+  useEffect(() => {
+    if (!focusHeading.current) return
+    focusHeading.current = false
+    heading.current?.focus({ preventScroll: true })
+  }, [selected, query])
   useEffect(() => {
     if (!returnTo.current || selected) return
     body.current?.querySelector<HTMLElement>(`[data-group="${returnTo.current}"]`)?.focus()
     returnTo.current = null
   }, [selected])
-  function choose(id: SettingsGroup) { setSelected(id); setQuery(''); body.current?.scrollTo({ top: 0 }) }
+  function choose(id: SettingsGroup, fromResult = false) { focusHeading.current = fromResult || !wide; setSelected(id); setQuery(''); body.current?.scrollTo({ top: 0 }) }
   function back() { returnTo.current = current; setSelected(null); body.current?.scrollTo({ top: 0 }) }
   const navigation = (place: 'side' | 'index') => <nav className="preferences-nav" aria-label="Settings categories">{SECTIONS.map(section => <div key={section} role="group" aria-labelledby={`settings-${place}-${section}`}>
     <h3 id={`settings-${place}-${section}`} className="preferences-section">{section}</h3>
@@ -186,14 +192,14 @@ export function Settings({ api, prefs, update, rejectedZone, onReload, onClose, 
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); event.stopPropagation(); search.current?.focus() }
   }}>
     <LevelUndoProvider>
-    <header className="preferences-header"><div className="preferences-title"><h2 id="settings-title">Settings</h2><p>Changes save at once.</p></div>
+    <header className="preferences-header"><div className="preferences-title"><h2 id="settings-title">Settings</h2><p>Changes save at once, except fields with a Save button.</p></div>
       <div className="preferences-search"><Search size={18} aria-hidden="true" /><input ref={search} type="search" aria-label="Search settings" placeholder="Search settings…" value={query} autoComplete="off" onChange={event => setQuery(event.target.value)} />{query && <button type="button" className="icon-button" aria-label="Clear search" onClick={() => { setQuery(''); search.current?.focus() }}><X size={16} /></button>}<kbd aria-hidden="true">{keyLabel('⌘K')}</kbd></div>
       <button type="button" className="icon-button preferences-close" aria-label="Close settings" onClick={onClose}><X size={22} /></button></header>
     <div className="preferences-layout"><aside>{navigation('side')}</aside><div ref={body} className="preferences-content">
       {searching ? <><div className="preferences-content-heading"><span className="preferences-eyebrow">Search results</span><h3>{visible.length} {visible.length === 1 ? 'match' : 'matches'}</h3><p role="status">Results for “{query.trim()}”</p></div>{!visible.length && <div className="preferences-empty"><Search size={24} aria-hidden="true" /><h4>No matching settings</h4><p>Try “folder”, “notifications”, “font” or “browser”.</p><button type="button" className="secondary" onClick={() => { setQuery(''); search.current?.focus() }}>Clear search</button></div>}</>
         : group ? <div className="preferences-content-heading"><button type="button" className="preferences-back" onClick={back}><ArrowLeft size={16} aria-hidden="true" />All settings</button><h3 ref={heading} tabIndex={-1}>{group.title}</h3><p>{group.description}</p></div>
         : <div className="preferences-index">{navigation('index')}</div>}
-      <div className="preferences-list">{visible.map((item, index) => <section key={item.id} className="preferences-entry" aria-label={item.title} data-setting={item.id}>{searching && (index === 0 || visible[index - 1].group !== item.group) && <button type="button" className="preferences-result-group" onClick={() => choose(item.group)}>{SETTINGS_GROUPS.find(group => group.id === item.group)!.title}<ChevronRight size={13} aria-hidden="true" /></button>}{item.content}</section>)}</div>
+      <div className="preferences-list">{visible.map((item, index) => <section key={item.id} className="preferences-entry" aria-label={item.title} data-setting={item.id}>{searching && (index === 0 || visible[index - 1].group !== item.group) && <button type="button" className="preferences-result-group" onClick={() => choose(item.group, true)}>{SETTINGS_GROUPS.find(group => group.id === item.group)!.title}<ChevronRight size={13} aria-hidden="true" /></button>}{item.content}</section>)}</div>
     </div></div>
     </LevelUndoProvider>
   </dialog>

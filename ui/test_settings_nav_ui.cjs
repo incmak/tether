@@ -104,6 +104,15 @@ async function main() {
     }
     console.log('ok search: folder and default folder find the General result, and Escape and Clear restore the page')
 
+    // A search result button leaves the screen when you choose it: focus goes to the new page's title (WCAG 2.4.3).
+    const focusedHeading = title => page.waitForFunction(name => document.activeElement?.matches('.preferences-content-heading h3') && document.activeElement.textContent === name, title)
+    await nav.getByRole('button', { name: 'Voice', exact: true }).click()
+    await search.fill('default folder')
+    await folder.getByRole('button', { name: 'General', exact: true }).press('Enter')
+    await focusedHeading('General')
+    assert.equal(await search.inputValue(), '')
+    console.log('ok 1280px: Enter on a search result focuses the page title')
+
     await openSettings(320)
     const index = settings.locator('.preferences-index nav.preferences-nav')
     await index.waitFor()
@@ -122,6 +131,14 @@ async function main() {
     await settings.getByRole('button', { name: 'All settings', exact: true }).click()
     await page.waitForFunction(() => document.activeElement?.matches('.preferences-index [data-group="voice"]'))
     console.log('ok 320px: 14 described index rows, Voice heading focus, and focus return to the Voice row')
+    await voice.click()
+    await focusedHeading('Voice')
+    await search.fill('microphone')
+    await settings.getByRole('region', { name: 'Voice button', exact: true }).getByRole('button', { name: 'Voice', exact: true }).press('Enter')
+    await focusedHeading('Voice')
+    await page.keyboard.press('Tab')
+    assert(await page.evaluate(() => !!document.activeElement?.closest('.preferences-content') && !document.activeElement.matches('input[type="search"]')), 'Tab after the title stays in the page')
+    console.log('ok 320px: Enter on a search result focuses the page title, and Tab moves into the page')
     assert.deepEqual(errors, [])
     console.log('all passed')
   } catch (error) {
