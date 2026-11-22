@@ -23,7 +23,7 @@ export interface SavedAnswer { id: string; date: string; question: string; answe
 // 'dm' is the BriskBot approver's 1:1 chat with the bot. The others are team channels.
 const SPACES = [{ value: 'dm', label: 'Direct chat' }, ...['team', 'qa', 'release', 'bots'].map(value => ({ value, label: value }))]
 
-/** Settings › Agents: the two setup steps autonomy needs, each applied only after approval. */
+/** Settings › Autonomy › Setup: the two setup steps autonomy needs, each applied only after approval. */
 export function AutonomySetup({ api }: { api: Api }) {
   const fetcher = useCallback((signal: AbortSignal) => api<SetupState>('autonomy/setup', undefined, signal), [api])
   const { data, error: loadError, refresh } = usePolling(fetcher, 30000)

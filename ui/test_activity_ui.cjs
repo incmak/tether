@@ -1,4 +1,4 @@
-// Activity time (Settings › About & system) and the activity ping against an existing build. Every API request stays
+// Activity time (Settings › Usage tracking) and the activity ping against an existing build. Every API request stays
 // in this page's fixtures; no terminal is touched and nothing is published.
 // Run: cd ui && npm run test:ui (or node test_activity_ui.cjs against an existing build).
 const http = require('node:http')

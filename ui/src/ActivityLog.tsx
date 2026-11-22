@@ -9,7 +9,7 @@ import { SkeletonRows } from './Skeleton'
 import { dayKey, fmtDate, fmtDateTime, fmtTime, sameDay, useTetherZone, zonedTime, zoneParts } from './zone'
 import './ActivityLog.css'
 
-// Settings › Activity (server: audit.py, GET /mobile/api/audit). What each device and agent changed: settings with the old
+// Settings › Activity log (server: audit.py, GET /mobile/api/audit). What each device and agent changed: settings with the old
 // and the new value, tabs, reviews, backlog, lessons, advisor asks and approvals. Newest first; the server keeps 90 days.
 export type AuditSource = 'ui' | 'agent-cli' | 'cli' | 'hook' | 'server' | 'unknown'
 type Scalar = string | number | boolean | null
@@ -104,7 +104,7 @@ function merged(...lists: AuditEntry[][]) {
   return lists.flat().filter(entry => !seen.has(entry.id) && !!seen.add(entry.id)).sort((a, b) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0))
 }
 
-/** Settings › Activity. The first page reloads every 20 s while it is open. After Load more, the sheet keeps one list:
+/** Settings › Activity log. The first page reloads every 20 s while it is open. After Load more, the sheet keeps one list:
  * each reload and each older page merge into it, so no row that was on screen goes away. */
 export function ActivityLog({ api }: { api: Api }) {
   const zone = useTetherZone()

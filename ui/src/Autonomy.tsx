@@ -79,7 +79,7 @@ function LevelList({ name, levels, value, disabled, onChange }: { name: string; 
   </fieldset>
 }
 
-/** Settings › Agents: the global autonomy level. */
+/** Settings › Autonomy: the global autonomy level. */
 export function GlobalAutonomy({ api }: { api: Api }) {
   const { data, error, pending, save } = useAutonomy(api)
   const value = typeof pending?.level === 'number' ? pending.level : data?.global

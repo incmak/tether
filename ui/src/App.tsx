@@ -1083,7 +1083,7 @@ function App() {
         choosePhoneScreen('chats', setScreen)
         setNotice(paths.length === 1 ? `Added ${paths[0]} to the message.` : `Added ${paths.length} paths to the message.`)
       } : undefined} /></Suspense>}
-    {!home && prefs.agentBubble && sessions.some(item => item.panes.some(p => p.agent !== 'shell')) && <AgentBubble sessions={sessions} seen={prefs.seen} selected={openId} onOpen={openPane} onMarkRead={markRead} onPage={() => setAgentsPage('list')} onHide={() => { update(() => ({ agentBubble: false })); setNotice('Agents bubble hidden. Turn it on in Settings › Chat.') }} />}
+    {!home && prefs.agentBubble && sessions.some(item => item.panes.some(p => p.agent !== 'shell')) && <AgentBubble sessions={sessions} seen={prefs.seen} selected={openId} onOpen={openPane} onMarkRead={markRead} onPage={() => setAgentsPage('list')} onHide={() => { update(() => ({ agentBubble: false })); setNotice('Agents bubble hidden. Turn it on in Settings › Appearance.') }} />}
     {livePins.length > 0 && <SidePins api={api} pins={prefs.sidePins} sessions={sessions} seen={prefs.seen} selected={openId} onOpen={openPane} onPin={pinPane} onUnpin={unpinPane} onNote={notePin} onMove={movePin} onUpdate={() => void refresh()} />}
     {!wide && <PhoneTabs screen={home ? 'home' : screen} waiting={waitingCount} onScreen={next => choosePhoneScreen(next, setScreen)} setScreen={setScreen} onLive={openLive}
       browser={pane ? {

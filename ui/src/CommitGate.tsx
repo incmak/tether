@@ -54,7 +54,7 @@ function Numbers({ stats, mode, here }: { stats: GateStats | null; mode: GateMod
 
 const pendingMode = (pending: Record<string, unknown> | null) => typeof pending?.mode === 'string' ? pending.mode as GateMode : undefined
 
-/** Settings › Agents: the global mode and the numbers from the log. */
+/** Settings › Commit & merge: the global mode and the numbers from the log. */
 export function GlobalCommitGate({ api }: { api: Api }) {
   const { data, error, pending, save } = useCommitGate(api)
   const value = pendingMode(pending) ?? data?.global

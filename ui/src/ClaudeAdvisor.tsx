@@ -49,7 +49,7 @@ const userNote = (data: ClaudeAdvisorState) => data.user_setting
   ? `Your Claude Code settings already set advisorModel to “${data.user_setting}”. With Off, Tether adds nothing, so tabs keep that advisor.`
   : ''
 
-/** Settings › Agents: the choice for every Claude tab that Tether starts. */
+/** Settings › Models & helpers: the choice for every Claude tab that Tether starts. */
 export function GlobalClaudeAdvisor({ api }: { api: Api }) {
   const { data, error, pending, save } = useClaudeAdvisor(api)
   const value = (pending?.model as AdvisorModel | undefined) ?? data?.global ?? 'off'

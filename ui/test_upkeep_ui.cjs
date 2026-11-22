@@ -112,6 +112,16 @@ async function main() {
     const small = scope => page.evaluate(selector => [...document.querySelectorAll(`${selector} button`)].filter(el => el.getClientRects().length).map(el => el.getBoundingClientRect()).filter(box => box.width < 24 || box.height < 24).length, scope)
     const reset = () => Object.assign(state, fresh(), { posts: [], mode: 'ok', delay: 0 })
     const sheet = page.locator('dialog.upkeep-sheet[open]')
+    const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
+    const openUpkeepSettings = async width => {
+      await page.goto(`${ORIGIN}/chat/`)
+      await page.locator('.chat-panel[data-pane="%1"]').first().waitFor()
+      if (width < 800) await page.getByRole('button', { name: 'Open sessions', exact: true }).click()
+      await page.getByRole('button', { name: 'Settings', exact: true }).click()
+      await settings.getByRole('navigation', { name: 'Settings categories' })
+        .getByRole('button', { name: /^Learning & upkeep/ }).click()
+      await settings.getByRole('heading', { name: 'Learning & upkeep', exact: true }).waitFor()
+    }
 
     for (const [width, height] of [[1280, 800], [320, 640]]) {
       const at = `${width}:`
@@ -183,10 +193,8 @@ async function main() {
       await sheet.getByRole('heading', { name: /Lessons that never repeated/ }).waitFor()
       check(`${at} Try again loads the list`, true)
 
-      // ---- Settings › Agents: the entry and the daily ops report ----
-      await page.goto(`${ORIGIN}/chat/?go=notifications`)
-      const settings = page.locator('dialog.preferences[open]')
-      await settings.getByPlaceholder(/Search settings/).fill('clean up')
+      // ---- Settings › Learning & upkeep: the entry and the daily ops report ----
+      await openUpkeepSettings(width)
       const entry = settings.locator('[data-setting="cleanup"]')
       await entry.getByText('2 lessons and 2 notes look stale').waitFor()
       check(`${at} Settings names the counts`, true)
@@ -196,7 +204,6 @@ async function main() {
       await sheet.waitFor({ state: 'detached' })
       check(`${at} Review opens the sheet and Done closes it`, true)
 
-      await settings.getByPlaceholder(/Search settings/).fill('ops report')
       const ops = settings.locator('[data-setting="ops-report"]')
       const toggle = ops.getByRole('switch', { name: /Write a postmortem each day/ })
       await toggle.waitFor()
@@ -235,8 +242,7 @@ async function main() {
       // Dark theme and the ops error state.
       await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'dark' })
       state.mode = 'down'
-      await page.goto(`${ORIGIN}/chat/?go=notifications`)
-      await settings.getByPlaceholder(/Search settings/).fill('ops report')
+      await openUpkeepSettings(width)
       await ops.getByRole('alert').getByText('Tether could not read or write its files.').waitFor()
       check(`${at} the ops report shows a load error with a retry`, await ops.getByRole('button', { name: 'Try again' }).isVisible())
       state.mode = 'ok'

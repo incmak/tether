@@ -1,4 +1,4 @@
-// Upkeep in Settings › Agents (server: prune.py, ops_agent.py, upkeep_api.py).
+// Upkeep in Settings › Learning & upkeep (server: prune.py, ops_agent.py, upkeep_api.py).
 // - Clean-up (B211): a weekly check flags lessons that never repeated and notes nobody touched for 30 days. The
 //   person removes each one with its own button; nothing goes without that tap. Undo works for 7 days.
 // - Daily ops report (B212): once a day Tether writes yesterday's facts to a postmortem note and a cheap tab says
@@ -105,7 +105,7 @@ export function CleanUp({ api, onClose }: { api: Api; onClose: () => void }) {
   </dialog>
 }
 
-/** Settings › Agents: the entry to the clean-up sheet, with the counts. */
+/** Settings › Learning & upkeep: the entry to the clean-up sheet, with the counts. */
 export function CleanUpSettings({ api }: { api: Api }) {
   const fetcher = useCallback((signal: AbortSignal) => api<PruneState>('upkeep/prune', undefined, signal), [api])
   const { data, error, refresh } = usePolling(fetcher, 120000)
@@ -141,7 +141,7 @@ function Postmortem({ api, run, onClose }: { api: Api; run: OpsRun; onClose: () 
   </dialog>
 }
 
-/** Settings › Agents: the daily ops report's switch, its last runs and the lessons it proposes. */
+/** Settings › Learning & upkeep: the daily ops report's switch, its last runs and the lessons it proposes. */
 export function OpsSettings({ api }: { api: Api }) {
   useTetherZone()
   const fetcher = useCallback((signal: AbortSignal) => api<OpsState>('upkeep/ops', undefined, signal), [api])

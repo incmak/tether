@@ -7,7 +7,7 @@ import { useModal } from './hooks'
 import { useAutonomy } from './Autonomy'
 import type { Advisor, AutonomyState, CatalogModel, HelperChoice, ProviderCatalog, Reviewer, Tier } from './Autonomy'
 
-// Settings › Agents › "Who helps your agents": the advisor, the second opinion and the three reviewer tiers
+// Settings › Models & helpers › "Who helps your agents": the advisor, the second opinion and the three reviewer tiers
 // (server: advisor.py, autonomy.py, model_catalog.py). Each row shows what runs now; a sheet changes it.
 type Role = 'advisor' | 'second' | Tier
 type Agent = Reviewer['agent']
@@ -81,7 +81,7 @@ function summary(data: AutonomyState, role: Role, value: HelperChoice | Reviewer
   return `${AGENT_NAME[value.agent]} · ${modelName(data, value.agent, value.model)} · ${effort}`
 }
 
-/** Settings › Agents: who helps the agents before they ask you, and who checks their work after. */
+/** Settings › Models & helpers: who helps the agents before they ask you, and who checks their work after. */
 export function HelperSettings({ api }: { api: Api }) {
   const { data, error, pending, save } = useAutonomy(api)
   const [open, setOpen] = useState<Role | null>(null)

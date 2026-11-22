@@ -185,7 +185,10 @@ async function main() {
     }
     // The server's own window, opened from that link: Settings shows the notification switch.
     await page.goto(`${HOME}/chat/?go=notifications`, { waitUntil: 'load' })
-    const push = page.getByRole('switch', { name: /Push notifications/ })
+    const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
+    const notifications = settings.locator('[data-setting="notifications"]')
+    const push = notifications.getByRole('switch', { name: /Push notifications/ })
+    await settings.getByRole('heading', { name: 'Notifications', exact: true }).waitFor()
     await push.waitFor()
     check('?go=notifications opens the notification setting', await push.isVisible() && new URL(page.url()).search === '')
     await page.keyboard.press('Escape')

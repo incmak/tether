@@ -87,7 +87,7 @@ function RunOptions({ run, models, disabled, onChange }: { run: CodexRun; models
   </fieldset>
 }
 
-/** Settings › System: the global level. */
+/** Settings › Models & helpers: the global level. */
 export function GlobalCodexLevel({ api }: { api: Api }) {
   const { data, error, pending, save } = useCodexLevel(api)
   const value = typeof pending?.level === 'number' ? pending.level : data?.global

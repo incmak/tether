@@ -43,7 +43,7 @@ export function AgentBubble({ sessions, seen, selected, onOpen, onHide, onMarkRe
         <AgentTabs sessions={sessions} seen={seen} selected={selected} tab={tab} onTab={setTab} onOpen={pane => { close(false); onOpen(pane) }} onMarkRead={onMarkRead} />
       </div>
       <footer className="agent-pop-foot">
-        <button type="button" className="agent-pop-hide" title="Turn it back on in Settings › Chat" onClick={() => { close(false); onHide() }}>Hide bubble</button>
+        <button type="button" className="agent-pop-hide" title="Turn it back on in Settings › Appearance" onClick={() => { close(false); onHide() }}>Hide bubble</button>
       </footer>
     </div>}
   </>
