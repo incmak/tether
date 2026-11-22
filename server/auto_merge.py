@@ -1394,6 +1394,9 @@ def merge(plan, reviewer, job):
     _check_push_url(root, plan['url'])
     with _mode_lock:
         def confirm():
+            """Runs right before each network command of the push. Order: the Git reads of the worktree, then the
+            binding check (_check_bound), then one in-process read of the approval. Each check sees one moment; a
+            change while the next Git command runs, or after the last read, is out of reach (the residual race)."""
             problem = _authorization_problem(read_setting(), job.get('approved_at'))
             if problem:
                 raise NotAuthorized(problem)
@@ -1411,6 +1414,9 @@ def merge(plan, reviewer, job):
                 raise NotAuthorized(str(exc)) from exc
             if dirty:
                 raise NotAuthorized(dirty)
+            if job.get('tab') is not None:
+                _check_bound(job.get('folder'), folder, job.get('repo'), job['tab'])
+            # Last: one in-process read of the approval store (no subprocess). The network command follows at once.
             current = job.get('current')
             try:
                 live = current().get(job.get('worker'), {}).get(job.get('reviewer')) if callable(current) else None
@@ -1420,9 +1426,6 @@ def merge(plan, reviewer, job):
                 raise NotAuthorized('Could not read the current reviewer approval.') from exc
             if not matches:
                 raise NotAuthorized('The reviewer approval changed or is no longer available.')
-            if job.get('tab') is not None:
-                # Last, after every Git read above: the network command follows at once.
-                _check_bound(job.get('folder'), folder, job.get('repo'), job['tab'])
 
         # Once before the look at the remote main and once after it, right before the push.
         _fast_forward_push(root, scratch, plan['url'], plan['target_sha'], made, confirm)
@@ -1567,8 +1570,10 @@ def handles(path):
     return path.split('?', 1)[0] == PATH
 
 
-def _trust(root, known):
-    """One repository's ladder for the Settings page. known: the repository appears in the decision log."""
+def _trust(root, known, identity=None):
+    """One repository's ladder for the Settings page. known: the repository appears in the decision log.
+    identity: the repository that decision saw. Each network command then runs only while `root` still reads it.
+    A live tab's root has none: the open tab names it."""
     entry = {'root': root, 'repo': Path(root).name, 'areas': [], 'error': ''}
     failed = _target_errors.get(root)
     if failed and time.monotonic() - failed[0] < TARGET_TTL:
@@ -1577,7 +1582,15 @@ def _trust(root, known):
     try:
         scratch = _scratch(root)
         cached = _target_cache.get(root)
-        _, target_sha = cached[1] if cached and time.monotonic() - cached[0] < TARGET_TTL else _fetch_target(root, scratch)
+        if cached and time.monotonic() - cached[0] < TARGET_TTL:
+            _, target_sha = cached[1]
+        elif identity is not None:
+            def same_repository():
+                if not _still_repository(root, identity):
+                    raise RepositoryChanged(f'{root} now holds another repository than the one in the decision log.')
+            _, target_sha = _fetch_target(root, scratch, same_repository)
+        else:
+            _, target_sha = _fetch_target(root, scratch)
         _target_errors.pop(root, None)
         entry['target'] = f'{REMOTE}/{TARGET}'
         rules = rules_at(scratch, target_sha)
@@ -1614,7 +1627,7 @@ def state(roots=()):
     shown = [{key: item.get(key) for key in ('at', 'mode', 'outcome', 'repo', 'root', 'branch', 'head', 'target', 'name',
                                               'subject', 'checks', 'areas', 'files', 'merge', 'error', 'note')}
              for item in reversed(found[-SHOWN:])]
-    logged, refused = [], []
+    logged, refused, identities = [], [], {}
     for item in reversed(found):
         root = item.get('root')
         if not isinstance(root, str) or root in logged or root in refused:
@@ -1623,10 +1636,14 @@ def state(roots=()):
             break
         # The log holds a path, and another repository can take that path. The newest decision for a root names
         # the repository it saw; Settings fetches only while the path still reads that repository.
-        (logged if _still_repository(root, item.get('root_id')) else refused).append(root)
+        if _still_repository(root, item.get('root_id')):
+            logged.append(root)
+            identities[root] = item['root_id']
+        else:
+            refused.append(root)
     trust = []
     for root in [*logged[:4], *[root for root in roots if root not in logged][:4]]:
-        entry = _trust(root, root in logged)
+        entry = _trust(root, root in logged, identities.get(root))
         if entry is not None:
             trust.append(entry)
     return {**setting, 'enforce_available': ENFORCE_AVAILABLE,

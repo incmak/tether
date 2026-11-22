@@ -2294,8 +2294,9 @@ class CrossWorktree(Base):
         self.assertEqual(self.origin_main(), before)
 
     def test_an_approval_that_changes_during_the_remote_check_stops_the_push(self):
-        # The approval moves during the look at the remote main, or during the push's credential lookup before it.
-        for moment in ('ls-remote', 'credentials'):
+        # The approval moves during the look at the remote main, during the push's credential lookup before it, or
+        # during the binding check's Git reads (the approval read comes after them).
+        for moment in ('ls-remote', 'credentials', 'binding'):
             with self.subTest(moment=moment):
                 self.enforce()
                 head = self.change(text=f'{moment}\n')
@@ -2303,8 +2304,13 @@ class CrossWorktree(Base):
                 live = {'commit': head, 'at': None, 'folder': str(self.work), 'repo': self.repo_of()}
                 job = {**self.job(head), 'tab': str(self.repo), 'current': lambda: {'%1': {'%2': dict(live)}}}
                 live['at'] = job['approved_at']
-                real, real_helpers = auto_merge._object_git, auto_merge._credential_helpers
+                real, real_helpers, real_bound = auto_merge._object_git, auto_merge._credential_helpers, auto_merge._check_bound
                 steps = []
+
+                def check_bound(*args):
+                    real_bound(*args)
+                    if moment == 'binding' and 'commit-tree' in steps:
+                        live.clear()
 
                 def object_git(scratch, *args, **kwargs):
                     result = real(scratch, *args, **kwargs)
@@ -2319,14 +2325,15 @@ class CrossWorktree(Base):
                     return real_helpers(root)
 
                 with mock.patch.object(auto_merge, '_object_git', side_effect=object_git), \
-                        mock.patch.object(auto_merge, '_credential_helpers', side_effect=helpers):
+                        mock.patch.object(auto_merge, '_credential_helpers', side_effect=helpers), \
+                        mock.patch.object(auto_merge, '_check_bound', side_effect=check_bound):
                     decision = auto_merge.process(job)
                 self.assertEqual(decision['outcome'], 'failed')
                 self.assertIn('approval changed', decision['error'])
                 self.assertIn('commit-tree', steps)
                 self.assertNotIn('push', steps)
                 # No network command after the change: the push's look at main runs only when the approval held.
-                self.assertEqual(steps.count('ls-remote'), 1 if moment == 'credentials' else 2)
+                self.assertEqual(steps.count('ls-remote'), 2 if moment == 'ls-remote' else 1)
                 self.assertEqual(self.origin_main(), before)
 
 
@@ -2401,6 +2408,48 @@ class Http(Base):
         self.assertIn('ls-remote', listed[0]['error'])
         auto_merge._target_errors.clear()
 
+    def test_settings_checks_the_logged_repository_before_each_network_command(self):
+        # The scan saw the logged repository; then another one takes the path during scratch setup, or between
+        # ls-remote and fetch. Settings runs no later network command for that root.
+        decision = auto_merge.process(self.job(self.change()))
+        for moment in ('scratch', 'ls-remote'):
+            with self.subTest(moment=moment):
+                auto_merge._target_cache.clear()
+                auto_merge._target_errors.clear()
+                aside = self.repo / f'.git-{moment}'
+                swapped = []
+                real_scratch, real_git = auto_merge._scratch, auto_merge._object_git
+
+                def swap():
+                    if not swapped:
+                        swapped.append(True)
+                        (self.repo / '.git').rename(aside)
+                        shutil.copytree(aside, self.repo / '.git', symlinks=True)
+
+                def scratch(root):
+                    made = real_scratch(root)
+                    if moment == 'scratch':
+                        swap()
+                    return made
+
+                def object_git(scratch_dir, *args, **kwargs):
+                    result = real_git(scratch_dir, *args, **kwargs)
+                    if moment == 'ls-remote' and args[0] == 'ls-remote':
+                        swap()
+                    return result
+
+                with mock.patch.object(auto_merge, '_scratch', side_effect=scratch), \
+                        mock.patch.object(auto_merge, '_object_git', side_effect=object_git) as git:
+                    trust = auto_merge.state()['trust']
+                commands = [call.args[1] for call in git.call_args_list]
+                self.assertEqual(swapped, [True])
+                self.assertEqual(commands.count('ls-remote'), 0 if moment == 'scratch' else 1)
+                self.assertNotIn('fetch', commands)
+                self.assertEqual([item['areas'] for item in trust], [[]])
+                self.assertIn('another repository than the one in the decision log', trust[0]['error'])
+                # The next case starts from a log entry for the repository now at the path.
+                auto_merge.record({**decision, 'root_id': self.repo_of(self.repo), 'head': moment[0] * 40})
+
     def test_settings_fetches_a_logged_root_only_while_it_reads_the_logged_repository(self):
         # The log holds a path. After the decision, another repository takes it (here a copy of the Git directory,
         # so only the identity differs), or the record names no repository: Settings runs no Git network command.
@@ -2412,7 +2461,7 @@ class Http(Base):
                 auto_merge.record({**decision, 'head': ('c' if case == 'no identity' else 'd') * 40})
                 with mock.patch.object(auto_merge, '_trust', return_value=None) as trust:
                     auto_merge.state()
-                self.assertEqual(trust.call_args_list, [mock.call(str(self.repo), True)])
+                self.assertEqual(trust.call_args_list, [mock.call(str(self.repo), True, decision['root_id'])])
                 if case == 'another repository':
                     common = self.repo / '.git'
                     common.rename(self.repo / '.git-aside')
@@ -2426,7 +2475,7 @@ class Http(Base):
         # A live tab in that repository is still listed: it is the user's open repository, not a logged path.
         with mock.patch.object(auto_merge, '_trust', return_value=None) as trust:
             auto_merge.state([str(self.repo)])
-        self.assertEqual(trust.call_args_list, [mock.call(str(self.repo), False)])
+        self.assertEqual(trust.call_args_list, [mock.call(str(self.repo), False, None)])
 
     def test_a_repository_without_rules_is_listed_only_when_it_has_decisions(self):
         other = self.root / 'other'
