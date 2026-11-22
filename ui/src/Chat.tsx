@@ -857,7 +857,10 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     if (!panel) return
     const observer = new ResizeObserver(() => rescueFocus.current())
     observer.observe(panel)
-    return () => observer.disconnect()
+    // A press outside the header moves the user away, even where it leaves focus on the page (empty chat space).
+    const away = (event: PointerEvent) => { if (!headerRef.current?.contains(event.target as Node)) headerFocus.current = null }
+    document.addEventListener('pointerdown', away, true)
+    return () => { observer.disconnect(); document.removeEventListener('pointerdown', away, true) }
   }, [])
   useLayoutEffect(() => {
     const view = viewport.current

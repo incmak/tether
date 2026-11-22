@@ -357,6 +357,7 @@ async function main() {
     await open(2)
     const secondSlot = '.workspace .slot[data-slot="1"]'
     const selectedSlot = page.locator('.workspace .slot.focused')
+    const clickSecondChat = () => page.locator(`${secondSlot} .chat-empty h2`).click()
     const assertWideSlots = async () => {
       const widths = await page.locator('.workspace .slot > .chat-panel').evaluateAll(panels => panels.map(panel => panel.getBoundingClientRect().width))
       assert.ok(widths.length === 2 && widths.every(width => width > 420), `Both panes must stay above the fold breakpoint: ${widths}`)
@@ -366,11 +367,11 @@ async function main() {
     await page.keyboard.press('Tab')
     assert.ok(await focused(keys), 'Tab must focus the … button in slot 1')
     assert.equal(await selectedSlot.getAttribute('data-slot'), '0', 'Slot 1 starts selected')
-    await page.locator(`${secondSlot} .chat-empty h2`).click()
+    await clickSecondChat()
     await page.locator(`${secondSlot}.focused`).waitFor()
     assert.ok(await page.evaluate(() => document.activeElement === document.body), 'Clicking the empty chat in slot 2 must leave focus on the body')
 
-    for (const [axis, size] of [['height', { width: 1280, height: 760 }], ['width', { width: 1240, height: 760 }]]) {
+    const resizeSlot = async (axis, size) => {
       await panel.evaluate((element, axis) => {
         const before = element.getBoundingClientRect()[axis]
         window.slotResized = new Promise(resolve => {
@@ -385,15 +386,56 @@ async function main() {
       }, axis)
       await page.setViewportSize(size)
       await page.evaluate(() => window.slotResized)
+    }
+    for (const [axis, size] of [['height', { width: 1280, height: 760 }], ['width', { width: 1240, height: 760 }]]) {
+      await resizeSlot(axis, size)
       await assertWideSlots()
       assert.ok(!await focused(keys), `A ${axis}-only resize must not return focus to the … button in slot 1`)
       assert.equal(await selectedSlot.getAttribute('data-slot'), '1', `Slot 2 must stay selected after a ${axis}-only resize`)
     }
     console.log('ok resizing wide slots keeps slot 2 selected and focus away from the … button in slot 1')
 
+    const outsidePressCases = [
+      { name: 'Search stays folded as the slot actions fold', count: 3, item: 'Search this chat',
+        before: [320, 420], viewport: 1000, after: [0, 320], visible: { search: false, swap: false } },
+      { name: 'Search unfolds', count: 3, item: 'Search this chat',
+        before: [320, 420], viewport: 1440, after: [420], visible: { search: true } },
+      { name: 'The slot picker unfolds', count: 4, item: 'Show another pane here',
+        before: [0, 320], viewport: 1440, after: [320, 420], visible: { swap: true } },
+      { name: 'Outside click closes the menu', count: 3, item: 'Search this chat', before: [320, 420] },
+    ]
+    const outsidePressResults = []
+    for (const { name, count, item, before, viewport, after, visible } of outsidePressCases) {
+      await page.setViewportSize({ width: 1280, height: 800 })
+      await open(count, count === 4 ? { cols: { 4: [0.25] } } : {})
+      await widthIn(name, ...before)
+      assert.equal(await selectedSlot.getAttribute('data-slot'), '0', `${name}: slot 1 starts selected`)
+      await tabToMenuItem(menuItem(item))
+      await clickSecondChat()
+      await menu.waitFor({ state: 'detached' })
+      const bodyAfterClick = await page.evaluate(() => document.activeElement === document.body)
+      const selectedAfterClick = await selectedSlot.getAttribute('data-slot')
+      if (viewport) {
+        await resizeSlot('width', { width: viewport, height: 800 })
+        await widthIn(name, ...after)
+        await show(name, visible)
+      }
+      outsidePressResults.push({
+        name,
+        bodyAfterClick,
+        selectedAfterClick,
+        triggerFocused: await focused(keys),
+        selectedSlot: await selectedSlot.getAttribute('data-slot'),
+      })
+    }
+    assert.deepEqual(outsidePressResults, outsidePressCases.map(({ name }) => ({
+      name, bodyAfterClick: true, selectedAfterClick: '1', triggerFocused: false, selectedSlot: '1',
+    })), 'An outside click and any following resize must leave slot 2 selected and focus away from slot 1’s … button')
+    console.log('ok clicking outside the menu keeps slot 2 selected and focus away from the … button through dismissal and both fold breakpoints')
+
     assert.deepEqual(writes.filter(write => write.endpoint !== 'prefs'), [], 'Header actions send no API writes except local fixture preference sync')
     assert.deepEqual(errors, [], 'No uncaught browser exceptions')
-    console.log('13 scenarios passed. No terminal writes or uncaught browser exceptions.')
+    console.log('14 scenarios passed. No terminal writes or uncaught browser exceptions.')
   } finally {
     await browser.close()
   }
