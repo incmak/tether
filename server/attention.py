@@ -503,7 +503,18 @@ class Attention:
                     pane, ask = next(((key, value) for key, value in self.asks.items() if value['id'] == ask_id),
                                      (None, None))
                 if ask is None:
-                    return False
+                    # Between panes the ask waits in the parked store.
+                    parked = next((value for value in self.parked.values() if value.get('id') == ask_id), None)
+                    if parked is None:
+                        return False
+                    before = parked.get('opened')
+                    parked['opened'] = True
+                    try:
+                        self._save_user(self.clock())
+                    except AttentionError:
+                        parked['opened'] = before
+                        raise
+                    return self.public(parked)
                 thread = ask.get('thread')
             result = self.act(pane, thread, 'opened', ask_id=ask_id)
             if result:

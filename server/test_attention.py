@@ -147,6 +147,15 @@ class AttentionTest(unittest.TestCase):
             self.assertTrue(self.store.mark_opened('%1', ask['id'])['opened'])
         self.assertTrue(self.store.asks['%3']['opened'])
 
+    def test_mark_opened_opens_an_ask_parked_between_panes(self):
+        self.world.turn('%1', 'Urgent: Pick one?\nNeeds you: yes', 10)
+        self.world.observe(entry())
+        ask = self.store.ask('%1', 't1')
+        with self.store.lock:
+            self.store.parked['t1'] = dict(self.store.asks.pop('%1'), parked_at=self.clock.now)
+        self.assertTrue(self.store.mark_opened('%1', ask['id'])['opened'])
+        self.assertTrue(attention.Attention(self.path, self.clock).parked['t1']['opened'])
+
     def test_call_candidates_are_private_snapshots_and_mark_opened_checks_id(self):
         self.world.turn('%1', 'Urgent: Pick one?\nNeeds you: yes', 10)
         self.world.observe(entry())

@@ -23,6 +23,8 @@ CALL_MAX = 15 * 60 + 60
 ASK_KEEP = 1000  # ask records kept, newest first; a returning ask keeps its decided slots
 DEFAULT_SETTINGS = {'mode': 'on', 'day_start': '08:00', 'day_end': '22:00'}
 OUTCOMES = ('answered', 'declined', 'unanswered')
+# dnd_from..dnd_until and hold_from..hold_until are the latest blocks; released_at is the last "calls back on".
+TIMES = ('hold_until', 'dnd_until', 'hold_from', 'dnd_from', 'released_at')
 
 
 class CallRefused(Exception):
@@ -36,7 +38,7 @@ def _number(value):
 def _valid(data):
     if (type(data['version']) is not int or data['version'] != 1
             or not isinstance(data['calls'], list) or not isinstance(data['asks'], dict)
-            or not all(_number(data[key]) for key in ('hold_until', 'dnd_until'))):
+            or not all(_number(data[key]) for key in TIMES)):
         return False
     ids, live = set(), None
     for call in data['calls']:
@@ -73,7 +75,7 @@ class Planner:
         self.log = log or (lambda event, **fields: None)
         self.lock = threading.Lock()
         self.broken = self._reported_broken = self._dirty = False
-        self.state = dict(version=1, calls=[], asks={}, hold_until=0, dnd_until=0, live=None)
+        self.state = dict(version=1, calls=[], asks={}, live=None, **dict.fromkeys(TIMES, 0))
         try:
             data = json.loads(self.path.read_text())
             if not _valid(data):
@@ -152,8 +154,18 @@ class Planner:
             late = due[-1:] if due and now > candidate['grace_end'] + SLOTS[due[-1]] + LATE else []
             decide(candidate, ask, due[:-1] + late, 'skipped')
             slots = [] if late else due[-1:]
+            if slots:
+                # A slot whose time fell inside a do-not-disturb or hold that has ended since stays blocked, even
+                # if no tick ran before the block ended (C2). A block still active is checked in tick, in order.
+                at = candidate['grace_end'] + SLOTS[slots[0]]
+                rule = next((rule for rule in ('dnd', 'hold')
+                             if self.state[rule + '_from'] <= at < self.state[rule + '_until'] <= now), None)
+                if rule:
+                    decide(candidate, ask, slots, rule, rule)
+                    slots = []
+            hold_end = max(self.state['hold_until'], self.state['released_at'])
             if ask['hold_slot'] == 'pending' and now >= self.state['hold_until']:
-                if now > self.state['hold_until'] + LATE:
+                if now > hold_end + LATE:
                     decide(candidate, ask, ['hold'], 'skipped')
                 else:
                     slots.append('hold')
@@ -308,7 +320,10 @@ class Planner:
                         self.state['asks'][ask_id]['done'] = True
                         opened.append((call['panes'][ask_id], ask_id))
             elif outcome == 'declined':
-                self.state['hold_until'] = max(self.state['hold_until'], self.clock() + HOLD)
+                now = self.clock()
+                if self.state['hold_until'] <= now:
+                    self.state['hold_from'] = now
+                self.state['hold_until'] = max(self.state['hold_until'], now + HOLD)
                 for ask_id in call['asks']:
                     ask = self.state['asks'][ask_id]
                     ask['declines'] += 1
@@ -333,13 +348,18 @@ class Planner:
             if not _number(until) or not now < until <= now + DND_MAX:
                 raise ValueError('Do-not-disturb must end within the next 24 hours')
             before = deepcopy(self.state)
+            if self.state['dnd_until'] <= now:
+                self.state['dnd_from'] = now
             self.state['dnd_until'] = until
             self._commit(before)
 
     def calls_back_on(self):
         with self.lock:
             before = deepcopy(self.state)
-            self.state.update(dnd_until=0, hold_until=self.clock())
+            now = self.clock()
+            # End both blocks now. A pending hold slot is due on the next tick (C6).
+            self.state.update(dnd_until=min(self.state['dnd_until'], now),
+                              hold_until=min(self.state['hold_until'], now), released_at=now)
             self._commit(before)
 
     def status(self, now=None):
