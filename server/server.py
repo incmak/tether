@@ -322,7 +322,11 @@ def review_turn_source(entry):
 
 
 REVIEW_GATE_TAIL_BYTES = 256 * 1024
-REVIEW_GATE_TAIL = (None, {})  # (path, size, mtime) -> the newest record per (agent, thread)
+REVIEW_GATE_TAIL = (None, {})  # (path, size, mtime) -> the newest rows per (agent, thread)
+REVIEW_GATE_ROWS = 8
+REVIEW_GATE_LANDED = {}  # (folder, at, head, tree) -> the reflog position of a confirmed row
+REVIEW_GATE_LANDED_MAX = 256
+REVIEW_GATE_LANDED_LOCK = threading.Lock()
 
 
 def review_gate_records():
@@ -350,7 +354,7 @@ def review_gate_records():
     if start:
         data = data.partition(b'\n')[2]  # The first line may start inside a record.
     records = {}
-    for line in data.rpartition(b'\n')[0].split(b'\n'):  # A writer may not have finished the last line.
+    for line in reversed(data.rpartition(b'\n')[0].split(b'\n')):  # Drop a partial last line and break ties by log order.
         try:
             row = json.loads(line)
         except (ValueError, RecursionError):
@@ -364,10 +368,31 @@ def review_gate_records():
                 or head is not None and not isinstance(head, str)):
             continue
         identity = (source, session)
-        if identity not in records or at >= records[identity][0]:
-            records[identity] = (at, folder)
+        recent = records.setdefault(identity, [])
+        recent.append({field: row[field] for field in ('at', 'folder', 'head', 'tree', 'reflog') if field in row})
+        recent.sort(key=lambda record: record['at'], reverse=True)
+        del recent[REVIEW_GATE_ROWS:]
     REVIEW_GATE_TAIL = key, records
     return records
+
+
+def _review_gate_landed(row):
+    tree = row.get('tree')
+    if 'head' not in row or not isinstance(tree, str):
+        return None
+    key = (row['folder'], row['at'], row['head'], tree)
+    position = row.get('reflog')
+    cached = REVIEW_GATE_LANDED.get(key)
+    if cached is not None and cached == position and all(
+            type(cached[field]) is type(position[field]) for field in ('size', 'ino', 'dev')):
+        return True
+    landed = commit_gate.record_landed(row)
+    if landed is True:
+        with REVIEW_GATE_LANDED_LOCK:
+            if key not in REVIEW_GATE_LANDED and len(REVIEW_GATE_LANDED) >= REVIEW_GATE_LANDED_MAX:
+                del REVIEW_GATE_LANDED[next(iter(REVIEW_GATE_LANDED))]
+            REVIEW_GATE_LANDED[key] = position
+    return landed
 
 
 def review_folder(entry):
@@ -381,19 +406,24 @@ def review_folder(entry):
     started = entry.get('process_start')
     use_gate = after is not None if follow_up else started
     if source in ('claude', 'codex') and thread and not entry.get('codex_unresolved') and use_gate:
-        record = review_gate_records().get((source, thread))
-        if record is not None:
-            at, gate_folder = record
-            if after is not None:
-                if at > after:
-                    return gate_folder  # the scope read checks this exact worktree
-            elif started:
-                try:
-                    started_ms = agents.started_ms(started)
-                except (OSError, TypeError, ValueError, OverflowError):
-                    started_ms = None
-                if started_ms is not None and at > started_ms / 1000 and review_scope.head(gate_folder):
-                    return gate_folder
+        threshold = after
+        if not follow_up:
+            try:
+                started_ms = agents.started_ms(started)
+            except (OSError, TypeError, ValueError, OverflowError):
+                started_ms = None
+            if started_ms is not None:
+                threshold = started_ms / 1000
+        if threshold is not None:
+            for record in review_gate_records().get((source, thread), ()):
+                if not record['at'] > threshold:
+                    break
+                landed = _review_gate_landed(record)
+                if landed is False:
+                    continue
+                if landed is True and (follow_up or review_scope.head(record['folder'])):
+                    return record['folder']
+                break  # Unavailable evidence or HEAD: use the usual fallback.
     return folder if after is not None else folder or agent_folder(entry)
 
 

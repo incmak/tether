@@ -175,10 +175,103 @@ sys.exit(main(sys.argv[2:]))
             'project': None, 'mode': 'observe', 'verdict': 'would_block', 'reason': 'no-line',
             'count': 1, 'folder': str(self.repo), 'head': None,
             'tree': self.git('rev-parse', 'HEAD^{tree}').stdout.strip(),
+            'reflog': {'size': 0, 'ino': None, 'dev': None},
             'author_date': author_date,
             'messages': [digest],
         })
+        self.assertIs(commit_gate.record_landed(check), True)
         self.assertNotIn('private test message', self.log.read_text())
+
+    def test_record_landed_for_commit_and_amend_after_reset(self):
+        self.commit('-m', 'base')
+        base = self.git('rev-parse', 'HEAD').stdout.strip()
+        before = commit_gate._head_reflog_position(self.repo)
+        self.install()
+        self.write_file('initial change')
+        self.commit('-m', 'initial')
+        initial = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.write_file('amended change')
+        self.commit('--amend', '-m', 'amended')
+        commit, amend = self.rows()
+        self.assertEqual(commit['reflog'], before)
+        self.assertEqual(amend['head'], initial)
+        self.assertEqual(self.git('rev-parse', 'HEAD^').stdout.strip(), base)
+        self.git('reset', '--hard', base)
+        self.assertIs(commit_gate.record_landed(commit), True)
+        self.assertIs(commit_gate.record_landed(amend), True)
+
+    def test_record_landed_for_merge(self):
+        self.prepare_merge()
+        head = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.git('merge', '--no-ff', '--no-commit', 'side')
+        self.commit('-m', 'merge side')
+        row, = self.rows()
+        self.assertEqual(row['head'], head)
+        self.assertEqual(len(self.git('show', '-s', '--format=%P').stdout.split()), 2)
+        self.assertIs(commit_gate.record_landed(row), True)
+
+    def test_record_landed_rejects_aborted_commit_and_unrelated_checkout(self):
+        self.commit('-m', 'base')
+        self.git('checkout', '-qb', 'other')
+        self.write_file('unrelated change')
+        self.commit('-m', 'other')
+        self.git('checkout', '-q', 'main')
+        self.script(self.hook, f'{self.user_hook_line()}\nexit 1')
+        self.write_file('aborted change')
+        self.assertNotEqual(self.commit('-m', 'abort', check=False).returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['verdict'], 'would_block')
+        self.assertIs(commit_gate.record_landed(row), False)
+        self.git('checkout', '-qf', 'other')
+        self.assertNotEqual(self.git('rev-parse', 'HEAD^{tree}').stdout.strip(), row['tree'])
+        self.assertIs(commit_gate.record_landed(row), False)
+
+    def test_record_landed_uses_all_reflog_entries_for_the_same_commit(self):
+        date = '2000-01-01T00:00:00+00:00'
+        self.env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+        self.commit('-m', 'base')
+        self.git('checkout', '-qb', 'other')
+        self.write_file('change')
+        self.commit('-m', 'other')
+        self.git('checkout', '-q', 'main')
+        self.git('checkout', '-qb', 'intermediate')
+        self.write_file('intermediate change')
+        self.commit('-m', 'intermediate')
+        self.git('checkout', '-q', 'main')
+        row = {'folder': str(self.repo), 'head': self.git('rev-parse', 'HEAD').stdout.strip(),
+               'tree': self.git('rev-parse', 'other^{tree}').stdout.strip(),
+               'reflog': commit_gate._head_reflog_position(self.repo)}
+        self.git('checkout', '-q', 'intermediate')
+        self.git('checkout', '-q', 'other')
+        self.assertIs(commit_gate.record_landed(row), False)
+        self.git('checkout', '-q', 'main')
+        self.write_file('change')
+        self.commit('-m', 'other')
+        self.assertEqual(self.git('rev-parse', 'HEAD').stdout, self.git('rev-parse', 'other').stdout)
+        self.assertIs(commit_gate.record_landed(row), True)
+
+    def test_record_landed_is_unknown_without_reliable_git_evidence(self):
+        self.commit('-m', 'base')
+        self.install()
+        self.commit('-m', 'landed')
+        row, = self.rows()
+        for field in ('tree', 'head', 'reflog'):
+            with self.subTest(missing=field):
+                self.assertIsNone(commit_gate.record_landed({k: v for k, v in row.items() if k != field}))
+        for fields in ({'tree': 'bad'}, {'head': 'bad'}, {'reflog': {'size': -1, 'ino': None, 'dev': None}},
+                       {'folder': str(self.root / 'removed')}, {'folder': '.'}):
+            with self.subTest(fields=fields):
+                self.assertIsNone(commit_gate.record_landed(row | fields))
+        reflog = self.repo / '.git' / 'logs' / 'HEAD'
+        original = reflog.read_bytes()
+        for tail in (b'malformed\n', b'x' * commit_gate.REFLOG_BYTES):
+            reflog.write_bytes(original + tail)
+            with self.subTest(tail_length=len(tail)):
+                self.assertIsNone(commit_gate.record_landed(row))
+        replacement = reflog.with_name('HEAD.replaced')
+        replacement.write_bytes(original)
+        replacement.replace(reflog)
+        self.assertIsNone(commit_gate.record_landed(row))
 
     def test_enforce_checks_stamp_grammar_and_never_counts_terminal_blocks(self):
         self.mode('enforce')

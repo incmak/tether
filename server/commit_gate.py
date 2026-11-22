@@ -14,6 +14,8 @@ The person sets the mode in Settings. Nothing else changes it.
 
 The installed Git commit-msg hook checks the final message file for Claude, Codex and terminal commits.
 It logs one verdict and skips merges, replays that invoke the hook, and fixup, squash and amend! commits.
+The hook records the index tree, HEAD and the HEAD reflog position before Git makes the commit.
+For review binding, a later HEAD reflog entry must move from that HEAD to a commit with that tree.
 The hook checks ordinary amendments. Claude's PreToolUse check can defer to the hook.
 PostToolUse matches each hook row to one landed commit by worktree, tree, all parents, message HMAC and dates.
 A merge skip row can lack the author date. PostToolUse checks uncovered commits and skips new merges.
@@ -1072,10 +1074,8 @@ def _head_reflog_position(folder):
     return None
 
 
-def _head_reflog(folder, start):
-    """Return the HEAD before each commit's first entry since start, or None if unavailable.
-
-    The first entry is the one that made the commit. Later checkouts and resets cannot replace it."""
+def _head_reflog_entries(folder, start):
+    """Read all (old, new) HEAD entries since start, or None if the reflog cannot be read."""
     if not isinstance(start, dict) or not {'size', 'ino', 'dev'} <= start.keys():
         return None
     offset, ino, dev = start['size'], start['ino'], start['dev']
@@ -1105,9 +1105,9 @@ def _head_reflog(folder, start):
                 if source.read(1) != b'\n':
                     return None
             tail = source.read(length + 1)
-        if len(tail) != length or not tail.endswith(b'\n'):
+        if len(tail) != length or (tail and not tail.endswith(b'\n')):
             return None
-        heads = {}
+        entries = []
         for line in tail.split(b'\n')[:-1]:
             old, new, ident = line.split(b' ', 2)
             old, new = old.decode('ascii'), new.decode('ascii')
@@ -1115,10 +1115,41 @@ def _head_reflog(folder, start):
                 return None
             if not re.fullmatch(rb'[^<>\0]* <[^<>\0]*> \d+ [+-]\d{4}(?:\t[^\0]*)?', ident):
                 return None
-            heads.setdefault(new, old)
-        return heads
+            entries.append((old, new))
+        return entries
     except (OSError, ValueError):
         return None
+
+
+def _head_reflog(folder, start):
+    """Return the HEAD before each commit's first entry since start, or None if unavailable.
+
+    The first entry is the one that made the commit. Later checkouts and resets cannot replace it."""
+    entries = _head_reflog_entries(folder, start)
+    if not entries:
+        return None
+    heads = {}
+    for old, new in entries:
+        heads.setdefault(new, old)
+    return heads
+
+
+def record_landed(row):
+    """Return whether a commit-msg row matches a HEAD move, or None if Git cannot tell."""
+    folder, head, tree = (row.get(field) for field in ('folder', 'head', 'tree'))
+    if (not isinstance(tree, str) or not GIT_OID.fullmatch(tree) or 'head' not in row
+            or (head is not None and (not isinstance(head, str) or not GIT_OID.fullmatch(head)))
+            or not isinstance(folder, str) or not os.path.isabs(folder) or not os.path.isdir(folder)):
+        return None
+    entries = _head_reflog_entries(folder, row.get('reflog'))
+    if entries is None:
+        return None
+    for old, new in entries:
+        if old == (head or '0' * len(old)):
+            found = _git(folder, 'rev-parse', '--verify', '-q', f'{new}^{{tree}}')
+            if found is not None and found.returncode == 0 and found.stdout.strip() == tree:
+                return True
+    return False
 
 
 def _message_hook(folder):
@@ -1823,6 +1854,8 @@ def commit_msg(path, env=os.environ, cwd=None, now=None):
         source, session = _source_session(ancestors, env)
         record.update(source=source, session=session)
         record.update(_hook_identity(cwd))
+        if (reflog := _head_reflog_position(cwd)) is not None:
+            record['reflog'] = reflog
         if author_date := re.fullmatch(r'@(\d+ [+-]\d{4})', env.get('GIT_AUTHOR_DATE', '')):
             record['author_date'] = author_date[1]
         git_process = next((ancestor for ancestor in ancestors if os.path.basename(ancestor.comm) == 'git'), None)

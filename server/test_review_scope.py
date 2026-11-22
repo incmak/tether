@@ -25,14 +25,20 @@ class ReviewFolderTests(unittest.TestCase):
         self.start = root / 'start'
         self.work = root / 'other worktree'
         self.git('init', '-q', '-b', 'main', str(self.start), cwd=root)
+        self.start_check = self.gate_fields(self.start, unborn=True)
         self.git('commit', '-qm', 'Start', '--allow-empty')
         self.start_head = self.git('rev-parse', 'HEAD')
         self.git('worktree', 'add', '-qb', 'work', str(self.work))
+        self.work_check = self.gate_fields(self.work)
         self.git('commit', '-qm', 'Work', '--allow-empty', cwd=self.work)
         self.entry = {'id': '%13', 'agent': 'claude', 'thread': SESSION, 'cwd': str(self.start),
                       'process_start': '1234'}
         self.enterContext(patch.object(server.paths, 'COMMIT_GATE_LOG', self.log))
         self.enterContext(patch.object(server.agents, 'started_ms', return_value=100_000))
+
+    def gate_fields(self, folder, *, unborn=False):
+        return {'folder': str(folder), 'head': None if unborn else self.git('rev-parse', 'HEAD', cwd=folder),
+                'tree': self.git('write-tree', cwd=folder), 'reflog': server.commit_gate._head_reflog_position(folder)}
 
     def git(self, *args, cwd=None):
         return subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
@@ -56,7 +62,58 @@ class ReviewFolderTests(unittest.TestCase):
 
     def line(self, **fields):
         return (json.dumps({'event': 'check', 'via': 'commit-msg', 'source': 'claude', 'session': SESSION,
-                            'folder': str(self.work), 'at': 101, 'head': self.start_head, **fields}) + '\n').encode()
+                            'at': 101, **self.work_check, **fields}) + '\n').encode()
+
+    def test_aborted_new_request_uses_older_landed_worktree(self):
+        self.entry['agent'] = 'codex'
+        self.log.write_bytes(self.line(source='codex') + self.line(source='codex', at=102,
+                                                                  **self.gate_fields(self.start)))
+        self.assertEqual(server.review_folder(self.entry), str(self.work))
+
+    def test_aborted_follow_up_uses_older_landed_worktree(self):
+        entry = {**self.entry, 'review_after': 100, 'review_folder': str(self.start)}
+        self.log.write_bytes(self.line() + self.line(at=102, **self.gate_fields(self.start)))
+        self.assertEqual(server.review_folder(entry), str(self.work))
+        self.assertEqual(server.review_folder({**entry, 'review_after': 101}), str(self.start))
+
+    def test_aborted_amend_binds_only_after_it_lands(self):
+        self.log.write_bytes(self.line(**self.start_check) + self.line(at=102, **self.gate_fields(self.work)))
+        self.assertEqual(server.review_folder(self.entry), str(self.start))
+        self.git('commit', '--amend', '--allow-empty', '-qm', 'Amended work', cwd=self.work)
+        self.assertEqual(server.review_folder(self.entry), str(self.work))
+        with patch.object(server.commit_gate, 'record_landed', wraps=server.commit_gate.record_landed) as landed:
+            self.assertEqual(server.review_folder(self.entry), str(self.work))
+            landed.assert_not_called()
+
+    def test_rebased_commit_still_binds_after_another_attempt_aborts(self):
+        (self.work / 'changed.txt').write_text('Work\n')
+        self.git('add', 'changed.txt', cwd=self.work)
+        landed = self.line(**self.gate_fields(self.work))
+        self.git('commit', '-qm', 'Changed work', cwd=self.work)
+        old_commit = self.git('rev-parse', 'HEAD', cwd=self.work)
+        self.git('commit', '-qm', 'Advance the base', '--allow-empty')
+        self.git('rebase', 'main', cwd=self.work)
+        rebased = self.git('rev-parse', 'HEAD', cwd=self.work)
+        self.assertNotEqual(rebased, old_commit)
+        self.log.write_bytes(landed + self.line(at=102, **self.gate_fields(self.start)))
+        self.assertEqual(server.review_folder(self.entry), str(self.work))
+        self.assertEqual(server.review_commit(self.entry), rebased)
+
+    def test_legacy_row_falls_back_instead_of_using_older_landed_row(self):
+        legacy = json.loads(self.line(at=102))
+        del legacy['reflog']
+        self.log.write_bytes(self.line() + (json.dumps(legacy) + '\n').encode())
+        self.assertEqual(server.review_folder(self.entry), str(self.start))
+        entry = {**self.entry, 'review_after': 100, 'review_folder': str(self.start)}
+        self.assertEqual(server.review_folder(entry), str(self.start))
+
+    def test_keeps_only_the_eight_newest_records_per_identity(self):
+        aborted = self.gate_fields(self.start)
+        self.log.write_bytes(self.line() + b''.join(self.line(at=at, **aborted) for at in range(108, 101, -1)))
+        self.assertEqual(server.review_folder(self.entry), str(self.work))
+        with self.log.open('ab') as stream:
+            stream.write(self.line(at=109, **aborted))
+        self.assertEqual(server.review_folder(self.entry), str(self.start))
 
     def test_missing_corrupt_unmatched_and_unreadable_log_fall_back(self):
         self.log.write_bytes(self.line())
@@ -75,16 +132,17 @@ class ReviewFolderTests(unittest.TestCase):
 
     def test_newest_record_wins_for_codex_and_the_worker_can_return_to_start(self):
         self.entry['agent'] = 'codex'
-        self.log.write_bytes(self.line(source='codex', at=103) + self.line(source='codex', at=102, folder=str(self.start)))
+        self.log.write_bytes(self.line(source='codex', at=103) + self.line(source='codex', at=102, **self.start_check))
         work_head = self.git('rev-parse', 'HEAD', cwd=self.work)
         self.assertEqual(server.review_commit(self.entry), work_head)
+        check = self.gate_fields(self.start)
         self.git('commit', '-qm', 'Back in the start folder', '--allow-empty')
         with self.log.open('ab') as stream:
-            stream.write(self.line(source='codex', at=104, folder=str(self.start)))
+            stream.write(self.line(source='codex', at=104, **check))
         self.assertEqual(server.review_commit(self.entry), self.git('rev-parse', 'HEAD'))
 
     def test_new_request_ignores_blocked_commit_but_accepts_observe_mode_record(self):
-        self.log.write_bytes(self.line(folder=str(self.start)) + self.line(at=102, verdict='block'))
+        self.log.write_bytes(self.line(**self.start_check) + self.line(at=102, verdict='block'))
         self.assertEqual(server.review_folder(self.entry), str(self.start))
         with self.log.open('ab') as stream:
             stream.write(self.line(at=103, verdict='would_block'))
@@ -100,7 +158,7 @@ class ReviewFolderTests(unittest.TestCase):
 
     def test_tail_is_bounded_and_cached_until_metadata_changes(self):
         # The valid row at the front must never be found through a long run of malformed data.
-        self.log.write_bytes(self.line() + b'x' * 2_000_000 + b'\n' + self.line(folder=str(self.start), at=100))
+        self.log.write_bytes(self.line() + b'x' * 2_000_000 + b'\n' + self.line(at=100, **self.start_check))
         with patch('server.open', wraps=open, create=True) as opened, self.log.open('rb') as stream, \
                 patch.object(stream, 'read', wraps=stream.read) as read:
             opened.return_value = stream
@@ -148,12 +206,12 @@ class ReviewFolderTests(unittest.TestCase):
         self.git('add', '-A', cwd=self.work)
         self.git('commit', '-qm', 'Review rules and checklist', cwd=self.work)
         self.git('update-ref', 'refs/remotes/origin/main', 'HEAD', cwd=self.work)
-        base = self.git('rev-parse', 'HEAD', cwd=self.work)
         (self.work / 'changed.txt').write_text('Fixed\n')
         self.git('add', 'changed.txt', cwd=self.work)
+        check = self.gate_fields(self.work)
         self.git('commit', '-qm', 'Fix the bug', cwd=self.work)
         work_head = self.git('rev-parse', 'HEAD', cwd=self.work)
-        self.log.write_bytes(self.line(head=base))
+        self.log.write_bytes(self.line(**check))
 
         send = Mock()
         answer = None
@@ -177,7 +235,7 @@ class ReviewFolderTests(unittest.TestCase):
             self.assertEqual(link['work_mark'], server.review_work_mark({'cwd': str(self.work)}))
             # Once sent, the approval still checks the worktree named in the request.
             with self.log.open('ab') as stream:
-                stream.write(self.line(at=102, folder=str(self.start)))
+                stream.write(self.line(at=102, **self.start_check))
             answer = f'APPROVED {work_head}'
             observe()
             self.assertEqual(send.call_args.args[0], self.entry)
@@ -195,9 +253,11 @@ class ReviewFolderTests(unittest.TestCase):
             # The folder that the request named has changed HEAD. A different worktree at the old hash
             # cannot make that approval current.
             self.git('commit', '-qm', 'More work', '--allow-empty')
+            check = self.gate_fields(self.work)
+            self.git('commit', '-qm', 'More work in the linked worktree', '--allow-empty', cwd=self.work)
             self.git('switch', '--detach', self.start_head, cwd=self.work)
             with self.log.open('ab') as stream:
-                stream.write(self.line(at=103))
+                stream.write(self.line(at=103, **check))
             answer = f'APPROVED {self.start_head}'
             sent = send.call_count
             observe()
@@ -248,9 +308,10 @@ class ReviewFolderTests(unittest.TestCase):
                 (folder / 'other.txt').write_text('Other work\n')
                 self.git('add', 'other.txt', cwd=folder)
                 (self.work / 'changed.txt').unlink()
+            check = self.gate_fields(folder)
             self.git('commit', '-qm', 'Commit', cwd=folder)
             with self.log.open('ab') as stream:
-                stream.write(self.line(at=102, folder=str(folder)))
+                stream.write(self.line(at=102, **check))
             observe('Working')
             observe()
             text = send.call_args.args[1]

@@ -23,6 +23,7 @@ from unittest.mock import ANY, Mock, patch
 from uuid import uuid4
 
 import audit
+import commit_gate
 import helper_close
 import injected_prompts
 import review_links
@@ -8295,6 +8296,7 @@ class ApprovalTurnWorktreeTests(ApprovalTurnFixture):
         self.reviewed = self.root / "reviewed worktree"
         self.gate_log = self.root / "gate.log"
         self.git("init", "-q", "-b", "main", str(self.start), cwd=self.root)
+        self.start_check = self.gate_fields(self.start, unborn=True)
         self.git("commit", "-qm", "Start", "--allow-empty")
         self.git("worktree", "add", "-qb", "reviewed", str(self.reviewed))
         self.commit_in(self.reviewed, "Reviewed commit")
@@ -8320,18 +8322,22 @@ class ApprovalTurnWorktreeTests(ApprovalTurnFixture):
             text=True, timeout=10,
         ).stdout.strip()
 
-    def record_gate_check(self, folder, previous_head):
+    def gate_fields(self, folder, *, unborn=False):
+        return {
+            "folder": str(folder), "head": None if unborn else self.git("rev-parse", "HEAD", cwd=folder),
+            "tree": self.git("write-tree", cwd=folder), "reflog": commit_gate._head_reflog_position(folder),
+        }
+
+    def record_gate_check(self, **fields):
         record = {
             "event": "check", "via": "commit-msg", "source": "claude",
-            "session": WORKER_THREAD, "folder": str(folder), "at": self.now + 0.1,
-            "head": previous_head,
+            "session": WORKER_THREAD, "at": self.now + 0.1, **fields,
         }
         with self.gate_log.open("a", encoding="utf-8") as log:
             log.write(json.dumps(record) + "\n")
 
     def commit_in(self, folder, message):
-        previous_head = self.git("rev-parse", "HEAD", cwd=folder)
-        self.record_gate_check(folder, previous_head)
+        self.record_gate_check(**self.gate_fields(folder))
         self.git("commit", "-qm", message, "--allow-empty", cwd=folder)
         return self.git("rev-parse", "HEAD", cwd=folder)
 
@@ -8340,7 +8346,7 @@ class ApprovalTurnWorktreeTests(ApprovalTurnFixture):
         self.assertEqual(self.send.call_count, 1)
         self.assertIn(f"in {shlex.quote(str(self.reviewed))}", self.send.call_args.args[1])
         if earlier_gate_points_to_start:
-            self.record_gate_check(self.start, self.git("rev-parse", "HEAD"))
+            self.record_gate_check(**self.start_check)
         head = self.git("rev-parse", "HEAD", cwd=self.reviewed)
         self.deliver_approval(head)
         self.assertEqual(self.send.call_count, 2)
@@ -8651,13 +8657,7 @@ class ApprovalTurnWorktreeTests(ApprovalTurnFixture):
         alternate = self.another_worktree()
         head = self.approve_reviewed_worktree()
         self.observe("Working")
-        record = {
-            "event": "check", "via": "commit-msg", "source": "claude",
-            "session": self.worker["thread"], "folder": str(alternate),
-            "at": self.now + 0.1, "head": head, "verdict": "block",
-        }
-        with self.gate_log.open("a", encoding="utf-8") as log:
-            log.write(json.dumps(record) + "\n")
+        self.record_gate_check(**self.gate_fields(alternate), verdict="block")
         path = self.reviewed / "notes.txt"
         path.write_text("Actual follow-up edit in the reviewed worktree.\n", encoding="utf-8")
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=alternate), head)
