@@ -500,32 +500,43 @@ function silenceWav() {
     // The deadline timer starts in the same task as the play lock request, on the same paused clock.
     const left = await starter.evaluate(() => window.__voice.playWaitPerf + 5000 - performance.now())
     await starter.clock.runFor(Math.max(0, Math.floor(left) - 50))
-    const waiting = await starter.evaluate(() => ({ micOpens: window.__voice.micOpens.length, alert: !!document.querySelector('.live-problem') }))
+    const waiting = await starter.evaluate(async () => ({
+      micOpens: window.__voice.micOpens.length,
+      alert: !!document.querySelector('.live-problem'),
+      playWaits: (await navigator.locks.query()).pending.filter(lock => lock.name === 'tether-read-aloud-play' && lock.mode === 'exclusive').length,
+    }))
     await starter.clock.runFor(100)
     const alert = live.getByRole('alert')
     await alert.waitFor()
     const startAgain = live.getByRole('button', { name: 'Start again' })
-    const gaveUp = {
+    const stoppedState = async () => ({
       text: await alert.textContent(),
       micOpens: await starter.evaluate(() => window.__voice.micOpens.length),
       holds: await page.evaluate(async () => (await navigator.locks.query()).held.filter(lock => lock.name.startsWith('tether-read-aloud-hold:')).length),
       startEnabled: await startAgain.isEnabled(),
       status: await live.locator('.live-status').textContent(),
       pauseEnabled: await live.getByRole('button', { name: 'Pause listening' }).isEnabled(),
-    }
+      playWaits: await page.evaluate(async () => (await navigator.locks.query()).pending.filter(lock => lock.name === 'tether-read-aloud-play' && lock.mode === 'exclusive').length),
+    })
+    const gaveUp = await stoppedState()
+    // Nothing that the start left behind may open the mic or change the message later.
+    await starter.clock.runFor(60000)
+    const later = await stoppedState()
     check('a reader that never stops: Live gives up at the deadline, keeps the mic closed, releases its hold and says what to do', () => {
-      assert.deepEqual(waiting, { micOpens: 0, alert: false })
+      assert.deepEqual(waiting, { micOpens: 0, alert: false, playWaits: 1 })
       assert.deepEqual(gaveUp, {
         text: 'Another Tether tab is still playing audio. Stop it there, then press Start again.',
-        micOpens: 0, holds: 0, startEnabled: true, status: 'Not started', pauseEnabled: false,
+        micOpens: 0, holds: 0, startEnabled: true, status: 'Not started', pauseEnabled: false, playWaits: 0,
       })
+      assert.deepEqual(later, gaveUp)
     })
     await page.evaluate(() => window.__unstick())
     await starter.clock.resume()
-    await startAgain.click()
+    await startAgain.focus()
+    await starter.keyboard.press('Space')
     await starter.waitForFunction(() => window.__voice.micOpens.length === 1, null, { polling: 100 })
     const restarted = { alert: await live.getByRole('alert').count(), mic: await starter.evaluate(() => window.__voice.micOpens[0]) }
-    check('Start again opens the mic after the other reader stops', () => {
+    check('Space on Start again opens the mic after the other reader stops', () => {
       assert.equal(restarted.alert, 0)
       assert.deepEqual({ held: restarted.mic.held, reading: restarted.mic.reading }, { held: true, reading: false })
     })
