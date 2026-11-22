@@ -88,6 +88,21 @@ def head(folder):
     return found if HASH.fullmatch(found) else None
 
 
+def repo_identity(folder):
+    """The repository of `folder`: {'path', 'dev', 'ino'} of its resolved common Git directory, or None. Read fresh
+    each time, never from a cache: a checkout of another repository can take the same folder path (B368)."""
+    found = git(folder, 'rev-parse', '--path-format=absolute', '--git-common-dir') if folder else None
+    path = (found or '').removesuffix('\n')
+    if not found or not found.endswith('\n') or '\n' in path or not os.path.isabs(path):
+        return None
+    try:
+        real = Path(path).resolve(strict=True)
+        info = real.stat()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return {'path': str(real), 'dev': info.st_dev, 'ino': info.st_ino}
+
+
 def checklist(folder):
     """Run the checker with a deadline for regular expressions from the repository."""
     empty = {'rows': [], 'paths': []}

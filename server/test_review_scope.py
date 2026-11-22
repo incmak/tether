@@ -3,12 +3,14 @@ import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
 import review_links
+import review_scope
 import server
 from own_time import own_time
 
@@ -36,6 +38,21 @@ class ReviewFolderTests(unittest.TestCase):
         return subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
                                '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', *args],
                               cwd=cwd or self.start, capture_output=True, check=True, text=True).stdout.strip()
+
+    def test_repo_identity_is_shared_by_worktrees_and_changes_with_the_repository(self):
+        # B368: auto-merge compares the repository a review saw with the live one.
+        found = review_scope.repo_identity(str(self.work))
+        self.assertEqual(found, review_scope.repo_identity(str(self.start)))
+        self.assertEqual(found['path'], str((self.start / '.git').resolve()))
+        common = self.start / '.git'
+        common.rename(self.start / '.git-aside')
+        shutil.copytree(self.start / '.git-aside', common, symlinks=True)
+        moved = review_scope.repo_identity(str(self.work))
+        self.assertEqual(moved['path'], found['path'])
+        self.assertNotEqual(moved, found)  # the same path, another directory
+        for folder in (None, '', str(self.start.parent), str(self.start.parent / 'missing')):
+            with self.subTest(folder=folder):
+                self.assertIsNone(review_scope.repo_identity(folder))
 
     def line(self, **fields):
         return (json.dumps({'event': 'check', 'via': 'commit-msg', 'source': 'claude', 'session': SESSION,
