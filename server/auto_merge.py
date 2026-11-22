@@ -1165,7 +1165,7 @@ def evaluate(folder, approved, tab=None, repo=None):
             # Before the root is logged: Settings fetches from each logged root.
             if _repo_identity(own) != repo:
                 raise RepositoryChanged(f'The reviewed folder {folder} is now in another repository than the one the review saw.')
-            decision.update(root=own_root, repo=Path(own_root).name)
+            decision.update(root=own_root, repo=Path(own_root).name, root_id=repo)
             try:
                 real = Path(folder).resolve(strict=True)
             except (OSError, RuntimeError) as exc:
@@ -1173,12 +1173,16 @@ def evaluate(folder, approved, tab=None, repo=None):
             if _git_dir(real, '--git-common-dir').resolve() != own:
                 raise GitError(f"The reviewed folder {folder} is not a checkout of the tab's repository {own_root}.")
             folder = real  # every later read uses this one path, so a moved symlink cannot switch repositories
-        root = main_checkout(folder)
+        common = _git_dir(folder, '--git-common-dir')
+        root = str(common.parent if common.name == '.git' else common)
         if own_root is not None and root != own_root:
             raise GitError(f"The reviewed folder {folder} is not a checkout of the tab's repository {own_root}.")
+        # Settings fetches from a logged root only while it still reads this identity.
+        root_id = repo if tab is not None else _repo_identity(common.resolve())
         head = _head(folder)
         branch = _git(folder, 'symbolic-ref', '--quiet', '--short', 'HEAD', check=False).stdout.strip()
-        decision.update(root=root, repo=Path(root).name, head=head, branch=branch, target=f'{REMOTE}/{TARGET}')
+        decision.update(root=root, repo=Path(root).name, root_id=root_id, head=head, branch=branch,
+                        target=f'{REMOTE}/{TARGET}')
         scratch = _scratch(root)
 
         def same_repository():
@@ -1195,6 +1199,7 @@ def evaluate(folder, approved, tab=None, repo=None):
         if isinstance(exc, RepositoryChanged):
             decision['root'] = None
             decision.pop('repo', None)
+            decision.pop('root_id', None)
         check('git', False, str(exc))
         return decision, None
     if not isinstance(approved, str) or not SHA.fullmatch(approved):
@@ -1392,8 +1397,6 @@ def merge(plan, reviewer, job):
             problem = _authorization_problem(read_setting(), job.get('approved_at'))
             if problem:
                 raise NotAuthorized(problem)
-            if job.get('tab') is not None:
-                _check_bound(job.get('folder'), folder, job.get('repo'), job['tab'])
             try:
                 head = _head(folder)
                 branch = _git(folder, 'symbolic-ref', '--quiet', '--short', 'HEAD').stdout.strip()
@@ -1417,6 +1420,9 @@ def merge(plan, reviewer, job):
                 raise NotAuthorized('Could not read the current reviewer approval.') from exc
             if not matches:
                 raise NotAuthorized('The reviewer approval changed or is no longer available.')
+            if job.get('tab') is not None:
+                # Last, after every Git read above: the network command follows at once.
+                _check_bound(job.get('folder'), folder, job.get('repo'), job['tab'])
 
         # Once before the look at the remote main and once after it, right before the push.
         _fast_forward_push(root, scratch, plan['url'], plan['target_sha'], made, confirm)
@@ -1470,6 +1476,7 @@ def process(job, alert=None):
                 if isinstance(exc, RepositoryChanged):
                     decision['root'] = None  # Settings fetches from each logged root
                     decision.pop('repo', None)
+                    decision.pop('root_id', None)
     added = record(decision)
     if added and alert is not None and decision['outcome'] in ('merged', 'failed'):
         name = decision.get('name') or decision.get('branch') or 'A branch'
@@ -1592,16 +1599,31 @@ def _trust(root, known):
     return entry
 
 
+def _still_repository(root, identity):
+    if not (isinstance(identity, dict) and set(identity) == {'path', 'dev', 'ino'}):
+        return False
+    try:
+        return _repo_identity(_git_dir(root, '--git-common-dir').resolve()) == identity
+    except (GitError, OSError, RuntimeError):
+        return False
+
+
 def state(roots=()):
     setting = read_setting()
     found = records()
     shown = [{key: item.get(key) for key in ('at', 'mode', 'outcome', 'repo', 'root', 'branch', 'head', 'target', 'name',
                                               'subject', 'checks', 'areas', 'files', 'merge', 'error', 'note')}
              for item in reversed(found[-SHOWN:])]
-    logged = []
+    logged, refused = [], []
     for item in reversed(found):
-        if isinstance(item.get('root'), str) and item['root'] not in logged:
-            logged.append(item['root'])
+        root = item.get('root')
+        if not isinstance(root, str) or root in logged or root in refused:
+            continue
+        if len(logged) >= 4 or len(logged) + len(refused) >= 8:
+            break
+        # The log holds a path, and another repository can take that path. The newest decision for a root names
+        # the repository it saw; Settings fetches only while the path still reads that repository.
+        (logged if _still_repository(root, item.get('root_id')) else refused).append(root)
     trust = []
     for root in [*logged[:4], *[root for root in roots if root not in logged][:4]]:
         entry = _trust(root, root in logged)

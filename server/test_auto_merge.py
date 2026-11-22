@@ -2137,6 +2137,37 @@ class CrossWorktree(Base):
         self.assertEqual(self.origin_main(), before)
         self.assertNoTrustRoot(decision, self.repo)
 
+    def test_a_repository_replaced_during_the_last_clean_read_stops_the_push(self):
+        # The binding check is the last step of confirm(), after its Git reads (here the clean-tree read).
+        self.enforce()
+        head = self.change()
+        before = self.origin_main()
+        job = {**self.job(head), 'tab': str(self.repo)}
+        real_git, real_dirty = auto_merge._object_git, auto_merge._dirty
+        steps = []
+
+        def object_git(scratch, *args, **kwargs):
+            steps.append(args[0])
+            return real_git(scratch, *args, **kwargs)
+
+        def dirty(checkout):
+            result = real_dirty(checkout)
+            if 'commit-tree' in steps and not (self.repo / '.git-aside').exists():
+                common = self.repo / '.git'
+                common.rename(self.repo / '.git-aside')
+                shutil.copytree(self.repo / '.git-aside', common, symlinks=True)
+            return result
+
+        with mock.patch.object(auto_merge, '_object_git', side_effect=object_git), \
+                mock.patch.object(auto_merge, '_dirty', side_effect=dirty):
+            decision = auto_merge.process(job)
+        self.assertEqual(decision['outcome'], 'failed')
+        self.assertIn('in another repository than the one the review saw', decision['error'])
+        self.assertEqual(steps.count('ls-remote'), 1)  # only the evaluation's look at main
+        self.assertNotIn('push', steps)
+        self.assertEqual(self.origin_main(), before)
+        self.assertNoTrustRoot(decision, self.repo)
+
     def test_a_tab_folder_replaced_after_the_decision_stops_the_push(self):
         # The tab works in a sibling worktree. After commit-tree it becomes a checkout of repository B; the reviewed
         # folder and A's main checkout stay. The push still needs the whole binding.
@@ -2245,7 +2276,8 @@ class CrossWorktree(Base):
         self.git(self.repo, 'worktree', 'add', '-f', str(twin), 'work')
         saved = str(link)
         job = {**self.job(head), 'folder': saved, 'tab': str(self.repo),
-               'current': lambda: {'%1': {'%2': {'commit': head, 'at': job['approved_at'], 'folder': saved}}}}
+               'current': lambda: {'%1': {'%2': {'commit': head, 'at': job['approved_at'], 'folder': saved,
+                                                 'repo': job['repo']}}}}
         real = auto_merge.evaluate
 
         def evaluate(*args, **kwargs):
@@ -2362,11 +2394,39 @@ class Http(Base):
         asked = [call.args[0] for call in run.call_args_list if 'ls-remote' in call.args[0] and str(self.root / 'no-such-remote.git') in call.args[0]]
         self.assertEqual(len(asked), 1)
         # With a decision in the log the repository is listed, with the reason.
-        auto_merge.record({'root': str(other), 'head': 'a' * 40, 'mode': 'observe', 'outcome': 'wait', 'checks': []})
+        auto_merge.record({'root': str(other), 'root_id': review_scope.repo_identity(str(other)), 'head': 'a' * 40,
+                           'mode': 'observe', 'outcome': 'wait', 'checks': []})
         listed = auto_merge.state([str(self.repo)])['trust']
         self.assertEqual([item['repo'] for item in listed], ['private', 'project'])
         self.assertIn('ls-remote', listed[0]['error'])
         auto_merge._target_errors.clear()
+
+    def test_settings_fetches_a_logged_root_only_while_it_reads_the_logged_repository(self):
+        # The log holds a path. After the decision, another repository takes it (here a copy of the Git directory,
+        # so only the identity differs), or the record names no repository: Settings runs no Git network command.
+        decision = auto_merge.process(self.job(self.change()))
+        self.assertEqual(decision['root_id'], self.repo_of(self.repo))
+        for case in ('no identity', 'another repository'):
+            with self.subTest(case=case):
+                # Each case starts from a logged root that Settings reads.
+                auto_merge.record({**decision, 'head': ('c' if case == 'no identity' else 'd') * 40})
+                with mock.patch.object(auto_merge, '_trust', return_value=None) as trust:
+                    auto_merge.state()
+                self.assertEqual(trust.call_args_list, [mock.call(str(self.repo), True)])
+                if case == 'another repository':
+                    common = self.repo / '.git'
+                    common.rename(self.repo / '.git-aside')
+                    shutil.copytree(self.repo / '.git-aside', common, symlinks=True)
+                else:
+                    auto_merge.record({**decision, 'root_id': None, 'head': 'b' * 40})
+                auto_merge._target_cache.clear()
+                with mock.patch.object(auto_merge, '_trust', return_value=None) as trust:
+                    auto_merge.state()
+                trust.assert_not_called()
+        # A live tab in that repository is still listed: it is the user's open repository, not a logged path.
+        with mock.patch.object(auto_merge, '_trust', return_value=None) as trust:
+            auto_merge.state([str(self.repo)])
+        self.assertEqual(trust.call_args_list, [mock.call(str(self.repo), False)])
 
     def test_a_repository_without_rules_is_listed_only_when_it_has_decisions(self):
         other = self.root / 'other'

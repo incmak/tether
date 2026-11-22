@@ -272,8 +272,10 @@ A branch passes the checks when all of this holds:
 
 - Tether checks the worktree that the review checked. That can be a worktree other than the tab's start folder, but
   it must belong to the same repository as the tab's folder, and to the repository the review saw: Tether saves the
-  repository's Git folder when it sends the review request and checks it again at the approval, before the fetch and
-  right before the push. An approval saved before this rule names no worktree or repository and waits.
+  repository's Git folder when it sends the review request and checks it again at the approval and right before each
+  network command (the fetch, the look at the remote main, and the push). An approval saved before this rule names no
+  worktree or repository and waits. Settings reads trust from a logged repository only while its path still holds
+  the repository of that decision.
 - The reviewer approved the exact commit at the head of the branch. The worktree has no uncommitted or untracked files.
   Git itself answers (`git status`, with untracked files and submodules). A tree with a filter such as Git LFS
   waits: Tether does not run the filter's program.
