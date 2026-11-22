@@ -10,6 +10,7 @@ import importlib.util
 import inspect
 import io
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -35,6 +36,18 @@ try:
 except ImportError:
     import friday_agent as friday
     import push
+
+
+_asyncio_handler = logging.StreamHandler(sys.__stderr__)
+
+
+def setUpModule():
+    # B397: logging.lastResort follows the patched sys.stderr.
+    logging.getLogger('asyncio').addHandler(_asyncio_handler)
+
+
+def tearDownModule():
+    logging.getLogger('asyncio').removeHandler(_asyncio_handler)
 
 
 def saved_draft(*texts, skill=None, state='ready', error=None, chat='API Server'):
@@ -2446,6 +2459,24 @@ class HeldNewsTests(unittest.TestCase):
 
 
 class FridayNoteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_slow_callback_warning_bypasses_patched_stderr(self):
+        loop = asyncio.get_running_loop()
+        done = loop.create_future()
+        warnings = io.StringIO()
+        original_stream = _asyncio_handler.setStream(warnings)
+        original_duration = loop.slow_callback_duration
+        try:
+            with patch('sys.stderr') as stderr:
+                loop.slow_callback_duration = 0
+                loop.call_soon(done.set_result, None)
+                await done
+                stderr.write.assert_not_called()
+        finally:
+            loop.slow_callback_duration = original_duration
+            _asyncio_handler.setStream(original_stream)
+
+        self.assertRegex(warnings.getvalue(), r'Executing <Handle .*Future\.set_result.* took .* seconds')
+
     async def test_interrupt_logs_state_and_preserves_broadcast_condition(self):
         session = friday.Session.__new__(friday.Session)
         session.bot_speaking = session.llm_running = session.busy = session.user_speaking = False
