@@ -32,7 +32,7 @@ def isolate():
         location.mkdir()
         os.environ[key] = str(location)
     # Use defaults under the isolated roots. Individual tests can still override them.
-    for key in ('TETHER_SHARE', 'TETHER_ATTENTION', 'TETHER_LAYOUTS', 'TETHER_COMMIT_GATE_LOG',
+    for key in ('TETHER_SHARE', 'TETHER_ATTENTION', 'TETHER_URGENT_CALLS', 'TETHER_LAYOUTS', 'TETHER_COMMIT_GATE_LOG',
                 'TETHER_BACKGROUNDS', 'TETHER_REMINDERS', 'TETHER_TASK_SOURCES', 'MOBILE_TMUX_CODEX_HOOKS', 'CODEX_HOME',
                 'TETHER_ACTIVITY', 'TETHER_INSTALL_STATE', 'TETHER_OFFICE_CONFIG', 'TETHER_DEPLOYED',
                 'TETHER_FRIDAY_MODELS', 'TETHER_FRIDAY_NOTES', 'TETHER_FRIDAY_DRAFTS',

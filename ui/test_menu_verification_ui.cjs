@@ -2,7 +2,7 @@
 const { strict: assert } = require('node:assert')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, prefsStore } = require('./browser_test_helper.cjs')
 
 const dist = path.resolve(process.env.DIST || 'dist')
 const origin = 'http://127.0.0.1:9876'
@@ -53,11 +53,13 @@ async function main() {
     page.on('pageerror', error => errors.push(error.message))
     await page.emulateMedia({ reducedMotion: 'reduce' })
     await page.routeWebSocket('**/*', socket => socket.close())
+    const prefs = prefsStore({ prefs: { uiUsage: false } })
     await page.route('**/*', async route => {
       const request = route.request(), url = new URL(request.url())
       if (url.origin !== origin) return route.abort('blockedbyclient')
       if (url.pathname.startsWith('/mobile/api/')) {
         const endpoint = url.pathname.slice('/mobile/api/'.length)
+        if (endpoint === 'prefs') return route.fulfill({ json: request.method() === 'GET' ? prefs.get() : prefs.post(request.postDataJSON()) })
         if (request.method() !== 'GET') {
           const body = request.postDataJSON()
           writes.push({ endpoint, body })
@@ -77,7 +79,6 @@ async function main() {
               menu_verified: verified ? revision : undefined, options: multiOptions, ask_current: multiCurrent }
             : { id: 'menu-1', reason: 'menu', text: question, question, menu_verified: verified ? revision : false,
               ...(verified ? { options } : {}) } } })
-        if (endpoint === 'prefs') return route.fulfill({ json: { prefs: { uiUsage: false }, version: 1 } })
         return route.fulfill({ json: replies[endpoint] ?? {} })
       }
       if (url.pathname === '/terminal/live/') return route.fulfill({ contentType: 'text/html', body: '<p>Mocked terminal</p>' })

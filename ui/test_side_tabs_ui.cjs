@@ -3,7 +3,7 @@ const assert = require('node:assert/strict')
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal, prefsStore } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const AGENTS = '.agent-bubble:not(.side-pin-bubble)'
@@ -29,7 +29,7 @@ const fixture = {
   sessions: { sessions: panes, default_thread: 't1' },
   chat: { messages, busy: false, thread: 't1', agent: 'claude', writable: true, session: '%1', earlier: 0, limit: 100, state: 'Idle', approval: null },
   footer: { observed: true, model: 'Claude', mode: 'default', notices: [] },
-  prefs: { prefs: {}, version: 1 }, 'projects/marks': {}, 'projects/backlog': { text: '' },
+  'projects/marks': {}, 'projects/backlog': { text: '' },
   'work/board': { revision: 1, projects: [], items: [], stages: [] }, 'side-shells': { shells: [] },
   update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Test server', office: false },
   catalog: { commands: [], plugins: [], mcp: [], note: '' }, 'codex-runs': { pane: '%1', running: 0, runs: [] },
@@ -42,11 +42,13 @@ const fixture = {
 async function openPage(page, origin, side) {
   page.setDefaultTimeout(10000)
   await page.routeWebSocket('**/*', socket => socket.close())
+  const prefs = prefsStore()
   await page.route('**/*', route => {
     const request = route.request(), url = new URL(request.url())
     if (url.origin !== origin) return route.abort()
     if (url.pathname.startsWith('/mobile/api/')) {
       const endpoint = url.pathname.slice('/mobile/api/'.length)
+      if (endpoint === 'prefs') return route.fulfill({ json: request.method() === 'GET' ? prefs.get() : prefs.post(request.postDataJSON()) })
       if (endpoint === 'stream') return route.fulfill({ status: 204 })
       if (request.method() !== 'GET') return route.fulfill({ json: { ok: true } })
       return route.fulfill({ json: fixture[endpoint] || {} })

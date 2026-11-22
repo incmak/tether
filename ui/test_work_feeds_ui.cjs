@@ -5,14 +5,14 @@
 const { strict: assert } = require('node:assert')
 const fs = require('node:fs')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, prefsStore } = require('./browser_test_helper.cjs')
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = process.env.SHOTS
 const ORIGIN = 'http://tether.test'
 const NOW = Math.floor(Date.now() / 1000)
 const fixtures = {
   sessions: { sessions: [], default_thread: '' },
-  prefs: { prefs: {}, version: 1 }, 'projects/marks': {}, 'projects/backlog': { text: '', version: 'v', limit: 200000, next_id: 1 },
+  'projects/marks': {}, 'projects/backlog': { text: '', version: 'v', limit: 200000, next_id: 1 },
   'side-shells': { shells: [] }, update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Test server', office: false },
   catalog: { commands: [], plugins: [], mcp: [], note: '' }, usage: { claude: null, codex: null },
   'browser/agents': { enabled: false, available: false, reason: 'off', agents: [], asks: [] },
@@ -39,11 +39,13 @@ async function open(browser, viewport, options = {}) {
   const context = await browser.newContext({ viewport, serviceWorkers: 'block' })
   contexts.push(context)
   const posts = [], errors = []
+  const prefs = prefsStore()
   await context.route(`${ORIGIN}/**`, route => {
     const request = route.request()
     const url = new URL(request.url())
     if (url.pathname.startsWith('/mobile/api/')) {
       const name = url.pathname.slice('/mobile/api/'.length)
+      if (name === 'prefs') return route.fulfill({ json: request.method() === 'GET' ? prefs.get() : prefs.post(request.postDataJSON()) })
       if (request.method() === 'POST') {
         if (name !== 'work/project') return route.fulfill({ json: {} })
         posts.push(request.postDataJSON())

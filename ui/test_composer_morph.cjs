@@ -2,7 +2,7 @@
 // The outline grows from the old size, the parts slide from where they were, and reduced motion turns it off.
 // Every API request stays in this page's fixtures; no terminal is touched.
 const http = require('node:http'), fs = require('node:fs/promises'), path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, prefsStore } = require('./browser_test_helper.cjs')
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const phone = { width: 390, height: 844 }
 const keyboard = { ...phone, height: 544 }
@@ -40,11 +40,13 @@ const check = (name, ok, detail = '') => { console.log(`${ok ? 'ok' : 'FAIL'} ${
   const hold = () => { let release; const promise = new Promise(resolve => { release = resolve }); gate = { promise, release }; return gate }
   try {
     await page.routeWebSocket('**/*', s => s.close())
+    const prefs = prefsStore()
     await page.route('**/*', async route => {
       const url = new URL(route.request().url())
       if (url.pathname.endsWith('/sw.js')) return route.fulfill({ status: 404, body: '' })
       if (url.pathname.startsWith('/mobile/api/')) {
         const ep = url.pathname.slice(12)
+        if (ep === 'prefs') return route.fulfill({ json: route.request().method() === 'GET' ? prefs.get() : prefs.post(route.request().postDataJSON()) })
         if (route.request().method() === 'POST') {
           const body = route.request().postDataJSON(); posts.push({ ep, body })
           if (ep === 'feedback' && gate) { const held = gate; gate = null; const status = await held.promise; if (status !== 200) return route.fulfill({ status, json: { error: 'Disk full.' } }) }
@@ -54,7 +56,6 @@ const check = (name, ok, detail = '') => { console.log(`${ok ? 'ok' : 'FAIL'} ${
         }
         if (ep === 'stream') return route.fulfill({ status: 204, body: '' })
         if (ep.startsWith('chat')) return route.fulfill({ json: url.searchParams.get('session') === '%2' ? { ...fixture.chat, thread: 't2', session: '%2' } : fixture.chat })
-        if (ep === 'prefs') return route.fulfill({ json: { prefs: {}, version: 1 } })
         if (ep === 'feedback') gets.push(url.searchParams.get('thread'))
         if (ep === 'feedback') return route.fulfill({ json: { ratings: url.searchParams.get('thread') === 't2' ? ratingsT2 : ratings } })
         return route.fulfill({ json: fixture[ep] || {} })

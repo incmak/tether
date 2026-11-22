@@ -40,13 +40,13 @@ const choice: ChoiceState = {
   items: [{ id: 1, text: long, detail: long, selected: true, checked: true }, { id: 2, text: `Second${long}`, selected: false, checked: false }],
   more_above: 123, more_below: 99, hints: ['Space selects'],
 }
-const attention: Attention = { id: 'fixture-choice', reason: 'menu', text: `Choose ${long}`, question: 'Choose how to continue.', choice,
+const attention: Attention = { id: 'fixture-choice', reason: 'menu', menu_verified: 'a'.repeat(64), text: `Choose ${long}`, question: 'Choose how to continue.', choice,
   options: [{ id: 1, text: long, detail: long, selected: true }, { id: 2, text: `Second${long}`, detail: `Description${long}` }] }
 const ask: AskBridge = { id: 'fixture-ask', nonce: 'fixture-nonce', expires: now + 3600, questions: [{ header: long, question: `How should we handle ${long}?`,
   options: [{ label: long, description: long }, { label: 'Use the second option', description: `Description${long}` }] }] }
 
 function Choices() {
-  return <ChoiceDock approval={null} attention={state === 'empty' ? { id: 'empty', reason: 'prompt', text: '' } : attention} agent="Claude" disabled={state === 'loading'} onChoose={done} onKey={noop} />
+  return <ChoiceDock approval={null} attention={state === 'empty' ? { id: 'empty', reason: 'prompt', text: '' } : attention} agent="Claude" disabled={state === 'loading'} onChoose={done} onKey={noop} onPick={done} />
 }
 
 function Picker() {

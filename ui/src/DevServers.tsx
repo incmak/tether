@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { CheckSquare, RotateCw, Square, SquareX } from 'lucide-react'
 import { errorText } from './api'
 import type { Api } from './api'
@@ -69,12 +69,17 @@ export function DevServerList({ api, rows, manage, refreshed = 0, onPick, onChan
   const [selecting, setSelecting] = useState(false)
   const [selected, setSelected] = useState<number[]>([])
   const [ask, setAsk] = useState<Ask | null>(null)
-  const [said, setSaid] = useState('')
+  const [stopResult, setStopResult] = useState<{ announcement: string } | null>(null)
   const listRef = useRef<HTMLUListElement>(null)
   const shown = rows.filter(row => !gone.includes(row.port))
   const busy = Object.values(states).some(row => row.state === 'stopping')
   const chosen = selected.filter(port => shown.some(row => row.port === port))
   const all = chosen.length === shown.filter(row => row.id).length
+  // React may commit after the next frame. Check for lost focus after the stop result removes its controls.
+  useLayoutEffect(() => {
+    const active = document.activeElement
+    if (stopResult && (!active || active === document.body)) document.getElementById(titleId)?.focus()
+  }, [stopResult, titleId])
   // The list generation: the person's Refresh or Try again starts a new one. A stop answer from an older generation
   // describes programs that may have left: it only ends the Stopping state and reads the list again.
   const generation = useRef(refreshed)
@@ -140,10 +145,8 @@ export function DevServerList({ api, rows, manage, refreshed = 0, onPick, onChan
       setSelected(old => old.filter(port => !ended.includes(port)))
       // The selection cannot change while a stop runs (busy), so it is the one that was stopped.
       if (ended.length && !Object.keys(next).length) setSelecting(false)
-      setSaid(words.join(' '))
+      setStopResult({ announcement: words.join(' ') })
       if (ended.length || changed) onChanged()
-      // The focused Stop button may leave with its row: keep focus in the list.
-      requestAnimationFrame(() => { if (!document.activeElement || document.activeElement === document.body) document.getElementById(titleId)?.focus() })
     })()
   }
   // A new list from the server is the truth: a port that stopped and runs again shows again.
@@ -213,7 +216,7 @@ export function DevServerList({ api, rows, manage, refreshed = 0, onPick, onChan
       <button type="button" className="secondary" disabled={busy} onClick={() => setSelected(all ? [] : shown.filter(row => row.id).map(row => row.port))}>{all ? 'Clear' : 'Select all'}</button>
       <button type="button" className="danger" disabled={!chosen.length || busy} onClick={() => askStop(chosen, false)}>Stop {chosen.length || ''}</button>
     </div>}
-    <p className="visually-hidden" role="status">{said}</p>
+    <p className="visually-hidden" role="status">{stopResult?.announcement}</p>
     {ask && <ConfirmStop ask={ask} rows={rows} fallback={titleId} onYes={() => stop(ask)} onClose={() => setAsk(null)} />}
   </div>
 }

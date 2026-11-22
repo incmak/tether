@@ -103,6 +103,85 @@ class AttentionTest(unittest.TestCase):
             self.assertIsNone(attention.urgent_text(text))
         self.assertEqual(attention.urgent_text('Urgent: ' + 'x' * 200), 'x' * (attention.LIMIT - 1) + '…')
 
+    def test_call_text_requires_urgent_just_above_final_yes(self):
+        for urgent, gap, status in (
+            ('Urgent: Pick  one?', '\n', 'Needs you: yes'),
+            ('**Urgent:** **Pick** `one`?', '\n\n \n', '`Needs you: yes`'),
+        ):
+            with self.subTest(urgent=urgent):
+                self.assertEqual(attention.call_text(urgent + gap + status), 'Pick one?')
+        for reply in ('Urgent: Pick one?\nNeeds you: no', 'Urgent: Pick one?', 'Needs you: yes',
+                      'Urgent: **\nNeeds you: yes', 'Urgent: Pick one?\nNeeds you: yes\nExtra text'):
+            with self.subTest(reply=reply):
+                self.assertIsNone(attention.call_text(reply))
+        quoted = '> Urgent: An example?\nThat was only an example.\nNeeds you: yes'
+        self.assertIsNone(attention.call_text(quoted))
+        self.assertEqual(attention.urgent_text(quoted), 'An example?')
+        self.assertEqual(attention.call_text('Urgent: ' + 'x' * 400 + '\nNeeds you: yes'), 'x' * 299 + '…')
+
+    def test_new_reply_replaces_then_removes_call_text(self):
+        self.world.turn('%1', 'Urgent: First question?\nNeeds you: yes', 10)
+        self.world.observe(entry())
+        self.world.turn('%1', 'Urgent: Second question?\nNeeds you: yes', 20)
+        self.world.observe(entry())
+        self.assertEqual(self.store.call_candidates()[0]['call'], 'Second question?')
+        self.world.turn('%1', '> Urgent: Example?\nNext: Choose a plan.\nNeeds you: yes', 30)
+        self.world.observe(entry())
+        self.assertNotIn('call', self.store.asks['%1'])
+        self.assertEqual(self.store.call_candidates(), [])
+        self.assertTrue(self.store.ask('%1', 't1')['urgent'])
+
+    def test_mark_opened_retries_when_the_ask_moves_before_the_write(self):
+        self.world.turn('%1', 'Urgent: Pick one?\nNeeds you: yes', 10)
+        self.world.observe(entry())
+        ask = self.store.ask('%1', 't1')
+        act = self.store.act
+
+        def move_then_act(pane, thread, action, ask_id=None):
+            if pane == '%1':
+                with self.store.lock:
+                    self.store.asks['%3'] = self.store.asks.pop('%1')
+            return act(pane, thread, action, ask_id=ask_id)
+
+        with mock.patch.object(self.store, 'act', side_effect=move_then_act):
+            self.assertTrue(self.store.mark_opened('%1', ask['id'])['opened'])
+        self.assertTrue(self.store.asks['%3']['opened'])
+
+    def test_mark_opened_opens_an_ask_parked_between_panes(self):
+        self.world.turn('%1', 'Urgent: Pick one?\nNeeds you: yes', 10)
+        self.world.observe(entry())
+        ask = self.store.ask('%1', 't1')
+        with self.store.lock:
+            self.store.parked['t1'] = dict(self.store.asks.pop('%1'), parked_at=self.clock.now)
+        self.assertTrue(self.store.mark_opened('%1', ask['id'])['opened'])
+        self.assertTrue(attention.Attention(self.path, self.clock).parked['t1']['opened'])
+
+    def test_call_candidates_are_private_snapshots_and_mark_opened_checks_id(self):
+        self.world.turn('%1', 'Urgent: Pick one?\nNeeds you: yes', 10)
+        self.world.observe(entry())
+        ask = self.store.ask('%1', 't1')
+        self.assertNotIn('call', ask)
+        candidate, = self.store.call_candidates()
+        self.assertEqual(candidate, dict(id=ask['id'], pane='%1', thread='t1', call='Pick one?',
+                                         grace_end=self.clock.now + attention.URGENT_GRACE,
+                                         opened=False, snoozed=False, later=False))
+        candidate['call'] = 'Changed snapshot'
+        self.assertFalse(self.store.mark_opened('%1', 'stale'))
+        # The pane is a hint: an ask that moved to another pane still opens by its id.
+        self.assertTrue(self.store.mark_opened('%2', ask['id'])['opened'])
+        candidate, = self.store.call_candidates()
+        self.assertEqual((candidate['call'], candidate['opened']), ('Pick one?', True))
+
+        self.store.act('%1', 't1', 'snooze', ask_id=ask['id'])
+        self.assertTrue(self.store.call_candidates()[0]['snoozed'])
+        self.assertFalse(self.store.call_candidates(self.clock.now + attention.SNOOZE)[0]['snoozed'])
+        self.store.act('%1', 't1', 'later', ask_id=ask['id'])
+        self.assertTrue(self.store.call_candidates()[0]['later'])
+        for kind, due in (('approval', self.clock.now), ('reply', None), ('reply', 'soon'), ('reply', True)):
+            with self.subTest(kind=kind, due=due):
+                self.store.asks['%1'].update(kind=kind, ping_due=due)
+                self.assertEqual(self.store.call_candidates(), [])
+
     def test_new_urgent_replies_notify_once_each_and_keep_the_first_since(self):
         self.world.turn('%1', 'Next: normal\nNeeds you: yes', 10)
         self.world.observe(entry())

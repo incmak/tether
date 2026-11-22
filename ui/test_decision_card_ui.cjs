@@ -4,7 +4,7 @@
 const { strict: assert } = require('node:assert')
 const fs = require('node:fs')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, prefsStore } = require('./browser_test_helper.cjs')
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = process.env.SHOTS
 const ORIGIN = 'http://tether.test'
@@ -20,7 +20,7 @@ const fixtures = {
   chat: { messages: [], busy: false, thread: 't195', agent: 'claude', writable: true, session: '%195', earlier: 0, limit: 100, state: 'Idle', approval: null },
   footer: { observed: true, model: 'Opus 5.5', mode: 'default', notices: [] },
   subagents: { main: { model: null, context: null, title: null }, agents: [], tasks: [] },
-  prefs: { prefs: {}, version: 1 }, 'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
+  'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
   update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Test server', office: false },
   catalog: { commands: [], plugins: [], mcp: [], note: '' }, usage: { claude: null, codex: null },
   'codex-runs': { pane: '%195', running: 0, runs: [] }, feedback: { ratings: {} },
@@ -43,11 +43,13 @@ async function open(browser, viewport) {
   const context = await browser.newContext({ viewport, serviceWorkers: 'block', hasTouch: viewport.width < 500 })
   contexts.push(context)
   const gets = [], errors = []
+  const prefs = prefsStore()
   await context.route(`${ORIGIN}/**`, route => {
     const request = route.request()
     const url = new URL(request.url())
     if (url.pathname.startsWith('/mobile/api/')) {
       const name = url.pathname.slice('/mobile/api/'.length)
+      if (name === 'prefs') return route.fulfill({ json: request.method() === 'GET' ? prefs.get() : prefs.post(request.postDataJSON()) })
       if (request.method() === 'POST') return route.fulfill({ json: name === 'work/answer' ? { sent: false, why: 'test' } : {} })
       gets.push(`${name}${url.search}`)
       return name === 'stream' ? route.fulfill({ status: 204 }) : route.fulfill({ json: fixtures[name] ?? {} })

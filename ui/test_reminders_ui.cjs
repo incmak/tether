@@ -5,7 +5,7 @@ const { readFile } = require('node:fs/promises')
 const http = require('node:http')
 const path = require('node:path')
 const { test } = require('node:test')
-const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal, prefsStore } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const NOW = Date.parse('2026-11-18T06:30:00Z') / 1000
@@ -73,6 +73,7 @@ async function open(t, browser, origin, viewport, {
   loadGate, failFirst = false, go = true, zone = KOLKATA, holdPrefsSave = false,
 } = {}) {
   const context = await browser.newContext({ viewport, serviceWorkers: 'block', reducedMotion: 'reduce', timezoneId: 'UTC' })
+  const prefs = prefsStore({ zone })
   const errors = []
   const live = new Map(records.map(item => [item.id, item]))
   const deleted = new Map()
@@ -104,7 +105,7 @@ async function open(t, browser, origin, viewport, {
             await prefsSaveReleased
           }
         }
-        return route.fulfill({ json: { prefs: {}, version: 1, ...(read ? { zone } : {}) } })
+        return route.fulfill({ json: read ? prefs.get() : prefs.post(request.postDataJSON()) })
       }
       if (endpoint === 'reminders') {
         const first = ++reads === 1

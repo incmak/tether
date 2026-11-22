@@ -3,7 +3,7 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal, prefsStore } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = process.env.SHOTS || ''
@@ -31,7 +31,7 @@ function fixtures() {
     chat: { messages, busy: false, thread: pane.thread, agent: pane.agent, writable: true, session: pane.id, earlier: 0, limit: 100,
       state: 'Idle', approval: null, attention: null },
     footer: { observed: true, model: 'Claude', mode: 'default', notices: [] },
-    prefs: { prefs: {}, version: 1 }, 'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
+    'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
     update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Test server', office: false },
     catalog: { commands: [], plugins: [], mcp: [], note: '' }, stream: {},
     'codex-runs': { pane: '%1', running: 0, runs: [] }, 'autonomy/review': { due: false, reason: null, new: 0, disputed: 0, total: 0, last_review: 0, snoozed_until: 0, groups: [] },
@@ -85,6 +85,7 @@ async function main() {
       page.on('pageerror', error => { if (!/Service worker is disabled because the context is sandboxed/.test(error.message)) pageErrors.push(error.message) })
       await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'light' })
       await page.routeWebSocket('**/*', socket => socket.close())
+      const prefs = prefsStore()
       await page.route('**/*', async route => {
         const request = route.request(), url = new URL(request.url())
         if (url.pathname.endsWith('/sw.js')) return route.fulfill({ status: 404, body: '' })
@@ -96,6 +97,7 @@ async function main() {
         if (url.pathname.startsWith('/mobile/preview/')) return route.fulfill({ status: 200, contentType: 'text/html', body: PAGE, headers: { 'Content-Security-Policy': 'sandbox allow-scripts' } })
         if (url.pathname.includes('/api/')) {
           const endpoint = url.pathname.split('/api/')[1]
+          if (endpoint === 'prefs') return route.fulfill({ json: request.method() === 'GET' ? prefs.get() : prefs.post(request.postDataJSON()) })
           if (request.method() !== 'GET') {
             const body = request.postDataJSON() || {}
             posts.push({ endpoint, body })
@@ -397,11 +399,46 @@ async function main() {
         if (stopPosts().length) errors.push('Escape stopped a server')
         await page.keyboard.press('Enter')
         await confirm.waitFor()
-        await confirm.getByRole('button', { name: 'Stop', exact: true }).click()
-        await list.getByText('Stopping…').waitFor().catch(() => errors.push('the row does not say Stopping…'))
+        let finishStop
+        if (width === 320 || width === 1280) stopGate = new Promise(resolve => { finishStop = resolve })
+        const nextStop = drawer.getByRole('button', { name: 'Stop localhost:8000' })
+        try {
+          await confirm.getByRole('button', { name: 'Stop', exact: true }).click()
+          await list.getByText('Stopping…').waitFor().catch(() => errors.push('the row does not say Stopping…'))
+          if (width === 320) {
+            await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Stop localhost:5174')
+            // Let the browser paint before React commits the stop result. The active button still exists in that frame.
+            await page.evaluate(() => {
+              const json = Response.prototype.json
+              Response.prototype.json = async function () {
+                const data = await json.call(this)
+                if (!this.url.endsWith('/mobile/api/dev-preview/stop')) return data
+                Response.prototype.json = json
+                const post = MessagePort.prototype.postMessage
+                MessagePort.prototype.postMessage = function (...args) {
+                  MessagePort.prototype.postMessage = post
+                  requestAnimationFrame(() => {
+                    document.documentElement.dataset.stopFocusBeforeCommit = document.activeElement?.getAttribute('aria-label') ?? ''
+                    post.apply(this, args)
+                  })
+                }
+                return data
+              }
+            })
+          }
+          if (width === 1280) await nextStop.focus()
+        } finally {
+          finishStop?.()
+          stopGate = null
+        }
         await stop5174.waitFor({ state: 'detached' })
         if (JSON.stringify(stopPosts()[0]?.body) !== JSON.stringify({ ports: [5174], force: false, expect: { 5174: `ino-5174-node-${MANAGED[0].folder}` } })) errors.push(`stop asked for ${JSON.stringify(stopPosts()[0]?.body)}`)
-        await page.waitForFunction(() => document.activeElement?.id === 'dev-manager-title').catch(() => errors.push('focus is lost after the row went away'))
+        if (width === 320 && await page.locator('html').getAttribute('data-stop-focus-before-commit') !== 'Stop localhost:5174') errors.push('stop focus probe did not paint before the row left')
+        if (width === 1280) {
+          if (!await nextStop.evaluate(node => node === document.activeElement)) errors.push('the stop took focus from another row')
+        } else {
+          await page.waitForFunction(() => document.activeElement?.id === 'dev-manager-title').catch(() => errors.push('focus is lost after the row went away'))
+        }
         if (!(await drawer.getByRole('status').filter({ hasText: 'Stopped localhost:5174.' }).count())) errors.push('the stop is not announced')
         // Still running: the row offers Force stop, which asks again.
         await drawer.getByRole('button', { name: 'Stop localhost:8000' }).click()

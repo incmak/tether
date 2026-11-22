@@ -93,7 +93,8 @@ class TetherZoneTests(unittest.TestCase):
         prefs_sync.save({'timeZone': 'Pacific/Auckland'})
         self.assertEqual(tether_zone.parse(shown), datetime(2026, 3, 7, 21, tzinfo=timezone.utc).timestamp())
 
-    def test_post_prefs_returns_effective_zone(self):
+    @mock.patch.object(tether_zone, '_available', return_value={'America/New_York', 'Asia/Calcutta'})
+    def test_post_prefs_returns_effective_zone(self, _available):
         handler = object.__new__(server.Handler)
         handler.command, handler.path = 'POST', '/mobile/api/prefs'
         handler.deny = mock.Mock(return_value=False)

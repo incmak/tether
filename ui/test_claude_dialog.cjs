@@ -5,7 +5,7 @@ const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
 const { execFileSync } = require('node:child_process')
-const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal, prefsStore } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = process.env.SHOTS || ''
@@ -43,7 +43,7 @@ function fixtures(name) {
     chat: { messages, busy: false, thread: pane.thread, agent: pane.agent, writable: true, session: pane.id, earlier: 0, limit: 100,
       state: 'Idle', approval: null, attention },
     footer: { observed: true, model: 'Claude', mode: 'default', notices: [] },
-    prefs: { prefs: {}, version: 1 }, 'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
+    'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
     update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Test server', office: false },
     catalog: { commands: [], plugins: [], mcp: [], note: '' }, stream: {},
     'codex-runs': { pane: '%1', running: 0, runs: [] }, 'autonomy/review': { due: false, reason: null, new: 0, disputed: 0, total: 0, last_review: 0, snoozed_until: 0, groups: [] },
@@ -81,8 +81,7 @@ async function main() {
     for (const state of NAMES) for (const width of [320, 390, 1280]) {
       const name = `${state}-${width}`, errors = [], sent = [], pageErrors = []
       const fixture = fixtures(state)
-      // The stored prefs, as server/prefs_sync.py keeps them: a save applies its changes and raises the version.
-      let prefs = { ...fixture.prefs, zone: 'UTC' }
+      const prefs = prefsStore()
       if (page) await page.close().catch(() => {})
       page = await context.newPage()
       page.setDefaultTimeout(10000)
@@ -97,15 +96,11 @@ async function main() {
           if (request.method() !== 'GET') {
             const body = request.postDataJSON()
             sent.push({ endpoint, ...body })
-            // A prefs save answers with the stored prefs, as the server does. Another body makes the app retry or stop.
-            if (endpoint === 'prefs') {
-              prefs = { prefs: { ...prefs.prefs, ...body.changes }, version: prefs.version + 1, zone: prefs.zone }
-              return route.fulfill({ json: prefs })
-            }
+            if (endpoint === 'prefs') return route.fulfill({ json: prefs.post(body) })
             return route.fulfill({ json: { ok: true, accepted: true } })
           }
           if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
-          return route.fulfill({ json: endpoint === 'prefs' ? prefs : fixture[endpoint] || {} })
+          return route.fulfill({ json: endpoint === 'prefs' ? prefs.get() : fixture[endpoint] || {} })
         }
         if (url.origin === origin && url.pathname.startsWith('/chat/')) return serveLocal(route)
         return route.abort('blockedbyclient')
