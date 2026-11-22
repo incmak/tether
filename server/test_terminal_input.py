@@ -96,6 +96,10 @@ class NumberedDraftTests(unittest.TestCase):
         lines[1] = '› 1. text'
         self.assertTrue(terminal.menu_open('codex', lines))
 
+    def test_named_rule_rejects_a_numbered_menu_with_a_heavy_rule(self):
+        lines = ['───────── Name ─', '❯ 1. a', '  2. b', '━' * 16, '─' * 16]
+        self.assertFalse(terminal.claude_input_box(lines, 1))
+
     def test_chat_about_this_under_rule_stays_a_menu(self):
         rule = '─' * 80
         for closing in ('', rule):

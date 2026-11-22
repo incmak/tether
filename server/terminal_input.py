@@ -455,20 +455,17 @@ def claude_input_box(lines, row):
     if row < 0:
         return False
     above = next((line for line in reversed(lines[:row]) if line.strip()), '')
-    named = not RULE_LINE.match(above)
-    if not above or (named and not CLAUDE_NAMED_RULE.match(above)):
+    if not above or not (RULE_LINE.match(above) or CLAUDE_NAMED_RULE.match(above)):
         return False
     for index in range(row + 1, len(lines)):
         line = lines[index]
         if INPUT_HINT.search(line) or MENU_HINT_START.match(line):
             return False
-        if line.lstrip().startswith('─'):
-            if not RULE_LINE.match(line):
+        if line.lstrip().startswith(tuple('─━│┃╭╮╰╯┌┐└┘├┤┬┴┼═║')):
+            closing = line.strip()
+            if (not closing or closing.strip('─')
+                    or _terminal_columns(line.rstrip()) != _terminal_columns(above.rstrip())):
                 return False
-            if named:
-                closing = line.rstrip()
-                if closing.strip('─') or _terminal_columns(closing) != _terminal_columns(above.rstrip()):
-                    return False
             after = lines[index + 1:]
             return not (any(INPUT_HINT.search(line) for line in after)
                         or INPUT_HINT.search(joined_lines(after)))
