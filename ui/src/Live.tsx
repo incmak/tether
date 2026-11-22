@@ -621,11 +621,13 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
       })
     }
     void agentReady().then(async ready => {
-      const quiet = await readAloudReady
+      const readAloud = await readAloudReady
       if (gone) return
-      if (!quiet) {
+      if (readAloud !== 'quiet') {
         releaseReadAloud()
-        setProblem('Another Tether tab is still playing audio. Stop it there, then press Start again.')
+        setProblem(readAloud === 'busy'
+          ? 'Another Tether tab is still playing audio. Stop it there, then press Start again.'
+          : 'Live could not check for audio in other Tether tabs. Press Start again.')
         setStopped(true)
         go('idle')
         return

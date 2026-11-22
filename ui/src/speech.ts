@@ -90,8 +90,10 @@ if (locks) window.addEventListener('focus', () => void refreshHeld())
 /** How long Live waits for other tabs to stop reading aloud before it gives up. The mic stays closed. */
 export const READ_ALOUD_STOP_MS = 5000
 
-/** `ready` is true when no tab reads aloud any more, false when a reader did not stop in time. */
-export function holdReadAloud(): { release: () => void; ready: Promise<boolean> } {
+/** quiet: no tab reads aloud any more. busy: a reader did not stop in time. failed: the browser refused a lock. */
+export type ReadAloudReady = 'quiet' | 'busy' | 'failed'
+
+export function holdReadAloud(): { release: () => void; ready: Promise<ReadAloudReady> } {
   stopSpeaking()
   localHolds++
   updateHeld()
@@ -106,26 +108,27 @@ export function holdReadAloud(): { release: () => void; ready: Promise<boolean> 
     pending.abort()
     drain.abort()
   }
-  if (!locks) return { release, ready: Promise.resolve(true) }
+  if (!locks) return { release, ready: Promise.resolve<ReadAloudReady>('quiet') }
 
   const name = holdPrefix + (crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`)
   const released = new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
   ownHolds.add(name)
-  const ready = new Promise<boolean>(resolve => {
+  const ready = new Promise<ReadAloudReady>(resolve => {
     void locks.request(name, { mode: 'exclusive', signal }, () => {
       if (signal.aborted) return
       channel?.postMessage({ t: 'hold' })
       // Earlier readers must stop before this exclusive request runs. The mic must not hear them, so a reader
-      // that does not stop in time makes ready false: the caller keeps the mic closed.
-      const deadline = setTimeout(() => { resolve(false); drain.abort() }, READ_ALOUD_STOP_MS)
-      void locks.request(playName, { mode: 'exclusive', signal: drain.signal }, () => { resolve(true) })
-        .catch(() => {}).finally(() => clearTimeout(deadline))
+      // that does not stop in time makes ready busy: the caller keeps the mic closed.
+      const deadline = setTimeout(() => { resolve('busy'); drain.abort() }, READ_ALOUD_STOP_MS)
+      // A rejected request does not prove the device is quiet: the caller keeps the mic closed and offers a retry.
+      void locks.request(playName, { mode: 'exclusive', signal: drain.signal }, () => { resolve('quiet') })
+        .catch(() => { resolve('failed') }).finally(() => clearTimeout(deadline))
       return released
     }).catch(() => {}).finally(() => {
       ownHolds.delete(name)
       channel?.postMessage({ t: 'release' })
       void refreshHeld()
-      resolve(false)
+      resolve('failed')
     })
   })
   return { release, ready }

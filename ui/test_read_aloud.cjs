@@ -129,6 +129,7 @@ function silenceWav() {
       const request = navigator.locks.request.bind(navigator.locks)
       navigator.locks.request = (name, options, callback) => {
         if (name === 'tether-read-aloud-play' && options.mode === 'exclusive') { voice.playWaitAt = now(); voice.playWaitPerf = performance.now() }
+        if (name === 'tether-read-aloud-play' && options.mode === 'exclusive' && voice.rejectPlay) return Promise.reject(new DOMException('Fixture rejects the play lock', 'NotSupportedError'))
         return request(name, options, callback)
       }
       const query = navigator.locks.query.bind(navigator.locks)
@@ -539,6 +540,28 @@ function silenceWav() {
     check('Space on Start again opens the mic after the other reader stops', () => {
       assert.equal(restarted.alert, 0)
       assert.deepEqual({ held: restarted.mic.held, reading: restarted.mic.reading }, { held: true, reading: false })
+    })
+    await closeLive(starter)
+
+    // The browser rejects the play lock request: Live must not wait for a deadline that was cleared.
+    await starter.evaluate(() => { window.__voice.rejectPlay = true })
+    await openLive(starter)
+    await live.getByRole('alert').waitFor()
+    const rejected = {
+      text: await live.getByRole('alert').textContent(),
+      status: await live.locator('.live-status').textContent(),
+      startEnabled: await startAgain.isEnabled(),
+      micOpens: await starter.evaluate(() => window.__voice.micOpens.length),
+      holds: await page.evaluate(async () => (await navigator.locks.query()).held.filter(lock => lock.name.startsWith('tether-read-aloud-hold:')).length),
+    }
+    await starter.evaluate(() => { window.__voice.rejectPlay = false })
+    await startAgain.click()
+    await starter.waitForFunction(() => window.__voice.micOpens.length === 2, null, { polling: 100 })
+    check('a rejected play lock request stops the start at once, releases the hold, and Start again works', () => {
+      assert.deepEqual(rejected, {
+        text: 'Live could not check for audio in other Tether tabs. Press Start again.',
+        status: 'Not started', startEnabled: true, micOpens: 1, holds: 0,
+      })
     })
     await closeLive(starter)
     await starter.close()
