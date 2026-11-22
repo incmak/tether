@@ -81,6 +81,8 @@ async function main() {
     for (const state of NAMES) for (const width of [320, 390, 1280]) {
       const name = `${state}-${width}`, errors = [], sent = [], pageErrors = []
       const fixture = fixtures(state)
+      // The stored prefs, as server/prefs_sync.py keeps them: a save applies its changes and raises the version.
+      let prefs = { ...fixture.prefs, zone: 'UTC' }
       if (page) await page.close().catch(() => {})
       page = await context.newPage()
       page.setDefaultTimeout(10000)
@@ -93,11 +95,17 @@ async function main() {
         if (url.pathname.includes('/api/')) {
           const endpoint = url.pathname.split('/api/')[1]
           if (request.method() !== 'GET') {
-            sent.push({ endpoint, ...request.postDataJSON() })
+            const body = request.postDataJSON()
+            sent.push({ endpoint, ...body })
+            // A prefs save answers with the stored prefs, as the server does. Another body makes the app retry or stop.
+            if (endpoint === 'prefs') {
+              prefs = { prefs: { ...prefs.prefs, ...body.changes }, version: prefs.version + 1, zone: prefs.zone }
+              return route.fulfill({ json: prefs })
+            }
             return route.fulfill({ json: { ok: true, accepted: true } })
           }
           if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
-          return route.fulfill({ json: fixture[endpoint] || {} })
+          return route.fulfill({ json: endpoint === 'prefs' ? prefs : fixture[endpoint] || {} })
         }
         if (url.origin === origin && url.pathname.startsWith('/chat/')) return serveLocal(route)
         return route.abort('blockedbyclient')
@@ -145,7 +153,9 @@ async function main() {
           const marked = card.locator('.dlg-list button[aria-current="true"]')
           if (await card.locator('.dlg-list button[tabindex="0"]').count() !== 1) errors.push('want one Tab stop in the list')
           await marked.focus()
-          const before = sent.length
+          // Prefs saves (seen, layout) and UI usage batches go out on their own timers. Neither reaches the terminal.
+          const toTerminal = () => sent.filter(item => !['prefs', 'ui-usage'].includes(item.endpoint))
+          const before = toTerminal().length
           const focused = () => page.evaluate(() => document.activeElement?.textContent ?? '')
           const start = await focused()
           await page.keyboard.press('ArrowDown')
@@ -154,7 +164,7 @@ async function main() {
           const last = await focused()
           await page.keyboard.press('Home')
           if (await focused() === last) errors.push('Home did not move the focus')
-          if (sent.length !== before) errors.push(`moving the focus sent a request: ${JSON.stringify(sent.slice(before))}`)
+          if (toTerminal().length !== before) errors.push(`moving the focus sent a request: ${JSON.stringify(toTerminal().slice(before))}`)
           // A click on the marked row runs its action, as Enter does in the terminal.
           if (!(await marked.innerText()).includes('Confirm')) errors.push('the marked row does not name its action')
           await clickAction(marked, 'key:Enter')
