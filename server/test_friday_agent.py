@@ -539,16 +539,42 @@ class FridayRulesTests(unittest.TestCase):
         readback = friday.send_readback(pending)
         args = {'topic': '  aUTh ', 'chat': 'aPi  SERver'}
         grant = dict(args, id='T1', rev=1, pane='%42', thread='api-thread')
-        for words in ('send', 'send it', 'yes', 'yes send it', 'go ahead'):
+        unclear = ('send', 'send it', 'please send it', 'you can send it', 'can you send it?', 'Yes?', 'Send it?')
+        for words in (*unclear, 'yes', 'Yes, please send it', 'go ahead'):
             with self.subTest(words=words):
-                accepted = words not in ('send', 'send it')
+                accepted = words not in unclear
                 self.assertEqual(friday.confirmed_args('send_prompt', args, words, readback, pending, 1),
                                  grant if accepted else args)
                 self.assertEqual(friday.check_tool('send_prompt', grant, 'speech', words, set(), readback, pending, 1),
                                  None if accepted else friday.READBACK_REQUIRED)
-        for words in ('no', 'stop', 'don’t'):
+        for words in ('no', 'stop', 'don’t', 'Yes, but stop.', 'Yes, don’t send it.',
+                      'No, I mean I have read it, you can send it'):
             self.assertEqual(friday.check_tool('send_prompt', args, 'speech', words, set(), readback, pending, 1),
                              'The user declined the send.')
+
+    def test_send_prompt_accepts_the_old_and_new_readback_endings(self):
+        for read_all in (False, True):
+            with self.subTest(read_all=read_all):
+                pending = draft_proposal(read_all=read_all)
+                readback = friday.send_readback(pending)
+                self.assertTrue(readback.endswith(' Say yes to send it, or no.'), readback)
+                old = readback.removesuffix(' Say yes to send it, or no.') + ' Yes or no?'
+                self.assertTrue(pending.follows(readback))
+                self.assertTrue(pending.follows(old))
+                self.assertFalse(pending.follows(old.replace('API Server', 'Docs')))
+
+    def test_send_prompt_cue_requires_a_live_heard_proposal_that_gave_it(self):
+        pending = draft_proposal()
+        cue = 'Not sent. Say yes to send it, or no.'
+        args = {'topic': 'Auth', 'id': 'T1', 'rev': 1, 'pane': '%42', 'thread': 'api-thread'}
+        self.assertEqual(friday.check_tool('send_prompt', args, 'speech', 'yes', set(), cue, pending, 2),
+                         friday.READBACK_REQUIRED)
+        pending = replace(pending, cue_given=True)
+        self.assertIsNone(friday.check_tool('send_prompt', args, 'speech', 'yes', set(), cue, pending, 2))
+        for previous, proposal, turn in ((cue, replace(pending, heard=False), 2),
+                                         (cue, pending, 3), (f'One moment. {cue}', pending, 2)):
+            self.assertEqual(friday.check_tool('send_prompt', args, 'speech', 'yes', set(), previous, proposal, turn),
+                             friday.READBACK_REQUIRED)
 
     def test_send_prompt_grant_requires_exact_target_and_current_heard_question(self):
         pending = draft_proposal()
@@ -3566,9 +3592,9 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         for full, expected in (
                 (False, 'Not sent yet. Should I send the Auth prompt, version 1, to API Server? '
                         'It starts with /research. Keep the token check. '
-                        f'The full draft is on screen, {len(text)} characters. Yes or no?'),
+                        f'The full draft is on screen, {len(text)} characters. Say yes to send it, or no.'),
                 (True, 'Not sent yet. Here is version 1 of the Auth prompt. /research Keep the token check. Run the tests. '
-                       'Should I send all of it to API Server? Yes or no?')):
+                       'Should I send all of it to API Server? Say yes to send it, or no.')):
             with self.subTest(full=full):
                 session, frames = await self.draft_tool_turn('Send it to API Server now',
                     {'topic': 'auth', 'read_all': full, 'text': 'Invented by model'})
@@ -3588,7 +3614,51 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         _, frames = await self.draft_tool_turn('Send it')
         self.assertEqual([frame.text for frame in frames if isinstance(frame, self.rt.TTSSpeakFrame)],
                          ['Not sent yet. Should I send the Auth prompt, version 1, to API Server? '
-                          'Keep the token check. The full draft is on screen, 21 characters. Yes or no?'])
+                          'Keep the token check. The full draft is on screen, 21 characters. Say yes to send it, or no.'])
+
+    async def test_send_prompt_cue_requires_speech(self):
+        self.mock_draft_source(saved_draft('Keep the token check.'))
+        pending = draft_proposal()
+        session, frames = await self.draft_tool_turn(friday.EVENT_PREFIX + 'Send it.', pending=pending)
+        self.assertNotIn(('dispatch', 'send_prompt'), frames)
+        self.assertFalse(any(isinstance(frame, self.rt.TTSSpeakFrame) and
+                             frame.text == 'Not sent. Say yes to send it, or no.' for frame in frames))
+        self.assertEqual(session.pending_proposal, pending)
+
+    async def test_heard_draft_passes_followup_requests_to_the_model(self):
+        from pipecat.processors.aggregators.llm_context import LLMContext
+
+        for words in ('Read all of it', 'Change the second line to say hello',
+                      'Send it to Billing instead', 'What does it say about tests?',
+                      'Send it to that chat', 'Send it to Go', 'Send it to this tab',
+                      'Read it all, then send it', 'Read it all and send it',
+                      'Read it then send it', 'Send all', 'Could you read it and send it',
+                      'Read it, you can send it', 'I have read it, could you read it? You can send it'):
+            with self.subTest(words=words):
+                pending = draft_proposal()
+                session = SimpleNamespace(pending_proposal=pending, prepare_messages=lambda messages: messages)
+                service = self.rt.FridayLLM(session, friday.brain_config({}))
+                service.push_frame = AsyncMock()
+                context = LLMContext([{'role': 'assistant', 'content': friday.send_readback(pending)},
+                                      {'role': 'user', 'content': words}])
+                try:
+                    with patch.object(self.rt.OpenAILLMService, '_process_context', AsyncMock()) as completion:
+                        await service._process_context(context)
+                    completion.assert_awaited_once_with(context)
+                    self.assertEqual(context.get_messages()[-1]['content'], words)
+                    service.push_frame.assert_not_awaited()
+                    self.assertEqual(session.pending_proposal, pending)
+                finally:
+                    await service._client.close()
+
+    async def test_expired_draft_cue_needs_a_new_readback(self):
+        self.mock_draft_source(saved_draft('Keep the token check.'))
+        pending = replace(draft_proposal(), turn=-2, cue_given=True)
+        session, frames = await self.draft_tool_turn('yes', pending=pending,
+                                                     previous='Not sent. Say yes to send it, or no.')
+        self.assertNotIn(('dispatch', 'send_prompt'), frames)
+        self.assertFalse(session.pending_proposal.heard)
+        self.assertGreater(session.pending_proposal.turn, pending.turn)
 
     async def test_send_prompt_rechecks_revision_and_both_destination_ids_before_dispatch(self):
         text = 'Keep the token check.'
@@ -3607,13 +3677,16 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                     listing.return_value = {'topics': [saved_draft(text)]}
                 _, _, pane, thread, _ = target
                 destination.update(pane=pane, thread=thread, name='Docs' if change == 'chat' else 'API Server')
-                words = 'yes, to Docs' if change == 'chat' else 'yes'
-                session, frames = await self.draft_tool_turn(words, call_args, pending=pending, previous=previous)
-                self.assertNotIn(('dispatch', 'send_prompt'), frames)
-                self.assertEqual(session.pending_proposal.target, target)
-                self.assertFalse(session.pending_proposal.heard)
-                speech, = [frame.text for frame in frames if isinstance(frame, self.rt.TTSSpeakFrame)]
-                self.assertIn(expected, speech)
+                for after_cue in (False, True):
+                    with self.subTest(after_cue=after_cue):
+                        active = replace(pending, cue_given=True) if after_cue else pending
+                        last_reply = previous or ('Not sent. Say yes to send it, or no.' if after_cue else None)
+                        session, frames = await self.draft_tool_turn('yes', call_args, pending=active, previous=last_reply)
+                        self.assertNotIn(('dispatch', 'send_prompt'), frames)
+                        self.assertEqual(session.pending_proposal.target, target)
+                        self.assertFalse(session.pending_proposal.heard)
+                        speech, = [frame.text for frame in frames if isinstance(frame, self.rt.TTSSpeakFrame)]
+                        self.assertIn(expected, speech)
 
     async def test_send_prompt_consumes_grant_before_first_dispatch_even_when_send_fails(self):
         self.mock_draft_source(saved_draft('Keep the token check.'))
@@ -5720,7 +5793,8 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                          ['Please stop speaking'])
         self.assertFalse(session.bot_speaking)
 
-    async def readback_pipeline(self, tool, mode, scenario, *, boundary='natural', attach=False, draft=None):
+    async def readback_pipeline(self, tool, mode, scenario, *, boundary='natural', attach=False, draft=None,
+                                draft_answers=()):
         from pipecat.frames.frames import EndFrame, LLMMessagesAppendFrame, TTSAudioRawFrame
         from pipecat.pipeline.pipeline import Pipeline
         from pipecat.pipeline.worker import PipelineParams, PipelineWorker
@@ -5746,7 +5820,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
             expected = friday.send_readback(draft or friday.SendProposal(tool, chat, payload, 1, attach=attach))
             proposal_error = 'Not sent yet. Friday asked the user to confirm.'
         if draft:
-            initial = 'Read all of it and send it to API Server.'
+            initial = 'Read all of it and send it to API Server.' if draft.target[4] else 'Send the Auth draft.'
         cue = 'Let me finish, then say yes.'
         cap = 'I could not finish reading it back. Please say the whole request again.'
         started, output_paused, release_output = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -5843,7 +5917,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                         and friday.plain_yes(text))):
                 args[key] = 'approve' if approval else new_payload
             if draft:
-                args = {'topic': draft.topic, 'chat': draft.chat, 'read_all': True}
+                args = {'topic': draft.topic, 'chat': draft.chat, 'read_all': draft.target[4]}
 
             async def chunks():
                 if ((scenario == 'approval-no' and text == 'No.') or text == hold_words or (text == unrelated_words
@@ -5993,7 +6067,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 async with asyncio.timeout(6):
                     await started.wait()
                     early = scenario not in ('complete', 'preface', 'debt-cleared', 'heard-reset',
-                                             'approval-no', 'approval-no-call')
+                                             'approval-no', 'approval-no-call', 'draft-answers')
                     await speak(initial, hold=early)
                     self.assertEqual((await results.get())['error'], proposal_error)
                     heard = not early or scenario == 'blip'
@@ -6037,7 +6111,38 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                     if scenario != 'debt':
                         self.assertEqual(session.pending_proposal.heard, heard)
 
-                    if approval:
+                    if scenario == 'draft-answers':
+                        pending = session.pending_proposal
+                        cue_reply = 'Not sent. Say yes to send it, or no.'
+                        await speak(draft_answers[0])
+                        if len(draft_answers) == 2:
+                            self.assertEqual(await replies.get(), cue_reply)
+                            await finish_device_voice()
+                            self.assertEqual(len(requests), 1)
+                            self.assertEqual(session.llm_calls, 1)
+                            self.assertEqual(speech, [expected, cue_reply])
+                            self.assertEqual(sends, [])
+                            self.assertEqual(session.pending_proposal, replace(pending, cue_given=True))
+                            await speak(draft_answers[1])
+                        answer = draft_answers[-1]
+                        result = await results.get()
+                        if answer in ('Yes', 'Yes, please send it'):
+                            self.assertEqual(result, {'ok': True})
+                            self.assertEqual(sends, [dict(topic=draft.topic, chat=draft.chat, read_all=draft.target[4],
+                                                         **dict(zip(friday.DRAFT_GRANT_FIELDS, draft.target[:4])))])
+                            self.assertIsNone(session.pending_proposal)
+                        elif answer in ('No', 'No, I mean I have read it, you can send it'):
+                            self.assertEqual(result, {'error': friday.DRAFT_SEND_DECLINED})
+                            self.assertEqual(sends, [])
+                            self.assertIsNone(session.pending_proposal)
+                        else:
+                            self.assertEqual(result, {'error': proposal_error})
+                            await complete()
+                            self.assertEqual(sends, [])
+                            self.assertFalse(session.pending_proposal.cue_given)
+                            self.assertGreater(session.pending_proposal.turn, pending.turn)
+                        self.assertEqual(speech.count(cue_reply), len(draft_answers) - 1)
+                    elif approval:
                         self.assertEqual(sends, [])
                         session.llm.readback_budget.offer(session.pending_proposal)
                         if scenario == 'approval-no':
@@ -6276,6 +6381,23 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
             for mode in ('server', 'client'):
                 with self.subTest(mode=mode):
                     await self.readback_pipeline('send_prompt', mode, 'replay', draft=draft)
+
+    async def test_heard_draft_cue_and_followup_use_the_same_proposal(self):
+        for mode, read_all, answers in (
+                ('server', False, ('You can send it', 'Yes')),
+                ('server', False, ('send it', 'Yes')),
+                ('server', False, ('Please send it', 'Yes')),
+                ('server', False, ('I have read it, you can send it', 'Yes')),
+                ('client', True, ('Send it?', 'Yes')),
+                ('client', False, ('You can send it', 'No')),
+                ('server', False, ('You can send it', 'send it')),
+                ('server', False, ('No, I mean I have read it, you can send it',)),
+                ('server', False, ('Yes, please send it',))):
+            with self.subTest(mode=mode, read_all=read_all, answers=answers):
+                draft = draft_proposal(read_all=read_all, heard=False)
+                with patch.object(friday, 'load_prompt_readback',
+                                  side_effect=lambda args, turn: replace(draft, turn=turn)):
+                    await self.readback_pipeline('send_prompt', mode, 'draft-answers', draft=draft, draft_answers=answers)
 
     async def test_readback_pipeline_reproposal_reaches_cap_and_restatement_starts_fresh(self):
         for tool in sorted(friday.SEND_TOOLS):
