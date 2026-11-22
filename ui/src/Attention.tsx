@@ -8,7 +8,7 @@ import type { Api, Ask, Pane } from './api'
 import { ApiError, errorText } from './api'
 import type { Reminder } from './reminders'
 import { whenLabel } from './reminders'
-import { fmtDate, fmtTime, useTetherZone } from './zone'
+import { fmtDate, fmtTime, tetherZone, useTetherZone } from './zone'
 import { askAction, confirmStaleRule, LATE, splitToday, staleRuleQueue, stillWait, useNow } from './attention'
 import type { AskAction, AttentionState, StaleRuleResult, AutoEntry, AutoLog, Digest, Waiting } from './attention'
 import { useModal } from './hooks'
@@ -242,14 +242,29 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
   const now = useNow()
   // A zone change moves "today" on the server and every time shown here, so reload the log.
   const zone = useTetherZone()
-  const [log, setLog] = useState<AutoLog | null>(null)
-  const [error, setError] = useState('')
+  const [loaded, setLoaded] = useState<(AutoLog & { zone: string }) | null>(null)
+  const [failure, setFailure] = useState<{ zone: string; text: string } | null>(null)
+  if (failure && failure.zone !== zone) setFailure(null)
+  const log = loaded?.zone === zone ? loaded : null
+  const error = failure?.zone === zone ? failure.text : ''
   const [busy, setBusy] = useState('')
   const [rowError, setRowError] = useState<{ id: string; text: string } | null>(null)
   const [status, setStatus] = useState('')
-  const load = useCallback((signal?: AbortSignal) => api<AutoLog>('attention/log', undefined, signal)
-    .then(data => { setLog(data); setError('') })
-    .catch(reason => { if (!signal?.aborted) setError(errorText(reason)) }), [api])
+  const load = useCallback((signal?: AbortSignal) => {
+    const requestedZone = tetherZone()
+    const isCurrent = () => !signal?.aborted && tetherZone() === requestedZone
+    return api<AutoLog>('attention/log', undefined, signal).then(data => {
+      if (!isCurrent()) return
+      setLoaded({ ...data, zone: requestedZone })
+      setFailure(null)
+    }).catch(reason => {
+      if (isCurrent()) setFailure({ zone: requestedZone, text: errorText(reason) })
+    })
+  }, [api])
+  const reload = () => {
+    setFailure(null)
+    return load()
+  }
   useLayoutEffect(() => {
     const pending = focusLater.current
     if (!pending || later.some(item => laterKey(item) === pending.id)) return
@@ -267,7 +282,7 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
       await write()
       if ('undo' in source) {
         focusUndo.current = id
-        setLog(current => current && {
+        setLoaded(current => current && {
           ...current,
           entries: current.entries.map(row => row.id === id ? { ...row, undone: true, undo: null } : row),
           handled_today: source.undo.at >= current.today_start ? Math.max(0, current.handled_today - 1) : current.handled_today,
@@ -278,7 +293,7 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
       }
       setStatus(done)
       onChanged()
-      await load()
+      await reload()
     } catch (reason) {
       setRowError({ id, text: errorText(reason) })
     } finally {
@@ -334,7 +349,7 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
       <h3 id="handled-log">Today <span className="handled-count">{log ? log.handled_today : ''}</span></h3>
       {!log && !error && <p className="handled-empty" role="status">Loading the log…</p>}
       {error && <div className="handled-error" role="alert"><p className="error">Could not load the log. {error}</p>
-        <button type="button" className="secondary sm" onClick={() => void load()}><RotateCw size={14} aria-hidden="true" />Retry</button></div>}
+        <button type="button" className="secondary sm" onClick={() => void reload()}><RotateCw size={14} aria-hidden="true" />Retry</button></div>}
       {log && (today.length ? <ol className="handled-list">{today.map(entry => line(entry, true))}</ol> : <p className="handled-empty">Nothing was handled for you today.</p>)}
     </section>
     {older.length > 0 && <section className="handled-section" aria-labelledby="handled-older">
