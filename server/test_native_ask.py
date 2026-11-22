@@ -177,6 +177,7 @@ class GutterAskTests(unittest.TestCase):
         # The same for a wrapped question whose gutter is not dim, or is not in column 0.
         long = (self.DIR / 'long-120.ansi').read_text()
         for name, frame in (('not dim', long.replace('\x1b[2m│', '\x1b[1m│').replace('\x1b[0;2m│', '\x1b[0;1m│')),
+                            ('bold and dim', long.replace('\x1b[2m│', '\x1b[1;2m│').replace('\x1b[0;2m│', '\x1b[0;1;2m│')),
                             ('indented', long.replace('\x1b[2m│', ' \x1b[2m│').replace('\x1b[0;2m│', ' \x1b[0;2m│')),
                             ('unstyled', terminal.ANSI_SGR.sub('', long))):
             with self.subTest(name=name):

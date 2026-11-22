@@ -348,7 +348,8 @@ def ask_current(frame):
     lines = [text.strip() for text, _ in block]
     # Claude 2.1.330 draws a dim "│" gutter in column 0 of each row of a question that wraps. It is not question
     # text. A bold or indented "│", or a single row, is the question's own text and stays.
-    if len(block) > 1 and all(re.match(r'│(?: |$)', text) and styles and styles[0]['dim'] for text, styles in block):
+    if len(block) > 1 and all(re.match(r'│(?: |$)', text) and styles and styles[0]['dim'] and not styles[0]['bold']
+                                   for text, styles in block):
         lines = [text[1:].strip() for text, _ in block]
     question = ' '.join(line for line in lines if line)
     if not question or '…' in question or '...' in question or any(RULE.fullmatch(text) or CHAT.match(text)
