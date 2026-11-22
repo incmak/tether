@@ -81,6 +81,8 @@ async function main() {
     for (const state of NAMES) for (const width of [320, 390, 1280]) {
       const name = `${state}-${width}`, errors = [], sent = [], pageErrors = []
       const fixture = fixtures(state)
+      // The stored prefs, as server/prefs_sync.py keeps them: a save applies its changes and raises the version.
+      let prefs = { ...fixture.prefs, zone: 'UTC' }
       if (page) await page.close().catch(() => {})
       page = await context.newPage()
       page.setDefaultTimeout(10000)
@@ -93,12 +95,17 @@ async function main() {
         if (url.pathname.includes('/api/')) {
           const endpoint = url.pathname.split('/api/')[1]
           if (request.method() !== 'GET') {
-            sent.push({ endpoint, ...request.postDataJSON() })
+            const body = request.postDataJSON()
+            sent.push({ endpoint, ...body })
             // A prefs save answers with the stored prefs, as the server does. Another body makes the app retry or stop.
-            return route.fulfill({ json: endpoint === 'prefs' ? fixture.prefs : { ok: true, accepted: true } })
+            if (endpoint === 'prefs') {
+              prefs = { prefs: { ...prefs.prefs, ...body.changes }, version: prefs.version + 1, zone: prefs.zone }
+              return route.fulfill({ json: prefs })
+            }
+            return route.fulfill({ json: { ok: true, accepted: true } })
           }
           if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
-          return route.fulfill({ json: fixture[endpoint] || {} })
+          return route.fulfill({ json: endpoint === 'prefs' ? prefs : fixture[endpoint] || {} })
         }
         if (url.origin === origin && url.pathname.startsWith('/chat/')) return serveLocal(route)
         return route.abort('blockedbyclient')
