@@ -8,7 +8,7 @@ import type { Api, Ask, Pane } from './api'
 import { ApiError, errorText } from './api'
 import type { Reminder } from './reminders'
 import { whenLabel } from './reminders'
-import { fmtDate, fmtTime, tetherZone, tetherZoneConfirmed, useTetherZone, useTetherZoneConfirmed } from './zone'
+import { canFormat, fmtDate, fmtTime, tetherZone, tetherZoneConfirmed, useTetherZone, useTetherZoneConfirmed } from './zone'
 import { askAction, confirmStaleRule, LATE, splitToday, staleRuleQueue, stillWait, useNow } from './attention'
 import type { AskAction, AttentionState, StaleRuleResult, AutoEntry, AutoLog, Digest, Waiting } from './attention'
 import { useModal } from './hooks'
@@ -19,6 +19,7 @@ import './attention.css'
 
 const seenText = (ask: Ask) => ask.opened ? 'Opened, not answered' : 'Not opened'
 const DONE: Record<AskAction, string> = { handled: 'Handled.', snooze: 'Snoozed until tomorrow.', opened: '', later: 'Moved to Later.', back: 'Back in the queue.' }
+const spoken = (zone: string) => zone.replace(/_/g, ' ')
 const clock = (at: number) => fmtTime(at * 1000, { hour: '2-digit', minute: '2-digit' })
 const ago = (at: number, now: number) => { const text = age(at, now); return text === 'now' ? 'just now' : `${text} ago` }
 const dayText = (at: number) => fmtDate(at * 1000, { day: 'numeric', month: 'short' })
@@ -246,7 +247,8 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
   const [loaded, setLoaded] = useState<AutoLog | null>(null)
   const [failure, setFailure] = useState<{ api: Api; zone: string; confirmed: boolean; text: string } | null>(null)
   const latestRequest = useRef(0)
-  const log = loaded?.zone === zone ? loaded : null
+  const unsupportedZone = loaded !== null && loaded.zone !== zone && !canFormat(loaded.zone)
+  const log = loaded?.zone === zone || unsupportedZone ? loaded : null
   const currentFailure = failure?.api === api && failure.zone === zone && failure.confirmed === confirmed ? failure : null
   if (failure && !currentFailure) setFailure(null)
   const error = currentFailure?.text ?? ''
@@ -353,6 +355,7 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
     </section>
     <section className="handled-section" aria-labelledby="handled-log">
       <h3 id="handled-log">Today <span className="handled-count">{log ? log.handled_today : ''}</span></h3>
+      {log && unsupportedZone && <p className="sheet-sub sheet-note">This browser has no time data for {spoken(log.zone)}. Times show in {spoken(zone)}; Today follows {spoken(log.zone)}.</p>}
       {!log && !error && <p className="handled-empty" role="status">Loading the log…</p>}
       {error && <div className="handled-error" role="alert"><p className="error">Could not load the log. {error}</p>
         <button type="button" className="secondary sm" onClick={() => void reload()}><RotateCw size={14} aria-hidden="true" />Retry</button></div>}

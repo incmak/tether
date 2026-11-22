@@ -10,6 +10,8 @@ const SRC = path.join(__dirname, 'src')
 const SHOTS = shotsDir('handled-zone')
 const NY = 'America/New_York'
 const LA = 'America/Los_Angeles'
+const KOLKATA = 'Asia/Kolkata'
+const UNSUPPORTED = 'Mars/Olympus_Mons' // Rejected by Intl, even on browsers with current zone data.
 const seconds = time => Date.parse(time) / 1000
 const entry = { id: 'overnight', at: seconds('2026-11-21T06:00Z'), kind: 'auto.move', summary: 'Overnight move' }
 const nyLog = { zone: NY, today_start: seconds('2026-11-21T05:00Z'), handled_today: 1, entries: [entry] }
@@ -61,6 +63,7 @@ w.logState = () => ({
   older: !!document.querySelector('#handled-older'),
   loading: [...document.querySelectorAll('.handled-sheet [role="status"]')].some(node => node.textContent === 'Loading the log…'),
   error: document.querySelector('.handled-error p')?.textContent ?? '',
+  note: document.querySelector('#handled-log + .sheet-note')?.textContent ?? '',
 })
 function Harness() {
   const [settled, setSettled] = useState(0)
@@ -71,7 +74,7 @@ setTetherZone('${NY}')
 createRoot(root).render(<Harness />)
 `
 const PAGE = '<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width"></head><body><div id="root"></div></body></html>'
-const hiddenLog = { rows: [], count: '', older: false, loading: true, error: '' }
+const hiddenLog = { rows: [], count: '', older: false, loading: true, error: '', note: '' }
 
 async function main() {
   const sourceFiles = new Set(fs.readdirSync(SRC))
@@ -223,8 +226,8 @@ async function main() {
     })
 
     await test('a rejected zone save keeps the mismatched log in the loading state', async () => {
-      await open()
-      await settle(0, laLog)
+      await open(KOLKATA)
+      await settle(0, nyLog)
       assert.deepEqual(await readLog(), hiddenLog)
     })
 
@@ -265,6 +268,37 @@ async function main() {
       assert.equal(await today.getByRole('heading').textContent(), 'Today 0')
       await settle(1, beforeUndo)
       assert.deepEqual(await readLog(), { ...hiddenLog, count: '0', loading: false })
+    })
+
+    await test('an unsupported server zone uses client times and the server Today boundary', async () => {
+      await page.setViewportSize({ width: 320, height: 640 })
+      await open(KOLKATA)
+      const log = {
+        zone: UNSUPPORTED, today_start: seconds('2026-11-21T03:00Z'), handled_today: 1,
+        entries: [todayEntry, { ...entry, at: seconds('2026-11-21T02:00Z') }],
+      }
+      await settle(0, log)
+      assert.equal(await today.getByRole('heading').textContent(), 'Today 1')
+      const copy = 'This browser has no time data for Mars/Olympus Mons. Times show in Asia/Kolkata; Today follows Mars/Olympus Mons.'
+      const note = today.locator('h3 + p')
+      assert.equal(await note.textContent(), copy)
+      assert.equal(await note.getAttribute('role'), null)
+      assert.equal(await today.getByRole('listitem').count(), 1)
+      assert.equal(await today.locator('time').textContent(), '02:30 PM')
+      const undo = today.getByRole('button', { name: `Undo: ${todayEntry.summary}` })
+      assert.equal(await undo.isVisible(), true)
+      assert.equal(await older.getByText(entry.summary, { exact: true }).isVisible(), true)
+      assert.equal(await older.locator('time').textContent(), 'Nov 21 07:30 AM')
+      assert.equal((await readLog()).loading, false)
+      fs.mkdirSync(SHOTS, { recursive: true })
+      for (const [width, height] of [[320, 640], [1280, 900]]) {
+        await page.setViewportSize({ width, height })
+        await page.screenshot({ path: path.join(SHOTS, `unsupported-zone-${width}.png`) })
+      }
+      await undo.press('Enter')
+      await waitForRequest(1, KOLKATA)
+      await today.getByText('Undone', { exact: true }).waitFor()
+      assert.equal(await today.getByRole('heading').textContent(), 'Today 0')
     })
   } finally {
     try { await context?.close() } finally { await browser.close() }
