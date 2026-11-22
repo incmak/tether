@@ -428,6 +428,39 @@ class MergeForwardTest(GitCase):
     def test_missing_base_does_not_enable_merge_forward(self):
         self.assertFalse(self.allowed(self.merge(self.base), None))
 
+    def side_merge(self):
+        """A clean merge of the approved commit with a branch that is not on remote main (the base)."""
+        self.branch('side', self.base)
+        side = self.commit('not on main', 'side.txt')
+        self.git('checkout', '-q', 'worker')
+        return self.merge(side)
+
+    def push(self, local, remote):
+        with patch.object(review_gate, 'pane_identity', return_value=PANE), \
+                patch.object(review_gate, 'links_for', return_value=[link(self.approved)]):
+            review_gate.pre_push(self.repo, [ref_line(local, remote)])
+
+    def test_main_push_of_a_clean_merge_of_remote_main_is_allowed(self):
+        self.push(self.merge(self.base), self.base)
+
+    def test_main_push_of_a_merge_with_a_commit_not_on_remote_main_is_refused(self):
+        merged = self.side_merge()
+        with self.assertRaisesRegex(review_gate.GateRefused, merged[:12]):
+            self.push(merged, self.base)
+
+    def test_tag_push_of_a_clean_merge_is_refused(self):
+        merged = self.merge(self.base)
+        with patch.object(review_gate, 'pane_identity', return_value=PANE), \
+                patch.object(review_gate, 'links_for', return_value=[link(self.approved)]), \
+                self.assertRaisesRegex(review_gate.GateRefused, self.approved[:12]):
+            review_gate.pre_push(self.repo, [ref_line(merged, ZERO, source=TAG, destination=TAG)])
+
+    def test_main_push_names_git_fetch_when_remote_main_is_not_local(self):
+        merged = self.merge(self.base)
+        missing = 'e' * len(merged)
+        with self.assertRaisesRegex(review_gate.GateRefused, f'remote main {missing[:12]}. Run git fetch'):
+            self.push(merged, missing)
+
     def test_depth_limit_allows_twenty_merges_and_refuses_twenty_one(self):
         # The remote parent is already in each subsequent merge. A clean recomputation has the same tree.
         merged = self.merge(self.base)

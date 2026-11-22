@@ -253,8 +253,9 @@ For the line in your own hook, the helper uses `python3` unless you set `TETHER_
 
 Install the review gate from the main checkout with `python3 server/review_gate.py install-hook`. It adds a marked
 block to the `pre-push` hook and keeps the rest of the hook. A tab with a live review link can then push to `main` or a
-tag only the commit that every reviewer approved, or a clean merge of `main` into that commit. `deploy-ui.py` and
-auto-merge check the same rule. Branch pushes pass. Any lookup error refuses. Add `--uninstall` to remove the block.
+tag, deploy with `deploy-ui.py`, or auto-merge only the commit that every reviewer approved. A `main` push and a deploy
+also accept a clean merge of remote `main` into that commit; a tag push and auto-merge need the exact hash. Branch
+pushes pass. Any lookup error refuses. Add `--uninstall` to remove the block.
 All agents run as one OS user, so `git push --no-verify` still bypasses the gate: it guards against mistakes and races.
 
 The gate compares possible cleanup results for `#` and any single configured comment character. If the results

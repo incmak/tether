@@ -421,6 +421,38 @@ class ReviewGateTest(GuardCase):
             self.deploy(force=True)
         self.assert_untouched()
 
+    def merge_setup(self, side=False):
+        """Approve a worker commit, move remote main (origin is this repo), and merge main, or a side branch that is
+        not on remote main, into the approved commit. Returns the merge commit."""
+        self.git('remote', 'add', 'origin', str(self.repo))
+        self.git('checkout', '-q', '-b', 'worker', self.base)
+        approved = self.commit('approved')
+        self.approve(approved)
+        self.git('checkout', '-q', '-b', 'main-tip', self.base)
+        main = self.commit('main moved')
+        self.git('update-ref', 'refs/heads/main', main)
+        if side:
+            self.git('checkout', '-q', '-b', 'side', main)
+            other = self.commit('not on main')
+        else:
+            other = main
+        self.git('checkout', '-q', 'worker')
+        self.git('merge', '-q', '--no-edit', other)
+        return self.git('rev-parse', 'HEAD')
+
+    def test_clean_merge_of_remote_main_into_the_approved_commit_deploys(self):
+        merged = self.merge_setup()
+        self.stamp(merged)
+        self.assertEqual(self.deploy(), 2)
+        self.assertEqual(self.record()['commit'], merged)
+
+    def test_merge_with_a_commit_not_on_remote_main_is_refused_even_with_force(self):
+        merged = self.merge_setup(side=True)
+        self.stamp(merged)
+        with self.assertRaisesRegex(deploy_ui.ReviewRefused, merged[:12]):
+            self.deploy(force=True)
+        self.assert_untouched()
+
     def test_merge_forward_base_comes_from_the_remote_not_the_tracking_ref(self):
         self.git('remote', 'add', 'origin', str(self.repo))
         self.git('update-ref', 'refs/heads/main', self.base)
