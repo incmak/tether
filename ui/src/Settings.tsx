@@ -170,8 +170,9 @@ export function Settings({ api, prefs, update, rejectedZone, onReload, onClose, 
   // or on the phone index to the current row.
   useEffect(() => {
     const active = document.activeElement
-    if (active instanceof HTMLElement && active !== document.body && active.checkVisibility()) return
-    if (heading.current) heading.current.focus({ preventScroll: true })
+    // getClientRects: a hidden control has none (checkVisibility needs Safari 17.4).
+    if (active instanceof HTMLElement && active !== document.body && active.getClientRects().length) return
+    if (heading.current) heading.current.focus()
     else body.current?.querySelector<HTMLElement>(`.preferences-index [data-group="${returnTo.current ?? 'general'}"]`)?.focus()
   }, [wide])
   useEffect(() => {

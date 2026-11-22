@@ -120,6 +120,20 @@ async function main() {
     await focusedHeading('Voice')
     console.log('ok resize 1280 -> 320 px: focus moves from the hidden nav to the page title')
 
+    // The same after scrolling the page: the title it focuses comes into view.
+    await page.setViewportSize({ width: 1280, height: 420 })
+    await nav.getByRole('button', { name: 'Voice', exact: true }).focus()
+    await settings.locator('.preferences-content').evaluate(el => { el.scrollTop = el.scrollHeight })
+    await page.waitForFunction(() => document.querySelector('.preferences-content').scrollTop > 0)
+    await page.setViewportSize({ width: 320, height: 420 })
+    await focusedHeading('Voice')
+    const inView = await heading.evaluate(el => {
+      const box = el.getBoundingClientRect(), pane = el.closest('.preferences-content').getBoundingClientRect()
+      return box.top >= pane.top && box.bottom <= pane.bottom
+    })
+    assert(inView, 'The focused title is in view after the resize')
+    console.log('ok resize after scrolling: the focused title is in view')
+
     await openSettings(320)
     const index = settings.locator('.preferences-index nav.preferences-nav')
     await index.waitFor()
