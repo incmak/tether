@@ -159,12 +159,21 @@ export function Settings({ api, prefs, update, rejectedZone, onReload, onClose, 
   useEffect(() => { if (start === 'notifications') body.current?.querySelector('[data-setting="notifications"]')?.scrollIntoView({ block: 'start' }) }, [start])
   // When the control you used leaves the screen (a phone index row, or a search result), focus goes to the new page's
   // title, and Back on a phone returns it to the row.
-  const focusHeading = useRef(false)
+  // A deep link on a phone opens straight on a page, so it starts there too.
+  const focusHeading = useRef(!!start && !wide)
   useEffect(() => {
     if (!focusHeading.current) return
     focusHeading.current = false
     heading.current?.focus({ preventScroll: true })
   }, [selected, query])
+  // A resize can hide the control that has focus (the desktop nav or the phone index): focus goes to the page title,
+  // or on the phone index to the current row.
+  useEffect(() => {
+    const active = document.activeElement
+    if (active instanceof HTMLElement && active !== document.body && active.checkVisibility()) return
+    if (heading.current) heading.current.focus({ preventScroll: true })
+    else body.current?.querySelector<HTMLElement>(`.preferences-index [data-group="${returnTo.current ?? 'general'}"]`)?.focus()
+  }, [wide])
   useEffect(() => {
     if (!returnTo.current || selected) return
     body.current?.querySelector<HTMLElement>(`[data-group="${returnTo.current}"]`)?.focus()

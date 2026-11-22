@@ -113,6 +113,13 @@ async function main() {
     assert.equal(await search.inputValue(), '')
     console.log('ok 1280px: Enter on a search result focuses the page title')
 
+    // A resize that hides the focused control moves focus to the page title, not to the page body.
+    await nav.getByRole('button', { name: 'Voice', exact: true }).press('Enter')
+    await heading.and(settings.getByRole('heading', { name: 'Voice', exact: true })).waitFor()
+    await page.setViewportSize({ width: 320, height: 800 })
+    await focusedHeading('Voice')
+    console.log('ok resize 1280 -> 320 px: focus moves from the hidden nav to the page title')
+
     await openSettings(320)
     const index = settings.locator('.preferences-index nav.preferences-nav')
     await index.waitFor()
@@ -139,6 +146,17 @@ async function main() {
     await page.keyboard.press('Tab')
     assert(await page.evaluate(() => !!document.activeElement?.closest('.preferences-content') && !document.activeElement.matches('input[type="search"]')), 'Tab after the title stays in the page')
     console.log('ok 320px: Enter on a search result focuses the page title, and Tab moves into the page')
+
+    // A deep link on a phone opens on the page and focuses its title.
+    await page.goto(`${ORIGIN}/chat/?go=notifications`)
+    await focusedHeading('Notifications')
+    console.log('ok 320px: ?go=notifications focuses the Notifications title')
+
+    await openSettings(320)
+    await index.locator('[data-group="voice"]').focus()
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await focusedHeading('General')
+    console.log('ok resize 320 -> 1280 px: focus moves from the hidden index row to the page title')
     assert.deepEqual(errors, [])
     console.log('all passed')
   } catch (error) {
