@@ -38,6 +38,13 @@ test('verify measures recipe answers and capture, and owns popups', { timeout: 1
       res.writeHead(Number(req.url.split('/').at(-1)), { Location: '/redirect-decoy' }).end()
       return
     }
+    if (req.url === '/chat/early') {
+      // The test holds slow.js until it sees the early request, so that request falls between the commit and
+      // DOMContentLoaded.
+      res.writeHead(200, { 'Content-Type': 'text/html' })
+        .end('<script>void fetch("/mobile/api/fixture/early").catch(() => {})</script><script src="/chat/slow.js"></script>' + PAGE)
+      return
+    }
     if (req.url === '/chat/popup-error') {
       res.writeHead(200, { 'Content-Type': 'text/html' }).end('<script>throw new Error("Fixture popup error")</script>')
       return
@@ -154,6 +161,28 @@ test('verify measures recipe answers and capture, and owns popups', { timeout: 1
       { name: 'orphan-goto', ok: true, problems: [] },
       { name: 'orphan-reload', ok: true, problems: [] },
     ])
+
+    // The new document's own early request still counts; only the old document's request is dropped.
+    let releaseEarly
+    const early = new Promise(resolve => { releaseEarly = resolve })
+    try {
+      const earlyRequest = await withHeldRequest('orphan-early', async (page, hold, release) => {
+        await page.route('**/mobile/api/fixture/early', async route => {
+          await early
+          await route.fulfill({ status: 200 }).catch(() => {})
+        })
+        try {
+          await hold()
+          const seen = page.waitForRequest('**/mobile/api/fixture/early')
+          await page.route('**/chat/slow.js', async route => {
+            await seen
+            await route.fulfill({ status: 200, contentType: 'text/javascript', body: '' })
+          })
+          await page.goto(new URL('/chat/early', info.url).href, { waitUntil: 'load' })
+        } finally { release() }
+      })
+      assert.deepEqual(earlyRequest.problems, ['API still in flight after 5 s: GET /mobile/api/fixture/early'])
+    } finally { releaseEarly() }
 
     const duringCapture = async (name, status) => {
       let release, timer
