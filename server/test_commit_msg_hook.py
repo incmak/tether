@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import select
 import shlex
 import shutil
 import stat
@@ -15,6 +16,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -28,6 +30,41 @@ PID = 'abcdef012345'
 SESSION = 'test-session'
 STAMP = 'Verified: tests(server 412 ok)'
 SCISSORS = '# ------------------------ >8 ------------------------'
+# A well-formed start token that cannot belong to the current process.
+EXITED_GIT_IDENTITY = {'git_pid': os.getpid(),
+                       'git_started': 1.0 if sys.platform.startswith('linux') else 'Sat Jan  1 00:00:00 2000'}
+HOLD_COMMIT_HOOK = (
+    f'exec {shlex.quote(sys.executable)} -c '
+    + shlex.quote('import os; print("hook ready", flush=True); os.read(int(os.environ["TETHER_TEST_HOOK_FD"]), 1)')
+)
+
+
+@contextmanager
+def held_commit(command, *, cwd, env):
+    """Wait for the hook, then release it and reap Git even when an assertion fails."""
+    hook_read, release = os.pipe()
+    with os.fdopen(hook_read, 'rb') as reader, os.fdopen(release, 'wb') as writer:
+        env = dict(env, TETHER_TEST_HOOK_FD=str(reader.fileno()))
+        with subprocess.Popen(command, cwd=cwd, env=env, pass_fds=(reader.fileno(),),
+                              stderr=subprocess.PIPE, text=True) as git:
+            reader.close()
+            try:
+                if not select.select([git.stderr], [], [], 10)[0]:
+                    raise AssertionError('Git hook did not report readiness')
+                ready = git.stderr.readline()
+                if ready != 'hook ready\n':
+                    raise AssertionError(f'Git hook did not report readiness: {ready!r}')
+                yield git
+            finally:
+                writer.close()
+                try:
+                    _, stderr = git.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    git.kill()
+                    git.communicate()
+                    raise
+            if git.returncode:
+                raise subprocess.CalledProcessError(git.returncode, command, stderr=stderr)
 
 
 class AncestorTimes(unittest.TestCase):
@@ -395,6 +432,53 @@ sys.exit(main(sys.argv[2:]))
         self.assertNotEqual(self.git('rev-parse', 'HEAD^{tree}').stdout.strip(), row['tree'])
         self.assertIs(commit_gate.record_landed(row), False)
 
+    def test_record_landed_is_unknown_while_hook_runs_without_process_identity(self):
+        self.commit('-m', 'base')
+        self.script(self.hook, f'{self.user_hook_line()}\n{HOLD_COMMIT_HOOK}')
+        with held_commit(['git', 'commit', '--allow-empty', '-qm', 'Held commit'], cwd=self.repo, env=self.env) as git:
+            row, = self.rows()
+            self.assertEqual(row['git_pid'], git.pid)
+            self.assertEqual(commit_gate.record_landed(row), 'pending')
+            self.assertEqual(commit_gate._head_reflog_position(self.repo), row['reflog'])
+            no_identity = {key: value for key, value in row.items() if key not in ('git_pid', 'git_started')}
+            for identity in ({}, {'git_pid': git.pid}, {'git_started': row['git_started']},
+                             {'git_pid': True, 'git_started': row['git_started']},
+                             {'git_pid': git.pid, 'git_started': 'invalid'}):
+                with self.subTest(identity=identity):
+                    self.assertIsNone(commit_gate.record_landed(no_identity | identity))
+        self.assertIs(commit_gate.record_landed(no_identity), True)
+
+    def test_hook_git_alive_is_unknown_when_the_process_cannot_be_read(self):
+        """A slow ps or an unreadable /proc must not look like an exited Git (that would skip a live commit)."""
+        deadline = time.monotonic() + 5
+        linux_row = {'git_pid': 4242, 'git_started': 100.0}
+        mac_row = {'git_pid': 4242, 'git_started': 'Sat Jan  1 00:00:00 2000'}
+        with mock.patch.object(commit_gate.sys, 'platform', 'linux'):
+            with mock.patch.object(commit_gate, '_boot_clock', return_value=None):
+                self.assertIsNone(commit_gate._hook_git_alive(linux_row, deadline=deadline))
+            with mock.patch.object(commit_gate, '_boot_clock', return_value=(0, 100)):
+                for error, expected in ((PermissionError(), None), (ValueError(), None),
+                                        (FileNotFoundError(), False), (ProcessLookupError(), False)):
+                    with self.subTest(linux=type(error).__name__), \
+                            mock.patch.object(commit_gate, '_linux_process', side_effect=error):
+                        self.assertIs(commit_gate._hook_git_alive(linux_row, deadline=deadline), expected)
+                for answer, expected in (((1, 'git', 100.0, b'S'), True), ((1, 'git', 101.0, b'S'), False),
+                                         ((1, 'git', 100.0, b'Z'), False), ((1, 'git', None, b'S'), None)):
+                    with self.subTest(linux=answer), mock.patch.object(commit_gate, '_linux_process',
+                                                                       return_value=answer):
+                        self.assertIs(commit_gate._hook_git_alive(linux_row, deadline=deadline), expected)
+        done = subprocess.CompletedProcess
+        with mock.patch.object(commit_gate.sys, 'platform', 'darwin'):
+            for result, expected in ((subprocess.TimeoutExpired('ps', 0.5), None), (OSError(), None),
+                                     (done([], 1, '', ''), False), (done([], 2, '', 'ps: bad'), None),
+                                     (done([], 0, 'S    Sat Jan  1 00:00:00 2000\n', ''), True),
+                                     (done([], 0, 'Z    Sat Jan  1 00:00:00 2000\n', ''), False),
+                                     (done([], 0, 'S    Sun Jan  2 00:00:00 2000\n', ''), False),
+                                     (done([], 0, '', ''), None)):
+                kwargs = {'side_effect': result} if isinstance(result, BaseException) else {'return_value': result}
+                with self.subTest(mac=repr(result)), mock.patch.object(commit_gate.subprocess, 'run', **kwargs):
+                    self.assertIs(commit_gate._hook_git_alive(mac_row, deadline=deadline), expected)
+
     def test_record_landed_uses_all_reflog_entries_for_the_same_commit(self):
         date = '2000-01-01T00:00:00+00:00'
         self.env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
@@ -410,7 +494,8 @@ sys.exit(main(sys.argv[2:]))
         row = {'folder': str(self.repo), 'head': self.git('rev-parse', 'HEAD').stdout.strip(),
                'tree': self.git('rev-parse', 'other^{tree}').stdout.strip(),
                'reflog': commit_gate._head_reflog_position(self.repo), 'git_dir': self.git_dir_fields(),
-               'messages': [commit_gate._message_digest(commit_gate._message_key(create=True), 'other')]}
+               'messages': [commit_gate._message_digest(commit_gate._message_key(create=True), 'other')],
+               **EXITED_GIT_IDENTITY}
         self.git('checkout', '-q', 'intermediate')
         self.git('checkout', '-q', 'other')
         self.assertIs(commit_gate.record_landed(row), False)

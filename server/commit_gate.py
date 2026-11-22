@@ -15,9 +15,10 @@ The person sets the mode in Settings. Nothing else changes it.
 The installed Git commit-msg hook checks the final message file for Claude, Codex and terminal commits.
 It logs one verdict and skips merges, replays that invoke the hook, and fixup, squash and amend! commits.
 The hook records the index tree, HEAD, the HEAD reflog position, the per-worktree Git directory and the Git
-process identity before Git makes the commit. Review binding needs a commit-making reflog entry in that worktree
-and a commit that matches the row's tree, parents, message HMAC and recorded dates. The new commit must be HEAD
-now or be the old HEAD of a later entry. A Git process still in flight can leave the decision pending.
+process identity before Git makes the commit. Review binding skips a row only when Git proves the commit did
+not land. Pending and uncertain rows keep their worktree. To confirm a landing, Git must show a commit-making
+reflog entry in that worktree and a commit that matches the row's tree, parents, message HMAC and recorded dates.
+The new commit must be HEAD now or be the old HEAD of a later entry.
 The hook checks ordinary amendments. Claude's PreToolUse check can defer to the hook.
 PostToolUse matches each hook row to one landed commit by worktree, tree, all parents, message HMAC and dates.
 A merge skip row can lack the author date. PostToolUse checks uncovered commits and skips new merges.
@@ -1207,14 +1208,17 @@ def worktree_head(folder, *, deadline):
 def record_landed(row, *, deadline=None):
     """Return True for a confirmed landing, or 'pending' if Git was alive and no landing is confirmed.
 
-    False means the attempt did not land. None means the evidence is uncertain, including a row without
-    message digests (no key or unreadable message). The deadline is absolute and monotonic.
+    False means the attempt did not land. None means the evidence is uncertain, including when the row lacks
+    the process identity needed to tell an in-flight commit from an aborted one. The deadline is absolute and
+    monotonic.
     """
     if deadline is None:
         deadline = time.monotonic() + 1.0
     # Sample before reading the reflog: Git can land and exit between the two reads.
     alive = _hook_git_alive(row, deadline=deadline)
     landed = _confirm_landing(row, deadline=deadline)
+    if landed is False and alive is None:
+        return None
     return 'pending' if alive and landed is not True else landed
 
 
@@ -1854,16 +1858,46 @@ def _ps_git_started(pid, *, timeout):
 
 
 def _hook_git_alive(row, *, deadline):
+    """True for a live match, False for no live match, None for an unusable process identity."""
     pid, expected = row.get('git_pid'), row.get('git_started')
-    if type(pid) is not int or pid <= 0 or expected is None or time.monotonic() >= deadline:
-        return False
-    if sys.platform.startswith('linux'):
+    linux = sys.platform.startswith('linux')
+    if type(pid) is not int or pid <= 0:
+        return None
+    if linux:
+        if type(expected) not in (int, float) or not 0 < expected < math.inf:
+            return None
+    elif not isinstance(expected, str) or not re.fullmatch(
+            r'[A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}', expected):
+        return None
+    if time.monotonic() >= deadline:
+        return None
+    if linux:
+        clock = _boot_clock()
+        if clock is None:
+            return None
         try:
-            _, _, started, state = _linux_process(pid, _boot_clock())
-            return state not in (b'Z', b'X') and started == expected
+            _, _, started, state = _linux_process(pid, clock)
+        except (FileNotFoundError, ProcessLookupError):
+            return False  # The process is gone.
         except (OSError, ValueError, IndexError):
-            return False
-    return _ps_git_started(pid, timeout=min(0.05, deadline - time.monotonic())) == expected
+            return None
+        return None if started is None else state not in (b'Z', b'X') and started == expected
+    # Only a clean ps answer counts. A timeout or a failure to run ps is unknown, not "Git exited".
+    timeout = min(0.5, deadline - time.monotonic())
+    if timeout <= 0:
+        return None
+    try:
+        shown = subprocess.run(['ps', '-o', 'stat=,lstart=', '-p', str(pid)], capture_output=True, text=True,
+                               timeout=timeout, env={**os.environ, 'LC_ALL': 'C', 'TZ': 'UTC0'})
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if shown.returncode != 0:
+        return False if not shown.stdout.strip() and shown.returncode == 1 else None
+    try:
+        state, started = shown.stdout.split(maxsplit=1)
+    except ValueError:
+        return None
+    return not state.startswith('Z') and started.strip() == expected
 
 
 def _ancestors():

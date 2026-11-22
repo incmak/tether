@@ -15,6 +15,7 @@ import review_links
 import review_scope
 import server
 from own_time import own_time
+from test_commit_msg_hook import EXITED_GIT_IDENTITY
 
 
 SESSION = '17b9c72a-a916-46a0-bc10-bc41a8c6249a'
@@ -46,12 +47,12 @@ class ReviewFolderTests(unittest.TestCase):
         return {'folder': str(folder), 'head': None if unborn else self.git('rev-parse', 'HEAD', cwd=folder),
                 'tree': self.git('write-tree', cwd=folder), 'reflog': server.commit_gate._head_reflog_position(folder),
                 'git_dir': {'path': str(path), 'dev': info.st_dev, 'ino': info.st_ino},
-                'messages': [server.commit_gate._message_digest(key, message)]}
+                'messages': [server.commit_gate._message_digest(key, message)], **EXITED_GIT_IDENTITY}
 
-    def git(self, *args, cwd=None):
+    def git(self, *args, cwd=None, env=None):
         return subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
                                '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', *args],
-                              cwd=cwd or self.start, capture_output=True, check=True, text=True).stdout.strip()
+                              cwd=cwd or self.start, env=env, capture_output=True, check=True, text=True).stdout.strip()
 
     def test_repo_identity_is_shared_by_worktrees_and_changes_with_the_repository(self):
         # B368: auto-merge compares the repository a review saw with the live one.
@@ -94,7 +95,7 @@ class ReviewFolderTests(unittest.TestCase):
             self.assertEqual(server.review_folder(self.entry), str(self.work))
             landed.assert_not_called()
 
-    def test_switch_at_same_head_after_aborted_amend_uses_both_review_fallbacks(self):
+    def test_switch_at_same_head_after_aborted_amend_selects_the_uncertain_row(self):
         older = self.work.parent / 'older'
         self.git('worktree', 'add', '-qb', 'older', str(older))
         older_check = self.gate_fields(older, 'Older landed commit')
@@ -117,24 +118,27 @@ class ReviewFolderTests(unittest.TestCase):
             self.assertIsNone(server.commit_gate.record_landed(check))
         for entry in (self.entry, follow_up):
             with self.subTest(follow_up='review_after' in entry):
-                self.assertEqual(server.review_folder(entry), str(self.start))
+                self.assertEqual(server.review_folder(entry), str(self.work))
 
-    def test_replacement_worktree_is_rejected_with_warm_and_cold_cache(self):
+    def test_replacement_worktree_selects_the_uncertain_row_with_warm_and_cold_cache(self):
         self.log.write_bytes(self.line())
-        self.assertEqual(server.review_folder(self.entry), str(self.work))  # Warm the cache.
+        row, = server.review_gate_records()['claude', SESSION]
+        deadline = float('inf')
+        self.assertIs(server._review_gate_landed(row, deadline=deadline), True)
         self.git('worktree', 'move', str(self.work), str(self.work.parent / 'moved'))
         self.git('worktree', 'add', '-qb', 'replacement', str(self.work), 'work')
         # Git kept the original metadata directory intact. Stat alone still finds the old inode.
         identity = self.work_check['git_dir']
         self.assertEqual(Path(identity['path']).stat().st_ino, identity['ino'])
         with patch.object(server.commit_gate, '_git', wraps=server.commit_gate._git) as git:
-            self.assertEqual(server.review_folder(self.entry), str(self.start))
+            self.assertIsNone(server._review_gate_landed(row, deadline=deadline))
+            self.assertEqual(server.review_folder(self.entry), str(self.work))
             git.assert_not_called()
         with patch.object(server, 'REVIEW_GATE_LANDED', {}):
-            self.assertEqual(server.review_folder(self.entry), str(self.start))
-        self.assertIsNone(server.commit_gate.record_landed(self.work_check))
+            self.assertIsNone(server._review_gate_landed(row, deadline=deadline))
+            self.assertEqual(server.review_folder(self.entry), str(self.work))
 
-    def test_failed_tree_lookup_uses_fallback_even_with_older_confirmed_row(self):
+    def test_failed_tree_lookup_selects_the_uncertain_row_before_an_older_confirmed_row(self):
         older = self.work.parent / 'older'
         self.git('worktree', 'add', '-qb', 'older', str(older))
         check = self.gate_fields(older, 'Older landed commit')
@@ -152,7 +156,32 @@ class ReviewFolderTests(unittest.TestCase):
             with self.subTest('landing evidence'):
                 self.assertIsNone(server.commit_gate.record_landed(self.work_check))
             with self.subTest('review folder'):
-                self.assertEqual(server.review_folder(self.entry), str(self.start))
+                self.assertEqual(server.review_folder(self.entry), str(self.work))
+
+    def test_commit_message_rewrite_keeps_the_linked_worktree(self):
+        hooks, env = self.review_gate_hook('printf "\\nTicket: test\\n" >> "$1"\n')
+        self.git('-c', f'core.hooksPath={hooks}', 'commit', '--allow-empty', '-qm', 'Work with ticket',
+                 cwd=self.work, env=env)
+        self.assertEqual(self.git('log', '-1', '--format=%B', cwd=self.work), 'Work with ticket\n\nTicket: test')
+        row, = server.review_gate_records()['claude', SESSION]
+        self.assertIsNone(server.commit_gate.record_landed(row))
+        self.assertEqual(server.review_folder(self.entry), str(self.work))
+
+    def test_detached_same_oid_amend_without_reflog_entry_keeps_the_linked_worktree(self):
+        hooks, env = self.review_gate_hook()
+        date = '2000-01-01T00:00:00+00:00'
+        env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+        self.git('commit', '--allow-empty', '-qm', 'Work with fixed dates', cwd=self.work, env=env)
+        self.git('switch', '-q', '--detach', 'HEAD', cwd=self.work)
+        head = self.git('rev-parse', 'HEAD', cwd=self.work)
+        reflog = server.commit_gate._head_reflog_position(self.work)
+        self.git('-c', f'core.hooksPath={hooks}', 'commit', '--amend', '--allow-empty', '--no-edit',
+                 cwd=self.work, env=env)
+        self.assertEqual(self.git('rev-parse', 'HEAD', cwd=self.work), head)
+        self.assertEqual(server.commit_gate._head_reflog_position(self.work), reflog)
+        row, = server.review_gate_records()['claude', SESSION]
+        self.assertIsNone(server.commit_gate.record_landed(row))
+        self.assertEqual(server.review_folder(self.entry), str(self.work))
 
     def test_review_batches_tree_lookups_across_branch_switches(self):
         (self.work / 'staged.txt').write_text('Staged for a commit that never happens\n')
@@ -180,7 +209,7 @@ class ReviewFolderTests(unittest.TestCase):
             self.assertEqual(server.review_folder(self.entry), str(new_worktree))
             self.assertEqual(landed.call_count, 2)
 
-    def test_in_flight_commit_has_no_scope_until_it_lands(self):
+    def test_in_flight_commit_uses_the_worktrees_current_head_until_it_lands(self):
         self.check_in_flight_commit(land=True)
 
     def test_in_flight_commit_that_exits_without_landing_uses_older_row(self):
@@ -188,16 +217,15 @@ class ReviewFolderTests(unittest.TestCase):
 
     def test_landing_cache_does_not_confirm_a_same_time_row_with_another_message(self):
         self.log.write_bytes(self.line())
-        self.assertEqual(server.review_folder(self.entry), str(self.work))
+        row, = server.review_gate_records()['claude', SESSION]
+        deadline = float('inf')
+        self.assertIs(server._review_gate_landed(row, deadline=deadline), True)
         self.log.write_bytes(self.line(messages=['0' * 32]))
-        self.assertEqual(server.review_folder(self.entry), str(self.start))
+        changed, = server.review_gate_records()['claude', SESSION]
+        self.assertIsNone(server._review_gate_landed(changed, deadline=deadline))
+        self.assertIs(server._review_gate_landed(row, deadline=deadline), True)
 
-    def check_in_flight_commit(self, *, land):
-        pending = self.work.parent / 'pending'
-        self.git('worktree', 'add', '-qb', 'pending', str(pending))
-        self.log.write_bytes(self.line())
-        fifo = self.work.parent / 'release-hook'
-        os.mkfifo(fifo)
+    def review_gate_hook(self, after_gate=''):
         hooks = self.work.parent / 'hooks'
         hooks.mkdir()
         gate = hooks / 'gate.py'
@@ -209,11 +237,22 @@ class ReviewFolderTests(unittest.TestCase):
         hook = hooks / 'commit-msg'
         hook.write_text(
             f'#!/bin/sh\n{shlex.quote(sys.executable)} {shlex.quote(str(gate))} "$1" || exit 2\n'
-            f'printf "ready\\n"\nread release < {shlex.quote(str(fifo))} || exit 2\nexit "$release"\n'
+            + after_gate
         )
         hook.chmod(0o755)
         env = dict(os.environ, MOBILE_TMUX_CACHE=str(server.paths.CACHE),
                    TETHER_COMMIT_GATE_LOG=str(self.log))
+        return hooks, env
+
+    def check_in_flight_commit(self, *, land):
+        pending = self.work.parent / 'pending'
+        self.git('worktree', 'add', '-qb', 'pending', str(pending))
+        previous_head = self.git('rev-parse', 'HEAD', cwd=pending)
+        self.log.write_bytes(self.line())
+        fifo = self.work.parent / 'release-hook'
+        os.mkfifo(fifo)
+        hooks, env = self.review_gate_hook(
+            f'printf "ready\\n"\nread release < {shlex.quote(str(fifo))} || exit 2\nexit "$release"\n')
         follow_up = {**self.entry, 'review_after': 100, 'review_folder': str(self.work)}
         with subprocess.Popen(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
                                '-c', 'commit.gpgsign=false', '-c', f'core.hooksPath={hooks}',
@@ -225,15 +264,17 @@ class ReviewFolderTests(unittest.TestCase):
                 self.assertEqual(row['git_pid'], git.pid)
                 self.assertEqual(server.commit_gate.record_landed(row), 'pending')
                 started = row['git_started']
-                wrong_start = started - 1 if isinstance(started, float) else str(started) + '0'
+                wrong_start = EXITED_GIT_IDENTITY['git_started']
+                self.assertNotEqual(started, wrong_start)
                 self.assertIs(server.commit_gate.record_landed({**row, 'git_started': wrong_start}), False)
                 for entry in (self.entry, follow_up):
                     with self.subTest(follow_up='review_after' in entry):
-                        self.assertIsNone(server.review_folder(entry))
-                        self.assertIsNone(server.review_scope_of(entry))
-                        self.assertIsNone(server.review_scope_of(entry, light=True))
-                        self.assertIsNone(server.review_commit(entry))
-                        self.assertIsNone(server.review_work_mark(entry))
+                        self.assertEqual(server.review_folder(entry), str(pending))
+                        self.assertEqual(server.review_commit(entry), previous_head)
+                        for light in (False, True):
+                            scope = server.review_scope_of(entry, light=light)
+                            self.assertEqual(scope['commit'], previous_head)
+                            self.assertEqual(scope['folder'], str(pending))
                 if land:
                     read_entries = server.commit_gate._head_reflog_entries
 
@@ -291,13 +332,14 @@ class ReviewFolderTests(unittest.TestCase):
         self.assertEqual(server.review_folder(self.entry), str(self.work))
         self.assertEqual(server.review_commit(self.entry), rebased)
 
-    def test_legacy_row_falls_back_instead_of_using_older_landed_row(self):
+    def test_legacy_row_selects_its_worktree_before_an_older_landed_row(self):
         legacy = json.loads(self.line(at=102))
-        del legacy['reflog']
-        self.log.write_bytes(self.line() + (json.dumps(legacy) + '\n').encode())
-        self.assertEqual(server.review_folder(self.entry), str(self.start))
+        for field in ('reflog', 'git_pid', 'git_started'):
+            del legacy[field]
+        self.log.write_bytes(self.line(**self.start_check) + (json.dumps(legacy) + '\n').encode())
+        self.assertEqual(server.review_folder(self.entry), str(self.work))
         entry = {**self.entry, 'review_after': 100, 'review_folder': str(self.start)}
-        self.assertEqual(server.review_folder(entry), str(self.start))
+        self.assertEqual(server.review_folder(entry), str(self.work))
 
     def test_keeps_only_the_eight_newest_records_per_identity(self):
         aborted = self.gate_fields(self.start)

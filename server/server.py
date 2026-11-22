@@ -328,7 +328,6 @@ REVIEW_GATE_LANDED = {}  # digest of the log row for confirmed landings
 REVIEW_GATE_LANDED_MAX = 256
 REVIEW_GATE_LANDED_LOCK = threading.Lock()
 REVIEW_GATE_SECONDS = 1.5
-_REVIEW_GATE_PENDING = object()
 
 
 def review_gate_records():
@@ -378,21 +377,14 @@ def review_gate_records():
     return records
 
 
-def _review_gate_landed(row, *, deadline, require_head):
+def _review_gate_landed(row, *, deadline):
+    """True, False, None or 'pending' (commit_gate.record_landed). Only a confirmed landing is cached."""
     if time.monotonic() >= deadline:
         return None
     folder = row['folder']
     key = row['cache_key']
     if key in REVIEW_GATE_LANDED:
-        identity = commit_gate.git_dir_key(row.get('git_dir'))
-        if not commit_gate.cached_git_dir_matches(folder, identity):
-            return None
-        # A cold confirmation already reads HEAD. A fresh request still needs HEAD on a cache hit.
-        if require_head and not commit_gate.worktree_head(folder, deadline=deadline):
-            return None
-        if time.monotonic() >= deadline:
-            return None
-        return True
+        return True if commit_gate.cached_git_dir_matches(folder, commit_gate.git_dir_key(row.get('git_dir'))) else None
     landed = commit_gate.record_landed(row, deadline=deadline)
     if landed is True:
         with REVIEW_GATE_LANDED_LOCK:
@@ -403,12 +395,11 @@ def _review_gate_landed(row, *, deadline, require_head):
 
 
 def review_folder(entry):
-    """Resolve a bound request, a post-verdict scope, or a new request's folder."""
-    folder = _review_folder(entry)
-    return None if folder is _REVIEW_GATE_PENDING else folder
+    """Resolve a bound request, a post-verdict scope, or a new request's folder.
 
-
-def _review_folder(entry, *, agent_fallback=True):
+    B369: the gate rows of the session are read newest first. A row whose commit Git proves did not land (False) is
+    skipped. A confirmed, pending or uncertain row selects its folder, as every row did before B369: a commit still
+    in its hook, or one that Git cannot confirm, keeps the request on that worktree and its current HEAD."""
     folder, after = entry.get('review_folder'), entry.get('review_after')
     follow_up = 'review_after' in entry
     if folder and not follow_up:
@@ -424,22 +415,18 @@ def _review_folder(entry, *, agent_fallback=True):
                 started_ms = agents.started_ms(started)
             except (OSError, TypeError, ValueError, OverflowError):
                 started_ms = None
-            if started_ms is not None:
-                threshold = started_ms / 1000
+            threshold = started_ms / 1000 if started_ms is not None else None
         if threshold is not None:
             deadline = time.monotonic() + REVIEW_GATE_SECONDS
             for record in review_gate_records().get((source, thread), ()):
                 if not record['at'] > threshold:
                     break
-                landed = _review_gate_landed(record, deadline=deadline, require_head=not follow_up)
-                if landed is False:
+                if _review_gate_landed(record, deadline=deadline) is False:
                     continue
-                if landed is True:
-                    return record['folder']
-                if landed == 'pending':
-                    return _REVIEW_GATE_PENDING
-                break  # Unavailable evidence or HEAD: use the usual fallback.
-    return folder if after is not None or not agent_fallback else folder or agent_folder(entry)
+                if follow_up or review_scope.head(record['folder']):
+                    return record['folder']  # the scope read checks this exact worktree
+                break
+    return folder if after is not None else folder or agent_folder(entry)
 
 
 REVIEW_SCOPES = {}  # pane id -> ((folder, work mark), monotonic time, scope)
@@ -451,9 +438,7 @@ def review_scope_of(entry, *, light=False):
     again on each monitor tick. The checklist run and the UI listing then repeat only when the work changed
     (review_scope.fingerprint: commit, base, status, tracked, staged and untracked files), or after REVIEW_SCOPE_AGE
     seconds. Idle close reads an uncached scope without the review request metadata."""
-    folder = _review_folder(entry)
-    if folder is _REVIEW_GATE_PENDING:
-        return None
+    folder = review_folder(entry)
     mark = review_scope.fingerprint(folder)
     if light:
         found = review_scope.scope(folder, light=True)
@@ -476,8 +461,7 @@ def review_scope_of(entry, *, light=False):
 
 
 def review_commit(entry):
-    folder = _review_folder(entry)
-    return None if folder is _REVIEW_GATE_PENDING else review_scope.head(folder)
+    return review_scope.head(review_folder(entry))
 
 
 def review_level(entry):
@@ -508,8 +492,6 @@ def review_parent(entry, entries):
 
 
 def review_work_mark(entry):
-    if _review_folder(entry, agent_fallback=False) is _REVIEW_GATE_PENDING:
-        return None
     cwd = entry.get('review_folder') or entry.get('cwd')
     if not cwd:
         return None

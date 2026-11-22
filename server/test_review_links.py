@@ -32,6 +32,7 @@ import server
 import terminal_input
 import undo
 from own_time import own_time
+from test_commit_msg_hook import HOLD_COMMIT_HOOK, held_commit
 from test_notification_priority import ASSISTANT, BACKGROUND, COMPACT_BOUNDARY, COMPACT_SUMMARY, claude, codex
 from terminal_input import DraftError
 
@@ -8430,6 +8431,48 @@ class ApprovalTurnWorktreeTests(ApprovalTurnFixture):
         self.assertTrue(self.reviewer_should_stay_open())
 
     # Round 2 worktree routing and partial Git read cases.
+    def test_request_during_a_pending_commit_names_the_previous_head_and_rejects_its_approval(self):
+        previous_head = self.git("rev-parse", "HEAD", cwd=self.reviewed)
+        self.observe("Working")
+        hooks = self.root / "hooks"
+        hooks.mkdir()
+        gate = (
+            f"import sys\nsys.path.insert(0, {str(Path(commit_gate.__file__).parent)!r})\n"
+            f"import commit_gate\ncommit_gate._source_session = lambda *_: ('claude', {WORKER_THREAD!r})\n"
+            f"code, _ = commit_gate.commit_msg(sys.argv[1], now={self.now + 0.1!r})\nsys.exit(code)\n"
+        )
+        hook = hooks / "commit-msg"
+        hook.write_text(f'#!/bin/sh\n{shlex.quote(sys.executable)} -c {shlex.quote(gate)} "$1" || exit 2\n'
+                        f"{HOLD_COMMIT_HOOK}\n")
+        hook.chmod(0o755)
+        env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+                   MOBILE_TMUX_CACHE=str(server.paths.CACHE), TETHER_COMMIT_GATE_LOG=str(self.gate_log))
+        command = ["git", "-c", "user.name=B286 Test", "-c", "user.email=test@example.invalid",
+                   "-c", "commit.gpgsign=false", "-c", f"core.hooksPath={hooks}",
+                   "commit", "--allow-empty", "-qm", "Pending review commit"]
+        folder = shlex.quote(str(self.reviewed))
+        with held_commit(command, cwd=self.reviewed, env=env) as git:
+            row = json.loads(self.gate_log.read_text().splitlines()[-1])
+            self.assertEqual(row["git_pid"], git.pid)
+            self.assertEqual(commit_gate.record_landed(row), "pending")
+            self.observe()
+            self.assertEqual(self.send.call_count, 1)
+            self.assertEqual(self.send.call_args.args[0], self.reviewer)
+            with self.subTest(phase="request while the hook runs"):
+                self.assertIn(f"Commit under review: {previous_head} in {folder}", self.send.call_args.args[1])
+
+        current_head = self.git("rev-parse", "HEAD", cwd=self.reviewed)
+        self.assertNotEqual(current_head, previous_head)
+        self.assertIs(commit_gate.record_landed(row), True)
+        sent_before = self.send.call_count
+        self.deliver_approval(previous_head)
+        self.assertTrue(all(call.args[0] == self.reviewer for call in self.send.call_args_list[sent_before:]))
+        self.observe()
+        self.assertEqual(self.send.call_count, 2)
+        self.assertEqual(self.send.call_args.args[0], self.reviewer)
+        self.assertIn(f"Commit under review: {current_head} in {folder}", self.send.call_args.args[1])
+
     def test_request_names_worktree_with_detected_edit(self):
         self.git("merge", "--ff-only", "reviewed")
         self.approve_reviewed_worktree(earlier_gate_points_to_start=True)
