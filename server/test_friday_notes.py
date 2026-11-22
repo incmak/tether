@@ -225,7 +225,8 @@ class FridayNotesTests(unittest.TestCase):
         self.assertEqual(notes.listing(NOW), {'topics': [dict(topic, draft=saved)]})
         self.assertEqual(self.hold('Server', ['Extra note.'], now=NOW + 1)['draft'], saved)
         pinned, = notes.pinned(NOW + 1)
-        self.assertEqual(pinned['draft'], dict(state='ready', rev=2, summary='Draft 2', skill='/research'))
+        self.assertEqual(pinned['draft'], dict(state='ready', rev=2, summary='Draft 2', skill='/research',
+                                               length=len('/research\n\nFull revised prompt.')))
         self.assertNotIn('Full revised prompt.', json.dumps(pinned))
         self.assertNotIn('Full draft 1', json.dumps(pinned))
 

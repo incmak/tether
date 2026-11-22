@@ -12,7 +12,7 @@ const SRC = path.join(__dirname, 'src')
 const SHOTS = shotsDir('held-notes')
 const ENTRY = `
 import { createRoot } from 'react-dom/client'
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { HeldNotes } from './HeldNotes'
 import { NOTES_PATH, useHeldNotes } from './fridayNotes'
 const w = window as any
@@ -25,8 +25,9 @@ const api: any = async (path: string, body?: unknown) => {
 const focusControls = () => document.getElementById('talk')?.focus()
 function Harness() {
   const notes = useHeldNotes(api)
-  useEffect(() => { w.refresh = notes.refresh }, [notes.refresh])
-  return <HeldNotes api={api} topics={notes.topics} refresh={notes.refresh} onEmpty={focusControls} />
+  const [show, setShow] = useState(null)
+  useEffect(() => { w.refresh = notes.refresh; w.setShow = setShow }, [notes.refresh])
+  return <HeldNotes api={api} topics={notes.topics} refresh={notes.refresh} onEmpty={focusControls} show={show} />
 }
 createRoot(document.getElementById('root')!).render(<Harness />)
 `
@@ -176,6 +177,41 @@ async function main() {
       check(`the chip is closed at ${size[0]}`, await page.locator('.live-held-chip').getAttribute('aria-expanded') === 'false')
       check(`focus stays on Talk at ${size[0]}`, await page.evaluate(() => document.activeElement?.id) === 'talk')
       await page.screenshot({ path: path.join(SHOTS, `after-empty-${size[0]}.png`) })
+    }
+
+    // 6. Friday puts a draft on screen (show): the sheet opens once, when the list holds that revision, and scrolls to it.
+    const rev = n => ({ rev: n, text: `Version ${n}. ` + 'Ring for 30 seconds, then push. '.repeat(30), skill: '/feature-dev', summary: 'S.', at: now + n })
+    const drafted = (state, revs) => [topic('T9', 'Other', long[0].notes),
+      { ...topic('T1', 'Urgent Call Spec', two[0].notes), draft: { state, error: null, chat: null, asked_close: false, revisions: revs.map(rev) } }]
+    for (const size of [[320, 640], [1280, 900]]) {
+      await open(drafted('drafting', [1]), size)
+      await page.keyboard.press('Escape')
+      await page.locator('.live-held-sheet').waitFor({ state: 'detached' })
+      // The read-back names version 2 before the list has it: nothing opens yet.
+      await page.evaluate(() => window.setShow({ id: 'T1', rev: 2, at: 1 }))
+      await page.evaluate(() => window.refresh())
+      check(`show waits for its revision at ${size[0]}`, await page.locator('.live-held-sheet').count() === 0)
+      await setListing(drafted('ready', [1, 2]))
+      await page.locator('.live-held-sheet').waitFor()
+      const block = page.locator('.live-held-draft[data-draft="T1"]')
+      check(`show marks the draft at ${size[0]}`, await block.getAttribute('data-shown') === 'true')
+      const seen = await block.evaluate(el => {
+        const box = el.getBoundingClientRect(), body = document.querySelector('.live-held-body').getBoundingClientRect()
+        return box.top >= body.top - 1 && box.top < body.bottom - 40
+      })
+      check(`show scrolls the draft into view at ${size[0]}`, seen)
+      check(`the draft text is the new revision at ${size[0]}`, (await block.locator('.live-held-draft-text').textContent()).startsWith('Version 2.'))
+      await page.screenshot({ path: path.join(SHOTS, `show-draft-${size[0]}.png`) })
+      // Closed again, a later refresh does not reopen it: one open per request.
+      await page.keyboard.press('Escape')
+      await page.locator('.live-held-sheet').waitFor({ state: 'detached' })
+      await setListing(drafted('ready', [1, 2, 3]))
+      await page.evaluate(() => window.refresh())
+      check(`a refresh after close keeps the sheet closed at ${size[0]}`, await page.locator('.live-held-sheet').count() === 0)
+      // A request for a topic that is not in the list never opens the sheet.
+      await page.evaluate(() => window.setShow({ id: 'gone', rev: 1, at: 2 }))
+      await page.evaluate(() => window.refresh())
+      check(`show for an unknown topic opens nothing at ${size[0]}`, await page.locator('.live-held-sheet').count() === 0)
     }
   } catch (error) {
     failed++

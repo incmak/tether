@@ -61,6 +61,124 @@ export interface HeldTopic {
   chat: string
   notes: { text: string; at: number }[]
   state: 'open' | 'sent'
+  draft: {
+    state: 'drafting' | 'ready' | 'failed' | 'closed'
+    error: string | null
+    chat: { pane: string; thread: string; name: string; gone?: true } | null
+    asked_close: boolean
+    revisions: { rev: number; text: string; skill: string | null; summary: string; at: number }[]
+  } | null
+}
+
+async function findTopic(api: Api, topic: unknown, scope: 'open' | 'draft') {
+  if (typeof topic !== 'string' || !topic.trim()) throw new Error('Provide a topic name.')
+  const { topics } = await api<{ topics: HeldTopic[] }>(`${PATH}?${new URLSearchParams({ topic, scope })}`)
+  return topics[0]
+}
+
+type DraftStarted = { state: 'drafting'; chat: string }
+
+export async function makePrompt(api: Api, { topic }: Record<string, unknown>, watch: (id: string) => void) {
+  try {
+    const saved = await findTopic(api, topic, 'open')
+    const result = await api<DraftStarted>(`${PATH}/draft`, { id: saved.id })
+    watch(saved.id)
+    return { ok: true, topic: saved.title, ...result }
+  } catch (error) {
+    return { error: errorText(error) }
+  }
+}
+
+export async function editPrompt(api: Api, { topic, change }: Record<string, unknown>, watch: (id: string) => void) {
+  try {
+    if (typeof change !== 'string' || !change.trim() || Array.from(change).length > 1000) {
+      return { error: 'Give a change of 1 to 1000 characters.' }
+    }
+    const saved = await findTopic(api, topic, 'open')
+    const revisions = saved.draft?.revisions ?? []
+    const latest = revisions[revisions.length - 1]
+    if (saved.draft?.state !== 'ready' || !latest) {
+      return { error: `There is no finished prompt for ${saved.title} yet.` }
+    }
+    const result = await api<DraftStarted>(`${PATH}/draft-edit`, { id: saved.id, rev: latest.rev, edit: change })
+    watch(saved.id)
+    return { ok: true, topic: saved.title, ...result }
+  } catch (error) {
+    return { error: errorText(error) }
+  }
+}
+
+export async function sendPrompt(api: Api, { id, rev, pane, thread }: Record<string, unknown>) {
+  if (typeof id !== 'string' || !id || typeof rev !== 'number' || !Number.isInteger(rev) || rev < 1 ||
+      typeof pane !== 'string' || !pane || typeof thread !== 'string' || !thread) {
+    return { error: 'Not sent. Friday must read it back and hear yes first.' }
+  }
+  try {
+    const result = await api<{ chat: string; rev: number; length: number; ask_close: boolean }>(
+      `${PATH}/draft-send`, { id, rev, pane, thread })
+    const asked = result.ask_close && await api<{ ask_close: boolean }>(`${PATH}/draft-asked`, { id }).catch(() => null)
+    return { ok: true, chat: result.chat, rev: result.rev, length: result.length, ask_close: !!asked && asked.ask_close }
+  } catch (error) {
+    return { error: errorText(error) }
+  }
+}
+
+export async function closeDraft(api: Api, { topic }: Record<string, unknown>) {
+  try {
+    const saved = await findTopic(api, topic, 'draft')
+    const chat = saved.draft?.chat
+    if (!chat) return { error: `There is no draft chat for ${saved.title}.` }
+    await api(`${PATH}/draft-close`, { id: saved.id, pane: chat.pane, thread: chat.thread })
+    return { ok: true }
+  } catch (error) {
+    return { error: errorText(error) }
+  }
+}
+
+export function createDraftWatch(api: Api, announce: (text: string, show?: { id: string; rev: number }) => void) {
+  const watches = new Map<string, () => void>()
+  return {
+    start(id: string) {
+      if (watches.has(id)) return
+      const abort = new AbortController()
+      const stop = () => {
+        abort.abort()
+        clearTimeout(timer)
+        clearTimeout(deadline)
+        watches.delete(id)
+      }
+      const poll = async () => {
+        try {
+          const { topics } = await api<{ topics: HeldTopic[] }>(PATH, undefined, abort.signal, undefined, undefined, 'low')
+          if (abort.signal.aborted) return
+          const topic = topics.find(topic => topic.id === id)
+          const draft = topic?.draft
+          if (draft?.state === 'drafting') {
+            timer = setTimeout(poll, 3000)
+            return
+          }
+          stop()
+          if (!topic || !draft) return
+          const latest = draft.revisions[draft.revisions.length - 1]
+          if (draft.state === 'ready' && latest) {
+            const summary = latest.summary ? ` ${latest.summary}` : ''
+            announce(`The prompt for ${topic.title} is ready, version ${latest.rev}.${summary} Say send it to a chat, read all of it, or a change.`,
+              { id, rev: latest.rev })
+          } else if (draft.state === 'failed') {
+            announce(`The prompt for ${topic.title} failed.${draft.error ? ` ${draft.error}` : ''}`)
+          }
+        } catch {
+          if (!abort.signal.aborted) stop()
+        }
+      }
+      let timer = setTimeout(poll, 3000)
+      const deadline = setTimeout(stop, 7 * 60 * 1000)
+      watches.set(id, stop)
+    },
+    clear() {
+      for (const stop of watches.values()) stop()
+    },
+  }
 }
 
 /** Open topics only; the chip refreshes after Friday's note tools and when the page shows again. */

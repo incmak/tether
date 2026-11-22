@@ -709,7 +709,7 @@ class DraftTests(unittest.TestCase):
         topic = self.ready(revisions=[revision(text=text, skill='/research')])
         before = self.stored(topic)['draft']
         self.assertEqual(drafts.send(topic, 1, '%42', TARGET, runtime=self.runtime),
-                         dict(sent=True, chat='Work Chat', rev=1, length=len(text)))
+                         dict(sent=True, chat='Work Chat', rev=1, length=len(text), ask_close=True))
         self.send.assert_called_once_with(self.target, text, user=True)
         saved = self.stored(topic)
         self.assertEqual((saved['state'], saved['sent_to'], saved['sent_at'], saved['draft']),
@@ -816,6 +816,25 @@ class DraftTests(unittest.TestCase):
         self.assertEqual(self.request('POST', '/drop', {'id': topic}),
                          (200, {'dropped': 'topic', 'topic': 'Server', 'left': 0}))
         self.assertEqual(self.kills, ['%12'])
+
+    def test_serve_drop_closes_an_open_draft_chat(self):
+        self.sign_in()
+        topic = self.ready()
+        status, result = self.request('POST', '/drop', {
+            'id': topic, 'count': 2, 'texts': ['Use the new port.', 'Keep <policy> and check startup.']})
+        self.assertEqual((status, result), (200, {'dropped': 'topic', 'topic': 'Server', 'left': 0}))
+        self.assertEqual(self.kills, ['%12'])
+        self.assertEqual(notes.listing(self.now)['topics'], [])
+
+    def test_draft_send_returns_409_after_edit_and_suppresses_already_asked_question(self):
+        self.sign_in()
+        topic = self.ready(asked_close=True, revisions=[revision(), revision(2)])
+        send = {'id': topic, 'rev': 1, 'pane': '%42', 'thread': TARGET}
+        self.assertEqual(self.request('POST', '/draft-send', send), (409, {'error': drafts.CHANGED}))
+        self.send.assert_not_called()
+        status, result = self.request('POST', '/draft-send', dict(send, rev=2))
+        self.assertEqual(status, 200)
+        self.assertIs(result['ask_close'], False)
 
     def test_close_uses_creation_stamp_before_the_thread_registers(self):
         self.sign_in()
@@ -1015,13 +1034,16 @@ class DraftTests(unittest.TestCase):
         self.enterContext(patch.object(server.auth, 'MODE', 'token'))
         self.enterContext(patch.object(server.auth, 'token', return_value='draft-test-secret'))
 
-    def request(self, method, suffix, payload=None, *, signed_in=True, origin='https://phone.test', write_header=True):
+    def request(self, method, suffix, payload=None, *, signed_in=True, origin='https://phone.test',
+                write_header=True, peer='127.0.0.1', extra_headers=None):
         handler = object.__new__(server.Handler)
-        handler.client_address = ('127.0.0.1', 1)
+        handler.client_address = (peer, 1)
         handler.log_request = Mock()
         body = json.dumps(payload).encode() if payload is not None else b''
-        headers = [f'{method} {notes.PREFIX}{suffix} HTTP/1.1', 'Host: phone.test',
-                   f'Origin: {origin}', f'Content-Length: {len(body)}']
+        headers = [f'{method} {notes.PREFIX}{suffix} HTTP/1.1', 'Host: phone.test', f'Content-Length: {len(body)}']
+        if origin is not None:
+            headers.append(f'Origin: {origin}')
+        headers.extend(f'{key}: {value}' for key, value in (extra_headers or {}).items())
         if signed_in:
             headers.append(f'Cookie: {server.auth.COOKIE}={server.auth.session_value()}')
         if write_header:
@@ -1072,12 +1094,60 @@ class DraftTests(unittest.TestCase):
                          (200, {'state': 'drafting', 'chat': 'Draft Server'}))
         self.job()
         self.assertEqual(self.request('POST', '/draft-send', {'id': topic, 'rev': 2, 'pane': '%42', 'thread': TARGET}),
-                         (200, {'sent': True, 'chat': 'Work Chat', 'rev': 2, 'length': len('Write the checks.')}))
-        self.assertEqual(self.request('POST', '/draft-asked', {'id': topic}), (200, {'asked_close': True}))
+                         (200, {'sent': True, 'chat': 'Work Chat', 'rev': 2, 'length': len('Write the checks.'),
+                                'ask_close': True}))
+        for expected in (True, False):
+            self.assertEqual(self.request('POST', '/draft-asked', {'id': topic}),
+                             (200, {'asked_close': True, 'ask_close': expected}))
         self.assertTrue(self.stored(topic)['draft']['asked_close'])
+        self.assertEqual(self.request('GET', '?topic=Server&scope=open')[0], 404)
+        status, result = self.request('GET', '?topic=the+server+topic&scope=draft')
+        self.assertEqual(status, 200)
+        self.assertEqual((result['topics'][0]['id'], result['topics'][0]['state']), (topic, 'sent'))
         self.assertEqual(self.request('POST', '/draft-close', {'id': topic, 'pane': temp['pane'], 'thread': temp['thread']}),
                          (200, {'state': 'closed'}))
+        another = self.hold('Server two')
+        self.change(another, draft=draft(chat={'pane': '%13', 'thread': REUSED, 'name': 'Draft Server two'}))
+        self.assertEqual(self.request('GET', '?topic=Server&scope=draft')[1]['topics'][0]['draft']['state'], 'closed')
         self.assertEqual(self.kills, [temp['pane']])
+
+    def friday_target(self, chat='Work Chat', *, token='test-friday', **kwargs):
+        headers = kwargs.pop('extra_headers', {})
+        if token is not None:
+            headers[server.command_history.FRIDAY_HEADER] = token
+        options = {'signed_in': False, 'origin': None, **kwargs}
+        with patch.object(server.command_history, 'friday_token', return_value='test-friday'):
+            return self.request('GET', '/friday-target?' + urlencode({'chat': chat}), extra_headers=headers, **options)
+
+    def test_friday_target_requires_loopback_peer(self):
+        self.assertEqual(self.friday_target(peer='192.0.2.7'), (403, {'error': 'Friday access refused.'}))
+
+    def test_friday_target_checks_token(self):
+        for token in ('wrong', None):
+            with self.subTest(token=token):
+                self.assertEqual(self.friday_target(token=token), (403, {'error': 'Friday access refused.'}))
+
+    def test_friday_target_refuses_browser_and_forwarding_headers(self):
+        self.sign_in()
+        for header in ('Origin', 'Cookie', 'X-Forwarded-For', 'Forwarded'):
+            with self.subTest(header=header):
+                self.assertEqual(self.friday_target(extra_headers={header: ''}),
+                                 (403, {'error': 'Friday access refused.'}))
+        self.assertEqual(self.friday_target(token=None, signed_in=True), (403, {'error': 'Friday access refused.'}))
+        for mode in ('token', 'proxy'):
+            with self.subTest(mode=mode), patch.object(server.auth, 'MODE', mode):
+                self.assertEqual(self.request('GET', '/target?chat=Work+Chat', signed_in=False, origin=None,
+                                              extra_headers={server.command_history.FRIDAY_HEADER: 'test-friday'})[0], 403)
+        self.assertFalse(notes.handles(notes.FRIDAY_TARGET + '?chat=Work+Chat'))
+
+    def test_friday_target_resolves_exactly_one_live_chat(self):
+        self.assertEqual(self.friday_target(' Work  CHAT '),
+                         (200, {'pane': '%42', 'thread': TARGET, 'name': 'Work Chat', 'agent': 'claude'}))
+        self.assertEqual(self.friday_target('Work'), (404, {'error': 'No chat called Work.'}))
+        self.panes['%41'] = agent('%41', REUSED, 'WORK CHAT', kind='codex')
+        self.assertEqual(self.friday_target(),
+                         (409, {'error': 'Several chats are called Work Chat: Work Chat, WORK CHAT. Which one?'}))
+        self.assertEqual(self.jobs, [])
 
     def test_target_resolve_matches_only_the_exact_visible_name(self):
         self.sign_in()

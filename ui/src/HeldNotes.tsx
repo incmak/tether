@@ -3,6 +3,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from
 import { StickyNote, X } from 'lucide-react'
 import { errorText, type Api } from './api'
 import { chipLabel, NOTES_PATH as PATH, type HeldTopic } from './fridayNotes'
+import { HeldDraft } from './HeldDraft'
 type HeldNote = HeldTopic['notes'][number]
 
 // A note is armed by what it says, not by its place: a refresh can shift places under the finger.
@@ -10,9 +11,11 @@ const noteKey = (topic: HeldTopic, note: HeldNote) => `${topic.id}\n${note.at}\n
 const clearKey = (topic: HeldTopic) => `${topic.id}\nclear`
 const FOCUSABLE = 'button:not(:disabled), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
 
-type Props = { api: Api; topics: HeldTopic[]; refresh: () => Promise<void>; onEmpty?: () => void }
+// `show` asks to put one draft on screen: Friday sends it with a send read-back and when a draft is ready.
+type Shown = { id: string; rev: number; at: number }
+type Props = { api: Api; topics: HeldTopic[]; refresh: () => Promise<void>; onEmpty?: () => void; show?: Shown | null }
 
-export function HeldNotes({ api, topics, refresh, onEmpty }: Props) {
+export function HeldNotes({ api, topics, refresh, onEmpty, show }: Props) {
   const [open, setOpen] = useState(false)
   const [arming, setArming] = useState({ key: '', shape: '' })
   const [problem, setProblem] = useState('')
@@ -26,6 +29,12 @@ export function HeldNotes({ api, topics, refresh, onEmpty }: Props) {
   const focusInside = useRef(false)
   const sheetId = useId()
   const shape = JSON.stringify(topics.map(topic => [topic.id, topic.notes.map(note => [note.at, note.text])]))
+  // The draft Friday last put on screen. It opens the sheet once per request, when the list holds that revision.
+  const [shown, setShown] = useState<Shown | null>(null)
+  const pending = useRef<Shown | null>(null)
+  const scrollTo = useRef('')
+  const lastRev = (topic: HeldTopic) => topic.draft?.revisions[topic.draft.revisions.length - 1]?.rev ?? 0
+  const drafts = topics.map(topic => `${topic.id}:${lastRev(topic)}`).join()
 
   const close = useCallback((focus = true) => {
     setOpen(false); setArming({ key: '', shape: '' }); setProblem('')
@@ -51,6 +60,30 @@ export function HeldNotes({ api, topics, refresh, onEmpty }: Props) {
     const target = keys.map(key => buttons.find(button => button.dataset.key === key)).find(Boolean)
     ;(target ?? sheet.current)?.focus()
   }, [shape, busy, topics.length, onEmpty])
+
+  // A new request waits for a list that has its revision; a refresh is asked for once.
+  useEffect(() => {
+    if (!show) return
+    pending.current = show
+    void refresh()
+  }, [show, refresh])
+  useEffect(() => {
+    const want = pending.current
+    if (!want) return
+    const topic = topics.find(item => item.id === want.id)
+    if (!topic || lastRev(topic) < want.rev) return
+    pending.current = null
+    scrollTo.current = want.id
+    setShown(want)
+    setOpen(true)
+  }, [drafts, topics])
+  useLayoutEffect(() => {
+    if (!open || !scrollTo.current) return
+    const id = scrollTo.current
+    scrollTo.current = ''
+    const block = [...(sheet.current?.querySelectorAll<HTMLElement>('[data-draft]') ?? [])].find(item => item.dataset.draft === id)
+    block?.scrollIntoView({ block: 'nearest' })
+  })
 
   useEffect(() => {
     if (!open) return
@@ -144,6 +177,8 @@ export function HeldNotes({ api, topics, refresh, onEmpty }: Props) {
             </li>
           })}
         </ol>
+        {topic.draft && topic.draft.state !== 'closed' && <HeldDraft topicId={topic.id} title={topic.title} draft={topic.draft}
+          shown={shown?.id === topic.id && shown.rev === lastRev(topic)} />}
         <button type="button" className="live-held-clear" data-key={clearKey(topic)} data-armed={armed === clearKey(topic)} disabled={busy}
           onClick={() => void remove(topicIndex)}>
           {armed === clearKey(topic) ? `Tap again to clear ${topic.notes.length} ${topic.notes.length === 1 ? 'note' : 'notes'}` : 'Clear topic'}

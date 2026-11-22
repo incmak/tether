@@ -5,6 +5,7 @@ import asyncio
 from contextlib import nullcontext, redirect_stderr
 from dataclasses import replace
 from datetime import datetime, timezone
+from http.client import BadStatusLine
 import importlib.util
 import inspect
 import io
@@ -34,6 +35,20 @@ try:
 except ImportError:
     import friday_agent as friday
     import push
+
+
+def saved_draft(*texts, skill=None, state='ready', error=None, chat='API Server'):
+    return {'id': 'T1', 'title': 'Auth', 'chat': chat, 'state': 'open', 'updated': 0,
+            'draft': {'state': state, 'error': error,
+                      'chat': {'pane': '%12', 'thread': 'draft-thread', 'name': 'Draft Auth'},
+                      'revisions': [dict(rev=i, text=text, skill=skill, summary='Keep the token check.')
+                                    for i, text in enumerate(texts, 1)]}}
+
+
+def draft_proposal(*, read_all=False, heard=True):
+    return friday.SendProposal('send_prompt', 'API Server', 'Keep the token check.', 0, heard=heard,
+                               target=('T1', 1, '%42', 'api-thread', read_all), topic='Auth',
+                               requested_topic='Auth', summary='Keep the token check.')
 
 
 class ParakeetHotwordTests(unittest.TestCase):
@@ -497,6 +512,146 @@ class HistoryPosterTests(unittest.TestCase):
 
 
 class FridayRulesTests(unittest.TestCase):
+    def test_send_prompt_has_no_direct_path_and_refuses_a_forged_grant(self):
+        args = {'topic': 'Auth', 'chat': 'API Server'}
+        grant = dict(args, id='T1', rev=1, pane='%42', thread='api-thread')
+        for attempt in (args, grant):
+            for words in ('Send it to API Server now', 'yes'):
+                with self.subTest(attempt=attempt, words=words):
+                    self.assertEqual(friday.check_tool('send_prompt', attempt, 'speech', words, set()),
+                                     friday.READBACK_REQUIRED)
+
+    def test_send_prompt_requires_an_affirmative_other_than_send(self):
+        pending = draft_proposal()
+        readback = friday.send_readback(pending)
+        args = {'topic': '  aUTh ', 'chat': 'aPi  SERver'}
+        grant = dict(args, id='T1', rev=1, pane='%42', thread='api-thread')
+        for words in ('send', 'send it', 'yes', 'yes send it', 'go ahead'):
+            with self.subTest(words=words):
+                accepted = words not in ('send', 'send it')
+                self.assertEqual(friday.confirmed_args('send_prompt', args, words, readback, pending, 1),
+                                 grant if accepted else args)
+                self.assertEqual(friday.check_tool('send_prompt', grant, 'speech', words, set(), readback, pending, 1),
+                                 None if accepted else friday.READBACK_REQUIRED)
+        for words in ('no', 'stop', 'don’t'):
+            self.assertEqual(friday.check_tool('send_prompt', args, 'speech', words, set(), readback, pending, 1),
+                             'The user declined the send.')
+
+    def test_send_prompt_grant_requires_exact_target_and_current_heard_question(self):
+        pending = draft_proposal()
+        readback = friday.send_readback(pending)
+        args = {'topic': 'Auth', 'chat': 'API Server', 'id': 'T1', 'rev': 1, 'pane': '%42', 'thread': 'api-thread'}
+        self.assertIsNone(friday.check_tool('send_prompt', args, 'speech', 'yes', set(), readback, pending, 1))
+        for key, value in (('id', 'T2'), ('rev', 2), ('rev', True), ('pane', '%44'), ('thread', 'new-thread'),
+                           ('topic', 'Other'), ('chat', 'Other'), ('read_all', True)):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(friday.check_tool('send_prompt', dict(args, **{key: value}),
+                                                  'speech', 'yes', set(), readback, pending, 1),
+                                 friday.READBACK_REQUIRED)
+        for previous, proposal, turn in ((readback, replace(pending, heard=False), 1),
+                                         ('Do you want to read it?', pending, 1),
+                                         (readback, pending, 3)):
+            self.assertEqual(friday.check_tool('send_prompt', args, 'speech', 'yes', set(), previous, proposal, turn),
+                             friday.READBACK_REQUIRED)
+        self.assertNotEqual(pending.key, replace(pending, target=(*pending.target[:4], True)).key)
+        self.assertNotEqual(pending.key, replace(pending, payload=pending.payload + '\n').key)
+
+    def test_send_prompt_event_yes_does_not_confirm(self):
+        pending = draft_proposal()
+        readback = friday.send_readback(pending)
+        grant = friday.confirmed_args('send_prompt', {'topic': 'Auth'}, 'yes', readback, pending, 1)
+        self.assertEqual(friday.check_tool('send_prompt', grant, 'event', 'yes', set(), readback, pending, 1),
+                         'Event runs only report news; do not take actions.')
+
+    def test_draft_bypass_refuses_saved_windows_in_both_tools(self):
+        first = ('Preserve the token check and use a new endpoint for the archive. '
+                 'Document the claims in the existing guide so each caller knows what to expect. '
+                 'Inspect the old indexes and show the routes that still use them before the final review. '
+                 'Add coverage for the list and the detail endpoint.')
+        second = ('Start with a new report for the batch retry. Check the timeouts and confirm the last record can be '
+                  'saved twice. If the second save fails, inspect the queue and add a regression test for the writer.')
+        topics = [dict(saved_draft('/research\n\n' + first, second), state='sent')]
+        middle = friday.norm('/research ' + first)[55:185]
+        for tool in ('send_to_chat', 'new_chat'):
+            for prompt in ('/research\n\n' + first, first, 'USE A FRESH INTRO.\n' + first,
+                           middle, second.upper().replace(' ', '  ')):
+                with self.subTest(tool=tool, prompt=prompt):
+                    self.assertEqual(friday.check_tool(tool, {'prompt': prompt}, 'speech', 'Send it', set(),
+                                                      draft_topics=topics), 'Use send_prompt for a drafted prompt.')
+            short = friday.norm(second)[:100]
+            self.assertIsNone(friday.check_tool(tool, {'prompt': short}, 'speech', 'Send it', set(),
+                                               draft_topics=topics))
+            with patch.object(friday.friday_notes, 'listing', side_effect=OSError):
+                self.assertEqual(friday.check_tool(tool, {'prompt': short}, 'speech', 'Send it', set()),
+                                 'Saved topic notes could not be read.')
+            with patch.object(friday.friday_notes, 'listing', return_value={'topics': topics}) as listing:
+                self.assertEqual(friday.check_tool(tool, {'prompt': second}, 'speech', 'Send it', set()),
+                                 'Use send_prompt for a drafted prompt.')
+                listing.assert_called_once_with(strict=True, scope='stored')
+
+    def test_draft_bypass_refuses_unaligned_copies_of_any_length_from_120(self):
+        draft = ('Preserve the token check and use a new endpoint for the archive. '
+                 'Document the claims in the existing guide so each caller knows what to expect. '
+                 'Inspect the old indexes and show the routes that still use them before the final review. '
+                 'Add coverage for the list and the detail endpoint.')
+        topics = [saved_draft(draft)]
+        saved = friday.norm(draft)
+        # Review B2-1: copies of 120-178 characters that start between the old 60-character steps passed.
+        cuts = [(30, 120), (30, 130), (61, 150), (1, 178), (89, 121), (137, 125)]
+        for tool in ('send_to_chat', 'new_chat'):
+            for start, size in cuts:
+                with self.subTest(tool=tool, start=start, size=size):
+                    copy = saved[start:start + size]
+                    self.assertEqual(len(copy), size)  # some cuts end on a space that norm() strips
+                    self.assertEqual(friday.check_tool(tool, {'prompt': 'Do this: ' + copy}, 'speech', 'Send it', set(),
+                                                       draft_topics=topics), 'Use send_prompt for a drafted prompt.')
+            with self.subTest(tool=tool, size=100):
+                self.assertIsNone(friday.check_tool(tool, {'prompt': saved[30:130]}, 'speech', 'Send it', set(),
+                                                    draft_topics=topics))
+
+    def test_draft_bypass_guards_a_draft_shorter_than_one_window(self):
+        tiny = 'Add a regression test for the archive route.'
+        topics = [saved_draft(tiny)]
+        for tool in ('send_to_chat', 'new_chat'):
+            with self.subTest(tool=tool):
+                self.assertEqual(friday.check_tool(tool, {'prompt': 'Please: ' + tiny}, 'speech', 'Send it', set(),
+                                                   draft_topics=topics), 'Use send_prompt for a drafted prompt.')
+                self.assertIsNone(friday.check_tool(tool, {'prompt': 'Add a regression test.'}, 'speech', 'Send it',
+                                                    set(), draft_topics=topics))
+
+    def test_draft_actions_require_speech_and_run_once(self):
+        for name, result, spoken in (
+                ('make_prompt', {'topic': 'Auth'}, 'Drafting the prompt for Auth. It takes about a minute.'),
+                ('edit_prompt', {}, 'Changing the prompt. It takes about a minute.'),
+                ('close_draft', {}, 'Closed the draft chat.')):
+            with self.subTest(name=name):
+                args = {'topic': 'Auth', 'change': 'Run tests.'}
+                self.assertIsNone(friday.check_tool(name, args, 'speech', 'yes', set()))
+                self.assertIsNotNone(friday.check_tool(name, args, 'speech', 'yes', {name}))
+                for source in ('event', 'tool', None):
+                    self.assertIsNotNone(friday.check_tool(name, args, source, 'yes', set()))
+                self.assertEqual(friday.action_ack(name, args, dict(result, ok=True)), spoken)
+                self.assertIsNone(friday.action_ack(name, args, dict(result, error='Failed.')))
+        for invalid in ('', ' ', 'x' * 1001, None):
+            self.assertIsNotNone(friday.check_tool('edit_prompt', {'topic': 'Auth', 'change': invalid},
+                                                 'speech', 'Change it', set()))
+        self.assertIsNone(friday.check_tool('edit_prompt', {'topic': 'Auth', 'change': 'x' * 1000},
+                                           'speech', 'Change it', set()))
+        for ask_close in (True, False):
+            self.assertEqual(friday.action_ack('send_prompt', {}, {'ok': True, 'chat': 'API Server', 'ask_close': ask_close}),
+                             'Sent the prompt to API Server.' + (' Should I close the draft chat?' if ask_close else ''))
+
+    def test_friday_target_opener_denies_proxy_redirects_and_non_loopback_urls(self):
+        with patch.object(friday.urllib.request, 'build_opener') as build:
+            self.assertIs(friday.friday_loopback_opener(), build.return_value.open)
+            proxy, redirect = build.call_args.args
+            self.assertEqual(proxy.proxies, {})
+            self.assertIsNone(redirect.redirect_request(None, None, 302, '', {}, 'http://example.test'))
+        with patch.object(friday, 'friday_server_url', return_value='http://example.test'), \
+                patch.object(friday.command_history, 'friday_token') as token:
+            with self.assertRaisesRegex(friday.friday_notes.NotesError, 'The destination chat could not be checked.'):
+                friday.resolve_friday_target('API Server')
+            token.assert_not_called()
     def test_preroll_target_uses_slowest_available_speed(self):
         target = friday.preroll_target
         self.assertEqual(target(.15, 100, None, None, 0, 0), .15)
@@ -1966,8 +2121,9 @@ class FridayRulesTests(unittest.TestCase):
         tools = {t['function']['name']: t['function']['parameters'] for t in schemas}
         self.assertEqual(set(tools), {'list_chats', 'send_to_chat', 'answer_approval', 'read_last_reply', 'new_chat', 'switch_chat', 'open_panel',
                                       'show_chat', 'show_session', 'backlog_list', 'backlog_add', 'backlog_send',
-                                      'reminder_add', 'reminder_list', 'hold_note', 'read_notes', 'drop_notes'})
-        self.assertEqual(list(tools)[-4:], ['reminder_list', 'hold_note', 'read_notes', 'drop_notes'])
+                                      'reminder_add', 'reminder_list', 'hold_note', 'read_notes', 'drop_notes',
+                                      'make_prompt', 'edit_prompt', 'send_prompt', 'close_draft'})
+        self.assertEqual(list(tools)[-4:], ['make_prompt', 'edit_prompt', 'send_prompt', 'close_draft'])
         self.assertEqual(tools['hold_note']['required'], ['topic', 'notes'])
         notes = tools['hold_note']['properties']['notes']
         self.assertEqual((notes['type'], notes['minItems'], notes['maxItems'], notes['items']['type']),
@@ -1975,6 +2131,13 @@ class FridayRulesTests(unittest.TestCase):
         self.assertEqual(tools['read_notes']['required'], [])
         self.assertEqual(tools['drop_notes']['required'], ['topic'])
         self.assertEqual(tools['drop_notes']['properties']['note']['minimum'], 1)
+        self.assertEqual(tools['send_prompt'], {
+            'type': 'object', 'required': ['topic'],
+            'properties': {'topic': {'type': 'string'}, 'chat': {'type': 'string'}, 'read_all': {'type': 'boolean'}},
+        })
+        self.assertEqual(tools['edit_prompt']['required'], ['topic', 'change'])
+        self.assertEqual(tools['edit_prompt']['properties']['change'],
+                         {'type': 'string', 'minLength': 1, 'maxLength': 1000})
         self.assertEqual(tools['show_chat']['required'], ['chat'])
         self.assertEqual(tools['show_chat']['properties'], {'chat': {'type': 'string'}})
         self.assertEqual(tools['show_session']['required'], ['session'])
@@ -2916,7 +3079,11 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
             for item in items:
                 await llm._run_function_call(item)
 
+        async def server_message(message):
+            frames.append(('page', message))
+
         session.rtvi.push_transport_message = dispatch
+        session.rtvi.send_server_message = server_message
         llm._run_parallel_function_calls = run_handlers
 
         def completion(text, calls, delay):
@@ -3334,6 +3501,151 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNone(session.pending_proposal)
                     self.assertNotIn(('dispatch', 'drop_notes'), frames)
                     self.assertFalse(any(isinstance(f, self.rt.TTSSpeakFrame) for f in frames))
+
+    def mock_draft_source(self, *topics):
+        listing = self.enterContext(patch.object(friday.friday_notes, 'listing', return_value={'topics': list(topics)}))
+        destination = dict(pane='%42', thread='api-thread', name='API Server', agent='codex')
+        opener = Mock(side_effect=lambda request, timeout: io.BytesIO(json.dumps(destination).encode()))
+        self.enterContext(patch.object(friday, 'friday_loopback_opener', return_value=opener))
+        self.enterContext(patch.object(friday, 'friday_server_url', return_value='http://127.0.0.1:7683'))
+        self.enterContext(patch.object(friday.command_history, 'friday_token', return_value='test-friday'))
+        self.enterContext(patch('sys.stderr'))
+        return listing, opener, destination
+
+    async def draft_tool_turn(self, words, args=None, *, pending=None, previous=None, result=None, count=1):
+        messages = []
+        if pending and previous is None:
+            previous = friday.send_readback(pending)
+        if previous:
+            messages.append({'role': 'assistant', 'content': previous})
+        messages.append({'role': 'user', 'content': words})
+        call = ('send_prompt', args if args is not None else {'topic': 'Auth'}, result or {})
+        return await self.tool_flow(messages, [('', 1, [call] * count)], pending)
+
+    async def test_send_prompt_reads_store_and_resolved_chat_and_shows_exact_revision(self):
+        text = '/research\n\nKeep the token check.\nRun the tests'
+        listing, opener, _ = self.mock_draft_source(saved_draft(text, skill='/research'))
+        for full, expected in (
+                (False, 'Not sent yet. Should I send the Auth prompt, version 1, to API Server? '
+                        'It starts with /research. Keep the token check. '
+                        f'The full draft is on screen, {len(text)} characters. Yes or no?'),
+                (True, 'Not sent yet. Here is version 1 of the Auth prompt. /research Keep the token check. Run the tests. '
+                       'Should I send all of it to API Server? Yes or no?')):
+            with self.subTest(full=full):
+                session, frames = await self.draft_tool_turn('Send it to API Server now',
+                    {'topic': 'auth', 'read_all': full, 'text': 'Invented by model'})
+                self.assertNotIn(('dispatch', 'send_prompt'), frames)
+                self.assertIn(('page', {'t': 'show_draft', 'd': {'id': 'T1', 'rev': 1}}), frames)
+                self.assertEqual([frame.text for frame in frames if isinstance(frame, self.rt.TTSSpeakFrame)], [expected])
+                self.assertEqual(session.pending_proposal.target, ('T1', 1, '%42', 'api-thread', full))
+                self.assertEqual(session.pending_proposal.payload, text)
+                self.assertFalse(session.pending_proposal.heard)
+                request = opener.call_args.args[0]
+                self.assertEqual(request.get_method(), 'GET')
+                self.assertEqual(request.full_url, 'http://127.0.0.1:7683/mobile/api/friday-notes/friday-target?chat=API+Server')
+                self.assertEqual(request.get_header(friday.command_history.FRIDAY_HEADER.capitalize()), 'test-friday')
+                self.assertEqual(opener.call_args.kwargs, {'timeout': 5})
+        listing.assert_called_with(strict=True)
+        listing.return_value = {'topics': [saved_draft('Keep the token check.')]}
+        _, frames = await self.draft_tool_turn('Send it')
+        self.assertEqual([frame.text for frame in frames if isinstance(frame, self.rt.TTSSpeakFrame)],
+                         ['Not sent yet. Should I send the Auth prompt, version 1, to API Server? '
+                          'Keep the token check. The full draft is on screen, 21 characters. Yes or no?'])
+
+    async def test_send_prompt_rechecks_revision_and_both_destination_ids_before_dispatch(self):
+        text = 'Keep the token check.'
+        listing, _, destination = self.mock_draft_source(saved_draft(text, 'New draft, same spoken summary.'))
+        pending = draft_proposal()
+        args = {'topic': 'Auth', 'chat': 'API Server'}
+        for change, target, call_args, previous, expected in (
+                ('revision', ('T1', 2, '%42', 'api-thread', False), args, None, 'version 2'),
+                ('pane', ('T1', 1, '%44', 'api-thread', False), args, None, 'to API Server?'),
+                ('thread', ('T1', 1, '%42', 'new-thread', False), args, None, 'to API Server?'),
+                ('chat', ('T1', 1, '%44', 'new-thread', False), dict(args, chat='Docs'), None, 'to Docs?'),
+                ('question', pending.target, args, 'Should I open the sheet?', 'to API Server?'),
+                ('full', (*pending.target[:4], True), dict(args, read_all=True), None, 'Here is version 1')):
+            with self.subTest(change=change):
+                if change != 'revision':
+                    listing.return_value = {'topics': [saved_draft(text)]}
+                _, _, pane, thread, _ = target
+                destination.update(pane=pane, thread=thread, name='Docs' if change == 'chat' else 'API Server')
+                words = 'yes, to Docs' if change == 'chat' else 'yes'
+                session, frames = await self.draft_tool_turn(words, call_args, pending=pending, previous=previous)
+                self.assertNotIn(('dispatch', 'send_prompt'), frames)
+                self.assertEqual(session.pending_proposal.target, target)
+                self.assertFalse(session.pending_proposal.heard)
+                speech, = [frame.text for frame in frames if isinstance(frame, self.rt.TTSSpeakFrame)]
+                self.assertIn(expected, speech)
+
+    async def test_send_prompt_consumes_grant_before_first_dispatch_even_when_send_fails(self):
+        self.mock_draft_source(saved_draft('Keep the token check.'))
+        pending = draft_proposal()
+        session, frames = await self.draft_tool_turn('yes send it', pending=pending,
+                                                    result={'error': 'The conversation changed.'}, count=2)
+        self.assertEqual(frames.count(('dispatch', 'send_prompt')), 1)
+        self.assertEqual(session.last_dispatch, dict(topic='Auth', id='T1', rev=1, pane='%42', thread='api-thread'))
+        self.assertIsNone(session.pending_proposal)
+        self.assertIn({'error': 'Only one send is allowed per spoken turn.'},
+                      [frame.result for frame in frames if isinstance(frame, self.rt.FunctionCallResultFrame)])
+
+    async def test_friday_target_errors_refuse_readback(self):
+        _, opener, destination = self.mock_draft_source(saved_draft('Keep the token check.'))
+        for status, reason in ((404, 'No chat called API Server.'), (409, 'Several chats are called API Server.'),
+                               (403, 'Friday access refused.'), (None, 'The destination chat could not be checked.')):
+            with self.subTest(status=status):
+                opener.side_effect = (HTTPError('http://127.0.0.1', status, '', {},
+                                                io.BytesIO(json.dumps({'error': reason}).encode()))
+                                      if status else TimeoutError())
+                if status is not None:
+                    self.assertEqual(opener.side_effect.code, status)
+                session, frames = await self.draft_tool_turn('Send it now')
+                frame, = [frame for frame in frames if isinstance(frame, self.rt.FunctionCallResultFrame)]
+                self.assertEqual(frame.result, {'error': reason})
+                self.assertIsNone(session.pending_proposal)
+                self.assertNotIn(('dispatch', 'send_prompt'), frames)
+                self.assertFalse(any(isinstance(frame, self.rt.TTSSpeakFrame) for frame in frames))
+        opener.side_effect = lambda request, timeout: io.BytesIO(json.dumps(destination).encode())
+        for pane, thread in (('%12', 'different-thread'), ('%99', 'draft-thread')):
+            destination.update(pane=pane, thread=thread)
+            session, frames = await self.draft_tool_turn('Send it to Draft Auth now',
+                                                        {'topic': 'Auth', 'chat': 'Draft Auth'})
+            frame, = [frame for frame in frames if isinstance(frame, self.rt.FunctionCallResultFrame)]
+            self.assertEqual(frame.result, {'error': 'Choose a destination other than the draft chat.'})
+            self.assertIsNone(session.pending_proposal)
+        opener.side_effect = BadStatusLine('Malformed response')
+        session, frames = await self.draft_tool_turn('Send it now')
+        frame, = [frame for frame in frames if isinstance(frame, self.rt.FunctionCallResultFrame)]
+        self.assertEqual(frame.result, {'error': 'The destination chat could not be checked.'})
+        self.assertIsNone(session.pending_proposal)
+        _, frames = await self.tool_flow('Send it now', [
+            ('', 1, [('send_prompt', {'topic': 'Auth'}, {})]),
+            ('Sent it.', 1, []),
+        ])
+        spoken = [frame.text for frame in frames if isinstance(frame, self.rt.TTSSpeakFrame)]
+        self.assertEqual(spoken, ['That did not go through. The destination chat could not be checked.'])
+
+    async def test_send_prompt_refuses_missing_unready_failed_and_too_long_drafts(self):
+        listing, opener, _ = self.mock_draft_source()
+        for args, topics, error in (
+                ({'topic': 'Other'}, [saved_draft('Short')], 'No topic matches Other. Open topics: Auth.'),
+                ({'topic': 'Auth'}, [saved_draft('Short', chat='')], 'Say which chat it should go to.'),
+                ({'topic': 'Auth'}, [saved_draft()], 'There is no finished prompt for Auth yet.'),
+                ({'topic': 'Auth'}, [saved_draft('Old', state='drafting')], 'There is no finished prompt for Auth yet.'),
+                ({'topic': 'Auth'}, [saved_draft(state='failed', error='Draft failed.')], 'Draft failed.'),
+                ({'topic': 'Auth', 'read_all': True}, [saved_draft('x' * 6001)],
+                 'That prompt is too long to read aloud: 6001 characters. It is on screen.')):
+            with self.subTest(error=error):
+                listing.return_value = {'topics': topics}
+                session, frames = await self.draft_tool_turn('Send it to a chat', args)
+                frame, = [frame for frame in frames if isinstance(frame, self.rt.FunctionCallResultFrame)]
+                self.assertEqual(frame.result, {'error': error})
+                self.assertIsNone(session.pending_proposal)
+                self.assertFalse(any(isinstance(frame, self.rt.TTSSpeakFrame) for frame in frames))
+        opener.assert_not_called()
+        listing.return_value = {'topics': [saved_draft('x' * 6000)]}
+        session, frames = await self.draft_tool_turn('Read all of it', {'topic': 'Auth', 'read_all': True})
+        self.assertEqual(session.pending_proposal.payload, 'x' * 6000)
+        self.assertTrue(any('x' * 6000 in frame.text for frame in frames if isinstance(frame, self.rt.TTSSpeakFrame)))
 
     async def test_copied_reply_with_send_word_speaks_confirmation_instead_of_sending(self):
         chat = 'Automation tether . Can we have…'
@@ -5370,7 +5682,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                          ['Please stop speaking'])
         self.assertFalse(session.bot_speaking)
 
-    async def readback_pipeline(self, tool, mode, scenario, *, boundary='natural', attach=False):
+    async def readback_pipeline(self, tool, mode, scenario, *, boundary='natural', attach=False, draft=None):
         from pipecat.frames.frames import EndFrame, LLMMessagesAppendFrame, TTSAudioRawFrame
         from pipecat.pipeline.pipeline import Pipeline
         from pipecat.pipeline.worker import PipelineParams, PipelineWorker
@@ -5393,8 +5705,10 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
             expected = 'Not denied yet. Should I deny deploy-check? Yes or no?'
             proposal_error = 'Not denied yet. Friday asked the user to confirm.'
         else:
-            expected = friday.send_readback(friday.SendProposal(tool, chat, payload, 1, attach=attach))
+            expected = friday.send_readback(draft or friday.SendProposal(tool, chat, payload, 1, attach=attach))
             proposal_error = 'Not sent yet. Friday asked the user to confirm.'
+        if draft:
+            initial = 'Read all of it and send it to API Server.'
         cue = 'Let me finish, then say yes.'
         cap = 'I could not finish reading it back. Please say the whole request again.'
         started, output_paused, release_output = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -5490,6 +5804,8 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                                                     'synthesis', 'debt-cleared', 'blip')
                         and friday.plain_yes(text))):
                 args[key] = 'approve' if approval else new_payload
+            if draft:
+                args = {'topic': draft.topic, 'chat': draft.chat, 'read_all': True}
 
             async def chunks():
                 if ((scenario == 'approval-no' and text == 'No.') or text == hold_words or (text == unrelated_words
@@ -5859,6 +6175,8 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual(len(requests), 1)
                             self.assertEqual(sends, [])
                         else:
+                            if draft:
+                                self.assertFalse(session.pending_proposal.heard)
                             await complete()
                             self.assertEqual(len(requests), 1)
                             self.assertLessEqual(session.llm_calls, 1)
@@ -5870,7 +6188,11 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                             self.assertFalse(session.llm.tool_work_pending)
                             await speak('Yes, please do.')
                             self.assertEqual(await results.get(), {'ok': True})
-                            self.assertEqual(sends, [{'chat': chat, key: payload}])
+                            expected_args = {'chat': chat, key: payload}
+                            if draft:
+                                expected_args = dict(topic=draft.topic, chat=draft.chat, read_all=True,
+                                                     **dict(zip(friday.DRAFT_GRANT_FIELDS, draft.target[:4])))
+                            self.assertEqual(sends, [expected_args])
             finally:
                 release_output.set()
                 if not running.done() and not worker.has_finished():
@@ -5909,6 +6231,13 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                                    ('client', 'replay'), ('client', 'missing')):
                 with self.subTest(tool=tool, mode=mode, scenario=scenario):
                     await self.readback_pipeline(tool, mode, scenario)
+
+    async def test_full_draft_readback_stays_unheard_after_cut_playback(self):
+        draft = draft_proposal(read_all=True, heard=False)
+        with patch.object(friday, 'load_prompt_readback', side_effect=lambda args, turn: replace(draft, turn=turn)):
+            for mode in ('server', 'client'):
+                with self.subTest(mode=mode):
+                    await self.readback_pipeline('send_prompt', mode, 'replay', draft=draft)
 
     async def test_readback_pipeline_reproposal_reaches_cap_and_restatement_starts_fresh(self):
         for tool in sorted(friday.SEND_TOOLS):

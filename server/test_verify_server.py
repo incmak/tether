@@ -318,8 +318,14 @@ COMPUTED_ROUTES = {
     ('backlogNews.ts', 'GET', 'api', 'BACKLOG_PATH'): ('projects/backlog',),
     ('fridayNotes.ts', 'GET', 'api', 'PATH'): ('friday-notes',),
     ('fridayNotes.ts', 'GET', 'api', 'path'): ('friday-notes',),
+    ('fridayNotes.ts', 'GET', 'api', '`${PATH}?${new URLSearchParams({ topic, scope })}`'): ('friday-notes',),
     ('fridayNotes.ts', 'POST', 'api', '`${PATH}/hold`'): ('friday-notes/hold',),
     ('fridayNotes.ts', 'POST', 'api', '`${PATH}/drop`'): ('friday-notes/drop',),
+    ('fridayNotes.ts', 'POST', 'api', '`${PATH}/draft`'): ('friday-notes/draft',),
+    ('fridayNotes.ts', 'POST', 'api', '`${PATH}/draft-edit`'): ('friday-notes/draft-edit',),
+    ('fridayNotes.ts', 'POST', 'api', '`${PATH}/draft-send`'): ('friday-notes/draft-send',),
+    ('fridayNotes.ts', 'POST', 'api', '`${PATH}/draft-close`'): ('friday-notes/draft-close',),
+    ('fridayNotes.ts', 'POST', 'api', '`${PATH}/draft-asked`'): ('friday-notes/draft-asked',),
     ('fridayReminders.ts', 'GET', 'api', 'PATH'): ('reminders',),
     ('fridayReminders.ts', 'POST', 'api', '`${PATH}/add`'): ('reminders/add',),
     ('quickBacklog.ts', 'GET', 'api', 'BACKLOG_PATH'): ('projects/backlog',),
@@ -360,7 +366,7 @@ REPEATED_COMPUTED = {
     ('Live.tsx', 'GET', 'api', 'BACKLOG_PATH'): 2,
     ('api.ts', 'GET', 'reach', '`/mobile/api/${path}`'): 2,
     ('approval.ts', 'POST', 'api', 'path'): 2,
-    ('fridayNotes.ts', 'GET', 'api', 'PATH'): 2,
+    ('fridayNotes.ts', 'GET', 'api', 'PATH'): 3,
     ('quickBacklog.ts', 'GET', 'api', 'BACKLOG_PATH'): 3,
 }
 
