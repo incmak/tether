@@ -1727,6 +1727,8 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                 if stale is not None:
                     # Not an approval of the current work and not a finding either: ask for a review of the current
                     # commit. The count stops a loop.
+                    link.pop('approved_commit', None)
+                    link.pop('approved_at', None)
                     link['stale_commit'] = stale
                     link['stale_unreadable'] = bool(stale) and current is None
                     if verdict is not None and verdict['folder']:
@@ -1765,6 +1767,8 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                         pass  # not delivered: the same checks run again on the next tick
                     elif bound and (after_send := _call(commit, review_entry)) != bound:
                         # The tab has the approval text. A different commit or a failed read needs a new review.
+                        link.pop('approved_commit', None)
+                        link.pop('approved_at', None)
                         now = after_send if isinstance(after_send, str) and FULL.fullmatch(after_send) else None
                         link['stale_commit'] = bound
                         link['stale_delivered'] = True
@@ -1830,6 +1834,8 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                                             entries, delivery, summary=stage is not None, blocking=True):
                             return link
                         forwarded = True
+                        link.pop('approved_commit', None)
+                        link.pop('approved_at', None)
                         link.pop('stale_correction', None)
                         paused_now = _record_round(cap, link, count)
                         link.pop('empty_turn', None)

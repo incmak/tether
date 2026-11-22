@@ -118,9 +118,15 @@ class Base(unittest.TestCase):
 
     def job(self, head, at='now'):
         at = int(auto_merge.time.time()) + 5 if at == 'now' else at
+        self.review_store(head)
         return {'folder': str(self.work), 'commit': head, 'approved_at': at,
                 'worker': '%1', 'name': 'Worker', 'reviewer': '%2', 'reviewer_agent': 'codex',
                 'current': lambda: {'%1': {'%2': {'commit': head, 'at': at}}}}
+
+    def review_store(self, head, *others):
+        self.write(paths.CACHE, 'review-links.json', json.dumps([
+            {'worker': '%1', 'reviewer': '%2', 'approved_commit': head}, *others,
+        ]))
 
     def origin_main(self):
         return self.git(self.origin, 'rev-parse', 'main')
@@ -1468,6 +1474,27 @@ class Modes(Base):
             auto_merge.merge(plan, 'codex', self.job(head))
         self.assertEqual(self.origin_main(), before)
 
+    def test_observe_waits_for_every_live_reviewer(self):
+        head = self.change()
+        job = self.job(head)
+        self.review_store(head, {'worker': '%1', 'reviewer': '%3'})
+        decision = auto_merge.process(job)
+        self.assertEqual(decision['outcome'], 'wait')
+        self.assertEqual(self.failed(decision), ['review'])
+        self.assertIn('not approved', decision['checks'][-1]['text'])
+
+    def test_push_rechecks_every_live_reviewer_after_the_plan(self):
+        self.enforce()
+        head = self.change()
+        job = self.job(head)
+        before = self.origin_main()
+        _, plan = auto_merge.evaluate(self.work, head)
+        self.assertEqual(auto_merge.review_gate.check(self.work, head, pane='%1'), head)
+        self.review_store(head, {'worker': '%1', 'reviewer': '%3'})
+        with self.assertRaisesRegex(auto_merge.NotAuthorized, 'not approved'):
+            auto_merge.merge(plan, 'codex', job)
+        self.assertEqual(self.origin_main(), before)
+
     def test_a_new_grant_before_the_push_rejects_the_old_approval_without_retry(self):
         now = int(auto_merge.time.time())
         with mock.patch.object(auto_merge.time, 'time', return_value=now - 1):
@@ -1539,8 +1566,10 @@ class Modes(Base):
             (lambda: self.git(self.work, 'switch', '-c', 'other'), 'branch changed'),
             (lambda: self.write(self.work, 'nested/new.txt', 'untracked\n'), 'untracked files'),
             (lambda: self.write(self.work, 'ui/src/App.tsx', 'uncommitted\n'), 'uncommitted'),
-            (lambda: job.update(current=self.job(head, at=job['approved_at'] + 1)['current']), 'approval changed'),
-            (lambda: job.update(current=self.job('a' * 40, at=job['approved_at'])['current']), 'approval changed'),
+            (lambda: job.update(current=lambda: {'%1': {'%2': {'commit': head, 'at': job['approved_at'] + 1}}}),
+             'approval changed'),
+            (lambda: job.update(current=lambda: {'%1': {'%2': {'commit': 'a' * 40, 'at': job['approved_at']}}}),
+             'approval changed'),
             (lambda: job.update(current=lambda: {}), 'approval changed'),
             (lambda: job.update(current=None), 'approval changed'),
             (lambda: job.update(current=fail_read), 'Could not read'),

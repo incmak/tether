@@ -45,6 +45,7 @@ if str(HERE) not in sys.path:
 
 import approval  # noqa: E402
 import paths  # noqa: E402
+import review_gate  # noqa: E402
 
 MODES = (
     ('off', 'Off', 'Tether does not check branches.'),
@@ -1328,6 +1329,12 @@ def merge(plan, reviewer, job):
             raise NotAuthorized('Could not read the current reviewer approval.') from exc
         if not matches:
             raise NotAuthorized('The reviewer approval changed or is no longer available.')
+        try:
+            approved = review_gate.check(folder, head, pane=job['worker'])
+        except review_gate.GateRefused as exc:
+            raise NotAuthorized(str(exc)) from exc
+        if approved is None:
+            raise NotAuthorized('The review link is no longer available.')
         _fast_forward_push(root, scratch, plan['url'], plan['target_sha'], made)
     return made
 
@@ -1352,6 +1359,12 @@ def process(job, alert=None):
     decision.setdefault('head', job.get('commit'))
     decision.pop('folder', None)
     at = job.get('approved_at')
+    if plan is not None:
+        try:
+            review_gate.check(job['folder'], decision['head'], pane=job['worker'])
+        except review_gate.GateRefused as exc:
+            decision['checks'].append({'key': 'review', 'ok': False, 'text': str(exc)})
+            plan = None
     if plan is None:
         decision['outcome'] = 'wait'
     elif not ENFORCE_AVAILABLE or setting['mode'] != 'enforce':
