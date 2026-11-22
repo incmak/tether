@@ -47,7 +47,8 @@ class ReviewFolderTests(unittest.TestCase):
         return {'folder': str(folder), 'head': None if unborn else self.git('rev-parse', 'HEAD', cwd=folder),
                 'tree': self.git('write-tree', cwd=folder), 'reflog': server.commit_gate._head_reflog_position(folder),
                 'git_dir': {'path': str(path), 'dev': info.st_dev, 'ino': info.st_ino},
-                'messages': [server.commit_gate._message_digest(key, message)], **EXITED_GIT_IDENTITY}
+                'messages': [server.commit_gate._message_digest(key, message)], 'head_attached': True,
+                **EXITED_GIT_IDENTITY}
 
     def git(self, *args, cwd=None, env=None):
         return subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',

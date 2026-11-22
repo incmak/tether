@@ -1276,21 +1276,15 @@ def _confirm_landing(row, *, deadline):
 
 
 def _could_be_same_oid_amend(replaced, hook, row, tree):
-    """True when this attempt could have rewritten the old HEAD to the same OID: the same tree and dates.
+    """True when this attempt could have rewritten the old HEAD to the same OID with no reflog entry.
 
-    Git fixes the commit date once, before the commit-msg hook runs, so it lies between the Git start and the row.
+    Only a detached HEAD can do that: on a branch, Git logs the amend in the HEAD reflog. A row without
+    head_attached could be either. Clocks are not used: a corrected clock can move any time window.
     The message is not compared: a repo hook can restore the old message after Tether reads it.
     """
-    if replaced.tree != tree or (hook.author_date is not None and hook.author_date != replaced.author_date):
+    if row.get('head_attached') is True:
         return False
-    if hook.committer_date is not None:
-        return hook.committer_date == replaced.committer_date
-    at, started = row.get('at'), row.get('started')
-    if type(at) not in (int, float):
-        return True
-    if 'committer_override' in row or type(started) is not int:
-        started = None
-    return not (replaced.committed > at + LOG_TIME_TOLERANCE or (started is not None and replaced.committed < started))
+    return replaced.tree == tree and (hook.author_date is None or hook.author_date == replaced.author_date)
 
 
 def _message_hook(folder):
@@ -1890,6 +1884,9 @@ def _hook_git_alive(row, *, deadline):
     if linux:
         if type(expected) is not int or expected < 0:
             return None  # Rows from before B369 round 5 stored a wall-clock time: unknown.
+    elif not isinstance(expected, str) or not re.fullmatch(
+            r'[A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}', expected):
+        return None
     if time.monotonic() >= deadline:
         return None
     if linux:
@@ -2099,6 +2096,11 @@ def commit_msg(path, env=os.environ, cwd=None, now=None):
         git_dir = _git_path(cwd, '--absolute-git-dir')
         if git_dir is not None and (identity := _git_dir_identity(git_dir)) is not None:
             record['git_dir'] = identity
+            try:
+                # A same-OID amend writes a HEAD reflog entry only when HEAD is on a branch.
+                record['head_attached'] = Path(git_dir, 'HEAD').read_bytes().startswith(b'ref: ')
+            except OSError:
+                pass
         if (reflog := _head_reflog_position(cwd)) is not None:
             record['reflog'] = reflog
         if author_date := re.fullmatch(r'@(\d+ [+-]\d{4})', env.get('GIT_AUTHOR_DATE', '')):

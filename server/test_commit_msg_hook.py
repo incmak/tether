@@ -216,7 +216,7 @@ sys.exit(main(sys.argv[2:]))
             'count': 1, 'folder': str(self.repo), 'head': None,
             'tree': self.git('rev-parse', 'HEAD^{tree}').stdout.strip(),
             'reflog': {'size': 0, 'ino': None, 'dev': None},
-            'git_dir': self.git_dir_fields(),
+            'git_dir': self.git_dir_fields(), 'head_attached': True,
             'author_date': author_date,
             'messages': [digest],
         })
@@ -304,7 +304,12 @@ sys.exit(main(sys.argv[2:]))
         row, = self.rows()
         self.assertEqual(row['head'], self.git('rev-parse', 'HEAD').stdout.strip())
         self.assertEqual(commit_gate._head_reflog_position(self.repo), before)
+        self.assertIs(row['head_attached'], False)
         self.assertIsNone(commit_gate.record_landed(row))
+        # No clock window: a corrected clock or an explicit future date must not rule the amend out.
+        for moved in ({'started': 10 ** 10}, {'at': 1.0}, {'committer_date': '4102444800 +0000'}):
+            with self.subTest(moved=moved):
+                self.assertIsNone(commit_gate.record_landed(row | moved))
         # A later checkout of another tree must not turn the landed amend into a proven non-landing.
         self.git('checkout', '-q', '--detach', 'side')
         self.assertNotEqual(self.git('rev-parse', 'HEAD^{tree}').stdout.strip(), row['tree'])
@@ -475,6 +480,14 @@ sys.exit(main(sys.argv[2:]))
         deadline = time.monotonic() + 5
         linux_row = {'git_pid': 4242, 'git_started': 100}
         mac_row = {'git_pid': 4242, 'git_started': 'Sat Jan  1 00:00:00 2000'}
+        with mock.patch.object(commit_gate.sys, 'platform', 'darwin'), \
+                mock.patch.object(commit_gate.subprocess, 'run', side_effect=AssertionError('ps ran')):
+            for token in (None, '', 'invalid', 100):  # a missing or malformed token is unknown, never "exited"
+                with self.subTest(mac_token=token):
+                    row = {key: value for key, value in mac_row.items() if token is not None or key != 'git_started'}
+                    if token is not None:
+                        row['git_started'] = token
+                    self.assertIsNone(commit_gate._hook_git_alive(row, deadline=deadline))
         with mock.patch.object(commit_gate.sys, 'platform', 'linux'):
             for legacy in (100.0, -1, None, '100'):  # a wall-clock start from older rows is unknown
                 with self.subTest(legacy=legacy):
