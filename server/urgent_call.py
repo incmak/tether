@@ -16,9 +16,11 @@ import tether_zone
 WINDOW = 30 * 60
 WINDOW_MAX, DAY_MAX, ASK_MAX = 2, 8, 3
 SLOTS = (0, 10 * 60, 40 * 60)
+LATE = 10 * 60  # a slot found later than this (downtime, a parked tab) is skipped, not rung
 HOLD = 2 * 3600
 DND_MAX = 24 * 3600
 CALL_MAX = 15 * 60 + 60
+ASK_KEEP = 1000  # ask records kept, newest first; a returning ask keeps its decided slots
 DEFAULT_SETTINGS = {'mode': 'on', 'day_start': '08:00', 'day_end': '22:00'}
 OUTCOMES = ('answered', 'declined', 'unanswered')
 
@@ -147,10 +149,14 @@ class Planner:
             ask['seen_at'] = now
             due = [i for i, offset in enumerate(SLOTS)
                    if i not in ask['decided'] and candidate['grace_end'] + offset <= now]
-            decide(candidate, ask, due[:-1], 'skipped')
-            slots = due[-1:]
+            late = due[-1:] if due and now > candidate['grace_end'] + SLOTS[due[-1]] + LATE else []
+            decide(candidate, ask, due[:-1] + late, 'skipped')
+            slots = [] if late else due[-1:]
             if ask['hold_slot'] == 'pending' and now >= self.state['hold_until']:
-                slots.append('hold')
+                if now > self.state['hold_until'] + LATE:
+                    decide(candidate, ask, ['hold'], 'skipped')
+                else:
+                    slots.append('hold')
             if not slots:
                 continue
             if candidate['opened'] or candidate['snoozed'] or candidate['later']:
@@ -190,8 +196,10 @@ class Planner:
                 live = None
             self.state['calls'] = [call for call in self.state['calls'] if call['at'] >= now - 48 * 3600]
             eligible = sorted(self._eligible(candidates, now, decide), key=lambda item: item[0]['grace_end'], reverse=True)
-            self.state['asks'] = {key: ask for key, ask in self.state['asks'].items()
-                                  if ask['seen_at'] >= now - 7 * 86400}
+            if len(self.state['asks']) > ASK_KEEP:
+                keep = set(sorted(self.state['asks'], key=lambda key: self.state['asks'][key]['seen_at'])[-ASK_KEEP:])
+                keep |= set(live['panes']) if live is not None else set()
+                self.state['asks'] = {key: ask for key, ask in self.state['asks'].items() if key in keep}
             if live is not None:
                 # A slot that comes due for an ask already on the live call is used by that call.
                 for candidate, ask, slots in eligible:
@@ -221,8 +229,16 @@ class Planner:
                 decide(candidate, ask, slots, decision, rule)
             try:
                 if self._dirty or self.state != before:
-                    self._commit(before)
+                    self._save()
             except OSError:
+                # Keep the slot decisions so a blocked slot never rings later (C2). Cancel only the new call.
+                if pending is not None:
+                    self.state['calls'] = [call for call in self.state['calls'] if call['id'] != pending]
+                    self.state['live'] = None
+                    for _, ask, _ in targets:
+                        ask['calls'] -= 1
+                self._dirty = True
+                self.log('save_failed')
                 return dict(placed=None, blocked=None, joined=[])
         for event, fields in events:
             self.log(event, **fields)
@@ -296,7 +312,10 @@ class Planner:
         self.log('outcome', call_id=call_id, outcome=outcome)
         if self.mark_opened is not None:
             for pane, ask_id in opened:
-                self.mark_opened(pane, ask_id)
+                try:
+                    self.mark_opened(pane, ask_id)
+                except Exception as exc:  # The ask stays done here: Mak heard it. Tether just shows it unopened.
+                    self.log('open_failed', ask=ask_id, error=type(exc).__name__)
         return True
 
     def set_dnd(self, until):
@@ -311,13 +330,15 @@ class Planner:
     def calls_back_on(self):
         with self.lock:
             before = deepcopy(self.state)
-            self.state.update(dnd_until=0, hold_until=0)
+            self.state.update(dnd_until=0, hold_until=min(self.state['hold_until'], self.clock()))
             self._commit(before)
 
     def status(self, now=None):
         with self.lock:
-            local = datetime.fromtimestamp(self.clock() if now is None else now, self.zone())
-            return dict(dnd_until=self.state['dnd_until'], hold_until=self.state['hold_until'],
+            now = self.clock() if now is None else now
+            local = datetime.fromtimestamp(now, self.zone())
+            active = {key: self.state[key] if self.state[key] > now else 0 for key in ('dnd_until', 'hold_until')}
+            return dict(dnd_until=active['dnd_until'], hold_until=active['hold_until'],
                         calls_today=self._today(local), live=self.state['live'])
 
     def live_agenda(self):

@@ -357,14 +357,37 @@ class PlannerTest(unittest.TestCase):
         self.assertEqual(self.place_and_finish(self.candidate()), 'call-1')
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
 
-    def test_failed_save_rolls_back_and_places_nothing_until_save_works(self):
+    def test_failed_save_places_nothing_and_never_makes_up_the_slot(self):
         ask = self.candidate()
         with mock.patch.object(urgent_call.os, 'replace', side_effect=OSError('denied')):
             self.assertIsNone(self.planner.tick([ask])['placed'])
         self.assertEqual(self.planner.status(), dict(dnd_until=0, hold_until=0, calls_today=0, live=None))
         self.assertEqual(list(self.path.parent.iterdir()), [])
         self.assertEqual(self.agendas, [])
-        self.assertEqual(self.place_and_finish(ask), 'call-1')
+        self.clock.advance(1)
+        self.assertIsNone(self.planner.tick([ask])['placed'])
+        self.clock.now = ask['grace_end'] + 10 * 60
+        self.assertEqual(self.planner.tick([ask])['placed'], 'call-1')
+
+    def test_slot_found_more_than_ten_minutes_late_is_skipped(self):
+        ask = self.candidate()
+        self.clock.advance(10 * 60 - 1)
+        self.planner.tick([self.candidate('b', grace_end=self.clock.now + 3600)])
+        self.clock.now = ask["grace_end"] + 20 * 60 + 1
+        self.assertIsNone(self.planner.tick([ask])['placed'])
+        self.assertEqual(sorted(self.state()['asks']['a']['decided']), [0, 1])
+        self.clock.now = ask['grace_end'] + 40 * 60 + 10 * 60
+        self.assertEqual(self.planner.tick([ask])['placed'], 'call-1')
+
+    def test_slot_blocked_while_save_fails_does_not_ring_when_the_block_ends(self):
+        ask = self.candidate()
+        self.planner.set_dnd(self.clock.now + 60)
+        with mock.patch.object(urgent_call.os, 'replace', side_effect=OSError('denied')):
+            self.assertIsNone(self.planner.tick([ask])['placed'])
+        self.clock.advance(61)
+        self.assertIsNone(self.planner.tick([ask])['placed'])
+        self.assertEqual(self.agendas, [])
+        self.assertEqual(self.state()['asks']['a']['decided'], [0])
 
     def test_failed_external_id_save_keeps_the_reservation_until_the_next_save(self):
         ask = self.candidate()
@@ -383,7 +406,7 @@ class PlannerTest(unittest.TestCase):
         self.assertEqual(self.state()['live'], 'call-1')
         self.assertEqual(self.agendas, [[ask]])
 
-    def test_prunes_old_calls_and_unseen_asks_at_their_own_limits(self):
+    def test_prunes_old_calls_and_keeps_newest_ask_records(self):
         old = self.candidate()
         self.place_and_finish(old)
         self.clock.advance(48 * 3600)
@@ -392,11 +415,12 @@ class PlannerTest(unittest.TestCase):
         self.clock.advance(1)
         self.planner.tick([])
         self.assertEqual(self.state()['calls'], [])
-        self.assertIn('a', self.state()['asks'])
-        self.clock.advance(5 * 86400 - 1)
-        fresh = self.candidate('b')
-        self.place_and_finish(fresh)
-        self.assertIn('a', self.state()['asks'])
-        self.clock.advance(1)
+        # An ask parked for weeks keeps its decided slots, so it does not ring again on return.
+        self.clock.advance(30 * 86400)
         self.planner.tick([])
-        self.assertEqual(list(self.state()['asks']), ['b'])
+        self.assertIsNone(self.planner.tick([old])['placed'])
+        with mock.patch.object(urgent_call, 'ASK_KEEP', 2):
+            for ask_id in ('b', 'c'):
+                self.clock.advance(1)
+                self.planner.tick([self.candidate(ask_id, grace_end=self.clock.now + 3600)])
+        self.assertEqual(sorted(self.state()['asks']), ['b', 'c'])

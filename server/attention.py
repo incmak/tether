@@ -495,9 +495,13 @@ class Attention:
                     if ask.get('call') and ask['kind'] == 'reply' and type(ask.get('ping_due')) in (int, float)]
 
     def mark_opened(self, pane, ask_id):
+        """Mark the ask opened by its id. The pane is a hint: the ask may have moved to another pane."""
         with self.lock:
             ask = self.asks.get(pane)
             if not ask or ask['id'] != ask_id:
+                pane, ask = next(((key, value) for key, value in self.asks.items() if value['id'] == ask_id),
+                                 (None, None))
+            if ask is None:
                 return False
             thread = ask.get('thread')
         return self.act(pane, thread, 'opened', ask_id=ask_id)

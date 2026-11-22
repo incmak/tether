@@ -141,9 +141,9 @@ class AttentionTest(unittest.TestCase):
                                          grace_end=self.clock.now + attention.URGENT_GRACE,
                                          opened=False, snoozed=False, later=False))
         candidate['call'] = 'Changed snapshot'
-        self.assertFalse(self.store.mark_opened('%2', ask['id']))
         self.assertFalse(self.store.mark_opened('%1', 'stale'))
-        self.assertTrue(self.store.mark_opened('%1', ask['id'])['opened'])
+        # The pane is a hint: an ask that moved to another pane still opens by its id.
+        self.assertTrue(self.store.mark_opened('%2', ask['id'])['opened'])
         candidate, = self.store.call_candidates()
         self.assertEqual((candidate['call'], candidate['opened']), ('Pick one?', True))
 
