@@ -92,26 +92,68 @@ test('verify measures recipe answers and capture, and owns popups', { timeout: 1
     }
     assert.equal(redirectHits, 0)
 
-    let release
-    const wait = new Promise(resolve => { release = resolve })
-    try {
-      const pending = await capture('pending', {
-        open: async page => {
-          let started
-          const routed = new Promise(resolve => { started = resolve })
-          await page.route('**/mobile/api/fixture/pending', async route => {
-            started()
-            await wait
-            await route.fulfill({ status: 200 }).catch(() => {})
-          })
-          await page.evaluate(() => { void fetch('/mobile/api/fixture/pending').catch(() => {}) })
-          await routed
-        },
+    const withHeldRequest = async (name, open) => {
+      let release
+      const wait = new Promise(resolve => { release = resolve })
+      try {
+        return await capture(name, {
+          open: page => open(page, async () => {
+            let started
+            const routed = new Promise(resolve => { started = resolve })
+            const url = '/mobile/api/fixture/' + name
+            await page.route('**' + url, async route => {
+              started()
+              await wait
+              await route.fulfill({ status: 200 }).catch(() => {})
+            })
+            await page.evaluate(url => { void fetch(url).catch(() => {}) }, url)
+            await routed
+          }, release),
+        })
+      } finally { release() }
+    }
+    const pending = await withHeldRequest('pending', (_page, hold) => hold())
+    assert.equal(pending.ok, false)
+    assert.match(pending.problems.join('\n'), /API still in flight after 5 s: .*\/fixture\/pending/)
+    assert.doesNotMatch(pending.problems.join('\n'), /did not finish/)
+
+    const sameDocument = await withHeldRequest('same-document', async (page, hold) => {
+      await hold()
+      await page.evaluate(() => {
+        history.pushState(null, '', '?same-document')
+        return new Promise(resolve => {
+          window.addEventListener('hashchange', () => resolve(), { once: true })
+          location.hash = 'fixture'
+        })
       })
-      assert.equal(pending.ok, false)
-      assert.match(pending.problems.join('\n'), /API still in flight after 5 s: .*\/fixture\/pending/)
-      assert.doesNotMatch(pending.problems.join('\n'), /did not finish/)
-    } finally { release() }
+    })
+    assert.equal(sameDocument.ok, false)
+    assert.match(sameDocument.problems.join('\n'), /API still in flight after 5 s: .*\/fixture\/same-document/)
+
+    const newDocument = await withHeldRequest('new-document', async (page, hold) => {
+      await page.goto(info.url, { waitUntil: 'load' })
+      await hold()
+    })
+    assert.equal(newDocument.ok, false)
+    assert.match(newDocument.problems.join('\n'), /API still in flight after 5 s: .*\/fixture\/new-document/)
+
+    const orphanResults = []
+    for (const [name, navigate] of [
+      ['orphan-goto', page => page.goto(info.url, { waitUntil: 'load' })],
+      ['orphan-reload', page => page.reload({ waitUntil: 'load' })],
+    ]) {
+      const { ok, problems } = await withHeldRequest(name, async (page, hold, release) => {
+        try {
+          await hold()
+          await navigate(page)
+        } finally { release() }
+      })
+      orphanResults.push({ name, ok, problems })
+    }
+    assert.deepEqual(orphanResults, [
+      { name: 'orphan-goto', ok: true, problems: [] },
+      { name: 'orphan-reload', ok: true, problems: [] },
+    ])
 
     const duringCapture = async (name, status) => {
       let release, timer
