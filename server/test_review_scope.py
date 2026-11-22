@@ -247,6 +247,10 @@ class ReviewFolderTests(unittest.TestCase):
     def check_in_flight_commit(self, *, land):
         pending = self.work.parent / 'pending'
         self.git('worktree', 'add', '-qb', 'pending', str(pending))
+        # An old base commit: a same-OID amend of it is impossible now, so an exited Git proves no landing.
+        old = '2000-01-01T00:00:00+00:00'
+        self.git('commit', '-qm', 'Old base', '--allow-empty', cwd=pending,
+                 env=dict(os.environ, GIT_AUTHOR_DATE=old, GIT_COMMITTER_DATE=old))
         previous_head = self.git('rev-parse', 'HEAD', cwd=pending)
         self.log.write_bytes(self.line())
         fifo = self.work.parent / 'release-hook'

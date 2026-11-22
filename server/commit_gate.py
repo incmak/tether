@@ -1246,8 +1246,6 @@ def _confirm_landing(row, *, deadline):
     current = worktree_head(folder, deadline=deadline)
     if current is None:
         return None
-    if not candidates and current != head:
-        return False
     if head is not None:
         candidates.setdefault(head)  # Compare the replaced commit's parents for an amend, in the same batch.
     commits = _batch_commits(folder, candidates, deadline=deadline)
@@ -1270,10 +1268,29 @@ def _confirm_landing(row, *, deadline):
                     return True
                 uncertain = True  # The repo's commit-msg hook may have rewritten the message after Tether read it.
         later_heads.add(old)
-    if head == current and replaced.tree == tree and _matches_hook_commit(
-            replaced, _commit_digest(key, replaced), hook, lambda: True):
-        return None  # A detached same-OID amend can succeed without writing a reflog entry.
+    if replaced is not None and _could_be_same_oid_amend(replaced, hook, row, tree):
+        # A detached same-OID amend lands with no reflog entry, and a repo hook can restore the old message, so
+        # Git cannot prove that this attempt did not land.
+        return None
     return None if uncertain else False
+
+
+def _could_be_same_oid_amend(replaced, hook, row, tree):
+    """True when this attempt could have rewritten the old HEAD to the same OID: the same tree and dates.
+
+    Git fixes the commit date once, before the commit-msg hook runs, so it lies between the Git start and the row.
+    The message is not compared: a repo hook can restore the old message after Tether reads it.
+    """
+    if replaced.tree != tree or (hook.author_date is not None and hook.author_date != replaced.author_date):
+        return False
+    if hook.committer_date is not None:
+        return hook.committer_date == replaced.committer_date
+    at, started = row.get('at'), row.get('started')
+    if type(at) not in (int, float):
+        return True
+    if 'committer_override' in row or type(started) is not int:
+        started = None
+    return not (replaced.committed > at + LOG_TIME_TOLERANCE or (started is not None and replaced.committed < started))
 
 
 def _message_hook(folder):
@@ -1844,6 +1861,13 @@ def _linux_process(pid, clock):
     return parent, comm, started, state
 
 
+def _linux_start_ticks(pid):
+    """(starttime clock ticks since boot, state). Raw ticks do not move when the wall-clock boot time is corrected."""
+    entry = Path(f'/proc/{pid}/stat').read_bytes()
+    fields = entry[entry.rindex(b')') + 1:].split()
+    return int(fields[19]), fields[0]
+
+
 def _ps_git_started(pid, *, timeout):
     """Return a stable macOS ps start token rather than estimating it from elapsed time."""
     if timeout <= 0:
@@ -1864,24 +1888,18 @@ def _hook_git_alive(row, *, deadline):
     if type(pid) is not int or pid <= 0:
         return None
     if linux:
-        if type(expected) not in (int, float) or not 0 < expected < math.inf:
-            return None
-    elif not isinstance(expected, str) or not re.fullmatch(
-            r'[A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}', expected):
-        return None
+        if type(expected) is not int or expected < 0:
+            return None  # Rows from before B369 round 5 stored a wall-clock time: unknown.
     if time.monotonic() >= deadline:
         return None
     if linux:
-        clock = _boot_clock()
-        if clock is None:
-            return None
         try:
-            _, _, started, state = _linux_process(pid, clock)
+            started, state = _linux_start_ticks(pid)
         except (FileNotFoundError, ProcessLookupError):
             return False  # The process is gone.
         except (OSError, ValueError, IndexError):
             return None
-        return None if started is None else state not in (b'Z', b'X') and started == expected
+        return state not in (b'Z', b'X') and started == expected
     # Only a clean ps answer counts. A timeout or a failure to run ps is unknown, not "Git exited".
     timeout = min(0.5, deadline - time.monotonic())
     if timeout <= 0:
@@ -1892,7 +1910,8 @@ def _hook_git_alive(row, *, deadline):
     except (OSError, subprocess.SubprocessError):
         return None
     if shown.returncode != 0:
-        return False if not shown.stdout.strip() and shown.returncode == 1 else None
+        # ps exits 1 with no output for a missing pid. Any diagnostic means ps did not answer.
+        return False if shown.returncode == 1 and not shown.stdout.strip() and not shown.stderr.strip() else None
     try:
         state, started = shown.stdout.split(maxsplit=1)
     except ValueError:
@@ -2088,8 +2107,13 @@ def commit_msg(path, env=os.environ, cwd=None, now=None):
         if git_process is not None:
             if git_process.started is not None:
                 record['started'] = math.floor(git_process.started) - 1  # Allow for clock tick rounding.
-            started = (git_process.started if sys.platform.startswith('linux')
-                       else _ps_git_started(git_process.pid, timeout=0.05))
+            if sys.platform.startswith('linux'):
+                try:
+                    started = _linux_start_ticks(git_process.pid)[0]
+                except (OSError, ValueError, IndexError):
+                    started = None
+            else:
+                started = _ps_git_started(git_process.pid, timeout=0.05)
             if started is not None:
                 record.update(git_pid=git_process.pid, git_started=started)
         if env.get('GIT_COMMITTER_DATE'):
