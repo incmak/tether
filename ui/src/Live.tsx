@@ -590,7 +590,7 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
 
   // Start: the Friday agent when its worker runs, else the phrase loop. Then a short briefing.
   useEffect(() => {
-    const releaseReadAloud = holdReadAloud()
+    const { release: releaseReadAloud, ready: readAloudReady } = holdReadAloud()
     let gone = false
     const watches = createDraftWatch(live.current.api, (text, show) => {
       void held.current()
@@ -619,6 +619,7 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
       })
     }
     void agentReady().then(async ready => {
+      await readAloudReady
       if (gone) return
       if (!ready) { classic(); return }
       const friday = new FridayAgent({

@@ -33,9 +33,13 @@ let playback: AbortController | null = null
 let generation = 0
 let ttsDown = false
 
-const holdName = 'tether-read-aloud-hold'
-const locks = typeof navigator !== 'undefined' && typeof BroadcastChannel !== 'undefined' ? navigator.locks : undefined
-const channel = locks ? new BroadcastChannel('tether-read-aloud') : undefined
+const holdPrefix = 'tether-read-aloud-hold:'
+const playName = 'tether-read-aloud-play'
+const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined
+const channel = locks && typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('tether-read-aloud') : undefined
+const ownHolds = new Set<string>()
+const watchedHolds = new Set<string>()
+const endedHolds = new Set<string>()
 let localHolds = 0
 let lockHeld = false
 let held = false
@@ -49,14 +53,30 @@ function updateHeld() {
 }
 
 async function refreshHeld() {
-  if (locks) {
-    try {
-      const state = await locks.query()
-      lockHeld = [...state.held ?? [], ...state.pending ?? []].some(lock => lock.name === holdName)
-    } catch { /* Keep the last snapshot if the document cannot query locks. */ }
+  if (!locks) return held
+  try {
+    const state = await locks.query()
+    const names = new Set((state.held ?? []).map(lock => lock.name).filter((name): name is string => !!name?.startsWith(holdPrefix)))
+    for (const name of endedHolds) {
+      if (!names.has(name)) endedHolds.delete(name)
+    }
+    lockHeld = false
+    for (const name of names) {
+      if (endedHolds.has(name)) continue
+      lockHeld = true
+      if (ownHolds.has(name) || watchedHolds.has(name)) continue
+      watchedHolds.add(name)
+      void locks.request(name, { mode: 'exclusive' }, () => {
+        // The unique hold has ended. Other watchers can briefly acquire the same name next.
+        endedHolds.add(name)
+      }).then(() => { void refreshHeld() }, () => {}).finally(() => watchedHolds.delete(name))
+    }
     updateHeld()
+    return localHolds > 0 || names.size > 0
+  } catch {
+    // Keep the last UI snapshot. Playback needs a successful check.
+    return true
   }
-  return held
 }
 
 if (channel) {
@@ -64,31 +84,50 @@ if (channel) {
     if (data?.t === 'hold') stopSpeaking()
     if (data?.t === 'hold' || data?.t === 'release') void refreshHeld()
   }
-  // A tab can disappear without sending a release message. Check again when the user returns.
-  window.addEventListener('focus', () => void refreshHeld())
 }
+if (locks) window.addEventListener('focus', () => void refreshHeld())
 
-export function holdReadAloud(): () => void {
+export function holdReadAloud(): { release: () => void; ready: Promise<void> } {
   stopSpeaking()
   localHolds++
   updateHeld()
 
   const pending = new AbortController()
-  const released = new Promise<void>(resolve => pending.signal.addEventListener('abort', () => resolve(), { once: true }))
-  const request = locks?.request(holdName, { mode: 'shared', signal: pending.signal }, () => released).catch(() => {})
-  channel?.postMessage({ t: 'hold' })
-
-  return () => {
-    if (pending.signal.aborted) return
+  const signal = pending.signal
+  const drain = new AbortController()
+  const release = () => {
+    if (signal.aborted) return
     localHolds--
     updateHeld()
     pending.abort()
-    // The lock manager updates its snapshot before the request promise settles.
-    void request?.then(() => {
+    drain.abort()
+  }
+  if (!locks) return { release, ready: Promise.resolve() }
+
+  const name = holdPrefix + (crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`)
+  const released = new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+  ownHolds.add(name)
+  const ready = new Promise<void>(resolve => {
+    void locks.request(name, { mode: 'exclusive', signal }, () => {
+      if (signal.aborted) return
+      channel?.postMessage({ t: 'hold' })
+      const timer = setTimeout(() => {
+        drain.abort()
+        if (!signal.aborted) console.warn('Read aloud did not stop within 1500 ms. Opening the Live microphone.')
+        resolve()
+      }, 1500)
+      // Earlier readers must finish before this exclusive request can run.
+      void locks.request(playName, { mode: 'exclusive', signal: drain.signal }, () => {})
+        .catch(() => {}).finally(() => { clearTimeout(timer); resolve() })
+      return released
+    }).catch(() => {}).finally(() => {
+      ownHolds.delete(name)
       channel?.postMessage({ t: 'release' })
       void refreshHeld()
+      resolve()
     })
-  }
+  })
+  return { release, ready }
 }
 
 function subscribeHeld(listener: () => void) {
@@ -208,7 +247,7 @@ function playOnDevice(text: string, stop: AbortSignal) {
   })
 }
 
-async function readParts(id: string, parts: string[], stop: AbortSignal) {
+function readParts(id: string, parts: string[], stop: AbortSignal) {
   let audio: AudioContext | undefined
   let ready: Promise<boolean> | undefined
   if (Context && !ttsDown) {
@@ -218,6 +257,12 @@ async function readParts(id: string, parts: string[], stop: AbortSignal) {
       ready = audio.resume().then(() => true, () => false)
     } catch { /* Web Audio failed. Continue on the device. */ }
   }
+  const read = () => playParts(id, parts, stop, audio, ready)
+  return locks ? locks.request(playName, { mode: 'shared', signal: stop }, read) : read()
+}
+
+async function playParts(id: string, parts: string[], stop: AbortSignal, audio?: AudioContext, ready?: Promise<boolean>) {
+  if (stop.aborted) return false
   if ((locks && await refreshHeld()) || stop.aborted) return false
   set(id)
   let at = 0
@@ -228,6 +273,7 @@ async function readParts(id: string, parts: string[], stop: AbortSignal) {
         const buffer = await next
         if (stop.aborted) return false
         if (!buffer) break
+        // Live can open after the deadline even if this clip is still loading.
         if ((locks && await refreshHeld()) || stop.aborted) return false
         const playing = play(audio, buffer)
         if (at + 1 < parts.length) next = clip(audio, ready, parts[at + 1], stop)
