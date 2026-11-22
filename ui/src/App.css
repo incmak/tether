@@ -458,7 +458,8 @@ button.stop-button:not(:disabled):hover { background: var(--muted); }
 /* Files dragged over a chat (chatDrop.ts). It ignores the pointer, so the drop lands on the panel below. */
 .chat-drop { position: absolute; inset: 6px; z-index: 40; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 16px; border: 2px dashed var(--accent); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--accent) 10%, color-mix(in srgb, var(--surface) 90%, transparent)); color: var(--text); font-weight: 600; text-align: center; overflow-wrap: anywhere; pointer-events: none; }
 .chat-drop.refused { border-color: var(--muted); background: color-mix(in srgb, var(--surface) 92%, transparent); color: var(--muted); font-weight: 500; }
-.chat-header { touch-action: pan-y; display: flex; align-items: center; min-height: 83px; gap: 12px; padding: max(12px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 12px max(10px, env(safe-area-inset-left)); border-bottom: 1px solid var(--line); z-index: 2; }
+.chat-header { touch-action: pan-y; display: flex; align-items: center; min-height: 83px; gap: 12px; padding: max(12px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 12px max(10px, env(safe-area-inset-left)); border-bottom: 1px solid var(--line); z-index: 3; }
+/* z-index 3: above the tab strip's close buttons (z-index 2), so the … menu that hangs over the strip covers them (B378). */
 .chat-title { min-width: 0; }
 .chat-title h1 { font-size: 16px; font-weight: 600; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; margin-bottom: 5px; }
 .chat-title > div { display: flex; gap: 7px; align-items: center; font-size: 12px; color: var(--muted); }
@@ -1518,6 +1519,24 @@ button.live-chip:active { background: var(--line); }
   /* nowrap: a wrapping flex line is as wide as its longest child, so the title ran under the header buttons (B271). */
   .workspace .chat-title { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 2px; }
 }
+/* B378: a narrow pane keeps the title readable. Pin, search and the terminal move into the … menu; under 320px also the
+   slot badge, swap and zoom. Close stays. The open terminal's toggle stays: it shows the state and takes the focus.
+   .foldable is set only while the … menu works (chat data loaded), so no action is ever out of reach. */
+.keys-menu > :is(.keys-fold, .keys-fold-slot) { display: none; }
+@container (max-width: 420px) {
+  .workspace .chat-header > :is(.side-pin-toggle, .search-toggle).foldable,
+  .workspace .chat-header > .terminal-toggle.foldable:not([aria-pressed="true"]) { display: none; }
+  .workspace .keys-menu > .keys-fold { display: flex; }
+  .workspace .keys-menu { width: min(210px, calc(100cqi - 120px)); }
+}
+@container (max-width: 320px) {
+  .workspace .chat-header:has(.keys-container > button:not(:disabled)) > :is(.slot-badge, .slot-pick, .slot-zoom) { display: none; }
+  .workspace .keys-menu > .keys-fold-slot { display: flex; }
+  .workspace .chat-header:has(.keys-container > button:not(:disabled)) .keys-menu { width: min(210px, calc(100cqi - 56px)); }
+}
+/* Under 280px the title takes its own row (below); keep the buttons on the right of the next row, so the … menu,
+   which hangs right-aligned from its button, stays inside the slot. */
+@container (max-width: 280px) { .workspace .chat-header { justify-content: flex-end; } }
 /* Drop hints while dragging a pane, a session or a slot. */
 .drop-hint { position: absolute; inset: 6px; z-index: 5; display: flex; align-items: center; justify-content: center; border: 2px dashed var(--accent); border-radius: 10px; background: color-mix(in srgb, var(--accent) 10%, transparent); pointer-events: none; }
 .touch-drop-hint { display: none; }
