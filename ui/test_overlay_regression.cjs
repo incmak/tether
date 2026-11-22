@@ -2,7 +2,7 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser, serveLocal, shotsDir } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal, shotsDir, prefsStore } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = shotsDir('overlay-regression')
@@ -36,7 +36,6 @@ function fixtures(state) {
       ...(state === 'heads-tasks' ? { goal: 'Review overlays', tasks: ['1 shell', '1 monitor'] } : {}),
       notices: state === 'toast' ? ['Fixture notice: Review the overlay result.'] : [],
     },
-    prefs: { prefs: {}, version: 1 },
     'projects/marks': {},
     'projects/backlog': { text: '' },
     'work/board': { revision: 1, projects: [], items: [], stages: [] },  // Home and the sidebar read the work board
@@ -252,12 +251,14 @@ async function main() {
       page.on('pageerror', error => pageErrors.push(error.message))
       await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'light' })
       await page.routeWebSocket('**/*', socket => socket.close())
+      const prefs = prefsStore()
       await page.route('**/*', async route => {
         const request = route.request(), url = new URL(request.url())
         // The random origin has no existing worker; never let this page install one.
         if (url.pathname.endsWith('/sw.js')) return route.fulfill({ status: 404, body: '' })
         if (url.pathname.includes('/api/')) {
           const endpoint = url.pathname.split('/api/')[1]
+          if (endpoint === 'prefs') return route.fulfill({ json: request.method() === 'GET' ? prefs.get() : prefs.post(request.postDataJSON()) })
           endpoints.add(`${request.method()} ${url.pathname}`)
           if (request.method() !== 'GET') return route.fulfill({ json: { ok: true } })
           if (!(endpoint in fixture)) unexpected.add(endpoint)

@@ -4,7 +4,7 @@ const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
 const assert = require('node:assert/strict')
-const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal, prefsStore } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const now = Math.floor(Date.now() / 1000)
@@ -29,7 +29,7 @@ const fixture = {
   footer: { observed: true, model: 'Claude', mode: 'default', notices: [],
     crons: [{ ...job, next: now + 600, schedule: '13,43 * * * *', recurring: true }] },
   live: {},
-  prefs: { prefs: {}, version: 1 }, 'projects/marks': {}, 'projects/backlog': { text: '' },
+  'projects/marks': {}, 'projects/backlog': { text: '' },
   'work/board': { revision: 1, projects: [], items: [], stages: [] }, 'side-shells': { shells: [] },
   update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Test server', office: false },
   catalog: { commands: [], plugins: [], mcp: [], note: '' }, stream: {},
@@ -63,11 +63,13 @@ async function main() {
       page.on('pageerror', error => pageErrors.push(`${width}: ${error.message}`))
       await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'light' })
       await page.routeWebSocket('**/*', socket => socket.close())
+      const prefs = prefsStore()
       await page.route('**/*', async route => {
         const request = route.request(), url = new URL(request.url())
         if (url.pathname.endsWith('/sw.js')) return route.fulfill({ status: 404, body: '' })
         if (url.pathname.includes('/api/')) {
           const endpoint = url.pathname.split('/api/')[1]
+          if (endpoint === 'prefs') return route.fulfill({ json: request.method() === 'GET' ? prefs.get() : prefs.post(request.postDataJSON()) })
           if (request.method() !== 'GET') return route.fulfill({ json: { ok: true } })
           if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
           return route.fulfill({ json: fixture[endpoint] || {} })

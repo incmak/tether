@@ -3,7 +3,7 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser, serveLocal, shotsDir } = require('../browser_test_helper.cjs')
+const { getBrowser, serveLocal, shotsDir, prefsStore } = require('../browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.resolve(__dirname, '../dist'))
 const SHOTS = shotsDir('responsive/tools')
@@ -39,7 +39,7 @@ const fixture = {
   footer: { observed: true, model: 'Opus 5.5', mode: 'default', notices: [] },
   subagents: { main: { model: 'claude-opus-5-5', context: 91452, title: 'Build the agent map' }, agents, tasks },
   'subagent-tool': { id: 't1', name: 'Bash', title: 'ls server', is_error: false, status: 'complete', detail: '$ ls server\nserver.py\nsubagents.py', format: 'text', truncated: false, images: 0 },
-  prefs: { prefs: {}, version: 1 }, 'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
+  'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
   update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Test server', office: false },
   catalog: { commands: [], plugins: [], mcp: [], note: '' }, stream: {}, 'codex-runs': { pane: '%1', running: 0, runs: [] }, 'autonomy/review': { due: false, reason: null, new: 0, disputed: 0, total: 0, last_review: 0, snoozed_until: 0, groups: [] },
   'browser/agents': { enabled: false, available: false, reason: 'off', agents: [], asks: [] },
@@ -78,10 +78,12 @@ async function main() {
   await page.emulateMedia({reducedMotion:'reduce',colorScheme:'light'})
   await page.routeWebSocket('**/*',socket=>socket.close())
   let detailMode='ok', trustMode='untrusted', terminalMode='ok'
+  const prefs = prefsStore()
   await page.route('**/*',async route=>{
    const req=route.request(),url=new URL(req.url())
    if(url.pathname.includes('/api/')){
     const endpoint=url.pathname.split('/api/')[1]
+    if (endpoint === 'prefs') return route.fulfill({ json: req.method() === 'GET' ? prefs.get() : prefs.post(req.postDataJSON()) })
     if(endpoint==='stream')return route.fulfill({status:204,body:''})
     if(endpoint==='codex-trust'&&req.postDataJSON()?.op==='trust')return route.fulfill({status:500,json:{error:long}})
     if(endpoint==='codex-trust')return route.fulfill({json:{state:trustMode,folder:'/workspace/a',target:'/workspace/'+long,target_id:'1:1'}})

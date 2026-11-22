@@ -2,7 +2,7 @@
 const { strict: assert } = require('node:assert')
 const { mkdirSync } = require('node:fs')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, prefsStore } = require('./browser_test_helper.cjs')
 
 const origin = 'http://127.0.0.1:5142'
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
@@ -17,18 +17,23 @@ async function main() {
     page.setDefaultTimeout(15000)
     page.on('pageerror', error => errors.push(error.message))
     await page.routeWebSocket('**/*', socket => socket.close())
+    const prefs = prefsStore()
     await page.route('**/*', route => {
       const request = route.request(), url = new URL(request.url())
       if (url.pathname.endsWith('/sw.js')) return route.fulfill({ status: 404, body: '' })
       if (url.pathname.includes('/api/')) {
         const endpoint = url.pathname.split('/api/')[1]
-        if (request.method() !== 'GET') { writes.push(endpoint); return route.fulfill({ json: { ok: true } }) }
+        if (request.method() !== 'GET') {
+          writes.push(endpoint)
+          return route.fulfill({ json: endpoint === 'prefs' ? prefs.post(request.postDataJSON()) : { ok: true } })
+        }
+        if (endpoint === 'prefs') return route.fulfill({ json: prefs.get() })
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
         const pane = panes.find(item => item.id === url.searchParams.get('session')) || panes[0]
         const fixtures = {
           sessions: { sessions: panes, default_thread: panes[0].thread },
           chat: { messages: [], earlier: 0, limit: 40, session: pane.id, thread: pane.thread, agent: pane.agent, state: 'Idle', writable: true },
-          footer: { observed: true }, prefs: { prefs: {}, version: 1 }, host: { name: 'Fixture' },
+          footer: { observed: true }, host: { name: 'Fixture' },
           'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
           catalog: { commands: [], plugins: [], mcp: [] }, usage: { claude: null, codex: null },
           subagents: { main: {}, agents: [], tasks: [] }, 'codex-runs': { runs: [] },
@@ -161,6 +166,7 @@ async function main() {
     assert.deepEqual(await labels(), [mouseBefore[1], mouseBefore[0], mouseBefore[2]])
     await page.locator(title(0)).focus(); await page.keyboard.press('Enter')
     await page.locator('dialog[open]').waitFor()
+    // Prefs saves and usage batches are background writes.
     assert.equal(writes.some(endpoint => endpoint !== 'prefs' && endpoint !== 'ui-usage'), false, `Unexpected write: ${writes}`)
     assert.deepEqual(errors, [])
     console.log('Mouse slot drag and keyboard details pass; no terminal writes or page errors')

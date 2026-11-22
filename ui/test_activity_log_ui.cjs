@@ -4,7 +4,7 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser, serveLocal, shotsDir } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal, shotsDir, prefsStore } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = shotsDir('activity-log')
@@ -65,7 +65,7 @@ const fixture = {
   sessions: { sessions: [pane], default_thread: 't1' },
   chat: { messages: [], busy: false, thread: 't1', agent: 'claude', writable: true, session: '%1', earlier: 0, limit: 100, state: 'Idle', approval: null },
   footer: { observed: true, model: 'Opus 5.5', mode: 'default', notices: [] }, subagents: { main: null, agents: [], tasks: [] },
-  prefs: { prefs: {}, version: 1 }, 'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
+  'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
   update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Test server', office: false },
   catalog: { commands: [], plugins: [], mcp: [], note: '' }, stream: {}, 'codex-runs': { pane: '%1', running: 0, runs: [] },
   'autonomy/review': { due: false, reason: null, new: 0, disputed: 0, total: 0, last_review: 0, snoozed_until: 0, groups: [] },
@@ -85,7 +85,7 @@ async function main() {
   const pageErrors = [], unexpected = new Set(), asks = [], posts = []
   let mode = 'rows'  // rows | empty | error
   let all = entries(), level = 3, rev = 0, autonomy = 4, projectCodex = { override: false, level: 3 }
-  let serverZone = 'America/New_York', timeZone, prefsVersion = 1
+  let prefs = prefsStore({ zone: 'America/New_York' })
   // A request the test holds: `seen` resolves when it arrives, and it is answered only on `release()`, or with
   // release({ status, json }) instead. The test waits on these events, never on a timer.
   const gates = []
@@ -138,7 +138,7 @@ async function main() {
       if (url.pathname.endsWith('/sw.js')) return route.fulfill({ status: 404, body: '' })
       if (url.pathname.includes('/api/')) {
         const endpoint = url.pathname.split('/api/')[1]
-        if (endpoint === 'prefs') return route.fulfill({ json: { prefs: { timeZone }, version: prefsVersion, zone: serverZone } })
+        if (endpoint === 'prefs') return route.fulfill({ json: request.method() === 'GET' ? prefs.get() : prefs.post(request.postDataJSON()) })
         if (request.method() === 'POST' && endpoint === 'ui-usage') return route.fulfill({ json: { gen: '' } })
         if (endpoint === 'audit') {
           if (request.method() !== 'GET') { unexpected.add(`${request.method()} audit`); return route.fulfill({ status: 405, json: { error: 'read only' } }) }
@@ -448,21 +448,21 @@ async function main() {
       await to.fill('2026-03-08')
       await spring
       check(`${at} the server's zone covers the 23-hour day`, true)
-      timeZone = 'Asia/Kolkata'; prefsVersion++
+      prefs.post({ changes: { timeZone: 'Asia/Kolkata' } })
       const kolkata = dateRange('2026-03-07T18:30:00Z', '2026-03-08T18:30:00Z')
       await pullPrefs()
       await kolkata
       check(`${at} the synced override updates the open date filter`, true)
-      timeZone = undefined; prefsVersion++
+      prefs.post({ changes: { timeZone: undefined } })
       const restored = ranges('05:00:00', '04:00:00')
       await pullPrefs()
       await restored
-      serverZone = 'UTC'
+      prefs = prefsStore({ ...prefs.get(), zone: 'UTC' })
       const utc = ranges('00:00:00', '00:00:00')
       await pullPrefs()
       await utc
       check(`${at} the server default updates without a prefs version change`, true)
-      serverZone = 'America/New_York'
+      prefs = prefsStore({ ...prefs.get(), zone: 'America/New_York' })
       const resetZone = ranges('05:00:00', '04:00:00')
       await pullPrefs()
       await resetZone

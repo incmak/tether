@@ -88,4 +88,15 @@ function shotsDir(name, ...sub) {
   return path.join(os.tmpdir(), 'tether-ui-shots', name, ...sub)
 }
 
-module.exports = { getBrowser, sharedEndpoint, serveLocal, shotsDir }
+// Mirror the stored copy returned by the prefs API. Create one store for each page or case.
+function prefsStore({ prefs = {}, version = 1, zone = 'UTC' } = {}) {
+  const get = () => ({ prefs, version, zone: prefs.timeZone ?? zone })
+  const post = ({ changes }) => {
+    prefs = { ...prefs, ...changes }
+    version += 1
+    return get()
+  }
+  return { get, post }
+}
+
+module.exports = { getBrowser, sharedEndpoint, serveLocal, shotsDir, prefsStore }
