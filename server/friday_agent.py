@@ -777,6 +777,7 @@ def same_text(text):
 YES_WORDS = frozenset('yes yeah yep yup ok okay sure send alright absolutely correct ahead'.split())
 YES_FILLER = frozenset('do it that this go right now thanks thank sounds good great perfect fine '
                        'uh um and just so then all s to the chat session tab please'.split())  # "you" only in "thank you"
+PROMPT_CUE_WORDS = YES_WORDS | YES_FILLER | {'you', 'can', 'could', 'i', 'have', 'read', 'it', 'now', 'please'}
 
 
 CORRECTION_OBJECTS = frozenset('it that this these those them the a an my its his her their to me'.split())
@@ -2588,7 +2589,9 @@ def runtime_types():
                         if not replay:
                             self.session.pending_proposal = proposal = None
                     elif proposal.name == 'send_prompt' and not proposal.cue_given:
-                        prompt_send_cue = not confirms(proposal, self.last_user_text)
+                        words = set(norm(self.last_user_text).split())
+                        prompt_send_cue = ('send' in words and words <= PROMPT_CUE_WORDS
+                                           and not confirms(proposal, self.last_user_text))
                 self.tool_run = SimpleNamespace(source=self.run_source,
                     last_user_text=self.last_user_text, used=set(),
                     drop_followup=drop_followup,

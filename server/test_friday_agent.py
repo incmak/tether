@@ -3625,6 +3625,28 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                              frame.text == 'Not sent. Say yes to send it, or no.' for frame in frames))
         self.assertEqual(session.pending_proposal, pending)
 
+    async def test_heard_draft_passes_followup_requests_to_the_model(self):
+        from pipecat.processors.aggregators.llm_context import LLMContext
+
+        for words in ('Read all of it', 'Change the second line to say hello',
+                      'Send it to Billing instead', 'What does it say about tests?'):
+            with self.subTest(words=words):
+                pending = draft_proposal()
+                session = SimpleNamespace(pending_proposal=pending, prepare_messages=lambda messages: messages)
+                service = self.rt.FridayLLM(session, friday.brain_config({}))
+                service.push_frame = AsyncMock()
+                context = LLMContext([{'role': 'assistant', 'content': friday.send_readback(pending)},
+                                      {'role': 'user', 'content': words}])
+                try:
+                    with patch.object(self.rt.OpenAILLMService, '_process_context', AsyncMock()) as completion:
+                        await service._process_context(context)
+                    completion.assert_awaited_once_with(context)
+                    self.assertEqual(context.get_messages()[-1]['content'], words)
+                    service.push_frame.assert_not_awaited()
+                    self.assertEqual(session.pending_proposal, pending)
+                finally:
+                    await service._client.close()
+
     async def test_expired_draft_cue_needs_a_new_readback(self):
         self.mock_draft_source(saved_draft('Keep the token check.'))
         pending = replace(draft_proposal(), turn=-2, cue_given=True)
@@ -6360,6 +6382,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         for mode, read_all, answers in (
                 ('server', False, ('You can send it', 'Yes')),
                 ('server', False, ('send it', 'Yes')),
+                ('server', False, ('Please send it', 'Yes')),
                 ('client', True, ('Send it?', 'Yes')),
                 ('client', False, ('You can send it', 'No')),
                 ('server', False, ('You can send it', 'send it')),
