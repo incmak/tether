@@ -48,6 +48,7 @@ TETHER = Path(os.environ.get('TETHER_HOME') or HOME / '.tether')  # session proj
 SHARE = Path(os.environ.get('TETHER_SHARE') or TETHER / 'share')
 CONFIG = Path(os.environ.get('MOBILE_TMUX_CONFIG') or HOME / '.config/mobile-tmux')
 ATTENTION = Path(os.environ.get('TETHER_ATTENTION') or CACHE / 'attention.json')  # Attention mode asks (attention.py)
+URGENT_CALLS = Path(os.environ.get('TETHER_URGENT_CALLS') or CACHE / 'urgent-calls.json')  # urgent call planner (urgent_call.py)
 LAYOUTS = Path(os.environ.get('TETHER_LAYOUTS') or CONFIG / 'layouts')  # custom layout JSON files (custom_layouts.py)
 # The commit gate's log (commit_gate.py): one JSON line per checked commit.
 COMMIT_GATE_LOG = Path(os.environ.get('TETHER_COMMIT_GATE_LOG') or HOME / '.cache/tether/commit-gate.log')

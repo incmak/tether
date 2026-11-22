@@ -38,6 +38,7 @@ TURN_REFRESH_INTERVAL = 86400
 TURN_HISTORY_LIMIT = 50
 URGENT_GRACE = 180
 LIMIT = 160
+CALL_LIMIT = 300
 QUIET = 8  # seconds after you answer a prompt in which the same prompt, still on screen, does not start a new ask
 AGENTS = ('claude', 'codex', 'antigravity')
 ENDED = ('Idle', 'Stopped')  # the turn is over, so the transcript's last reply is final
@@ -79,6 +80,19 @@ def urgent_text(reply):
         if match:
             return _clip(re.sub(r'[*`]', '', match[1])) or None
     return None
+
+
+def call_text(reply):
+    """The Urgent line directly above the final Needs you: yes line."""
+    status, lines = status_line(reply)
+    if status != 'yes':
+        return None
+    line = next((line.strip() for line in reversed(lines) if line.strip()), '')
+    match = URGENT.match(line.replace('`', ''))
+    if not match:
+        return None
+    text = ' '.join(re.sub(r'[*`]', '', match[1]).split())
+    return (text if len(text) <= CALL_LIMIT else text[:CALL_LIMIT - 1].rstrip() + '…') or None
 
 
 def _digest(text):
@@ -458,6 +472,11 @@ class Attention:
                     ask.update(id=secrets.token_hex(6), asked_at=now, later=None, stay=False, back_at=None)
                     ask.pop('moved', None)
                 ask.update(kind='reply', next=urgent or text, urgent=bool(urgent), opened=False, turn=turn_id, occ=occurrence)
+                call = call_text(reply)
+                if call is None:
+                    ask.pop('call', None)
+                else:
+                    ask['call'] = call
                 if is_new_urgent:
                     ask.update(ping_due=now + URGENT_GRACE, pinged=False)
                 elif not urgent:
@@ -465,6 +484,23 @@ class Attention:
             elif ask and ask['kind'] == 'reply':
                 del self.asks[pane]  # a new turn without "Needs you: yes": you answered it, here or in the terminal
         return True
+
+    def call_candidates(self, now=None):
+        now = self.clock() if now is None else now
+        with self.lock:
+            return [dict(id=ask['id'], pane=pane, thread=ask.get('thread'), call=ask['call'],
+                         grace_end=ask['ping_due'], opened=ask.get('opened', False),
+                         snoozed=(ask.get('snoozed_until') or 0) > now, later=bool(ask.get('later')))
+                    for pane, ask in self.asks.items()
+                    if ask.get('call') and ask['kind'] == 'reply' and type(ask.get('ping_due')) in (int, float)]
+
+    def mark_opened(self, pane, ask_id):
+        with self.lock:
+            ask = self.asks.get(pane)
+            if not ask or ask['id'] != ask_id:
+                return False
+            thread = ask.get('thread')
+        return self.act(pane, thread, 'opened', ask_id=ask_id)
 
     def due_pings(self, now=None):
         """Send due urgent pings once, after recording the attempts on disk."""
