@@ -2,17 +2,17 @@
  "long": {
   "questions": [
    {
-    "question": "B175 browser proof: the two cases that show B175's effect cannot be reached in a browser because of bugs that also exist on dev today. (1) A report with a missing image never opens the editor (B500), so the attach button can't be reached. (2) A package with more than 50 image files is refused (B501). The B175 behaviour is proven by pipeline tests and real-database tests, and a reviewer approved it. How do you want B175 shipped?",
-    "header": "B175 proof",
+    "question": "Release proof: the two cases that show the new export path cannot be reached in a browser because of bugs that also exist on the main branch today. (1) A report with a missing chart never opens the editor, so the upload button can't be reached. (2) A bundle with more than 50 chart files is refused. The behaviour is proven by pipeline tests and database tests, and a reviewer approved it. How do you want it shipped?",
+    "header": "Ship plan",
     "multiSelect": false,
     "options": [
      {
       "label": "Ship, label proof (Recommended)",
-      "description": "Push both PRs once (pipeline first). The PRs say 'B175 effect not proven in browser' and name the blocking bugs B500 and B501. I run one browser check that a normal PDF import still exports when host load drops (it is about 450 now). The browser proof of B175 becomes part of B500's acceptance."
+      "description": "Push both branches once (pipeline first). The notes say 'export path not proven in browser' and name the two blocking bugs. I run one browser check that a normal import still exports when the host is busy. The browser proof becomes part of the editor fix."
      },
      {
-      "label": "Hold until B500",
-      "description": "Keep both commits local. Fix B500 first in a new tab, then prove B175 end to end in a browser, then push. B175 waits until then."
+      "label": "Hold until the editor fix",
+      "description": "Keep both commits local. Fix the editor first in a new tab, then prove the export end to end in a browser, then push."
      }
     ]
    }
