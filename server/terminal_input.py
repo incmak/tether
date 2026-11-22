@@ -462,7 +462,7 @@ def claude_input_box(lines, row):
         if INPUT_HINT.search(line) or MENU_HINT_START.match(line):
             return False
         if line.lstrip().startswith(tuple('─━│┃╭╮╰╯┌┐└┘├┤┬┴┼═║')):
-            closing = line.strip()
+            closing = line.rstrip()  # no indent: spaces must not make up for missing dashes
             if (not closing or closing.strip('─')
                     or _terminal_columns(line.rstrip()) != _terminal_columns(above.rstrip())):
                 return False

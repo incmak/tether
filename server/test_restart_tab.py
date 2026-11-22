@@ -197,6 +197,8 @@ class RestartTests(unittest.TestCase):
             ('wrapped menu hint, plain top', [plain_top, '❯', closing, 'Enter', 'to select · Esc', 'to cancel']),
             ('malformed rule, named top', [top, '❯', '─ unexpected screen row', '  unsent text', closing]),
             ('malformed rule, plain top', [plain_top, '❯', '  ─ unexpected screen row', '  unsent text', closing]),
+            ('indented closing rule, named top', [top, '❯', ' ' + closing[1:], '  unsent text', closing]),
+            ('indented closing rule, plain top', [plain_top, '❯', ' ' + closing[1:], '  unsent text', closing]),
             *[
                 (f'{case}, {top_kind} top', [top_rule, '❯', *below])
                 for top_kind, top_rule in [('plain', plain_top), ('named', top)]
