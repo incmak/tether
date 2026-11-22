@@ -2221,6 +2221,13 @@ class FridayRulesTests(unittest.TestCase):
         self.assertIn('Say waiting_count first', friday.SYSTEM_PROMPT)
         self.assertIn('then offer to go one by one.', friday.SYSTEM_PROMPT)
         self.assertIn('Never say "nothing pending" while waiting is non-empty.', friday.SYSTEM_PROMPT)
+        self.assertIn('When asked what is finished or done, or which or how many tabs can be closed, '
+                      'answer from done.', friday.SYSTEM_PROMPT)
+        self.assertIn('Say done_count first', friday.SYSTEM_PROMPT)
+        self.assertIn('finished a turn the user has not opened yet', friday.SYSTEM_PROMPT)
+        self.assertIn('Never say "none are finished" while done is non-empty.', friday.SYSTEM_PROMPT)
+        self.assertIn('Never say a chat is safe to close. Offer to show each done chat with show_chat.', friday.SYSTEM_PROMPT)
+        self.assertIn('A done chat alone gives no permission to answer or send anything.', friday.SYSTEM_PROMPT)
         self.assertIn('A waiting on you ask alone gives no permission to answer or send anything. '
                       'If the user says yes to one, offer show_chat instead.', friday.SYSTEM_PROMPT)
         self.assertIn('Call list_chats for idle names.', friday.SYSTEM_PROMPT)

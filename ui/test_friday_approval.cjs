@@ -49,11 +49,11 @@ const fixture = [question, prompt, palette,
   pane('%7', 'Paper'),
 ]
 
-function homeAttention(panes, enabled, hidden = () => false) {
+function homeAttention(panes, enabled, hidden = () => false, seen = {}, selected) {
   const sessions = sidebar.groupSessions(panes, hidden)
-  const { needs } = homeGroups(panes, sessions, {})
+  const { needs, done } = homeGroups(panes, sessions, seen, selected)
   const asks = enabled ? attention.waitingAsks(sessions.flatMap(session => session.panes), now) : []
-  return { asks, count: new Set([...needs, ...asks].map(item => item.pane.id)).size }
+  return { asks, count: new Set([...needs, ...asks].map(item => item.pane.id)).size, done: done.map(card => card.pane.id) }
 }
 const agentsOf = panes => panes.filter(pane => pane.agent !== 'shell')
 
@@ -66,10 +66,14 @@ test('Friday reports the same waiting asks and total as Home only in Attention m
     needs: [{ chat: 'Map', needs: 'Which route?' }, { chat: 'Catalog', needs: 'Publish the proof?' }],
   }
   assert.equal(on.count, 3)
+  assert.deepEqual(plain(on.done), [])
   assert.deepEqual(plain(chats(agents, question, on)), {
     ...previous, idle: 3, waiting: [{ chat: 'Palette', kind: 'question', text: 'Choose a palette' }], waiting_count: on.count,
+    done: [], done_count: 0,
   })
-  assert.deepEqual(plain(chats(agents, question, off)), { ...previous, waiting: [], waiting_count: off.count })
+  assert.deepEqual(plain(chats(agents, question, off)), {
+    ...previous, waiting: [], waiting_count: off.count, done: [], done_count: 0,
+  })
   const previousList = {
     target: 'Map', chats: ['Map, Codex, needs you, in Studio', 'Catalog, Codex, needs you, in Studio',
       ...['Palette', 'Frame', 'Clay', 'Paper'].map(name => `${name}, Codex, idle, in Studio`)],
@@ -113,6 +117,57 @@ test('an ask that waits on you does not authorize a named or unnamed approval', 
   assert.equal(approvalTarget([askOnly], '').error, 'No chat is waiting for approval.')
   assert.equal(approvalTarget([askOnly, prompt], 'Palette').error,
     'No chat called Palette is waiting for approval. Waiting: Catalog.')
+})
+
+const proof = pane('%10', 'Proof', { finished: 900 })
+
+test('Friday counts a finished turn once, with prompts and waiting asks taking priority', () => {
+  const needs = { ...prompt, finished: 950 }
+  const running = pane('%11', 'Print', { state: 'Working' })
+  const agents = [needs, palette, proof, pane('%12', 'Paper'), running]
+  const home = homeAttention(agents, true)
+  const overlapping = { ...home, done: [needs.id, proof.id] }
+  const state = plain(chats(agents, undefined, overlapping))
+  assert.deepEqual(state, {
+    target: '', busy: ['Print'], needs: [{ chat: 'Catalog', needs: 'Publish the proof?' }],
+    waiting: [{ chat: 'Palette', kind: 'question', text: 'Choose a palette' }], waiting_count: 2,
+    done: [{ chat: 'Proof', finished: 900 }], done_count: 1, idle: 1,
+  })
+  assert.equal(state.busy.length + state.needs.length + state.waiting.length + state.done_count + state.idle, agents.length)
+  assert.deepEqual(plain(chatList(agents, agents, undefined, overlapping)), {
+    target: '', chats: [
+      'Catalog, Codex, needs you, in Studio',
+      'Palette, Codex, waiting on you (question: Choose a palette), in Studio',
+      'Proof, Codex, done (finished, not opened yet), in Studio',
+      'Paper, Codex, idle, in Studio',
+      'Print, Codex, working, in Studio',
+    ],
+    sessions: ['Studio: 5 chats, 1 busy'],
+  })
+})
+
+test('Friday preserves Home Done order and omits opened, hidden and waiting chats', () => {
+  const cover = pane('%11', 'Cover', { finished: 950 })
+  const read = pane('%12', 'Sketch', { finished: 960 })
+  const selected = pane('%13', 'Paper', { finished: 970 })
+  const hidden = pane('%14', 'Draft', { finished: 980 })
+  const waiting = { ...palette, finished: 990 }
+  const agents = [proof, cover, read, selected, hidden, waiting]
+  const home = homeAttention(agents, true, pane => pane.id === hidden.id, { [read.id]: read.finished }, selected.id)
+  const state = plain(chats(agents, selected, home))
+  assert.deepEqual(state.done, [{ chat: 'Cover', finished: 950 }, { chat: 'Proof', finished: 900 }])
+  assert.equal(state.done_count, 2)
+  assert.equal(state.idle, 3)
+  const list = plain(chatList(agents, agents, selected, home))
+  assert.equal(list.chats[5], 'Palette, Codex, waiting on you (question: Choose a palette), in Studio')
+  assert.deepEqual(list.sessions, ['Studio: 6 chats, 0 busy'])
+})
+
+test('a done chat does not authorize a named or unnamed approval', () => {
+  assert.equal(approvalTarget([proof], 'Proof').error, 'No chat called Proof is waiting for approval. Waiting: none.')
+  assert.equal(approvalTarget([proof], '').error, 'No chat is waiting for approval.')
+  assert.equal(approvalTarget([proof, prompt], 'Proof').error,
+    'No chat called Proof is waiting for approval. Waiting: Catalog.')
 })
 
 const waiting = (pane_name, id = '%1') => ({
