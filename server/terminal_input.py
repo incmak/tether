@@ -462,12 +462,16 @@ def claude_input_box(lines, row):
         line = lines[index]
         if INPUT_HINT.search(line) or MENU_HINT_START.match(line):
             return False
-        if line.strip() and RULE_LINE.match(line):
+        if line.lstrip().startswith('─'):
+            if not RULE_LINE.match(line):
+                return False
             if named:
                 closing = line.rstrip()
                 if closing.strip('─') or _terminal_columns(closing) != _terminal_columns(above.rstrip()):
                     return False
-            return not any(INPUT_HINT.search(after) for after in lines[index + 1:])
+            after = lines[index + 1:]
+            return not (any(INPUT_HINT.search(line) for line in after)
+                        or INPUT_HINT.search(joined_lines(after)))
     return False
 
 

@@ -170,6 +170,7 @@ class RestartTests(unittest.TestCase):
                                ('claude', 'claude_2.1.330_named_rule/short_name_120col.ansi'),
                                ('claude', 'claude_2.1.330_named_rule/short_name_50col.ansi'),
                                ('claude', 'claude_2.1.330_named_rule/long_name_50col.ansi'),
+                               ('claude', 'claude_2.1.330_named_rule/exact_fit_50col.ansi'),
                                ('claude', 'claude_2.1.330_named_rule/wide_chars_60col.ansi'),
                                ('codex', 'codex_0.170.0_restart/idle.ansi'), ('codex', 'codex_0.170.0_restart/idle_narrow.ansi'),
                                ('codex', 'codex_0.170.0_restart/idle_50col.ansi')]:
@@ -185,12 +186,17 @@ class RestartTests(unittest.TestCase):
         lines = terminal_input.ANSI_SGR.sub('', capture).splitlines()
         row = next(i for i, line in enumerate(lines) if line.startswith('❯'))
         top, _, closing = lines[row - 1:row + 2]
+        plain_top = '─' * len(closing)
         for case, screen in [
             ('missing closing rule', [top, '❯']),
             ('menu hint', [top, '❯', closing, 'Enter to select · Esc to cancel']),
             ('width mismatch', [' some text ─', '❯', closing]),
             ('blank closing rule', [top, '❯', ' ' * len(closing)]),
             ('wrong closing rule', [top, '❯', '━' * len(closing)]),
+            ('wrapped menu hint, named top', [top, '❯', closing, 'Enter', 'to select · Esc', 'to cancel']),
+            ('wrapped menu hint, plain top', [plain_top, '❯', closing, 'Enter', 'to select · Esc', 'to cancel']),
+            ('malformed rule, named top', [top, '❯', '─ unexpected screen row', '  unsent text', closing]),
+            ('malformed rule, plain top', [plain_top, '❯', '  ─ unexpected screen row', '  unsent text', closing]),
         ]:
             with self.subTest(case=case):
                 self.screen = '\n'.join(screen)
