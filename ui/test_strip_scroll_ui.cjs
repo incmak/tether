@@ -205,7 +205,7 @@ async function main() {
     check('setting off: at the strip end the swipe passes (Back/Forward)', none(wheels) && await selected() === '%2', JSON.stringify(wheels))
     wheels = await swipe(1, { x, y: tabs.y + tabs.height + 8 })
     check('setting off: the band passes too', none(wheels), JSON.stringify(wheels))
-    // 9. The setting: on by default, a labelled switch in Settings › Sessions & chat that works with the keyboard at 320 px.
+    // 9. The setting: on by default, a labelled switch in Settings › Sidebar & chat that works with the keyboard at 320 px.
     await open(1280)
     await page.locator('button[aria-label="Settings"]').first().click()
     await page.getByLabel('Search settings').fill('swipe')

@@ -81,7 +81,7 @@ def session_folder(value=None):
         if not folder.is_absolute():
             raise ValueError('Use an absolute folder path or a path that starts with ~/.')
     if not folder.is_dir() or not os.access(folder, os.R_OK | os.X_OK):
-        raise ValueError('The default session folder is unavailable. Choose an existing, accessible folder in Settings > Sessions.')
+        raise ValueError('The default session folder is unavailable. Choose an existing, accessible folder in Settings › General.')
     return str(folder.resolve())
 
 

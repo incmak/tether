@@ -100,7 +100,7 @@ def start():
             raise ValueError(BUSY)
         main = advisor.read()['main']
         if main['agent'] == 'none':
-            raise ValueError('Turn on the advisor in Settings › Agents first.')
+            raise ValueError('Turn on the advisor in Settings › Models & helpers first.')
         rows = [row for group in lessons.review()['groups'] for row in group['lessons']]
         if not rows:
             raise ValueError('There are no lessons to check.')

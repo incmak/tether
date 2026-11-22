@@ -119,7 +119,7 @@ export function SessionDetails({ api, pane, session, stack, footer, mode, model,
   const statusParts = (footer.status ?? '').split('|').map(part => part.trim()).filter(Boolean)
   const usageLabel = pane.agent === 'claude' ? 'Plan usage' : 'Usage and credits'
   const disclosure = foundry ? 'Tether does not write descriptions for Foundry tabs.'
-    : !enabled ? (brief?.error || 'AI descriptions are off: Settings › Main AI model is Local only.')
+    : !enabled ? (brief?.error || 'AI descriptions are off: Settings › Models & helpers › Main AI model is Local only.')
     : `Once per chat, Tether sends the first two prompts and replies, shortened, to ${BRIEF_MODEL[pane.agent] ?? 'a small model'} to write the name and description.`
 
   return <dialog {...modal} className="sheet session-details" aria-label={`Session details: ${title}`} aria-describedby={description ? 'sd-description' : undefined}>

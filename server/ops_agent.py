@@ -1,7 +1,7 @@
 """The daily ops report (B212): once a day, Tether writes yesterday's facts to a postmortem note and starts one
 cheap agent tab per project to say what to learn from them.
 
-Off by default: the tab spends tokens every day, so each person turns it on (Settings › Agents › Daily ops report).
+Off by default: the tab spends tokens every day, so each person turns it on (Settings › Learning & upkeep › Daily ops report).
 
 What one run does, for each open session that has a project folder and work from yesterday:
 1. Tether itself reads the facts. No model is involved:

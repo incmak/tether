@@ -258,7 +258,7 @@ export function BrowserSheet({ api, pane, onClose }: { api: Api; pane: Pane; onC
   </>
 }
 
-/** Settings › System: the switch and why it is off. */
+/** Settings › Shared browser: the switch and why it is off. */
 export function AgentBrowserSettings({ api }: { api: Api }) {
   const state = useAgentBrowser(api)
   const [busy, setBusy] = useState(false)

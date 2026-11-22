@@ -57,7 +57,7 @@ function DecisionRow({ item }: { item: Decision }) {
   </details></li>
 }
 
-/** Settings › Agents: the mode, the trust of each area and the latest decisions. */
+/** Settings › Commit & merge: the mode, the trust of each area and the latest decisions. */
 export function AutoMergeSettings({ api }: { api: Api }) {
   const fetcher = useCallback((signal: AbortSignal) => api<AutoMergeState>('auto-merge', undefined, signal), [api])
   const { data, error: loadError, refresh } = usePolling(fetcher, 10000)

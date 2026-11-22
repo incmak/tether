@@ -102,7 +102,7 @@ class LessonsCheck(unittest.TestCase):
 
     def test_start_refuses_disabled_empty_and_running(self):
         self.settings.return_value = {'main': advisor.OFF}
-        with self.assertRaisesRegex(ValueError, 'Turn on the advisor in Settings › Agents first.'):
+        with self.assertRaisesRegex(ValueError, 'Turn on the advisor in Settings › Models & helpers first.'):
             check.start()
         self.settings.return_value = {'main': self.main}
         with self.assertRaisesRegex(ValueError, 'There are no lessons to check.'):

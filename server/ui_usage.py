@@ -20,7 +20,7 @@ Event fields (all short strings or small numbers):
   t  when it happened, in the page's milliseconds. The batch has the page's time when it was sent ('now'), so the
      server finds the real time without trusting the page's clock.
 
-report() turns the log into the lists in Settings > UI usage: the most used controls, controls on the page that are
+report() turns the log into the lists in Settings › Usage tracking › UI usage: the most used controls, controls on the page that are
 rarely used (move them into a menu), controls in menus that are often used (move them up), controls that were seen
 but never used, and the clicks it takes to reach each view. Run `python3 ui_usage.py` for the same report as JSON.
 """

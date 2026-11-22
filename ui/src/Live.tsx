@@ -91,10 +91,12 @@ const needsOf = (pane: Pane) => pane.needs?.text ?? (approvalOf(pane) ? shortTex
 const waitingText = (ask: Waiting['ask']) => shortText(ask.next, 140)
 const wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 
-interface LiveAttention { asks: Waiting[]; count: number }
+interface LiveAttention { asks: Waiting[]; count: number; done: string[] }
 interface FridayChats extends AgentChats {
   waiting: { chat: string; kind: Waiting['ask']['kind']; text: string }[]
   waiting_count: number
+  done: { chat: string }[]
+  done_count: number
 }
 
 /** Prompt state: names of idle chats come from list_chats. */
@@ -107,22 +109,32 @@ export function chats(agents: Pane[], target: Pane | undefined, attention: LiveA
   })
   const waiting = attention.asks.filter(({ pane }) => !needsOf(pane))
     .map(({ pane, ask }) => ({ chat: paneTitle(pane), kind: ask.kind, text: waitingText(ask) }))
-  const busy = agents.filter(pane => !needsOf(pane) && !waitingIds.has(pane.id) && chatState(pane) !== 'idle').map(paneTitle)
+  const available = agents.filter(pane => !needsOf(pane) && !waitingIds.has(pane.id))
+  const availableById = new Map(available.map(pane => [pane.id, pane]))
+  const doneIds = new Set(attention.done)
+  const done = [...doneIds].flatMap(id => {
+    const pane = availableById.get(id)
+    return pane ? [{ chat: paneTitle(pane) }] : []
+  })
+  const busy = available.filter(pane => !doneIds.has(pane.id) && chatState(pane) !== 'idle').map(paneTitle)
   return { target: target ? paneTitle(target) : '', busy, needs, waiting, waiting_count: attention.count,
-    idle: agents.length - busy.length - needs.length - waiting.length }
+    done, done_count: done.length, idle: agents.length - busy.length - needs.length - waiting.length - done.length }
 }
 
 /** Every chat, one short line each, with the sidebar's session name. */
 // eslint-disable-next-line react-refresh/only-export-components -- Test the tool result without starting a call.
 export function chatList(agents: Pane[], panes: Pane[], target: Pane | undefined, attention: LiveAttention, session?: string) {
   const waiting = new Map(attention.asks.map(({ pane, ask }) => [pane.id, ask]))
+  const doneIds = new Set(attention.done)
   return fridayChatList(agents.map(pane => {
     const needs = needsOf(pane)
     const ask = needs ? undefined : waiting.get(pane.id)
     const text = ask ? waitingText(ask) : ''
-    const state = needs ? 'needs you' : ask ? `waiting on you (${ask.kind}${text ? `: ${text}` : ''})` : chatState(pane)
+    const done = doneIds.has(pane.id)
+    const state = needs ? 'needs you' : ask ? `waiting on you (${ask.kind}${text ? `: ${text}` : ''})`
+      : done ? 'done (finished, not opened yet)' : chatState(pane)
     return { session: pane.tmux_session, chat: paneTitle(pane), agent: agentNames[pane.agent], state,
-      busy: !needs && !ask && state !== 'idle' }
+      busy: !needs && !ask && !done && state !== 'idle' }
   }), groupSessions(panes), target ? paneTitle(target) : '', session)
 }
 

@@ -1,4 +1,4 @@
-// UI usage (Settings › About & system › UI usage, src/uiUsage.ts, server/ui_usage.py) against an existing build: the
+// UI usage (Settings › Usage tracking › UI usage, src/uiUsage.ts, server/ui_usage.py) against an existing build: the
 // page logs clicks, opened dialogs and seen controls without tab names or paths, the report renders at 320 px and
 // 1280 px, the switch saves the pref, and Clear asks first. Every API request stays in this page's fixtures.
 // Run: cd ui && npm run test:ui (or node test_ui_usage_ui.cjs against an existing build).
@@ -138,7 +138,7 @@ async function main() {
       // Open Settings by clicks, then UI usage.
       if (width < 800) await page.getByRole('button', { name: /menu|sessions|open the list/i }).first().click().catch(() => {})
       await page.getByRole('button', { name: 'Settings' }).first().click()
-      await page.getByRole('button', { name: /About & system/ }).first().click()
+      await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: /^Usage tracking/ }).click()
       const toggle = page.getByRole('switch', { name: /Log UI usage/ })
       await toggle.waitFor()
       check(`${at} on by default`, await toggle.isChecked())
@@ -157,7 +157,7 @@ async function main() {
       const clicks = events.filter(event => event.k === 'click')
       // Phone: Settings sits in the sessions drawer (a layer), one click from the page.
       check(`${at} logs the Settings click`, clicks.some(event => event.l === 'Settings' && (width < 800 ? event.d === 1 && event.n === 2 : event.d === 0 && event.n === 1)), JSON.stringify(clicks))
-      check(`${at} logs the click in Settings at depth 1`, clicks.some(event => /About/.test(event.l) && event.d === 1 && event.n >= 2), JSON.stringify(clicks))
+      check(`${at} logs the click in Settings at depth 1`, clicks.some(event => event.l === 'Usage tracking' && event.d === 1 && event.n >= 2), JSON.stringify(clicks))
       check(`${at} logs Settings opening`, events.some(event => event.k === 'open' && event.l === 'Settings' && event.n >= 1), JSON.stringify(events.filter(event => event.k === 'open')))
       const seen = events.filter(event => event.k === 'seen' && event.r === 'Settings').map(event => event.l)
       check(`${at} logs seen controls`, seen.includes('Log UI usage') && seen.includes('Clear the log'), JSON.stringify(seen))

@@ -949,7 +949,7 @@ class Learning(Base):
 
     def test_review_check_conflict_and_disabled_advisor(self):
         for message, code in ((autonomy.lessons_check.BUSY, 409),
-                              ('Turn on the advisor in Settings › Agents first.', 400),
+                              ('Turn on the advisor in Settings › Models & helpers first.', 400),
                               ('There are no lessons to check.', 400)):
             with mock.patch.object(autonomy.lessons_check, 'start', side_effect=ValueError(message)):
                 handler = Handler(autonomy.PATH + '/review', {'action': 'check'})
