@@ -111,14 +111,9 @@ export function holdReadAloud(): { release: () => void; ready: Promise<void> } {
     void locks.request(name, { mode: 'exclusive', signal }, () => {
       if (signal.aborted) return
       channel?.postMessage({ t: 'hold' })
-      const timer = setTimeout(() => {
-        drain.abort()
-        if (!signal.aborted) console.warn('Read aloud did not stop within 1500 ms. Opening the Live microphone.')
-        resolve()
-      }, 1500)
-      // Earlier readers must finish before this exclusive request can run.
+      // Earlier readers must stop before this exclusive request runs. No time limit: the mic must not hear them.
       void locks.request(playName, { mode: 'exclusive', signal: drain.signal }, () => {})
-        .catch(() => {}).finally(() => { clearTimeout(timer); resolve() })
+        .catch(() => {}).finally(resolve)
       return released
     }).catch(() => {}).finally(() => {
       ownHolds.delete(name)

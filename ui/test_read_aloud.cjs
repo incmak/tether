@@ -358,6 +358,11 @@ function silenceWav() {
     check('the exclusive play request queues before the Live microphone opens', () => {
       assert.deepEqual(beforeDelivery, { waiting: true, reading: true, micOpens: 0 })
     })
+    // The old 1500 ms limit opened the mic here. Hold the message past it and check the mic stays closed.
+    const pastLimit = await holder.waitForFunction(() => performance.timeOrigin + performance.now() - window.__voice.playWaitAt > 2000 && { micOpens: window.__voice.micOpens.length }, null, { timeout: 5000, polling: 100 }).then(handle => handle.jsonValue())
+    check('the Live microphone stays closed past 1500 ms while another tab plays', () => {
+      assert.deepEqual(pastLimit, { micOpens: 0 })
+    })
     await page.evaluate(() => window.__voice.deliverHold())
     await page.bringToFront()
     await page.waitForFunction(() => window.__voice.events.includes('end'))
@@ -407,24 +412,26 @@ function silenceWav() {
     assert.ok(staleLocks.every(name => !name.startsWith('tether-read-aloud-hold:')))
     await openLive(holder)
     await page.waitForFunction(() => !!window.__voice.deliverHold, null, { timeout: 5000 })
-    await waitForMic(holder, 2)
-    const cappedMic = await holder.evaluate(() => window.__voice.micOpens[1])
-    assert.equal(cappedMic.held, true)
-    assert.equal(cappedMic.reading, true)
-    assert.ok(cappedMic.at - cappedMic.playWaitAt >= 1490)
+    const staleWait = await holder.waitForFunction(() => performance.timeOrigin + performance.now() - window.__voice.playWaitAt > 2000 && { micOpens: window.__voice.micOpens.length }, null, { timeout: 5000, polling: 100 }).then(handle => handle.jsonValue())
     await page.bringToFront()
     staleClip.release()
+    await waitForMic(holder, 2)
+    const staleMic = await holder.evaluate(() => window.__voice.micOpens[1])
     await page.waitForFunction(async () => {
       const { held, pending } = await navigator.locks.query()
       return ![...held, ...pending].some(lock => lock.name === 'tether-read-aloud-play')
     }, null, { timeout: 5000 })
     await checkHeldButton()
     const stale = await voice()
-    check('the cap releases Live and a stale snapshot cannot start a clip or device voice', () => {
-      assert.equal(warnings.length, 1)
+    check('a loading clip keeps the mic closed, and a stale snapshot cannot start a clip or device voice', () => {
+      assert.deepEqual(staleWait, { micOpens: 1 })
+      assert.equal(staleMic.held, true)
+      assert.equal(staleMic.reading, false)
+      assert.equal(warnings.length, 0)
       assert.equal(stale.events.filter(event => event === 'start').length, beforeStale.events.filter(event => event === 'start').length)
       assert.deepEqual(stale.utterances, beforeStale.utterances)
     })
+    await page.evaluate(() => window.__voice.deliverHold?.())
 
     const focusState = () => page.evaluate(() => ({ focused: document.hasFocus(), events: window.__voice.focuses, releases: window.__voice.releases }))
     const beforeDeath = await focusState()
