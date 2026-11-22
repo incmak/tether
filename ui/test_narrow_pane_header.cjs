@@ -73,13 +73,14 @@ async function main() {
     const keys = header.locator('.keys-container > button')
     const menu = header.locator('.keys-menu')
     const menuItem = name => menu.getByRole('button', { name, exact: true })
+    const picker = page.getByRole('dialog', { name: 'Show in slot 1', exact: true })
     const liveTerminal = panel.getByTitle('Live terminal', { exact: true })
     const focused = locator => locator.evaluate(element => document.activeElement === element)
-    const open = async (count, { cols = {}, error = false } = {}) => {
+    const open = async (count, { cols = {}, row = 0.5, error = false } = {}) => {
       failChat = error
       const prefs = { selected: selected.id, voiceOff: true, voiceSound: false, uiUsage: false,
         layout: { desktop: { sidebar: false, inbox: false }, active: session,
-          desks: { [session]: { count, cols, panes: panes.slice(0, count).map(pane => pane.id), focus: 0 } } },
+          desks: { [session]: { count, cols, row, panes: panes.slice(0, count).map(pane => pane.id), focus: 0 } } },
       }
       await page.goto(origin)
       await page.evaluate(prefs => {
@@ -102,6 +103,46 @@ async function main() {
         const display = await tools[name].evaluate(element => getComputedStyle(element).display)
         assert.equal(display !== 'none', visible, `${scenario}: ${name} must be ${visible ? 'visible' : 'hidden'} (display: ${display})`)
       }
+    }
+    const assertMenuInViewport = async scenario => {
+      const fit = await menu.evaluate(element => {
+        const { left, right, top, bottom } = element.getBoundingClientRect()
+        return { open: element.matches(':popover-open'), left, right, top, bottom, width: innerWidth, height: innerHeight }
+      })
+      assert.ok(fit.open, `${scenario}: the … menu must be :popover-open`)
+      assert.ok(fit.left >= 0 && fit.top >= 0 && fit.right <= fit.width && fit.bottom <= fit.height,
+        `${scenario}: all menu edges must be inside the viewport: ${JSON.stringify(fit)}`)
+    }
+    const scrollToMenuButton = async button => {
+      const result = await button.evaluate(element => {
+        const menu = element.closest('.keys-menu')
+        const list = menu.getBoundingClientRect(), before = element.getBoundingClientRect()
+        // Scroll the menu itself so scrolling an overflow-hidden grid slot cannot mask clipping.
+        menu.scrollBy({ top: (before.top + before.bottom - list.top - list.bottom) / 2, behavior: 'instant' })
+        const { left, right, top, bottom } = element.getBoundingClientRect()
+        const x = (left + right) / 2, y = (top + bottom) / 2
+        const inside = left >= 0 && right <= innerWidth && top >= 0 && bottom <= innerHeight &&
+          left >= list.left && right <= list.right && top >= list.top && bottom <= list.bottom
+        return { label: element.textContent.trim(), inside, hit: element.contains(document.elementFromPoint(x, y)), x, y }
+      })
+      assert.ok(result.inside, `“${result.label}” must scroll fully into view`)
+      assert.ok(result.hit, `“${result.label}” must be hit-testable at (${result.x}, ${result.y})`)
+      return result
+    }
+    const activateMenuItem = async name => {
+      await keys.focus()
+      await page.keyboard.press('Enter')
+      const item = menuItem(name)
+      await item.waitFor()
+      const tabStops = await menu.getByRole('button', { disabled: false }).count()
+      for (let index = 0; index < tabStops && !await focused(item); index++) await page.keyboard.press('Tab')
+      assert.ok(await focused(item), `Tab must reach “${name}” from the … button`)
+      await page.keyboard.press('Enter')
+    }
+    const closePickerWithEscape = async () => {
+      await picker.waitFor()
+      await page.keyboard.press('Escape')
+      await picker.waitFor({ state: 'hidden' })
     }
 
     await open(3)
@@ -139,22 +180,93 @@ async function main() {
     assert.ok(await focused(keys), 'Returning to chat must restore focus to the … button')
     console.log(`ok terminal opens with focus on the pressed header toggle and closes with focus on the … button (${narrow}px slot)`)
 
+    await widthIn('Keyboard activation', 393, 395)
+    const [pinResponse] = await Promise.all([
+      page.waitForResponse(response => {
+        const request = response.request()
+        return new URL(response.url()).pathname === '/mobile/api/prefs' && request.method() === 'POST' &&
+          Object.hasOwn(request.postDataJSON().changes ?? {}, 'sidePins')
+      }),
+      activateMenuItem('Pin to side tab'),
+    ])
+    await menu.waitFor({ state: 'hidden' })
+    const focusAfterPin = await focused(keys)
+    assert.deepEqual(pinResponse.request().postDataJSON().changes.sidePins, [{ pane: selected.id }],
+      'Pin to side tab must save the selected pane in the mocked prefs request')
+
+    await activateMenuItem('Open terminal')
+    await liveTerminal.waitFor()
+    await page.waitForFunction(slot => document.activeElement?.matches(`${slot} .terminal-toggle[aria-pressed="true"]`), slot)
+    assert.ok(await focused(back), 'Opening the terminal with Enter must focus the pressed terminal toggle')
+    await page.keyboard.press('Enter')
+    await liveTerminal.waitFor({ state: 'detached' })
+    await show('Keyboard Back to chat', { terminal: false })
+    const focusAfterTerminal = await focused(keys)
+    assert.deepEqual({ pin: focusAfterPin, backToChat: focusAfterTerminal }, { pin: true, backToChat: true },
+      'Pin to side tab and the pressed Back to chat toggle must each restore focus to the … button')
+    // At this width the picker control is in the header. It folds into the menu at 320px or less.
+    await tools.swap.focus()
+    await page.keyboard.press('Enter')
+    await closePickerWithEscape()
+    console.log(`ok Enter pins the pane and toggles the terminal with focus return (${narrow}px slot)`)
+
+    // The composer unmounts when the shortcut opens the terminal. The last focus was outside the header.
+    const message = panel.locator('form.composer textarea')
+    await keys.focus()
+    await message.focus()
+    assert.ok(await focused(message) && !await menu.isVisible(), 'Start the shortcut with focus in the message box and the menu closed')
+    await page.keyboard.press('Alt+t')
+    await liveTerminal.waitFor()
+    await message.waitFor({ state: 'detached' })
+    assert.ok(!await focused(keys), 'Alt+T from the message box must leave focus away from the … button')
+    console.log('ok Alt+T from the message box does not move focus to the … button')
+
+    await page.setViewportSize({ width: 1280, height: 500 })
+    await open(4, { cols: { 4: [0.25] }, row: 0.15 }) // MIN_SHARE in workspace.ts
+    await widthIn('Short grid slot', 0, 320)
+    assert.equal(await page.getByRole('separator', { name: 'Resize rows' }).getAttribute('aria-valuenow'), '15',
+      'The short grid starts with the minimum top-row share')
+    await keys.click()
+    await menu.waitFor()
+    for (const button of await menu.getByRole('button').all()) await scrollToMenuButton(button)
+    await assertMenuInViewport('Short grid row')
+    const zoom = await scrollToMenuButton(menuItem('Zoom this slot Alt+Z'))
+    await page.mouse.click(zoom.x, zoom.y)
+    const showAllSlots = header.getByRole('button', { name: 'Show all slots (Alt+Z)', exact: true })
+    await showAllSlots.waitFor()
+    assert.equal(await page.locator('.workspace .slot').count(), 1, 'A mouse click in the short-row menu zooms the selected slot')
+    await showAllSlots.click()
+    await page.getByRole('separator', { name: 'Resize rows' }).waitFor()
+    await keys.click()
+    await menu.waitFor()
+    const beforeResize = await menu.boundingBox()
+    await page.setViewportSize({ width: 1100, height: 460 })
+    // The left column gets narrower, so the right-aligned menu must move with its button.
+    await page.waitForFunction(({ slot, previousLeft }) => {
+      const box = document.querySelector(`${slot} .keys-menu`)?.getBoundingClientRect()
+      return box && box.left < previousLeft - 1
+    }, { slot, previousLeft: beforeResize.x })
+    await assertMenuInViewport('Resized short grid row')
+    const anchor = await keys.boundingBox(), resized = await menu.boundingBox()
+    assert.ok(Math.abs(resized.y - (anchor.y + anchor.height)) <= 8 || Math.abs(resized.y + resized.height - anchor.y) <= 8,
+      `The menu must stay within 8px above or below its … button after resize: ${JSON.stringify({ anchor, resized })}`)
+    console.log('ok all short-row menu buttons receive hits, a mouse click zooms, and resize preserves the anchor')
+
+    await page.setViewportSize({ width: 1280, height: 800 })
     // Four slots form a 2×2 grid. Set an unequal column split to reach the smallest tier at the same viewport.
     await open(4, { cols: { 4: [0.25] } })
     const smallest = await widthIn('Slot actions from the menu', 0, 320)
     await show('Smallest slot', { badge: false, swap: false, zoom: false })
+    await activateMenuItem('Show another pane here')
+    await closePickerWithEscape()
+    console.log(`ok Enter opens the slot picker and Escape closes it (${smallest}px slot)`)
+
     await keys.click()
     await menuItem('Show another pane here').waitFor()
-    // A grid slot is short and clips what overflows it, so the menu must end inside the slot and scroll.
-    const fit = await menu.evaluate((element, slot) => {
-      const panel = document.querySelector(`${slot} .chat-panel`).getBoundingClientRect(), box = element.getBoundingClientRect()
-      return { bottom: Math.round(box.bottom), limit: Math.round(panel.bottom), scrolls: element.scrollHeight > element.clientHeight }
-    }, slot)
-    assert.ok(fit.bottom <= fit.limit && fit.scrolls, `The … menu must end inside the grid slot and scroll: ${JSON.stringify(fit)}`)
-    await menu.locator('button').last().scrollIntoViewIfNeeded()
-    assert.ok(await menu.locator('button').last().evaluate(button => { const box = button.getBoundingClientRect(), list = button.closest('.keys-menu').getBoundingClientRect(); return box.bottom <= list.bottom + 0.5 }), 'The last menu item scrolls into view')
+    await assertMenuInViewport('Smallest grid slot')
+    await scrollToMenuButton(menu.getByRole('button').last())
     await menuItem('Zoom this slot Alt+Z').click()
-    await header.getByRole('button', { name: 'Show all slots (Alt+Z)', exact: true }).waitFor()
+    await showAllSlots.waitFor()
     assert.equal(await page.locator('.workspace .slot').count(), 1, 'Zoom only shows the selected slot')
     const zoomed = await widthIn('Zoomed slot', 420)
     await show('Zoomed slot', { search: true })
@@ -181,7 +293,7 @@ async function main() {
 
     assert.deepEqual(writes.filter(write => write.endpoint !== 'prefs'), [], 'Header actions send no API writes except local fixture preference sync')
     assert.deepEqual(errors, [], 'No uncaught browser exceptions')
-    console.log('5 scenarios passed. No terminal writes or uncaught browser exceptions.')
+    console.log('9 scenarios passed. No terminal writes or uncaught browser exceptions.')
   } finally {
     await browser.close()
   }

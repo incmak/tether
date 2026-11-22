@@ -812,13 +812,37 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     document.addEventListener('click', dismiss)
     return () => document.removeEventListener('click', dismiss)
   }, [keysOpen])
-  // A workspace slot clips what overflows it (a 2×2 grid slot is about 400px tall), so the … menu scrolls inside the slot.
+  // A workspace slot clips what overflows it, and a short grid row can be under 120px tall. There the … menu opens in
+  // the top layer (popover), under the … button and inside the window, and it moves when the window or slot resizes (B378).
   useLayoutEffect(() => {
-    const menu = keysRef.current?.querySelector<HTMLElement>('.keys-menu'), panel = panelRef.current
-    if (!keysOpen || !menu || !panel?.closest('.workspace')) return
-    const room = Math.floor(panel.getBoundingClientRect().bottom - menu.getBoundingClientRect().top - 8)
-    if (menu.scrollHeight > room) { menu.style.maxHeight = `${Math.max(room, 120)}px`; menu.style.overflowY = 'auto'; menu.style.overscrollBehavior = 'contain' }
+    const keys = keysRef.current, menu = keys?.querySelector<HTMLElement>('.keys-menu'), panel = panelRef.current
+    if (!keysOpen || !keys || !menu || !panel?.closest('.workspace') || typeof menu.showPopover !== 'function') return
+    menu.popover = 'manual'
+    menu.showPopover()
+    const place = () => {
+      const button = keys.getBoundingClientRect(), gap = 4, edge = 8
+      Object.assign(menu.style, { inset: 'auto', margin: '0', maxHeight: 'none', overflowY: 'auto', overscrollBehavior: 'contain' })
+      const width = menu.offsetWidth, below = window.innerHeight - button.bottom - gap - edge, above = button.top - gap - edge
+      const up = below < Math.min(menu.scrollHeight, 240) && above > below
+      menu.style.maxHeight = `${Math.max(0, Math.floor(up ? above : below))}px`
+      menu.style.left = `${Math.max(edge, Math.min(button.right - width, window.innerWidth - width - edge))}px`
+      if (up) menu.style.bottom = `${window.innerHeight - button.top + gap}px`
+      else menu.style.top = `${button.bottom + gap}px`
+    }
+    place()
+    const observer = new ResizeObserver(place)
+    observer.observe(panel)
+    window.addEventListener('resize', place)
+    return () => { observer.disconnect(); window.removeEventListener('resize', place); if (menu.matches(':popover-open')) menu.hidePopover() }
   }, [keysOpen])
+  // When a header or menu action hides the focused control (a menu item closes the menu, Back to chat folds the terminal
+  // button, a pin folds), focus moves to the … button, not to the page (WCAG 2.4.3). Only while focus was in this header.
+  const headerFocus = useRef(false)
+  useLayoutEffect(() => {
+    if (!headerFocus.current) return
+    const active = document.activeElement as HTMLElement | null
+    if (!active || active === document.body || (headerRef.current?.contains(active) && !active.getClientRects().length)) focusKeys()
+  }, [keysOpen, term, sidePin?.pinned])
   useLayoutEffect(() => {
     const view = viewport.current
     if (!view) return
@@ -1217,7 +1241,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   return <AssistantRuntimeProvider runtime={runtime}><MediaOpener.Provider value={openMedia}><TabOpener.Provider value={tabOpener}><FilePane.Provider value={activePane.id}><PreviewOpener.Provider value={previewActions}><ReplyFeedbackProvider value={feedback}><section ref={panelRef} className={activePane.agent === 'shell' && !term ? 'chat-panel shell-page' : 'chat-panel'} aria-label={`Chat with ${pane.label}`} data-pane={activePane.id} data-task-tree={children.length ? '' : undefined} {...fileDrop}>
     <div className="visually-hidden" role="status">{newestNote ? `${commandOf(newestNote.text)} ran in the terminal. It left no chat output.` : ''}</div>
     {dropping !== null && <div className={dropping ? 'chat-drop refused' : 'chat-drop'} aria-hidden="true">{dropping ? <><Ban size={22} />{dropping}</> : <><Paperclip size={22} />Drop to attach to {chatTitle(pane, session)}</>}</div>}
-    <header ref={headerRef} className="chat-header" draggable={!!slot?.onDragStart} onPointerDown={event => { headerFromTouch.current = event.pointerType === 'touch'; headerDragged.current = false }} onDragStart={event => { if (headerFromTouch.current || headerTouch.current) event.preventDefault(); else slot?.onDragStart?.(event) }} onTouchStart={headerStart} onTouchMove={headerMove} onTouchEnd={headerEnd} onTouchCancel={event => headerEnd(event, true)} onClickCapture={event => { if (headerDragged.current && event.detail !== 0) { event.preventDefault(); event.stopPropagation() } }}><button className="icon-button mobile-menu" onClick={onMenu} aria-label={running ? `Open sessions. ${running} agents running or waiting` : 'Open sessions'}><Menu />{running > 0 && <span className="menu-count" aria-hidden="true">{running}</span>}</button>{slot && <kbd className="slot-badge" title={`Focus this slot: Alt+${slot.index + 1}`}>⌥{slot.index + 1}</kbd>}<button ref={headerTitle} type="button" className="chat-title" aria-label="Session details" onClick={() => setInfo(true)}><span className="task-phone-stack">{groupName}</span><h1><span className="task-desktop-title">{chatTitle(pane, session)}</span><span className="task-phone-title">{chatTitle(task, session)}</span></h1><div>{grouped && session && <><bdi className="group-crumb" title={`${session.name} › ${groupName}`}>{session.name} › {groupName}</bdi><span className="header-separator">·</span></>}<AgentIcon agent={activePane.agent} icon={activePane.pane_icon} /><span className="agent-word">{agentNames[activePane.agent]}</span>{activePane.agent === 'codex' && pane.codex_profile && <span className="provider-badge" title={`Runs on codex -p ${pane.codex_profile}`}>{profileName(pane.codex_profile)}</span>}<span className="header-separator agent-word">·</span><State state={state} />{context && <><span className="header-separator">·</span><span className={Number(context) >= 80 ? 'context-high' : ''}>{context}%<span className="context-word"> context</span></span></>}{activePane.worktree && <><span className="header-separator">·</span><WorktreeMark branch={activePane.worktree} /></>}{activePane.dir && !activePane.worktree && <><span className="header-separator">·</span><bdi className="header-folder" dir="ltr" title={activePane.dir} aria-label={`Directory: ${activePane.dir}`}>{activePane.dir.split('/').filter(Boolean).pop() || '/'}</bdi></>}{started && <span className="header-started" title={`Chat started ${started}`} aria-label={`Started ${started}`}><Clock3 size={12} aria-hidden="true" />{started}</span>}{sidePin?.pinned && <PinMark pin={sidePin} />}</div></button>
+    <header ref={headerRef} className="chat-header" onFocus={() => { headerFocus.current = true }} onBlur={event => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) headerFocus.current = false }} draggable={!!slot?.onDragStart} onPointerDown={event => { headerFromTouch.current = event.pointerType === 'touch'; headerDragged.current = false }} onDragStart={event => { if (headerFromTouch.current || headerTouch.current) event.preventDefault(); else slot?.onDragStart?.(event) }} onTouchStart={headerStart} onTouchMove={headerMove} onTouchEnd={headerEnd} onTouchCancel={event => headerEnd(event, true)} onClickCapture={event => { if (headerDragged.current && event.detail !== 0) { event.preventDefault(); event.stopPropagation() } }}><button className="icon-button mobile-menu" onClick={onMenu} aria-label={running ? `Open sessions. ${running} agents running or waiting` : 'Open sessions'}><Menu />{running > 0 && <span className="menu-count" aria-hidden="true">{running}</span>}</button>{slot && <kbd className="slot-badge" title={`Focus this slot: Alt+${slot.index + 1}`}>⌥{slot.index + 1}</kbd>}<button ref={headerTitle} type="button" className="chat-title" aria-label="Session details" onClick={() => setInfo(true)}><span className="task-phone-stack">{groupName}</span><h1><span className="task-desktop-title">{chatTitle(pane, session)}</span><span className="task-phone-title">{chatTitle(task, session)}</span></h1><div>{grouped && session && <><bdi className="group-crumb" title={`${session.name} › ${groupName}`}>{session.name} › {groupName}</bdi><span className="header-separator">·</span></>}<AgentIcon agent={activePane.agent} icon={activePane.pane_icon} /><span className="agent-word">{agentNames[activePane.agent]}</span>{activePane.agent === 'codex' && pane.codex_profile && <span className="provider-badge" title={`Runs on codex -p ${pane.codex_profile}`}>{profileName(pane.codex_profile)}</span>}<span className="header-separator agent-word">·</span><State state={state} />{context && <><span className="header-separator">·</span><span className={Number(context) >= 80 ? 'context-high' : ''}>{context}%<span className="context-word"> context</span></span></>}{activePane.worktree && <><span className="header-separator">·</span><WorktreeMark branch={activePane.worktree} /></>}{activePane.dir && !activePane.worktree && <><span className="header-separator">·</span><bdi className="header-folder" dir="ltr" title={activePane.dir} aria-label={`Directory: ${activePane.dir}`}>{activePane.dir.split('/').filter(Boolean).pop() || '/'}</bdi></>}{started && <span className="header-started" title={`Chat started ${started}`} aria-label={`Started ${started}`}><Clock3 size={12} aria-hidden="true" />{started}</span>}{sidePin?.pinned && <PinMark pin={sidePin} />}</div></button>
       {headerExtra}
       <ReviewLinks api={api} pane={pane} panes={allPanes} onOpen={onOpenPane} onChanged={onUpdate} onToast={setToast} />
       {sidePin && activePane.agent !== 'shell' && <button type="button" className={data ? 'icon-button side-pin-toggle foldable' : 'icon-button side-pin-toggle'} aria-pressed={sidePin.pinned} aria-label={sidePin.pinned ? 'Unpin from side tab' : 'Pin to side tab'} title={sidePin.pinned ? 'Unpin from side tab' : 'Pin to side tab'} onClick={sidePin.onToggle}>{sidePin.pinned ? <PinOff size={20} /> : <Pin size={20} />}</button>}

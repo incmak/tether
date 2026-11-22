@@ -1523,16 +1523,16 @@ button.live-chip:active { background: var(--line); }
    slot badge, swap and zoom. Close stays. The open terminal's toggle stays: it shows the state and takes the focus.
    .foldable is set only while the … menu works (chat data loaded), so no action is ever out of reach. */
 .keys-menu > :is(.keys-fold, .keys-fold-slot) { display: none; }
+/* In a workspace the menu opens in the top layer (Chat.tsx): keep the app text color, not the popover default. */
+.keys-menu:popover-open { color: inherit; }
 @container (max-width: 420px) {
   .workspace .chat-header > :is(.side-pin-toggle, .search-toggle).foldable,
   .workspace .chat-header > .terminal-toggle.foldable:not([aria-pressed="true"]) { display: none; }
   .workspace .keys-menu > .keys-fold { display: flex; }
-  .workspace .keys-menu { width: min(210px, calc(100cqi - 120px)); }
 }
 @container (max-width: 320px) {
   .workspace .chat-header:has(.keys-container > button:not(:disabled)) > :is(.slot-badge, .slot-pick, .slot-zoom) { display: none; }
   .workspace .keys-menu > .keys-fold-slot { display: flex; }
-  .workspace .chat-header:has(.keys-container > button:not(:disabled)) .keys-menu { width: min(210px, calc(100cqi - 56px)); }
 }
 /* Under 280px the title takes its own row (below); keep the buttons on the right of the next row, so the … menu,
    which hangs right-aligned from its button, stays inside the slot. */

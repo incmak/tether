@@ -1,7 +1,7 @@
 // B271/B378 desktop mouse and pane header checks on the built CSS.
 // 1. A pressed toggle (.icon-button or .rich-tool with aria-pressed="true") already has the hover fill at rest, so with
 //    a mouse its hover must use a stronger fill. A real pointer hovers each control.
-// 2. At each workspace header tier, controls fold into the menu, which stays in the pane, and the title keeps room.
+// 2. At each workspace header tier, controls fold into the menu and the title keeps room.
 //    The pressed terminal, unavailable menu, review control, and phone layout have their own checks.
 // Run after a build: node test_desktop_mouse_ui.cjs (DIST picks another build folder).
 const fs = require('node:fs')
@@ -51,8 +51,8 @@ async function main() {
     check('disabled pressed: no hover change', off.rest === off.hovered, `${off.rest} -> ${off.hovered}`)
 
     const fixtures = [
-      { width: 200, minTitle: 60, folded: true, foldedSlot: true, menuFits: true },
-      { width: 300, minTitle: 100, folded: true, foldedSlot: true, menuFits: true },
+      { width: 200, minTitle: 60, folded: true, foldedSlot: true },
+      { width: 300, minTitle: 100, folded: true, foldedSlot: true },
       { width: 331, minTitle: 100, folded: true },
       { width: 420, minTitle: 100, folded: true },
       { width: 421, minTitle: 100 },
@@ -93,14 +93,11 @@ async function main() {
       const panel = head.parentElement.getBoundingClientRect()
       const title = head.querySelector('.chat-title').getBoundingClientRect()
       const buttons = [...head.querySelectorAll('.icon-button')].filter(visible).map(button => button.getBoundingClientRect())
-      const menu = head.querySelector('.keys-menu')?.getBoundingClientRect()
       const displays = selector => [...head.querySelectorAll(selector)].map(item => getComputedStyle(item).display)
       return {
         width: panel.width,
         controls: Object.fromEntries(Object.entries(selectors).map(([name, selector]) => [name, !!visible(head.querySelector(selector))])),
         fold: displays('.keys-fold'), foldSlot: displays('.keys-fold-slot'),
-        menu: menu && { inside: menu.left >= panel.left - 0.5 && menu.right <= panel.right + 0.5,
-          why: `menu [${menu.left}, ${menu.right}], panel [${panel.left}, ${panel.right}]` },
         kids: [...head.querySelector('.chat-title').children].map(kid => {
           const r = kid.getBoundingClientRect()
           return { tag: kid.tagName, width: r.width, inside: r.left >= title.left - 0.5 && r.right <= title.right + 0.5,
@@ -109,7 +106,7 @@ async function main() {
       }
     }), selectors)
     for (const [index, row] of rows.entries()) {
-      const { width, minTitle, folded, foldedSlot, pressed, disabled, review, menuFits, label = `${width}px` } = fixtures[index]
+      const { width, minTitle, folded, foldedSlot, pressed, disabled, review, label = `${width}px` } = fixtures[index]
       check(`pane ${label}: panel width is ${width}px`, row.width === width, `measured ${row.width}px`)
       const expected = { pin: !folded, search: !folded, terminal: !folded || !!pressed, menu: true,
         badge: !foldedSlot, pick: !foldedSlot, zoom: !foldedSlot, close: true, review: !!review }
@@ -130,7 +127,6 @@ async function main() {
           check(`pane ${label}: title ${kid.tag} does not run under a visible button`, kid.clear)
         }
       }
-      if (menuFits) check(`pane ${label}: open menu stays within the panel horizontally`, row.menu?.inside, row.menu?.why)
     }
 
     await page.setViewportSize({ width: 320, height: 800 })
