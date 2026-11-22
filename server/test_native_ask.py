@@ -166,3 +166,19 @@ class GutterAskTests(unittest.TestCase):
         at = next(i for i, line in enumerate(lines) if '│' in line and 'exist on dev today' in line)
         lines[at] = terminal.ANSI_SGR.sub('', lines[at]).replace('│', ' ', 1)
         self.assertIsNone(terminal.verified_numbered_menu(self.entry('long'), '\n'.join(lines)))
+
+    def test_a_bar_that_is_question_text_is_kept(self):
+        # A bold bar is text, not Claude's dim gutter: the screen no longer matches the transcript.
+        short = (self.DIR / 'short-120.ansi').read_text()
+        row = '\x1b[1m\x1b[38;5;231mShip it now?\x1b[0m'
+        self.assertIn(row, short)
+        bold = short.replace(row, '\x1b[1m\x1b[38;5;231m│ Ship it now?\x1b[0m')
+        self.assertIsNone(terminal.verified_numbered_menu(self.entry('short'), bold))
+        # The same for a wrapped question whose gutter is not dim, or is not in column 0.
+        long = (self.DIR / 'long-120.ansi').read_text()
+        for name, frame in (('not dim', long.replace('\x1b[2m│', '\x1b[1m│').replace('\x1b[0;2m│', '\x1b[0;1m│')),
+                            ('indented', long.replace('\x1b[2m│', ' \x1b[2m│').replace('\x1b[0;2m│', ' \x1b[0;2m│')),
+                            ('unstyled', terminal.ANSI_SGR.sub('', long))):
+            with self.subTest(name=name):
+                self.assertNotEqual(frame, long)
+                self.assertIsNone(terminal.verified_numbered_menu(self.entry('long'), frame))

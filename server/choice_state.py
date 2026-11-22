@@ -344,10 +344,12 @@ def ask_current(frame):
     first = next((i for i in range(top + 1, stop) if item_row.fullmatch(rows[i][0])), None)
     if first is None:
         return None
-    lines = [text.strip() for text, _ in rows[top + 1:first] if text.strip()]
-    # Claude 2.1.330 draws a "│" gutter left of a question that wraps. It is not part of the question text.
-    if lines and all(re.match(r'│(?:\s|$)', line) for line in lines):
-        lines = [line[1:].strip() for line in lines]
+    block = [(text, styles) for text, styles in rows[top + 1:first] if text.strip()]
+    lines = [text.strip() for text, _ in block]
+    # Claude 2.1.330 draws a dim "│" gutter in column 0 of each row of a question that wraps. It is not question
+    # text. A bold or indented "│", or a single row, is the question's own text and stays.
+    if len(block) > 1 and all(re.match(r'│(?: |$)', text) and styles and styles[0]['dim'] for text, styles in block):
+        lines = [text[1:].strip() for text, _ in block]
     question = ' '.join(line for line in lines if line)
     if not question or '…' in question or '...' in question or any(RULE.fullmatch(text) or CHAT.match(text)
                                             for text, _ in rows[top + 1:first] if text.strip()):
