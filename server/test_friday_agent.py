@@ -3629,7 +3629,11 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         from pipecat.processors.aggregators.llm_context import LLMContext
 
         for words in ('Read all of it', 'Change the second line to say hello',
-                      'Send it to Billing instead', 'What does it say about tests?'):
+                      'Send it to Billing instead', 'What does it say about tests?',
+                      'Send it to that chat', 'Send it to Go', 'Send it to this tab',
+                      'Read it all, then send it', 'Read it all and send it',
+                      'Read it then send it', 'Send all', 'Could you read it and send it',
+                      'Read it, you can send it', 'I have read it, could you read it? You can send it'):
             with self.subTest(words=words):
                 pending = draft_proposal()
                 session = SimpleNamespace(pending_proposal=pending, prepare_messages=lambda messages: messages)
@@ -6383,6 +6387,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 ('server', False, ('You can send it', 'Yes')),
                 ('server', False, ('send it', 'Yes')),
                 ('server', False, ('Please send it', 'Yes')),
+                ('server', False, ('I have read it, you can send it', 'Yes')),
                 ('client', True, ('Send it?', 'Yes')),
                 ('client', False, ('You can send it', 'No')),
                 ('server', False, ('You can send it', 'send it')),
