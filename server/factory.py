@@ -25,6 +25,7 @@ from pathlib import Path
 import factory_history
 import paths
 import sweep
+import tether_zone
 
 PATH = '/mobile/api/factory'
 TAIL_BYTES = 262144
@@ -50,7 +51,7 @@ MONTHS = {name: number for number, name in enumerate(('jan', 'feb', 'mar', 'apr'
 ISO_DAY = re.compile(r'^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2}))?')
 WORD_DAY = re.compile(r'^(\d{1,2}) ([A-Za-z]{3})[a-z]* (\d{4})(?: (\d{1,2}):(\d{2}))?')
 ZONES = {'IST': timedelta(hours=5, minutes=30), 'UTC': timedelta(0), 'GMT': timedelta(0)}
-ZONE = re.compile(r'^\s*(IST|UTC|GMT)\b')
+ZONE = re.compile(r'^\s*(IST|UTC|GMT|[+-]\d{2}:?\d{2})\b')
 LEAD = re.compile(r'^[\s·:]+')
 
 
@@ -63,9 +64,10 @@ def refs(text):
 
 
 def parse_deployed_line(line):
-    """One DEPLOYED.md line: {at, timed, commit, text, refs}, or None for a line with no date. The log has no single
+    """One DEPLOYED.md line: {at, day, timed, commit, text, refs}, or None for a line with no date. The log has no single
     format: "- 2026-11-17 08:35 IST · 5d59421 ...", "2026-11-17 00:21 IST: b8636f0 ...", "- 09 Nov 2026 11:35 a315cf8 ...".
-    at: Unix seconds in the server's local time; a line with only a date is taken at the start of that day (timed False)."""
+    at: Unix seconds, using the written offset when known and host time otherwise. For a line with only a date,
+    at is host midnight for older clients and day is the written date (timed False)."""
     text = line.strip().lstrip('-*').strip()
     found = ISO_DAY.match(text)
     try:
@@ -82,25 +84,43 @@ def parse_deployed_line(line):
     timed = found.group(4) is not None
     rest = text[found.end():]
     zone = ZONE.match(rest)
-    if zone and timed:  # a named zone: the time is in that zone, not the server's
-        at = (when - ZONES[zone[1]]).replace(tzinfo=timezone.utc).timestamp()
-    else:
-        at = when.timestamp()
+    if zone and timed:
+        token = zone[1]
+        if token in ZONES:
+            when = when.replace(tzinfo=timezone(ZONES[token]))
+        else:
+            try:
+                when = when.replace(tzinfo=datetime.strptime(token, '%z').tzinfo)
+            except ValueError:
+                return None
+    at = when.timestamp()
     rest = LEAD.sub('', rest[zone.end():] if zone else rest).strip()
     commit = COMMIT.search(rest)
-    return {'at': int(at), 'timed': timed, 'commit': commit[1] if commit else None, 'text': rest[:400], 'refs': refs(rest)}
+    return {'at': int(at), 'day': when.date().isoformat(), 'timed': timed, 'commit': commit[1] if commit else None,
+            'text': rest[:400], 'refs': refs(rest)}
 
 
 def deployed(now=None, file=None):
     """DEPLOYED.md lines from the last DEPLOYED_DAYS days, newest first. A missing file gives none."""
-    now = now or time.time()
+    now = time.time() if now is None else now
     try:
         lines = (file or deployed_file()).read_text(encoding='utf-8', errors='replace').splitlines()
     except OSError:
         return []
-    since = datetime.fromtimestamp(now) - timedelta(days=DEPLOYED_DAYS)
-    since = since.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-    found = [item for item in map(parse_deployed_line, lines) if item and since <= item['at'] <= now + 86400]
+    today = tether_zone.now(now).date()
+    since = today - timedelta(days=DEPLOYED_DAYS)
+    first_day, last_day = since.isoformat(), today.isoformat()
+    first_at = tether_zone.day_start(since)
+    found = []
+    for item in map(parse_deployed_line, lines):
+        if not item:
+            continue
+        if item['timed']:
+            recent = first_at <= item['at'] <= now + 86400
+        else:
+            recent = first_day <= item['day'] <= last_day
+        if recent:
+            found.append(item)
     return sorted(found, key=lambda item: item['at'], reverse=True)
 
 

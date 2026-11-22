@@ -110,14 +110,15 @@ const buttonText = text => node => node.type === 'button' && node.props.children
 const key = extra => ({ code: 'KeyV', altKey: true, ctrlKey: false, metaKey: false, shiftKey: false, prevented: false, preventDefault() { this.prevented = true }, ...extra })
 function taskSetup(env) {
   const s = setup(env), requests = [], created = []
-  const { NewTask } = load('NewTask.tsx', {
+  const zone = load('zone.ts', { react: s.h.hooks })
+  const { NewTask, defaultSessionName } = load('NewTask.tsx', {
     react: s.h.hooks, './api': { errorText: error => error.message },
     './hooks': { useModal: () => ({}), usePopover: () => ({}) }, './Composer': { uploadFile() { throw new Error('Unexpected upload') } },
     './ChatPicker': { ChatPicker: () => null }, './Sidebar': { AgentIcon: () => null, agentNames: { claude: 'Claude', codex: 'Codex' } },
     './Worktree': { WorktreeField: () => null }, './Skeleton': { Spinner: () => null },
     './keys': { keyLabel: () => 'Alt+V' }, './useDictation': { useDictation: s.useDictation }, './NewTask.css': {},
     './CodexTrust': { CodexTrustCard: () => null }, './codexTrustState': { useCodexTrust: () => ({ status: null, busy: false, error: '', trust() {}, justTrusted: false }) },
-    './CreateFields': { FolderField: () => null, NameField: () => null }, './groups': { groupNameError: () => '' },
+    './CreateFields': { FolderField: () => null, NameField: () => null }, './groups': { groupNameError: () => '' }, './zone': zone,
   }, env.globals)
   const props = {
     api: async (path, body) => {
@@ -133,7 +134,7 @@ function taskSetup(env) {
     for (const node of nodes(tree, byLabel('Task'))) node.props.ref.current = { focus: () => env.focus++ }
     return tree
   }
-  return { ...s, props, render, requests, created }
+  return { ...s, props, render, requests, created, defaultSessionName, setTetherZone: zone.setTetherZone }
 }
 async function record(env, s) {
   await s.render().toggle(); env.advance(1000); env.records.at(-1).data()
@@ -143,6 +144,13 @@ async function main() {
     const source = readFileSync(`src/${file}`, 'utf8')
     assert.match(source, /import \{ useDictation \} from '\.\/useDictation'/)
     assert(!source.includes('getUserMedia'), `${file} must share recording logic`)
+  }
+  const nameEnv = environment()
+  nameEnv.advance(Date.parse('2026-11-22T02:15:00Z'))
+  const nameTask = taskSetup(nameEnv)
+  for (const [zone, expected] of [['Asia/Kolkata', 'chat-1122-0745'], ['America/New_York', 'chat-1121-2115']]) {
+    nameTask.setTetherZone(zone)
+    assert.equal(nameTask.defaultSessionName(), expected)
   }
   for (const label of ['USB Headset', '']) {
     const env = environment(label), s = setup(env)

@@ -49,7 +49,7 @@ async function main() {
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
     const origin = `http://localhost:${server.address().port}`
     browser = await getBrowser()
-    context = await browser.newContext({ serviceWorkers: 'block' })
+    context = await browser.newContext({ serviceWorkers: 'block', locale: 'en-US', timezoneId: 'UTC' })
     page = await context.newPage()
     page.setDefaultTimeout(10000)
     await page.clock.install()
@@ -78,7 +78,7 @@ async function main() {
           }
           return route.fulfill({ json: { ok: true } })
         }
-        if (endpoint === 'prefs') return route.fulfill({ json: { prefs, version } })
+        if (endpoint === 'prefs') return route.fulfill({ json: { prefs, version, zone: activity.zone } })
         if (endpoint === 'activity') return route.fulfill({ json: activity })
         if (endpoint.startsWith('chat')) return route.fulfill({ json: fixture.chat })
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
@@ -107,8 +107,9 @@ async function main() {
     })
     for (const [width, height] of sizes) {
       const at = `${width}px`
+      const zone = width === 320 ? 'Asia/Kolkata' : 'America/New_York'
       prefs = { selected: '%1' }; version++
-      activity = { ...activity, enabled: false, agents: false, since: null, days: [], projects: [], publish: publishOff }
+      activity = { ...activity, zone, enabled: false, agents: false, since: null, days: [], projects: [], publish: publishOff }
       posts.length = 0
       await page.setViewportSize({ width, height })
       await page.goto(`${origin}/chat/`, { waitUntil: 'load' })
@@ -171,6 +172,12 @@ async function main() {
           && request.method() === 'POST' && request.postDataJSON()?.now === true
       }), now.click()])
       check(`${at} publish now posted`, posts.some(post => post.endpoint === 'activity/publish' && post.body.now === true))
+      const published = Date.parse('2026-11-22T02:15:00Z')
+      activity = { ...activity, publish: { ...activity.publish, published: published / 1000 } }
+      await page.clock.fastForward(15_000)
+      const when = new Intl.DateTimeFormat('en-US', { timeZone: zone, dateStyle: 'medium', timeStyle: 'short' }).format(published)
+      await page.getByText(`Published ${when}.`, { exact: true }).waitFor()
+      check(`${at} published time uses ${zone}`, true)
       activity = { ...activity, publish: { ...activity.publish, last: { at: 1, ok: false, error: 'git push failed: fatal: Authentication failed' } } }
       await page.clock.fastForward(15_000)
       await page.getByRole('alert').filter({ hasText: 'Authentication failed' }).waitFor({ timeout: 20000 })
@@ -185,7 +192,7 @@ async function main() {
       const message = chat.locator('.composer textarea')
       await Promise.all([waitForPing('%1'), message.click()])
       await message.press('ArrowLeft')
-      check(`${at} chat input pings its tab once`, pings().length === 1 && pings()[0].body.pane === '%1' && typeof pings()[0].body.zone === 'string', JSON.stringify(pings()))
+      check(`${at} chat input pings its tab once without a zone`, pings().length === 1 && pings()[0].body.pane === '%1' && !Object.hasOwn(pings()[0].body, 'zone'), JSON.stringify(pings()))
       // A click on another tab's button counts for that tab, not for the tab that was open before the click.
       await message.blur()
       const other = page.locator('[role="tab"][data-pane="%2"]:visible').first()

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { errorText } from './api'
 import type { Api, CodexProvider, FoundrySpend } from './api'
 import { useHost } from './host'
+import { fmtTime, useTetherZone } from './zone'
 
 // Which provider new Codex runs use. Tether panes start with `codex -p foundry` for Azure Foundry; the server also sets the default
 // provider in ~/.codex/config.toml, so Claude Code lanes and scripts that run plain `codex` follow the same choice.
@@ -57,6 +58,7 @@ const count = (window: FoundrySpend['estimate']['tokens'], key: 'requests' | 'to
 // Foundry spend this month: a live estimate from the server Codex logs at list prices, and the real Azure bill when it is connected.
 // It shows while Foundry is chosen, and on the plan too if Foundry was used this month.
 function SpendRow({ api, show }: { api: Api; show: boolean }) {
+  useTetherZone()
   const [spend, setSpend] = useState<FoundrySpend | null>(null)
   // Refresh every minute while open: the estimate grows as Codex runs write their logs.
   useEffect(() => {
@@ -78,7 +80,7 @@ function SpendRow({ api, show }: { api: Api; show: boolean }) {
     </div>
     <dl className="spend-sources">
       <div><dt>Estimate</dt><dd>{estimate.usd === null ? 'Prices not available' : money(estimate.usd)} · {count(estimate.tokens, 'tokens').toLocaleString()} tokens in {estimate.sessions} {estimate.sessions === 1 ? 'chat' : 'chats'}. Runs on this server only, at Global Standard list prices.</dd></div>
-      <div><dt>Azure bill</dt><dd>{bill.state === 'ok' ? `${money(bill.usd, bill.currency)} so far · checked ${new Date(bill.checked * 1000).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}. Azure updates it a few times a day.`
+      <div><dt>Azure bill</dt><dd>{bill.state === 'ok' ? `${money(bill.usd, bill.currency)} so far · checked ${fmtTime(bill.checked * 1000, { hour: 'numeric', minute: '2-digit' })}. Azure updates it a few times a day.`
         : bill.state === 'error' ? bill.hint : 'Not connected. The bar uses the estimate.'}</dd></div>
     </dl>
   </div>

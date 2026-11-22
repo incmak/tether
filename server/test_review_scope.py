@@ -3,14 +3,19 @@ import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import os
 from pathlib import Path
+import shlex
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
 import review_links
+import review_scope
 import server
 from own_time import own_time
+from test_commit_msg_hook import EXITED_GIT_IDENTITY
 
 
 SESSION = '17b9c72a-a916-46a0-bc10-bc41a8c6249a'
@@ -20,26 +25,334 @@ class ReviewFolderTests(unittest.TestCase):
     def setUp(self):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.log = root / 'gate.log'
+        self.enterContext(patch.object(server.paths, 'CACHE', root / 'cache'))
         self.start = root / 'start'
         self.work = root / 'other worktree'
         self.git('init', '-q', '-b', 'main', str(self.start), cwd=root)
+        self.start_check = self.gate_fields(self.start, 'Start', unborn=True)
         self.git('commit', '-qm', 'Start', '--allow-empty')
         self.start_head = self.git('rev-parse', 'HEAD')
         self.git('worktree', 'add', '-qb', 'work', str(self.work))
+        self.work_check = self.gate_fields(self.work, 'Work')
         self.git('commit', '-qm', 'Work', '--allow-empty', cwd=self.work)
         self.entry = {'id': '%13', 'agent': 'claude', 'thread': SESSION, 'cwd': str(self.start),
                       'process_start': '1234'}
         self.enterContext(patch.object(server.paths, 'COMMIT_GATE_LOG', self.log))
         self.enterContext(patch.object(server.agents, 'started_ms', return_value=100_000))
 
-    def git(self, *args, cwd=None):
+    def gate_fields(self, folder, message='Aborted attempt', *, unborn=False):
+        path = Path(self.git('rev-parse', '--absolute-git-dir', cwd=folder))
+        info = path.stat()
+        key = server.commit_gate._message_key(create=True)
+        return {'folder': str(folder), 'head': None if unborn else self.git('rev-parse', 'HEAD', cwd=folder),
+                'tree': self.git('write-tree', cwd=folder), 'reflog': server.commit_gate._head_reflog_position(folder),
+                'git_dir': {'path': str(path), 'dev': info.st_dev, 'ino': info.st_ino},
+                'messages': [server.commit_gate._message_digest(key, message)], 'head_attached': True,
+                **EXITED_GIT_IDENTITY}
+
+    def git(self, *args, cwd=None, env=None):
         return subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
                                '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', *args],
-                              cwd=cwd or self.start, capture_output=True, check=True, text=True).stdout.strip()
+                              cwd=cwd or self.start, env=env, capture_output=True, check=True, text=True).stdout.strip()
+
+    def test_repo_identity_is_shared_by_worktrees_and_changes_with_the_repository(self):
+        # B368: auto-merge compares the repository a review saw with the live one.
+        found = review_scope.repo_identity(str(self.work))
+        self.assertEqual(found, review_scope.repo_identity(str(self.start)))
+        self.assertEqual(found['path'], str((self.start / '.git').resolve()))
+        common = self.start / '.git'
+        common.rename(self.start / '.git-aside')
+        shutil.copytree(self.start / '.git-aside', common, symlinks=True)
+        moved = review_scope.repo_identity(str(self.work))
+        self.assertEqual(moved['path'], found['path'])
+        self.assertNotEqual(moved, found)  # the same path, another directory
+        for folder in (None, '', str(self.start.parent), str(self.start.parent / 'missing')):
+            with self.subTest(folder=folder):
+                self.assertIsNone(review_scope.repo_identity(folder))
 
     def line(self, **fields):
         return (json.dumps({'event': 'check', 'via': 'commit-msg', 'source': 'claude', 'session': SESSION,
-                            'folder': str(self.work), 'at': 101, 'head': self.start_head, **fields}) + '\n').encode()
+                            'at': 101, **self.work_check, **fields}) + '\n').encode()
+
+    def test_aborted_new_request_uses_older_landed_worktree(self):
+        self.entry['agent'] = 'codex'
+        self.log.write_bytes(self.line(source='codex') + self.line(source='codex', at=102,
+                                                                  **self.gate_fields(self.start)))
+        self.assertEqual(server.review_folder(self.entry), str(self.work))
+
+    def test_aborted_follow_up_uses_older_landed_worktree(self):
+        entry = {**self.entry, 'review_after': 100, 'review_folder': str(self.start)}
+        self.log.write_bytes(self.line() + self.line(at=102, **self.gate_fields(self.start)))
+        self.assertEqual(server.review_folder(entry), str(self.work))
+        self.assertEqual(server.review_folder({**entry, 'review_after': 101}), str(self.start))
+
+    def test_aborted_amend_binds_only_after_it_lands(self):
+        self.log.write_bytes(self.line(**self.start_check)
+                             + self.line(at=102, **self.gate_fields(self.work, 'Amended work')))
+        self.assertEqual(server.review_folder(self.entry), str(self.start))
+        self.git('commit', '--amend', '--allow-empty', '-qm', 'Amended work', cwd=self.work)
+        self.assertEqual(server.review_folder(self.entry), str(self.work))
+        with patch.object(server.commit_gate, 'record_landed', wraps=server.commit_gate.record_landed) as landed:
+            self.assertEqual(server.review_folder(self.entry), str(self.work))
+            landed.assert_not_called()
+
+    def test_switch_at_same_head_after_aborted_amend_selects_the_uncertain_row(self):
+        older = self.work.parent / 'older'
+        self.git('worktree', 'add', '-qb', 'older', str(older))
+        older_check = self.gate_fields(older, 'Older landed commit')
+        self.git('commit', '--allow-empty', '-qm', 'Older landed commit', cwd=older)
+
+        self.git('branch', 'same-head', cwd=self.work)
+        check = self.gate_fields(self.work)
+        hooks = self.work.parent / 'hooks'
+        hooks.mkdir()
+        abort = hooks / 'commit-msg'
+        abort.write_text('#!/bin/sh\nexit 1\n')
+        abort.chmod(0o755)
+        self.assertRaises(subprocess.CalledProcessError, self.git, '-c', f'core.hooksPath={hooks}',
+                          'commit', '--amend', '-qm', 'Aborted message-only amend', cwd=self.work)
+        self.git('switch', '-q', 'same-head', cwd=self.work)
+        self.assertEqual(self.git('rev-parse', 'HEAD', cwd=self.work), check['head'])
+        self.log.write_bytes(self.line(**older_check) + self.line(at=102, **check))
+        follow_up = {**self.entry, 'review_after': 100, 'review_folder': str(self.start)}
+        with self.subTest('landing evidence'):
+            self.assertIsNone(server.commit_gate.record_landed(check))
+        for entry in (self.entry, follow_up):
+            with self.subTest(follow_up='review_after' in entry):
+                self.assertEqual(server.review_folder(entry), str(self.work))
+
+    def test_replacement_worktree_selects_the_uncertain_row_with_warm_and_cold_cache(self):
+        self.log.write_bytes(self.line())
+        row, = server.review_gate_records()['claude', SESSION]
+        deadline = float('inf')
+        self.assertIs(server._review_gate_landed(row, deadline=deadline), True)
+        self.git('worktree', 'move', str(self.work), str(self.work.parent / 'moved'))
+        self.git('worktree', 'add', '-qb', 'replacement', str(self.work), 'work')
+        # Git kept the original metadata directory intact. Stat alone still finds the old inode.
+        identity = self.work_check['git_dir']
+        self.assertEqual(Path(identity['path']).stat().st_ino, identity['ino'])
+        with patch.object(server.commit_gate, '_git', wraps=server.commit_gate._git) as git:
+            self.assertIsNone(server._review_gate_landed(row, deadline=deadline))
+            self.assertEqual(server.review_folder(self.entry), str(self.work))
+            git.assert_not_called()
+        with patch.object(server, 'REVIEW_GATE_LANDED', {}):
+            self.assertIsNone(server._review_gate_landed(row, deadline=deadline))
+            self.assertEqual(server.review_folder(self.entry), str(self.work))
+
+    def test_failed_tree_lookup_selects_the_uncertain_row_before_an_older_confirmed_row(self):
+        older = self.work.parent / 'older'
+        self.git('worktree', 'add', '-qb', 'older', str(older))
+        check = self.gate_fields(older, 'Older landed commit')
+        self.git('commit', '--allow-empty', '-qm', 'Older landed commit', cwd=older)
+        self.log.write_bytes(self.line(**check) + self.line(at=102))
+        git = server.commit_gate._git
+
+        def fail_tree_lookup(folder, *args, **kwargs):
+            if str(folder) == str(self.work) and (args[0] == 'log' and '--stdin' in args
+                                                 or args[-1].endswith('^{tree}')):
+                return None
+            return git(folder, *args, **kwargs)
+
+        with patch.object(server.commit_gate, '_git', side_effect=fail_tree_lookup):
+            with self.subTest('landing evidence'):
+                self.assertIsNone(server.commit_gate.record_landed(self.work_check))
+            with self.subTest('review folder'):
+                self.assertEqual(server.review_folder(self.entry), str(self.work))
+
+    def test_commit_message_rewrite_keeps_the_linked_worktree(self):
+        hooks, env = self.review_gate_hook('printf "\\nTicket: test\\n" >> "$1"\n')
+        self.git('-c', f'core.hooksPath={hooks}', 'commit', '--allow-empty', '-qm', 'Work with ticket',
+                 cwd=self.work, env=env)
+        self.assertEqual(self.git('log', '-1', '--format=%B', cwd=self.work), 'Work with ticket\n\nTicket: test')
+        row, = server.review_gate_records()['claude', SESSION]
+        self.assertIsNone(server.commit_gate.record_landed(row))
+        self.assertEqual(server.review_folder(self.entry), str(self.work))
+
+    def test_detached_same_oid_amend_without_reflog_entry_keeps_the_linked_worktree(self):
+        hooks, env = self.review_gate_hook()
+        date = '2000-01-01T00:00:00+00:00'
+        env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+        self.git('commit', '--allow-empty', '-qm', 'Work with fixed dates', cwd=self.work, env=env)
+        self.git('switch', '-q', '--detach', 'HEAD', cwd=self.work)
+        head = self.git('rev-parse', 'HEAD', cwd=self.work)
+        reflog = server.commit_gate._head_reflog_position(self.work)
+        self.git('-c', f'core.hooksPath={hooks}', 'commit', '--amend', '--allow-empty', '--no-edit',
+                 cwd=self.work, env=env)
+        self.assertEqual(self.git('rev-parse', 'HEAD', cwd=self.work), head)
+        self.assertEqual(server.commit_gate._head_reflog_position(self.work), reflog)
+        row, = server.review_gate_records()['claude', SESSION]
+        self.assertIsNone(server.commit_gate.record_landed(row))
+        self.assertEqual(server.review_folder(self.entry), str(self.work))
+
+    def test_review_batches_tree_lookups_across_branch_switches(self):
+        (self.work / 'staged.txt').write_text('Staged for a commit that never happens\n')
+        self.git('add', 'staged.txt', cwd=self.work)
+        self.git('branch', 'alternate', cwd=self.work)
+        check = self.gate_fields(self.work)
+        for branch in ('alternate', 'work') * 25:
+            self.git('switch', '-q', branch, cwd=self.work)
+        self.log.write_bytes(b''.join(self.line(at=101 + offset, **check) for offset in range(8)))
+        with patch.object(server.commit_gate, '_git', wraps=server.commit_gate._git) as git:
+            self.assertEqual(server.review_folder(self.entry), str(self.start))
+            self.assertLessEqual(git.call_count, 3 * 8)
+            batches = [call.kwargs['input'].splitlines() for call in git.call_args_list if '--stdin' in call.args]
+            self.assertEqual(batches, [[check['head'].encode('ascii')]] * 8)
+
+    def test_in_flight_root_commit_can_land_after_an_unknown_result(self):
+        new_worktree = self.work.parent / 'unborn'
+        self.git('init', '-q', '-b', 'main', str(new_worktree))
+        check = self.gate_fields(new_worktree, 'Root commit', unborn=True)
+        self.log.write_bytes(self.line(**check))
+        self.assertIsNone(server.commit_gate.record_landed(check))
+        with patch.object(server.commit_gate, 'record_landed', wraps=server.commit_gate.record_landed) as landed:
+            self.assertEqual(server.review_folder(self.entry), str(self.start))
+            self.git('commit', '--allow-empty', '-qm', 'Root commit', cwd=new_worktree)
+            self.assertEqual(server.review_folder(self.entry), str(new_worktree))
+            self.assertEqual(landed.call_count, 2)
+
+    def test_in_flight_commit_uses_the_worktrees_current_head_until_it_lands(self):
+        self.check_in_flight_commit(land=True)
+
+    def test_in_flight_commit_that_exits_without_landing_uses_older_row(self):
+        self.check_in_flight_commit(land=False)
+
+    def test_landing_cache_does_not_confirm_a_same_time_row_with_another_message(self):
+        self.log.write_bytes(self.line())
+        row, = server.review_gate_records()['claude', SESSION]
+        deadline = float('inf')
+        self.assertIs(server._review_gate_landed(row, deadline=deadline), True)
+        self.log.write_bytes(self.line(messages=['0' * 32]))
+        changed, = server.review_gate_records()['claude', SESSION]
+        self.assertIsNone(server._review_gate_landed(changed, deadline=deadline))
+        self.assertIs(server._review_gate_landed(row, deadline=deadline), True)
+
+    def review_gate_hook(self, after_gate=''):
+        hooks = self.work.parent / 'hooks'
+        hooks.mkdir()
+        gate = hooks / 'gate.py'
+        gate.write_text(
+            f'import sys\nsys.path.insert(0, {str(Path(server.commit_gate.__file__).parent)!r})\n'
+            f'import commit_gate\ncommit_gate._source_session = lambda *_: ("claude", {SESSION!r})\n'
+            'commit_gate.commit_msg(sys.argv[1])\n'
+        )
+        hook = hooks / 'commit-msg'
+        hook.write_text(
+            f'#!/bin/sh\n{shlex.quote(sys.executable)} {shlex.quote(str(gate))} "$1" || exit 2\n'
+            + after_gate
+        )
+        hook.chmod(0o755)
+        env = dict(os.environ, MOBILE_TMUX_CACHE=str(server.paths.CACHE),
+                   TETHER_COMMIT_GATE_LOG=str(self.log))
+        return hooks, env
+
+    def check_in_flight_commit(self, *, land):
+        pending = self.work.parent / 'pending'
+        self.git('worktree', 'add', '-qb', 'pending', str(pending))
+        # An old base commit: a same-OID amend of it is impossible now, so an exited Git proves no landing.
+        old = '2000-01-01T00:00:00+00:00'
+        self.git('commit', '-qm', 'Old base', '--allow-empty', cwd=pending,
+                 env=dict(os.environ, GIT_AUTHOR_DATE=old, GIT_COMMITTER_DATE=old))
+        previous_head = self.git('rev-parse', 'HEAD', cwd=pending)
+        self.log.write_bytes(self.line())
+        fifo = self.work.parent / 'release-hook'
+        os.mkfifo(fifo)
+        hooks, env = self.review_gate_hook(
+            f'printf "ready\\n"\nread release < {shlex.quote(str(fifo))} || exit 2\nexit "$release"\n')
+        follow_up = {**self.entry, 'review_after': 100, 'review_folder': str(self.work)}
+        with subprocess.Popen(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                               '-c', 'commit.gpgsign=false', '-c', f'core.hooksPath={hooks}',
+                               'commit', '--allow-empty', '-m', 'Pending commit'], cwd=pending, env=env,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True) as git:
+            self.assertIn('ready\n', git.stderr)
+            with fifo.open('w') as release:
+                row = json.loads(self.log.read_bytes().splitlines()[-1])
+                self.assertEqual(row['git_pid'], git.pid)
+                self.assertEqual(server.commit_gate.record_landed(row), 'pending')
+                started = row['git_started']
+                wrong_start = EXITED_GIT_IDENTITY['git_started']
+                self.assertNotEqual(started, wrong_start)
+                self.assertIs(server.commit_gate.record_landed({**row, 'git_started': wrong_start}), False)
+                for entry in (self.entry, follow_up):
+                    with self.subTest(follow_up='review_after' in entry):
+                        self.assertEqual(server.review_folder(entry), str(pending))
+                        self.assertEqual(server.review_commit(entry), previous_head)
+                        for light in (False, True):
+                            scope = server.review_scope_of(entry, light=light)
+                            self.assertEqual(scope['commit'], previous_head)
+                            self.assertEqual(scope['folder'], str(pending))
+                if land:
+                    read_entries = server.commit_gate._head_reflog_entries
+
+                    def finish_after_reflog_read(*args):
+                        entries = read_entries(*args)
+                        release.write('0\n')
+                        release.flush()
+                        self.assertEqual(git.wait(), 0)
+                        return entries
+
+                    with patch.object(server.commit_gate, '_head_reflog_entries', side_effect=finish_after_reflog_read):
+                        self.assertEqual(server.commit_gate.record_landed(row), 'pending')
+                else:
+                    release.write('1\n')
+            self.assertEqual(git.wait(), 0 if land else 1)
+        self.assertIs(server.commit_gate.record_landed(row), land)
+        expected = pending if land else self.work
+        for entry in (self.entry, follow_up):
+            self.assertEqual(server.review_folder(entry), str(expected))
+            self.assertEqual(server.review_scope_of(entry)['commit'], self.git('rev-parse', 'HEAD', cwd=expected))
+
+    def test_review_walk_shares_one_git_deadline(self):
+        check = self.gate_fields(self.start)
+        self.log.write_bytes(self.line() + b''.join(self.line(at=102 + offset, **check) for offset in range(7)))
+        elapsed = 0.0
+        git = server.commit_gate._git
+
+        def advance_command(*args, **kwargs):
+            nonlocal elapsed
+            result = git(*args, **kwargs)
+            elapsed += 0.3
+            return result
+
+        with (own_time(server, monotonic=lambda: elapsed),
+              own_time(server.commit_gate, monotonic=lambda: elapsed),
+              patch.object(server.commit_gate, '_git', side_effect=advance_command)):
+            self.assertEqual(server.review_folder(self.entry), str(self.start))
+
+    def test_expired_landing_deadline_skips_git(self):
+        with own_time(server.commit_gate, monotonic=lambda: 3), patch.object(server.commit_gate, '_git') as git:
+            self.assertIsNone(server.commit_gate.record_landed(self.work_check, deadline=3))
+            git.assert_not_called()
+
+    def test_rebased_commit_still_binds_after_another_attempt_aborts(self):
+        (self.work / 'changed.txt').write_text('Work\n')
+        self.git('add', 'changed.txt', cwd=self.work)
+        landed = self.line(**self.gate_fields(self.work, 'Changed work'))
+        self.git('commit', '-qm', 'Changed work', cwd=self.work)
+        old_commit = self.git('rev-parse', 'HEAD', cwd=self.work)
+        self.git('commit', '-qm', 'Advance the base', '--allow-empty')
+        self.git('rebase', 'main', cwd=self.work)
+        rebased = self.git('rev-parse', 'HEAD', cwd=self.work)
+        self.assertNotEqual(rebased, old_commit)
+        self.log.write_bytes(landed + self.line(at=102, **self.gate_fields(self.start)))
+        self.assertEqual(server.review_folder(self.entry), str(self.work))
+        self.assertEqual(server.review_commit(self.entry), rebased)
+
+    def test_legacy_row_selects_its_worktree_before_an_older_landed_row(self):
+        legacy = json.loads(self.line(at=102))
+        for field in ('reflog', 'git_pid', 'git_started'):
+            del legacy[field]
+        self.log.write_bytes(self.line(**self.start_check) + (json.dumps(legacy) + '\n').encode())
+        self.assertEqual(server.review_folder(self.entry), str(self.work))
+        entry = {**self.entry, 'review_after': 100, 'review_folder': str(self.start)}
+        self.assertEqual(server.review_folder(entry), str(self.work))
+
+    def test_keeps_only_the_eight_newest_records_per_identity(self):
+        aborted = self.gate_fields(self.start)
+        self.log.write_bytes(self.line() + b''.join(self.line(at=at, **aborted) for at in range(108, 101, -1)))
+        self.assertEqual(server.review_folder(self.entry), str(self.work))
+        with self.log.open('ab') as stream:
+            stream.write(self.line(at=109, **aborted))
+        self.assertEqual(server.review_folder(self.entry), str(self.start))
 
     def test_missing_corrupt_unmatched_and_unreadable_log_fall_back(self):
         self.log.write_bytes(self.line())
@@ -58,16 +371,17 @@ class ReviewFolderTests(unittest.TestCase):
 
     def test_newest_record_wins_for_codex_and_the_worker_can_return_to_start(self):
         self.entry['agent'] = 'codex'
-        self.log.write_bytes(self.line(source='codex', at=103) + self.line(source='codex', at=102, folder=str(self.start)))
+        self.log.write_bytes(self.line(source='codex', at=103) + self.line(source='codex', at=102, **self.start_check))
         work_head = self.git('rev-parse', 'HEAD', cwd=self.work)
         self.assertEqual(server.review_commit(self.entry), work_head)
+        check = self.gate_fields(self.start, 'Back in the start folder')
         self.git('commit', '-qm', 'Back in the start folder', '--allow-empty')
         with self.log.open('ab') as stream:
-            stream.write(self.line(source='codex', at=104, folder=str(self.start)))
+            stream.write(self.line(source='codex', at=104, **check))
         self.assertEqual(server.review_commit(self.entry), self.git('rev-parse', 'HEAD'))
 
     def test_new_request_ignores_blocked_commit_but_accepts_observe_mode_record(self):
-        self.log.write_bytes(self.line(folder=str(self.start)) + self.line(at=102, verdict='block'))
+        self.log.write_bytes(self.line(**self.start_check) + self.line(at=102, verdict='block'))
         self.assertEqual(server.review_folder(self.entry), str(self.start))
         with self.log.open('ab') as stream:
             stream.write(self.line(at=103, verdict='would_block'))
@@ -83,7 +397,7 @@ class ReviewFolderTests(unittest.TestCase):
 
     def test_tail_is_bounded_and_cached_until_metadata_changes(self):
         # The valid row at the front must never be found through a long run of malformed data.
-        self.log.write_bytes(self.line() + b'x' * 2_000_000 + b'\n' + self.line(folder=str(self.start), at=100))
+        self.log.write_bytes(self.line() + b'x' * 2_000_000 + b'\n' + self.line(at=100, **self.start_check))
         with patch('server.open', wraps=open, create=True) as opened, self.log.open('rb') as stream, \
                 patch.object(stream, 'read', wraps=stream.read) as read:
             opened.return_value = stream
@@ -131,12 +445,12 @@ class ReviewFolderTests(unittest.TestCase):
         self.git('add', '-A', cwd=self.work)
         self.git('commit', '-qm', 'Review rules and checklist', cwd=self.work)
         self.git('update-ref', 'refs/remotes/origin/main', 'HEAD', cwd=self.work)
-        base = self.git('rev-parse', 'HEAD', cwd=self.work)
         (self.work / 'changed.txt').write_text('Fixed\n')
         self.git('add', 'changed.txt', cwd=self.work)
+        check = self.gate_fields(self.work, 'Fix the bug')
         self.git('commit', '-qm', 'Fix the bug', cwd=self.work)
         work_head = self.git('rev-parse', 'HEAD', cwd=self.work)
-        self.log.write_bytes(self.line(head=base))
+        self.log.write_bytes(self.line(**check))
 
         send = Mock()
         answer = None
@@ -160,7 +474,7 @@ class ReviewFolderTests(unittest.TestCase):
             self.assertEqual(link['work_mark'], server.review_work_mark({'cwd': str(self.work)}))
             # Once sent, the approval still checks the worktree named in the request.
             with self.log.open('ab') as stream:
-                stream.write(self.line(at=102, folder=str(self.start)))
+                stream.write(self.line(at=102, **self.start_check))
             answer = f'APPROVED {work_head}'
             observe()
             self.assertEqual(send.call_args.args[0], self.entry)
@@ -178,9 +492,11 @@ class ReviewFolderTests(unittest.TestCase):
             # The folder that the request named has changed HEAD. A different worktree at the old hash
             # cannot make that approval current.
             self.git('commit', '-qm', 'More work', '--allow-empty')
+            check = self.gate_fields(self.work, 'More work in the linked worktree')
+            self.git('commit', '-qm', 'More work in the linked worktree', '--allow-empty', cwd=self.work)
             self.git('switch', '--detach', self.start_head, cwd=self.work)
             with self.log.open('ab') as stream:
-                stream.write(self.line(at=103))
+                stream.write(self.line(at=103, **check))
             answer = f'APPROVED {self.start_head}'
             sent = send.call_count
             observe()
@@ -231,9 +547,10 @@ class ReviewFolderTests(unittest.TestCase):
                 (folder / 'other.txt').write_text('Other work\n')
                 self.git('add', 'other.txt', cwd=folder)
                 (self.work / 'changed.txt').unlink()
+            check = self.gate_fields(folder, 'Commit')
             self.git('commit', '-qm', 'Commit', cwd=folder)
             with self.log.open('ab') as stream:
-                stream.write(self.line(at=102, folder=str(folder)))
+                stream.write(self.line(at=102, **check))
             observe('Working')
             observe()
             text = send.call_args.args[1]

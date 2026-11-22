@@ -21,6 +21,7 @@ from side_shells import SESSION as SIDE_SHELLS
 HOME = paths.HOME
 ICON = re.compile(r"[a-z0-9][a-z0-9-]{0,43}")  # tmux option @chat_icon: a lucide icon name, or svg-<name> (pane_icons.py)
 METRICS = paths.CACHE / 'usage'
+FRIDAY_DRAFT_ROLE = 'friday-draft'  # Internal only: a temporary chat must keep its read-only launch options.
 
 
 def records(path):
@@ -664,6 +665,8 @@ def discover(config, run, *, repair_zoom=True):
                 entry['role'] = 'advisor'
             elif role == 'reviewer':
                 entry['helper'] = 'reviewer'  # not a role: reviewers keep their AI tab names (tab_brief.py)
+            elif role == FRIDAY_DRAFT_ROLE:
+                entry['friday_draft'] = True
             elif role in ('coordinator', 'coordinator-needs', 'coordinator-off'):
                 entry['coordinator'] = role.partition('-')[2] or 'all'  # the session's coordinator tab and what it gets (coordinator.py)
             live = registered.get(owner) if agent == 'claude' else None

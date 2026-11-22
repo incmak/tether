@@ -4,10 +4,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowRightToLine, Search, TerminalSquare, X } from 'lucide-react'
 import { ApiError, errorText } from './api'
 import type { Api, ChatAgent, HistoryData, Pane, PastChat, SessionsData } from './api'
+import { useNow } from './attention'
 import { usePolling } from './hooks'
 import { AgentIcon, agentNames, ago, needsYou, paneTitle } from './Sidebar'
 import { FolderMenu } from './SelectMenu'
 import './ChatPicker.css'
+import { useTetherZone, zonedTime, zoneParts } from './zone'
 
 const PAGE = 50
 
@@ -111,13 +113,11 @@ export function useRemovedChat(setChatHidden: (chat: PastChat, hidden: boolean) 
 type Source = 'all' | ChatAgent | 'tabs'
 const SOURCES: { id: Source; label: string }[] = [{ id: 'all', label: 'All' }, { id: 'claude', label: 'Claude' }, { id: 'codex', label: 'Codex' }, { id: 'tabs', label: 'Open tabs' }]
 
-function dayLabel(time: string) {
-  const then = new Date(time), now = new Date()
-  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
-  const at = then.getTime()
-  if (at >= start) return 'Today'
-  if (at >= start - 86400000) return 'Yesterday'
-  if (at >= start - 6 * 86400000) return 'This week'
+function dayLabel(time: string, today: number, yesterday: number, week: number) {
+  const at = Date.parse(time)
+  if (at >= today) return 'Today'
+  if (at >= yesterday) return 'Yesterday'
+  if (at >= week) return 'This week'
   return 'Earlier'
 }
 
@@ -131,6 +131,7 @@ export function ChatPicker({ api, exclude, here, onChat, onTab, onMove, disabled
   api: Api; exclude?: string; here?: string; disabled?: boolean
   onChat: (chat: PastChat) => Promise<void>; onTab: (pane: Pane) => void; onMove?: (pane: Pane) => Promise<void>
 }) {
+  const zone = useTetherZone()
   const [text, setText] = useState('')
   const [source, setSource] = useState<Source>('all')
   const [dir, setDir] = useState('')
@@ -154,17 +155,22 @@ export function ChatPicker({ api, exclude, here, onChat, onTab, onMove, disabled
     return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([path, count]) => ({ dir: path, count, temporary: flags.get(path) }))
   }, [history.data?.dirs, allTabs, source, dir])
   const removed = useRemovedChat(history.setChatHidden, setFailure)
+  const now = useNow()
+  const { year, month, date } = zoneParts(now * 1000, zone)
+  const [today, yesterday, week] = useMemo(() =>
+    [0, 1, 6].map(daysAgo => zonedTime(year, month, date - daysAgo, 0, 0, zone)),
+  [year, month, date, zone])
   const groups = useMemo(() => {
     const list: { label: string; chats: PastChat[] }[] = []
     for (const chat of history.chats) {
-      const label = dayLabel(chat.time)
+      const label = dayLabel(chat.time, today, yesterday, week)
       const last = list[list.length - 1]
       if (last?.label === label) last.chats.push(chat)
       else list.push({ label, chats: [chat] })
     }
     return list
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [history.data, history.chats.length])
+  }, [history.data, history.chats.length, today, yesterday, week])
   const run = async (key: string, work: () => Promise<void>) => {
     if (busy || disabled) return
     setBusy(key); setFailure('')

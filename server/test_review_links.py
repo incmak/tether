@@ -1,6 +1,7 @@
 """Watcher transitions use isolated stores and mocked sends, never live panes."""
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from contextlib import nullcontext
+from copy import deepcopy
 import hashlib
 import importlib.util
 import io
@@ -22,6 +23,7 @@ from unittest.mock import ANY, Mock, patch
 from uuid import uuid4
 
 import audit
+import commit_gate
 import helper_close
 import injected_prompts
 import review_links
@@ -30,6 +32,7 @@ import server
 import terminal_input
 import undo
 from own_time import own_time
+from test_commit_msg_hook import HOLD_COMMIT_HOOK, held_commit
 from test_notification_priority import ASSISTANT, BACKGROUND, COMPACT_BOUNDARY, COMPACT_SUMMARY, claude, codex
 from terminal_input import DraftError
 
@@ -100,6 +103,10 @@ class ReviewLinksTests(unittest.TestCase):
         injected_prompts._write(receipts / 'injected-since.json', {'since_ms': 4_102_444_800_000})
         self.enterContext(patch.object(review_links, '_last_sent', {}))
         self.enterContext(patch.object(review_links, '_feedback_in_flight', {}))
+        # B368: the repository of each review folder. Fixture folders are not real checkouts.
+        self.repos = {}
+        self.enterContext(patch.object(review_links.review_scope, 'repo_identity',
+                                       side_effect=lambda folder: deepcopy(self.repos.get(folder))))
         self.clock = self.enterContext(own_time(review_links, monotonic=Mock(return_value=1000)))
         transcript = Path(temporary.name) / 'worker.jsonl'
         transcript.touch()
@@ -5974,6 +5981,7 @@ class ReviewLinksTests(unittest.TestCase):
 
     HASH = '1f0e' * 10
     NEXT = '2a9d' * 10
+    REPO = {'path': '/srv/project/.git', 'dev': 2049, 'ino': 77}
 
     def bind(self, commit=None, *, dirty=False, rules=True, mark='worktree fingerprint', **scope_fields):
         """The worker's folder is at `commit`. The request and the approval check read it from here."""
@@ -6135,6 +6143,7 @@ class ReviewLinksTests(unittest.TestCase):
                 self.add()
                 self.send.reset_mock()
                 self.bind()
+                self.repos['/work/my tree'] = self.REPO
                 self.request_review()
                 with patch.object(review_links.time, 'time', return_value=1700000000.9):
                     self.finish_review(reply)
@@ -6148,9 +6157,11 @@ class ReviewLinksTests(unittest.TestCase):
                     'give for an approved review, then stop.', 'Idle')
                 self.assertEqual(review_links._relay_source(self.send.call_args.args[1]), 'review-feedback')
                 link = self.links()[0]
-                self.assertEqual((link['approved_commit'], link['approved_at']), (self.HASH, 1700000000))
+                self.assertEqual((link['approved_commit'], link['approved_at'], link['approved_folder']),
+                                 (self.HASH, 1700000000, '/work/my tree'))
                 self.assertEqual(review_links.approved_commits(),
-                                 {'%13': {'%12': {'commit': self.HASH, 'at': 1700000000}}})
+                                 {'%13': {'%12': {'commit': self.HASH, 'at': 1700000000, 'folder': '/work/my tree',
+                                                  'repo': self.REPO}}})
 
     def test_clean_approval_uses_the_worktree_when_the_bound_folder_is_missing(self):
         commit = '1f0e' * 16
@@ -6163,6 +6174,92 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertIn(f"HEAD in this tab's worktree (`git rev-parse HEAD`) is {commit}.", text)
         self.assertNotIn('/work/a different tree', text)
         self.assertEqual(review_links._relay_source(text), 'review-feedback')
+        # B368: the request named no worktree, so the approval names none: auto-merge waits.
+        self.assertEqual(review_links.approved_commits()['%13']['%12']['folder'], None)
+
+    def test_approved_folder_is_saved_reloaded_and_replaced_with_each_approval(self):
+        self.bind()
+        self.request_review()
+        self.finish_review(f'APPROVED {self.HASH}')
+        self.assertEqual(json.loads(self.file.read_text())[0]['approved_folder'], '/work/my tree')
+        # A second approval whose clean read names no folder must not keep the old folder.
+        self.bind(self.NEXT)
+        self.request_review()
+        self.scope = lambda entry: {'commit': self.NEXT, 'dirty': False, 'mark': 'worktree fingerprint'}
+        self.finish_review(f'APPROVED {self.NEXT}')
+        self.assertEqual(review_links.approved_commits()['%13']['%12'],
+                         {'commit': self.NEXT, 'at': ANY, 'folder': None, 'repo': None})
+
+    def test_approved_folder_is_saved_only_when_the_clean_read_names_the_requested_worktree(self):
+        self.bind()
+        self.request_review()
+        self.scope = lambda entry: {'commit': self.HASH, 'dirty': False, 'folder': '/work/other tree',
+                                    'mark': 'worktree fingerprint'}
+        self.finish_review(f'APPROVED {self.HASH}')
+        self.assertEqual(review_links.approved_commits()['%13']['%12']['folder'], None)
+
+    def test_a_stored_approval_without_a_valid_folder_lists_none(self):
+        link = dict(self.rows()[0], approved_commit='a' * 40, approved_at=5)
+        for stored in ({}, {'approved_folder': 7}, {'approved_folder': None}):
+            with self.subTest(stored=stored):
+                self.file.write_text(json.dumps([dict(link, **stored)]))
+                self.assertEqual(review_links.approved_commits(), {'%13': {'%12': {'commit': 'a' * 40, 'at': 5,
+                                                                                   'folder': None, 'repo': None}}})
+        self.file.write_text(json.dumps([dict(link, approved_folder='/work/b')]))
+        self.assertEqual(review_links.approved_commits()['%13']['%12']['folder'], '/work/b')
+        # A stored repository identity must have exactly path, dev and ino, with integer dev and ino.
+        for repo in ({'path': '/srv/a/.git'}, {**self.REPO, 'dev': '1'}, {**self.REPO, 'ino': True},
+                     {**self.REPO, 'extra': 1}, ['/srv/a/.git', 1, 2], 'x'):
+            with self.subTest(repo=repo):
+                self.file.write_text(json.dumps([dict(link, approved_folder='/work/b', approved_repo=repo)]))
+                self.assertIsNone(review_links.approved_commits()['%13']['%12']['repo'])
+        self.file.write_text(json.dumps([dict(link, approved_folder='/work/b', approved_repo=self.REPO)]))
+        self.assertEqual(review_links.approved_commits()['%13']['%12']['repo'], self.REPO)
+
+    def test_approved_repo_is_the_repository_of_the_request_read_again_at_the_approval(self):
+        self.bind()
+        self.repos['/work/my tree'] = self.REPO
+        self.request_review()
+        self.assertEqual(self.links()[0]['review_repo'], self.REPO)
+        self.finish_review(f'APPROVED {self.HASH}')
+        self.assertEqual(json.loads(self.file.read_text())[0]['approved_repo'], self.REPO)
+        self.assertEqual(review_links.approved_commits()['%13']['%12']['repo'], self.REPO)
+        # Another checkout takes the folder path during the review: same path, another repository.
+        for other in ({**self.REPO, 'ino': self.REPO['ino'] + 1}, {**self.REPO, 'path': '/srv/b/.git'}, None):
+            with self.subTest(other=other):
+                self.bind(self.NEXT)
+                self.repos['/work/my tree'] = self.REPO
+                self.request_review()
+                self.repos['/work/my tree'] = other
+                self.scope = lambda entry: {'commit': self.NEXT, 'dirty': False, 'folder': '/work/my tree',
+                                            'mark': 'worktree fingerprint'}
+                self.finish_review(f'APPROVED {self.NEXT}')
+                approval = review_links.approved_commits()['%13']['%12']
+                self.assertEqual((approval['commit'], approval['folder'], approval['repo']),
+                                 (self.NEXT, '/work/my tree', None))
+                self.assertNotIn('approved_repo', self.links()[0])
+
+    def test_the_request_saves_the_repository_read_before_delivery(self):
+        # Another repository takes the folder path while the request is delivered: the saved identity is the one
+        # read with the scope that named the commit and folder, before the send.
+        other = {**self.REPO, 'ino': self.REPO['ino'] + 1}
+        self.bind()
+        self.repos['/work/my tree'] = self.REPO
+        self.send.side_effect = lambda *args, **kwargs: self.repos.update({'/work/my tree': other})
+        self.request_review()
+        self.send.side_effect = None
+        self.assertTrue(self.send.called)
+        self.assertEqual(self.links()[0]['review_repo'], self.REPO)
+        self.finish_review(f'APPROVED {self.HASH}')
+        self.assertIsNone(review_links.approved_commits()['%13']['%12']['repo'])
+
+    def test_a_request_whose_repository_cannot_be_read_saves_no_repository(self):
+        self.bind()
+        self.request_review()  # self.repos has no entry: the identity is unreadable
+        self.assertNotIn('review_repo', self.links()[0])
+        self.repos['/work/my tree'] = self.REPO  # readable later does not count: the request did not see it
+        self.finish_review(f'APPROVED {self.HASH}')
+        self.assertIsNone(review_links.approved_commits()['%13']['%12']['repo'])
 
     def test_approval_of_uncommitted_work_is_forwarded_but_not_recorded_as_an_approved_commit(self):
         self.bind()
@@ -6207,7 +6304,7 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertEqual(self.links()[0]['approved_commit'], self.NEXT)
         self.assertNotIn('stale_rounds', self.links()[0])
 
-    def test_later_findings_or_stale_approval_clear_both_approval_fields(self):
+    def test_later_findings_or_stale_approval_clear_every_approval_field(self):
         for verdict in ('The lock is not released.', f'APPROVED {self.HASH}', f'APPROVED {self.NEXT}'):
             with self.subTest(verdict=verdict):
                 self.add()
@@ -6216,6 +6313,7 @@ class ReviewLinksTests(unittest.TestCase):
                 self.request_review()
                 self.finish_review(f'APPROVED {self.HASH}')
                 self.assertEqual(review_links.approved_commits()['%13']['%12']['commit'], self.HASH)
+                self.assertIn('approved_folder', self.links()[0])
 
                 self.bind(self.NEXT)
                 self.request_review()
@@ -6223,7 +6321,7 @@ class ReviewLinksTests(unittest.TestCase):
                     self.send.side_effect = lambda entry, text, state: (
                         setattr(self, 'head', self.HASH) if entry is self.worker else None)
                 self.finish_review(verdict)
-                self.assertFalse({'approved_commit', 'approved_at'} & self.links()[0].keys())
+                self.assertFalse({'approved_commit', 'approved_at', 'approved_folder', 'approved_repo'} & self.links()[0].keys())
                 self.assertEqual(review_links.approved_commits(), {})
 
     def test_approval_that_names_another_commit_is_not_forwarded(self):
@@ -8219,6 +8317,7 @@ class ApprovalTurnWorktreeTests(ApprovalTurnFixture):
         self.reviewed = self.root / "reviewed worktree"
         self.gate_log = self.root / "gate.log"
         self.git("init", "-q", "-b", "main", str(self.start), cwd=self.root)
+        self.start_check = self.gate_fields(self.start, "Start", unborn=True)
         self.git("commit", "-qm", "Start", "--allow-empty")
         self.git("worktree", "add", "-qb", "reviewed", str(self.reviewed))
         self.commit_in(self.reviewed, "Reviewed commit")
@@ -8244,18 +8343,27 @@ class ApprovalTurnWorktreeTests(ApprovalTurnFixture):
             text=True, timeout=10,
         ).stdout.strip()
 
-    def record_gate_check(self, folder, previous_head):
+    def gate_fields(self, folder, message="Blocked attempt", *, unborn=False):
+        path = Path(self.git("rev-parse", "--absolute-git-dir", cwd=folder))
+        info = path.stat()
+        key = commit_gate._message_key(create=True)
+        return {
+            "folder": str(folder), "head": None if unborn else self.git("rev-parse", "HEAD", cwd=folder),
+            "tree": self.git("write-tree", cwd=folder), "reflog": commit_gate._head_reflog_position(folder),
+            "git_dir": {"path": str(path), "dev": info.st_dev, "ino": info.st_ino},
+            "messages": [commit_gate._message_digest(key, message)],
+        }
+
+    def record_gate_check(self, **fields):
         record = {
             "event": "check", "via": "commit-msg", "source": "claude",
-            "session": WORKER_THREAD, "folder": str(folder), "at": self.now + 0.1,
-            "head": previous_head,
+            "session": WORKER_THREAD, "at": self.now + 0.1, **fields,
         }
         with self.gate_log.open("a", encoding="utf-8") as log:
             log.write(json.dumps(record) + "\n")
 
     def commit_in(self, folder, message):
-        previous_head = self.git("rev-parse", "HEAD", cwd=folder)
-        self.record_gate_check(folder, previous_head)
+        self.record_gate_check(**self.gate_fields(folder, message))
         self.git("commit", "-qm", message, "--allow-empty", cwd=folder)
         return self.git("rev-parse", "HEAD", cwd=folder)
 
@@ -8264,7 +8372,7 @@ class ApprovalTurnWorktreeTests(ApprovalTurnFixture):
         self.assertEqual(self.send.call_count, 1)
         self.assertIn(f"in {shlex.quote(str(self.reviewed))}", self.send.call_args.args[1])
         if earlier_gate_points_to_start:
-            self.record_gate_check(self.start, self.git("rev-parse", "HEAD"))
+            self.record_gate_check(**self.start_check)
         head = self.git("rev-parse", "HEAD", cwd=self.reviewed)
         self.deliver_approval(head)
         self.assertEqual(self.send.call_count, 2)
@@ -8343,6 +8451,48 @@ class ApprovalTurnWorktreeTests(ApprovalTurnFixture):
         self.assertTrue(self.reviewer_should_stay_open())
 
     # Round 2 worktree routing and partial Git read cases.
+    def test_request_during_a_pending_commit_names_the_previous_head_and_rejects_its_approval(self):
+        previous_head = self.git("rev-parse", "HEAD", cwd=self.reviewed)
+        self.observe("Working")
+        hooks = self.root / "hooks"
+        hooks.mkdir()
+        gate = (
+            f"import sys\nsys.path.insert(0, {str(Path(commit_gate.__file__).parent)!r})\n"
+            f"import commit_gate\ncommit_gate._source_session = lambda *_: ('claude', {WORKER_THREAD!r})\n"
+            f"code, _ = commit_gate.commit_msg(sys.argv[1], now={self.now + 0.1!r})\nsys.exit(code)\n"
+        )
+        hook = hooks / "commit-msg"
+        hook.write_text(f'#!/bin/sh\n{shlex.quote(sys.executable)} -c {shlex.quote(gate)} "$1" || exit 2\n'
+                        f"{HOLD_COMMIT_HOOK}\n")
+        hook.chmod(0o755)
+        env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+                   MOBILE_TMUX_CACHE=str(server.paths.CACHE), TETHER_COMMIT_GATE_LOG=str(self.gate_log))
+        command = ["git", "-c", "user.name=B286 Test", "-c", "user.email=test@example.invalid",
+                   "-c", "commit.gpgsign=false", "-c", f"core.hooksPath={hooks}",
+                   "commit", "--allow-empty", "-qm", "Pending review commit"]
+        folder = shlex.quote(str(self.reviewed))
+        with held_commit(command, cwd=self.reviewed, env=env) as git:
+            row = json.loads(self.gate_log.read_text().splitlines()[-1])
+            self.assertEqual(row["git_pid"], git.pid)
+            self.assertEqual(commit_gate.record_landed(row), "pending")
+            self.observe()
+            self.assertEqual(self.send.call_count, 1)
+            self.assertEqual(self.send.call_args.args[0], self.reviewer)
+            with self.subTest(phase="request while the hook runs"):
+                self.assertIn(f"Commit under review: {previous_head} in {folder}", self.send.call_args.args[1])
+
+        current_head = self.git("rev-parse", "HEAD", cwd=self.reviewed)
+        self.assertNotEqual(current_head, previous_head)
+        self.assertIs(commit_gate.record_landed(row), True)
+        sent_before = self.send.call_count
+        self.deliver_approval(previous_head)
+        self.assertTrue(all(call.args[0] == self.reviewer for call in self.send.call_args_list[sent_before:]))
+        self.observe()
+        self.assertEqual(self.send.call_count, 2)
+        self.assertEqual(self.send.call_args.args[0], self.reviewer)
+        self.assertIn(f"Commit under review: {current_head} in {folder}", self.send.call_args.args[1])
+
     def test_request_names_worktree_with_detected_edit(self):
         self.git("merge", "--ff-only", "reviewed")
         self.approve_reviewed_worktree(earlier_gate_points_to_start=True)
@@ -8575,13 +8725,7 @@ class ApprovalTurnWorktreeTests(ApprovalTurnFixture):
         alternate = self.another_worktree()
         head = self.approve_reviewed_worktree()
         self.observe("Working")
-        record = {
-            "event": "check", "via": "commit-msg", "source": "claude",
-            "session": self.worker["thread"], "folder": str(alternate),
-            "at": self.now + 0.1, "head": head, "verdict": "block",
-        }
-        with self.gate_log.open("a", encoding="utf-8") as log:
-            log.write(json.dumps(record) + "\n")
+        self.record_gate_check(**self.gate_fields(alternate), verdict="block")
         path = self.reviewed / "notes.txt"
         path.write_text("Actual follow-up edit in the reviewed worktree.\n", encoding="utf-8")
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=alternate), head)

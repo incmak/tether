@@ -52,7 +52,28 @@ class AuditCliTests(unittest.TestCase):
                              '--since', '2026-11-19', '--until', '2026-11-20', '--limit', '1', '--json')
         self.assertEqual(json.loads(output), {'entries': [second], 'next': second['id']})
         self.assertEqual(json.loads(self.output('--text', 'LEVEL', '--json')), {'entries': [first], 'next': None})
-        self.assertEqual(self.output('--until', '2026-11-19'), 'Nothing recorded.\n')
+        self.assertEqual(json.loads(self.output('--until', '2026-11-19', '--json'))['entries'], [second, first])
+        self.assertEqual(self.output('--until', '2026-11-18'), 'Nothing recorded.\n')
+
+    def test_calendar_filters_include_both_midnight_folds_and_exclude_next_day(self):
+        with mock.patch.dict(os.environ, TETHER_REMINDER_ZONE='America/Havana'):
+            for day, instants, next_day, boundary in (
+                ('2026-11-01', ('2026-11-01T04:30:00Z', '2026-11-01T05:30:00Z'),
+                 '2026-11-02', '2026-11-02T05:00:00Z'),
+                ('2025-11-02', ('2025-11-02T04:30:00Z', '2025-11-02T05:30:00Z'),
+                 '2025-11-03', '2025-11-03T05:00:00Z'),
+            ):
+                entries = []
+                for instant in (*instants, boundary):
+                    at = datetime.fromisoformat(instant).timestamp()
+                    with mock.patch.object(audit.time, 'time', return_value=at):
+                        entries.append(audit.record('backlog.start', instant, project=day))
+                for bound, value, expected in (('--since', day, entries[::-1]),
+                                               ('--since', next_day, entries[-1:]),
+                                               ('--until', day, entries[1::-1])):
+                    with self.subTest(bound=bound, value=value):
+                        output = self.output(bound, value, '--project', day, '--json')
+                        self.assertEqual(json.loads(output)['entries'], expected)
 
     def test_empty_and_invalid_invocations(self):
         self.assertEqual(self.output(), 'Nothing recorded.\n')

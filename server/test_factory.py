@@ -2,6 +2,7 @@
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import subprocess
+import sys
 import time
 from unittest import mock
 import os
@@ -10,10 +11,13 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import antigravity
 import factory
+import prefs_sync
 import server
+import tether_zone
 from agents import claude_consume
 
 
@@ -31,20 +35,80 @@ def agy_step(position, **fields):
 
 
 class DeployedTests(unittest.TestCase):
+    def setUp(self):
+        # Old log lines without a known offset use the host clock.
+        self.addCleanup(time.tzset)
+        self.enterContext(mock.patch.dict(os.environ, TZ='Asia/Kolkata'))
+        time.tzset()
+
+    def test_timed_deploy_window_includes_the_first_instant_at_a_havana_midnight_transition(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(prefs_sync, 'FILE', root / 'prefs.json'))
+        prefs_sync.save({'timeZone': 'America/Havana'})
+        log = root / 'DEPLOYED.md'
+        for day, now, stamps in (
+            ('2026-11-01', '2026-11-03T17:00:00Z',
+             ('2026-10-31 23:59 -0400', '2026-11-01 00:00 -0400', '2026-11-01 00:00 -0500')),
+            ('2026-03-08', '2026-03-10T16:00:00Z',
+             ('2026-03-07 23:59 -0500', '2026-03-08 01:00 -0400', '2026-03-08 01:01 -0400')),
+        ):
+            with self.subTest(day=day):
+                log.write_text('\n'.join(f'- {stamp} · {index}' for index, stamp in enumerate(stamps)))
+                rows = factory.deployed(datetime.fromisoformat(now).timestamp(), log)
+                self.assertEqual([row['text'] for row in rows], ['2', '1'])
+
+    def test_date_only_deploys_use_the_written_day_at_the_window_boundary(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(prefs_sync, 'FILE', root / 'prefs.json'))
+        prefs_sync.save({'timeZone': 'America/New_York'})
+        log = root / 'DEPLOYED.md'
+        log.write_text('- 2026-11-20 · ddddddd earlier\n'
+                       '- 2026-11-21 · aaaaaaa deploy\n'
+                       '- 2026-11-22 · bbbbbbb another deploy\n'
+                       '- 2026-11-24 · ccccccc future\n')
+        now = datetime(2026, 11, 23, 18, tzinfo=timezone.utc).timestamp()
+        self.assertEqual([item['commit'] for item in factory.deployed(now, log)], ['bbbbbbb', 'aaaaaaa'])
+
+    def test_writer_and_reader_preserve_the_later_new_york_instant(self):
+        self.enterContext(mock.patch.object(sys, 'path', [str(Path(__file__).resolve().parents[1] / 'scripts'), *sys.path]))
+        import verification
+
+        at = datetime(2026, 11, 1, 6, 30, tzinfo=timezone.utc)
+        written = verification.line('deploy', 'none', now=at.astimezone(ZoneInfo('America/New_York')))
+        parsed = factory.parse_deployed_line(written)
+        self.assertEqual((parsed['at'], parsed['text']), (at.timestamp(), 'deploy · Verified: none'))
+        self.assertIn('01:30 -0500 ·', written)
+
+    def test_reads_numeric_and_legacy_deploy_offsets_and_preserves_unknown_names(self):
+        for stamp, expected, text in (
+            ('2026-11-22 02:10 +0530', '2026-11-21T20:40:00Z', 'deploy'),
+            ('2026-11-22 02:10 +05:30', '2026-11-21T20:40:00Z', 'deploy'),
+            ('2026-11-22 02:10 IST', '2026-11-21T20:40:00Z', 'deploy'),
+            ('2026-11-22 02:10 GMT', '2026-11-22T02:10:00Z', 'deploy'),
+            ('2026-11-22 02:10 EST', '2026-11-21T20:40:00Z', 'EST · deploy'),
+        ):
+            with self.subTest(stamp=stamp):
+                row = factory.parse_deployed_line(f'- {stamp} · deploy')
+                instant = datetime.fromisoformat(expected).timestamp()
+                self.assertEqual((row['at'], row['text']), (instant, text))
+
     def test_reads_each_date_format_of_the_log(self):
         iso = factory.parse_deployed_line('- 2026-11-17 08:35 IST · 5d59421 B188 new Claude tabs no longer stop (B12 too)')
         self.assertEqual(iso['commit'], '5d59421')
         self.assertEqual(iso['refs'], ['B12', 'B188'])
         self.assertTrue(iso['timed'])
+        self.assertEqual(iso['day'], '2026-11-17')
         self.assertEqual(iso['at'], int(datetime(2026, 11, 17, 3, 5, tzinfo=timezone.utc).timestamp()))
         self.assertTrue(iso['text'].startswith('5d59421 B188'))
         colon = factory.parse_deployed_line('2026-11-17 00:21 IST: b8636f0 Settings › Appearance')
         self.assertEqual(colon['commit'], 'b8636f0')
         self.assertEqual(colon['text'], 'b8636f0 Settings › Appearance')
         words = factory.parse_deployed_line('- 09 Nov 2026 11:35 a315cf8 Waiting on you sidebar')
-        self.assertEqual(datetime.fromtimestamp(words['at']), datetime(2026, 11, 9, 11, 35))
-        dated = factory.parse_deployed_line('- 2026-11-17 · Teams answer UI (8a90d86 + BriskBot acbea44)')
+        self.assertEqual(words['day'], '2026-11-09')
+        self.assertEqual(words['at'], datetime(2026, 11, 9, 6, 5, tzinfo=timezone.utc).timestamp())
+        dated = factory.parse_deployed_line('- 2026-11-21 · Teams answer UI (8a90d86 + BriskBot acbea44)')
         self.assertFalse(dated['timed'])
+        self.assertEqual(dated['day'], '2026-11-21')
         self.assertEqual(dated['text'], 'Teams answer UI (8a90d86 + BriskBot acbea44)')  # the leading T stays
         self.assertEqual(dated['commit'], '8a90d86')
         self.assertIsNone(factory.parse_deployed_line('  - Done: 30af7fe deploy guard'))
@@ -59,10 +123,22 @@ class DeployedTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             log = Path(folder) / 'DEPLOYED.md'
             log.write_text('- 2026-11-01 aaaaaaa old\n- 2026-11-16 10:00 bbbbbbb yesterday B7\n- 2026-11-17 09:00 ccccccc today\n\nnot a line\n')
-            now = datetime(2026, 11, 17, 12, 0).timestamp()
+            now = datetime(2026, 11, 17, 12, 0, tzinfo=tether_zone.zone()).timestamp()
             found = factory.deployed(now, log)
             self.assertEqual([item['commit'] for item in found], ['ccccccc', 'bbbbbbb'])
             self.assertEqual(factory.deployed(now, Path(folder) / 'missing.md'), [])
+
+    def test_recent_deploys_use_the_preference_day_boundary(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(prefs_sync, 'FILE', root / 'prefs.json'))
+        log = root / 'DEPLOYED.md'
+        log.write_text('- 2026-11-16 04:59 UTC · aaaaaaa before\n'
+                       '- 2026-11-16 05:00 UTC · bbbbbbb boundary\n')
+        now = datetime(2026, 11, 18, 18, tzinfo=timezone.utc).timestamp()
+        prefs_sync.save({'timeZone': 'America/New_York'})
+        self.assertEqual([item['commit'] for item in factory.deployed(now, log)], ['bbbbbbb'])
+        prefs_sync.save({'timeZone': 'Pacific/Auckland'})
+        self.assertEqual(factory.deployed(now, log), [])
 
 
 class ToolTests(unittest.TestCase):

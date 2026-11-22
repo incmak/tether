@@ -14,6 +14,7 @@ import { LevelUndoProvider } from './LevelUndo'
 import type { Session } from './Sidebar'
 import { AdvisorDecision, AdvisorLog, useAdvisorLog } from './AdvisorLog'
 import type { AdvisorRow } from './AdvisorLog'
+import { fmtDateTime, useTetherZone } from './zone'
 
 // The session's project (server: projects.py). Agents that start in the session get its text: Claude through a
 // SessionStart hook, Codex through developer_instructions. All projects include the built-in guidance.
@@ -62,6 +63,7 @@ export function useProjectMarks(api: Api, ready: boolean) {
 
 // With `group`, the sheet edits that group's own context (server/groups.py), which agents get after the session's.
 export function ProjectSheet({ api, session, group, mark, pin, onChanged, onClose }: { api: Api; session: Session; group?: GroupInfo; mark?: ProjectMark; pin?: string; onChanged: () => void; onClose: () => void }) {
+  useTetherZone()
   const modal = useModal(true, onClose)
   const [project, setProject] = useState<ProjectState | null>(null)
   const [text, setText] = useState('')
@@ -183,7 +185,7 @@ export function ProjectSheet({ api, session, group, mark, pin, onChanged, onClos
       <section className="settings-group" aria-labelledby="project-notes"><h3 id="project-notes">Notes from agents{fresh > 0 && <span className="project-new">{fresh} new</span>}</h3>
         {project.notes.length ? <ul className="project-list">{project.notes.map(item => <li key={item.name}>
           <button type="button" className="project-open" disabled={pending} onClick={() => void openNote(item.name)}>
-            <span className="project-item"><strong>{item.title}{item.new && <span className="project-dot" aria-label="New" />}</strong><small>{item.name} · {new Date(item.mtime).toLocaleString()}</small></span>
+            <span className="project-item"><strong>{item.title}{item.new && <span className="project-dot" aria-label="New" />}</strong><small>{item.name} · {fmtDateTime(item.mtime)}</small></span>
           </button>
         </li>)}</ul> : <p className="hint">No notes yet. Agents save project facts here, and you review them.</p>}
         {fresh > 0 && <div className="sheet-buttons project-row-end"><button type="button" className="secondary" disabled={pending} onClick={() => void post('seen', {})}>Mark all as read</button></div>}

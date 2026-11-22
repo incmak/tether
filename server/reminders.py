@@ -40,13 +40,13 @@ from math import inf
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
-    from . import paths
+    from . import paths, tether_zone
 except ImportError:
     import paths
+    import tether_zone
 
 PREFIX = '/mobile/api/reminders'
 ACTIONS = ('add', 'edit', 'done', 'reopen', 'snooze', 'delete', 'restore')
-ZONE = ZoneInfo(os.environ.get('TETHER_REMINDER_ZONE') or 'Asia/Kolkata')
 RULES = ('day', 'weekday', 'week', 'month', 'year')
 INTERVAL_LIMITS = {'day': 365, 'weekday': 1, 'week': 52, 'month': 60, 'year': 5}
 TEXT_LIMIT = 500
@@ -270,7 +270,7 @@ def repeat_zone(rule):
     try:
         return ZoneInfo(rule['zone'])
     except (ZoneInfoNotFoundError, ValueError):
-        return ZONE
+        return tether_zone.zone()
 
 
 def _repeat_date(rule, last_day):
@@ -302,7 +302,7 @@ def _clean_repeat(repeat, due, previous=None):
         raise ReminderError('Use last_day only with a monthly repeat.')
     # A rule-only edit keeps the series zone: its day and wall time belong to that zone.
     rule = {'every': every, 'anchor': previous['anchor'] if previous else due,
-            'zone': previous['zone'] if previous else ZONE.key}
+            'zone': previous['zone'] if previous else tether_zone.name()}
     if interval > 1:
         rule['interval'] = interval
     if previous and 'origin' in previous:
@@ -492,8 +492,8 @@ def change(rid, action, body=None, now=None, *, by_id=False):
                     raise ReminderError('A linked reminder cannot repeat.')
                 record['repeat'] = repeat
             elif due_changed and rule:
-                # A new time is typed in the server zone, so the series moves to it, as with a new rule.
-                rule.update(anchor=record['due'], zone=ZONE.key)
+                # A new time moves the series to the current Tether zone, as with a new rule.
+                rule.update(anchor=record['due'], zone=tether_zone.name())
                 rule.pop('origin', None)
                 _repeat_date(rule, rule.get('day') == -1)
         elif action == 'done':
@@ -680,10 +680,11 @@ def tick(channels, now=None):
 
 
 def when_text(at, now=None):
-    """'10:00', 'tomorrow 10:00' or 'Wed 19 Nov 10:00', in ZONE."""
+    """'10:00', 'tomorrow 10:00' or 'Wed 19 Nov 10:00', in the Tether time zone."""
     now = time.time() if now is None else now
-    day = datetime.fromtimestamp(at, ZONE)
-    today = datetime.fromtimestamp(now, ZONE).date()
+    zone = tether_zone.zone()
+    day = datetime.fromtimestamp(at, zone)
+    today = datetime.fromtimestamp(now, zone).date()
     clock = day.strftime('%H:%M')
     if day.date() == today:
         return clock
@@ -701,7 +702,7 @@ def payload(reminder, silent=False, now=None):
 
 
 # Times the CLI understands: "2026-11-19 10:00", "2026-11-19" (10:00), "2026-11-19T10:00+05:30", "10:00" (next), "tomorrow 10:00",
-# "tomorrow", "in 90m", "in 2h", "in 1d". A time without an offset is in ZONE.
+# "tomorrow", "in 90m", "in 2h", "in 1d". A time without an offset is in the Tether time zone.
 RELATIVE = re.compile(r'in\s+(\d{1,5})\s*(m|min|mins|minutes?|h|hr|hrs|hours?|d|days?)', re.I)
 CLOCK = re.compile(r'(\d{1,2}):(\d{2})')
 DATE = re.compile(r'\d{4}-\d{2}-\d{2}')
@@ -710,27 +711,28 @@ DATE = re.compile(r'\d{4}-\d{2}-\d{2}')
 def parse_when(text, now=None):
     now = time.time() if now is None else now
     text = ' '.join(str(text or '').split())
-    base = datetime.fromtimestamp(now, ZONE)
+    base = tether_zone.now(now)
     match = RELATIVE.fullmatch(text)
     if match:
         amount, unit = int(match[1]), match[2][0].lower()
         return now + amount * {'m': 60, 'h': 3600, 'd': 86400}[unit]
     try:
         lower = text.lower()
-        if lower == 'tomorrow' or lower.startswith('tomorrow '):
-            clock = CLOCK.fullmatch(text[8:].strip() or '09:00')
-            if clock is None:
-                raise ValueError
-            day = base + timedelta(days=1)
-            return day.replace(hour=int(clock[1]), minute=int(clock[2]), second=0, microsecond=0).timestamp()
-        clock = CLOCK.fullmatch(text)
+        tomorrow = lower == 'tomorrow' or lower.startswith('tomorrow ')
+        clock = CLOCK.fullmatch((text[8:].strip() or '09:00') if tomorrow else text)
+        if tomorrow and not clock:
+            raise ValueError
         if clock:
-            at = base.replace(hour=int(clock[1]), minute=int(clock[2]), second=0, microsecond=0)
-            return (at if at.timestamp() > now else at + timedelta(days=1)).timestamp()
+            wall = base.replace(tzinfo=None, hour=int(clock[1]), minute=int(clock[2]), second=0, microsecond=0)
+            if not tomorrow:
+                for at in tether_zone.wall_times(wall, base.tzinfo):
+                    if at > now:
+                        return at
+            return tether_zone.wall_times(wall + timedelta(days=1), base.tzinfo)[0]
         at = datetime.fromisoformat(text.replace(' ', 'T', 1) if 'T' not in text else text)
         if DATE.fullmatch(text):
             at = at.replace(hour=10)
-        return (at if at.tzinfo is not None else at.replace(tzinfo=ZONE)).timestamp()
+        return (at if at.tzinfo is not None else at.replace(tzinfo=base.tzinfo)).timestamp()
     except (ValueError, OverflowError, OSError):
         raise ReminderError(f'Cannot read the time "{text}". Use "2026-11-19 10:00", "tomorrow 10:00" or "in 2h".') from None
 

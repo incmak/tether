@@ -18,6 +18,17 @@ import server
 NOW = 1_800_000_000
 
 
+def revision(number=1, **fields):
+    return {'rev': number, 'text': f'Full draft {number}', 'skill': None, 'summary': f'Draft {number}',
+            'edit': None, 'at': NOW, **fields}
+
+
+def draft(**fields):
+    return {'state': 'ready', 'error': None, 'started': NOW, 'updated': NOW,
+            'chat': {'pane': '%12', 'thread': '11111111-1111-4111-8111-111111111111', 'name': 'Draft Server'},
+            'asked_close': False, 'revisions': [revision()], **fields}
+
+
 class FridayNotesTests(unittest.TestCase):
     def setUp(self):
         root = self.enterContext(TemporaryDirectory())
@@ -193,15 +204,102 @@ class FridayNotesTests(unittest.TestCase):
                     self.assertEqual(exc.exception.status, 503)
                     self.assertEqual(self.path.read_bytes(), corrupt)
 
-    def test_load_discards_malformed_records_and_keeps_valid_neighbors(self):
+    def test_load_hides_malformed_records_and_keeps_valid_neighbors(self):
         good = self.hold('Valid')
         data = {'version': 1, 'next': 1, 'topics': [None, {}, good, {**good, 'id': 'T8', 'notes': 5},
                 {**good, 'id': 'T9', 'state': 'sent'}, {**good, 'id': 'T10', 'updated': float('inf')}]}
         self.path.write_text(json.dumps(data))
         self.assertEqual(notes.listing(), {'topics': [good]})
-        self.assertEqual(self.hold('Fresh')['id'], 'T2')
+        self.assertEqual(self.hold('Fresh')['id'], 'T11')
+        self.assertEqual(json.loads(self.path.read_text())['topics'][:5], data['topics'][:5])
         self.path.write_text('{"topics": true}')
         self.assertEqual(notes.listing(), {'topics': []})
+
+    def test_draft_round_trip_hold_and_pinned_use_the_latest_revision(self):
+        topic = self.hold('Server')
+        saved = draft(revisions=[revision(), revision(2, text='/research\n\nFull revised prompt.',
+                                                      skill='/research', edit='Add checks.')])
+        data = json.loads(self.path.read_text())
+        data['topics'][0]['draft'] = saved
+        self.path.write_text(json.dumps(data))
+        self.assertEqual(notes.listing(NOW), {'topics': [dict(topic, draft=saved)]})
+        self.assertEqual(self.hold('Server', ['Extra note.'], now=NOW + 1)['draft'], saved)
+        pinned, = notes.pinned(NOW + 1)
+        self.assertEqual(pinned['draft'], dict(state='ready', rev=2, summary='Draft 2', skill='/research',
+                                               length=len('/research\n\nFull revised prompt.')))
+        self.assertNotIn('Full revised prompt.', json.dumps(pinned))
+        self.assertNotIn('Full draft 1', json.dumps(pinned))
+
+    def test_invalid_draft_fields_remain_byte_exact_and_ids_are_reserved(self):
+        topic = self.hold('Valid')
+        invalid = [
+            'ready', draft(state='new-state'), draft(error=True), draft(error='e' * (notes.DRAFT_ERROR_LIMIT + 1)),
+            draft(started=True), draft(updated=float('inf')), draft(chat=[]),
+            draft(chat={'pane': '12', 'thread': 'thread', 'name': 'A'}),
+            draft(chat={'pane': 12, 'thread': 'thread', 'name': 'A'}),
+            draft(chat={'pane': '%12', 'thread': 3, 'name': 'A'}),
+            draft(chat={'pane': '%12', 'thread': 'thread', 'name': []}),
+            draft(asked_close=1), draft(revisions={}), draft(revisions=[revision(i) for i in range(1, 22)]),
+            draft(revisions=[revision(2)]), draft(revisions=[revision(), revision()]),
+            draft(revisions=[revision(True)]), draft(revisions=[revision(text=21)]),
+            draft(revisions=[revision(text='')]), draft(revisions=[revision(text='a' * 20001)]),
+            draft(revisions=[revision(skill='research')]), draft(revisions=[revision(skill=5)]),
+            draft(revisions=[revision(summary=None)]), draft(revisions=[revision(summary='x' * 401)]),
+            draft(revisions=[revision(edit={})]), draft(revisions=[revision(edit='x' * 1001)]),
+            draft(revisions=[revision(at=False)]), draft(revisions=[{}]),
+            {key: value for key, value in draft().items() if key != 'error'}, draft(extra=True),
+        ]
+        records = [json.dumps(dict(topic, id=f'T{i}', title=f'Hidden {i}', draft=value), separators=(' ,\r\n ', ' :  '))
+                   for i, value in enumerate(invalid, 10)]
+        valid = json.dumps(topic)
+        ordered = [records[0], valid, *records[1:]]
+        self.path.write_bytes(('{"topics":[], "metadata": {"topics": ["irrelevant"]}, "next": 1, "to\\u0070ics": ['
+                               + ',\n'.join(ordered) + ']}').encode())
+        self.assertEqual(notes.listing(NOW), {'topics': [topic]})
+        self.assertEqual([item['topic'] for item in notes.pinned(NOW)], ['Valid'])
+        self.assertIsNone(notes.find(notes.listing(NOW)['topics'], 'Hidden 10'))
+        with self.assertRaisesRegex(notes.NotesError, 'No topic matches Hidden 10'):
+            notes.drop('Hidden 10', now=NOW)
+        self.hold('Valid', ['Still valid.'])
+        fresh = self.hold('Hidden 10', ['A new topic with that title.'])
+        self.assertEqual(fresh['id'], f'T{10 + len(invalid)}')
+        saved = self.path.read_bytes()
+        for value in records:
+            self.assertTrue(value.encode() in saved, 'The original invalid record is missing.')
+        offsets = [saved.index(value.encode()) for value in records]
+        self.assertEqual(offsets, sorted(offsets))
+        self.assertLess(offsets[0], saved.index(b'"title": "Valid"'))
+        self.assertLess(saved.index(b'"title": "Valid"'), offsets[1])
+
+    def test_stale_drafting_is_failed_on_read_and_saved_on_the_next_write(self):
+        self.hold('Old job')
+        self.hold('Current job')
+        data = json.loads(self.path.read_text())
+        data['topics'][0]['draft'] = draft(state='drafting', updated=NOW - notes.DRAFT_STALE - 1)
+        data['topics'][1]['draft'] = draft(state='drafting', updated=NOW - notes.DRAFT_STALE)
+        self.path.write_text(json.dumps(data))
+        old, current = notes.listing(NOW)['topics']
+        self.assertEqual((old['draft']['state'], old['draft']['error']),
+                         ('failed', 'Drafting stopped. Ask Friday to make the prompt again.'))
+        self.assertEqual(current['draft']['state'], 'drafting')
+        self.assertEqual(json.loads(self.path.read_text())['topics'][0]['draft']['state'], 'drafting')
+        self.hold('Current job')
+        self.assertEqual(json.loads(self.path.read_text())['topics'][0]['draft'], old['draft'])
+
+    def test_drop_would_remove_the_open_draft_identity(self):
+        topic = self.hold('Server', ['First', 'Last'])
+        data = json.loads(self.path.read_text())
+        data['topics'][0]['draft'] = draft()
+        self.path.write_text(json.dumps(data))
+        self.assertEqual(notes.drop(None, 1, now=NOW, topic_id=topic['id'])['left'], 1)
+        for note in (None, 1):
+            with self.subTest(note=note), self.assertRaisesRegex(notes.NotesError, 'Close the draft chat first.') as exc:
+                notes.drop(None, note, now=NOW, topic_id=topic['id'])
+            self.assertEqual(exc.exception.status, 409)
+        data = json.loads(self.path.read_text())
+        data['topics'][0]['draft']['state'] = 'closed'
+        self.path.write_text(json.dumps(data))
+        self.assertEqual(notes.drop('Server', now=NOW)['dropped'], 'topic')
 
     def test_pinned_drops_globally_oldest_and_keeps_newest_in_each_topic(self):
         first, second = 'α' * 120, '"' * 300
@@ -243,6 +341,7 @@ class FridayNotesTests(unittest.TestCase):
             self.assertEqual(S_IMODE(file.stat().st_mode), 0o600)
 
     def test_http_routes_preserve_auth_origin_and_write_header(self):
+        self.enterContext(patch('friday_drafts.schedule_sweep'))
         self.enterContext(patch.object(server.auth, 'MODE', 'token'))
         self.enterContext(patch.object(server.auth, 'token', return_value='notes-test-secret'))
 

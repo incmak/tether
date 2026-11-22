@@ -8,10 +8,11 @@ import { useModal } from './hooks'
 import { Bone } from './Skeleton'
 import { SelectMenu } from './SelectMenu'
 import { chatTitle } from './Sidebar'
-import { act, choiceLabel, choiceOf, choiceValid, fullLabel, groupReminders, INTERVAL_MAX, NO_REPEAT, parseWhen, quickPicks, repeatBody, repeatLabel, repeatOptions, sameChoice, snoozePicks, TEXT_LIMIT, unitName, whenLabel, ZONE_LABEL } from './reminders'
+import { act, choiceLabel, choiceOf, choiceValid, fullLabel, groupReminders, INTERVAL_MAX, NO_REPEAT, parseWhen, quickPicks, repeatBody, repeatLabel, repeatOptions, sameChoice, snoozePicks, TEXT_LIMIT, unitName, whenLabel } from './reminders'
 import type { Listing, Reminder, RepeatChoice, RepeatPick, RepeatRule, RepeatUnit, useReminders } from './reminders'
 import { TodosPanel } from './Todos'
 import { useTasks } from './tasks'
+import { useTetherZone, zoneLabel } from './zone'
 import './Reminders.css'
 
 type Polled = ReturnType<typeof useReminders>
@@ -27,12 +28,12 @@ const EMPTY: When = { text: '' }
 const whenAt = (when: When, now: number) => when.at ?? parseWhen(when.text, now)
 
 /** The "When" field: typed text, its parsed time below it, and quick picks that fill it. */
-function WhenField({ id, when, onChange, now, picks = true }: { id: string; when: When; onChange: (when: When) => void; now: number; picks?: boolean }) {
+function WhenField({ id, when, onChange, now, label, picks = true }: { id: string; when: When; onChange: (when: When) => void; now: number; label: string; picks?: boolean }) {
   const value = when.text
   const at = whenAt(when, now)
   const hint = `${id}-hint`
   return <div className="reminder-when">
-    <label htmlFor={id}>When <span className="reminder-zone">({ZONE_LABEL})</span></label>
+    <label htmlFor={id}>When <span className="reminder-zone">({label})</span></label>
     <input id={id} type="text" value={value} autoComplete="off" enterKeyHint="done" placeholder="tomorrow 10:00, in 2 h, fri 18:00"
       aria-describedby={hint} aria-invalid={!!value.trim() && at === null} onChange={event => onChange({ text: event.target.value })} />
     <p id={hint} className={value.trim() && at === null ? 'reminder-parsed bad' : 'reminder-parsed'} aria-live="polite">
@@ -76,8 +77,8 @@ function RepeatField({ id, value, at, rule, onChange }: { id: string; value: Rep
 }
 
 /** One reminder: text, time, links and actions. Editing swaps the row for a small form. */
-function Row({ item, now, panes, api, onOpenPane, onOpenItem, onDelete, onError }: {
-  item: Reminder; now: number; panes: Pane[]; api: Api; onOpenPane?: (pane: Pane) => void; onOpenItem?: (ref: string) => void
+function Row({ item, now, zoneName, panes, api, onOpenPane, onOpenItem, onDelete, onError }: {
+  item: Reminder; now: number; zoneName: string; panes: Pane[]; api: Api; onOpenPane?: (pane: Pane) => void; onOpenItem?: (ref: string) => void
   onDelete: (item: Reminder) => void; onError: (text: string) => void
 }) {
   const [editing, setEditing] = useState(false)
@@ -112,7 +113,7 @@ function Row({ item, now, panes, api, onOpenPane, onOpenItem, onDelete, onError 
       <form onSubmit={save} aria-label={`Edit reminder: ${item.text}`}>
         <label htmlFor={`${formId}-text`}>Reminder</label>
         <textarea id={`${formId}-text`} rows={2} maxLength={TEXT_LIMIT} value={text} onChange={event => setText(event.target.value)} autoFocus />
-        <WhenField id={`${formId}-when`} when={when} onChange={setWhen} now={now} picks={false} />
+        <WhenField id={`${formId}-when`} when={when} onChange={setWhen} now={now} label={zoneName} picks={false} />
         <p className="reminder-keep">{typed ? '' : `Leave When empty to keep ${whenLabel(item.due, now)}.`}</p>
         {/* A kept due (blank or re-typed) can be a snoozed time; the server keeps the rule's own occurrence then. */}
         {/* A new time gives the rule a new day; a kept time keeps the rule's own day and month. */}
@@ -189,6 +190,8 @@ export function RemindersSheet({ api, polled, panes, current, onOpenPane, onOpen
   api: Api; polled: Polled; panes: Pane[]; current?: Pane; onOpenPane?: (pane: Pane) => void; onOpenItem?: (ref: string) => void; onClose: () => void
 }) {
   const modal = useModal(true, onClose, undefined, { view: 'reminders' })
+  const zone = useTetherZone()
+  const zoneName = zoneLabel(zone)
   const { data, error, loading, refresh } = polled
   const [tab, setTab] = useState<'reminders' | 'todos'>('reminders')
   const tasks = useTasks(api)
@@ -238,7 +241,7 @@ export function RemindersSheet({ api, polled, panes, current, onOpenPane, onOpen
     try { await act(api, 'restore', { id }) } catch (error) { setProblem(errorText(error)) }
   }
   const deleted = useMemo(() => [...(data?.deleted ?? [])].sort((a, b) => b.deleted_at - a.deleted_at), [data])
-  const row = (item: Reminder) => <Row key={item.id} item={item} now={now} panes={panes} api={api} onDelete={item => void remove(item)} onError={setProblem}
+  const row = (item: Reminder) => <Row key={item.id} item={item} now={now} zoneName={zoneName} panes={panes} api={api} onDelete={item => void remove(item)} onError={setProblem}
     onOpenPane={onOpenPane && (pane => { onClose(); onOpenPane(pane) })} onOpenItem={onOpenItem && (ref => { onClose(); onOpenItem(ref) })} />
   const list: Listing | undefined = data
   return <dialog {...modal} className="sheet settings-sheet reminders-sheet" aria-labelledby={`${ids}-title`}>
@@ -260,13 +263,13 @@ export function RemindersSheet({ api, polled, panes, current, onOpenPane, onOpen
     </div>
     <div role="tabpanel" id={`${ids}-panel`} aria-labelledby={`${ids}-tab-${tab}`} tabIndex={0} className="reminders-panel">
     {tab === 'todos' ? <TodosPanel api={api} polled={tasks} onOpenItem={onOpenItem && (ref => { onClose(); onOpenItem(ref) })} /> : <>
-    <p className="sheet-sub sheet-note">Tether notifies you at the time, like an urgent ask. Times are in {ZONE_LABEL}.</p>
+    <p className="sheet-sub sheet-note">Tether notifies you at the time, like an urgent ask. Times are in {zoneName}{zoneName === zone ? '' : ` (${zone})`}.</p>
     <form className="reminder-add" onSubmit={add} aria-label="New reminder">
       <label htmlFor={`${ids}-text`}>Remind me to</label>
       <textarea id={`${ids}-text`} ref={textRef} rows={2} maxLength={TEXT_LIMIT} value={text} placeholder="Check the deploy"
         onChange={event => setText(event.target.value)}
         onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void add(event) }} />
-      <WhenField id={`${ids}-when`} when={when} onChange={setWhen} now={now} />
+      <WhenField id={`${ids}-when`} when={when} onChange={setWhen} now={now} label={zoneName} />
       <RepeatField id={`${ids}-repeat`} value={repeat} at={at} onChange={setRepeat} />
       {current && <label className="reminder-link-tab"><input type="checkbox" checked={linkTab} onChange={event => setLinkTab(event.target.checked)} />
         <span>Link to this tab: {chatTitle(current)}</span></label>}

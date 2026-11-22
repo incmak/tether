@@ -2,9 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, Calendar, FolderOpen, Monitor, RotateCw, Search, Terminal, Undo2, X } from 'lucide-react'
 import { errorText } from './api'
 import type { Api } from './api'
+import { useNow } from './attention'
 import { usePolling } from './hooks'
 import { SelectMenu } from './SelectMenu'
 import { SkeletonRows } from './Skeleton'
+import { dayKey, fmtDate, fmtDateTime, fmtTime, sameDay, useTetherZone, zonedTime, zoneParts } from './zone'
 import './ActivityLog.css'
 
 // Settings › Activity (server: audit.py, GET /mobile/api/audit). What each device and agent changed: settings with the old
@@ -44,31 +46,31 @@ function actorText(actor: AuditEntry['actor']) {
 }
 const ACTOR_ICON = { ui: Monitor, 'agent-cli': Bot, hook: Bot, cli: Terminal, server: Monitor, unknown: Monitor }
 
-/** A date input value (local day) → epoch seconds at the start of that day; `end` gives the start of the next day. */
-function dayStart(value: string, end = false) {
+/** A date input value → epoch seconds at the start of that day in Tether; `end` gives the start of the next day. */
+function dayStart(value: string, zone: string, end = false) {
   const [year, month, day] = value.split('-').map(Number)
   if (!year || !month || !day) return undefined
-  return Math.floor(new Date(year, month - 1, day + (end ? 1 : 0)).getTime() / 1000)
+  return Math.floor(zonedTime(year, month - 1, day + (end ? 1 : 0), 0, 0, zone) / 1000)
 }
-const dayKey = (seconds: number) => new Date(seconds * 1000).toDateString()
-function dayHeading(seconds: number) {
-  const date = new Date(seconds * 1000)
-  const today = new Date(); const yesterday = new Date(); yesterday.setDate(today.getDate() - 1)
-  if (date.toDateString() === today.toDateString()) return 'Today'
-  if (date.toDateString() === yesterday.toDateString()) return 'Yesterday'
-  return date.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: date.getFullYear() === today.getFullYear() ? undefined : 'numeric' })
+function dayHeading(seconds: number, now: number) {
+  const at = seconds * 1000
+  if (sameDay(at, now)) return 'Today'
+  const { year, month, date } = zoneParts(now)
+  const yesterday = zonedTime(year, month, date - 1, 0, 0)
+  if (sameDay(at, yesterday)) return 'Yesterday'
+  return fmtDate(at, { weekday: 'short', day: 'numeric', month: 'short', year: zoneParts(at).year === year ? undefined : 'numeric' })
 }
 
 interface Filters { text: string; group: string; project: string; actor: string; from: string; to: string }
 const NONE: Filters = { text: '', group: ANY, project: ANY, actor: ANY, from: '', to: '' }
-function queryOf(filters: Filters, before?: string) {
+function queryOf(filters: Filters, zone: string, before?: string) {
   const params = new URLSearchParams({ limit: String(PAGE) })
   if (filters.text.trim()) params.set('q', filters.text.trim())
   if (filters.group) params.set('kind', filters.group)
   if (filters.project) params.set('project', filters.project)
   if (filters.actor) params.set('actor', filters.actor)
-  const since = filters.from ? dayStart(filters.from) : undefined
-  const until = filters.to ? dayStart(filters.to, true) : undefined
+  const since = filters.from ? dayStart(filters.from, zone) : undefined
+  const until = filters.to ? dayStart(filters.to, zone, true) : undefined
   if (since !== undefined) params.set('since', String(since))
   if (until !== undefined) params.set('until', String(until))
   if (before) params.set('before', before)
@@ -83,7 +85,7 @@ function Row({ entry }: { entry: AuditEntry }) {
   const old = String(entry.old ?? '—'), now = String(entry.new ?? '—')
   const change = (entry.old !== undefined || entry.new !== undefined) && !entry.summary.includes(`${old} → ${now}`)
   return <li className="audit-row" data-kind={entry.kind}>
-    <time className="audit-time" dateTime={date.toISOString()} title={date.toLocaleString()}>{date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>
+    <time className="audit-time" dateTime={date.toISOString()} title={fmtDateTime(date)}>{fmtTime(date, { hour: 'numeric', minute: '2-digit' })}</time>
     <span className="audit-text">
       <strong className="audit-summary">{entry.undo && <span className="audit-undo"><Undo2 size={12} aria-hidden="true" />Undo</span>}{entry.summary}</strong>
       {change && <span className="audit-change"><span className="visually-hidden">Changed from </span><span className="audit-old">{old}</span><span aria-hidden="true"> → </span><span className="visually-hidden"> to </span><b>{now}</b></span>}
@@ -105,6 +107,7 @@ function merged(...lists: AuditEntry[][]) {
 /** Settings › Activity. The first page reloads every 20 s while it is open. After Load more, the sheet keeps one list:
  * each reload and each older page merge into it, so no row that was on screen goes away. */
 export function ActivityLog({ api }: { api: Api }) {
+  const zone = useTetherZone()
   const [filters, setFilters] = useState<Filters>(NONE)
   // The list after Load more, for one query. A filter change drops it, so the list starts again at the newest entry.
   const [loaded, setLoaded] = useState<{ path: string; entries: AuditEntry[]; next: string | null } | null>(null)
@@ -117,7 +120,7 @@ export function ActivityLog({ api }: { api: Api }) {
   const drop = () => { request.current = null; setLoaded(null); setMore(null) }
   // Typing waits 250 ms before it asks the server, so each key does not send a request.
   useEffect(() => { const timer = setTimeout(() => { if (text !== filters.text) { request.current = null; setLoaded(null); setMore(null); setFilters(current => ({ ...current, text })) } }, 250); return () => clearTimeout(timer) }, [text, filters.text])
-  const path = queryOf(filters)
+  const path = queryOf(filters, zone)
   // Each answer carries the query that asked for it, and a failure is an answer too: a page or an error for the last
   // filter must not show under this one.
   const fetcher = useCallback((signal: AbortSignal) => api<AuditPage>(path, undefined, signal).then(
@@ -155,7 +158,7 @@ export function ActivityLog({ api }: { api: Api }) {
     request.current = asked
     setMore(asked)
     try {
-      const page = await api<AuditPage>(queryOf(filters, next))
+      const page = await api<AuditPage>(queryOf(filters, zone, next))
       // Add the page only to the list it continues. A filter change or a reset dropped that list: then drop the page.
       if (request.current !== asked) return
       request.current = null
@@ -175,7 +178,8 @@ export function ActivityLog({ api }: { api: Api }) {
   const projects = facets?.projects ?? []
   const actors = facets?.actors ?? []
   const days = live?.retention_days ?? kept?.page.retention_days ?? 90
-  const today = new Date(); const max = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
+  const now = useNow() * 1000
+  const max = dayKey(now, zone)
 
   let body
   if (!live && error) body = <div className="audit-state" role="alert"><p className="error">Could not load the activity log. {error}</p><button type="button" className="secondary" onClick={() => void refresh()}><RotateCw size={15} aria-hidden="true" />Retry</button></div>
@@ -193,10 +197,10 @@ export function ActivityLog({ api }: { api: Api }) {
     {error && <p className="error audit-stale" role="alert">Could not refresh. {error} <button type="button" className="link-button" onClick={() => void refresh()}>Retry</button></p>}
     <ol className="audit-days">{entries.reduce<AuditEntry[][]>((groups, entry) => {
       const last = groups[groups.length - 1]
-      if (last && dayKey(last[0].at) === dayKey(entry.at)) last.push(entry); else groups.push([entry])
+      if (last && sameDay(last[0].at * 1000, entry.at * 1000, zone)) last.push(entry); else groups.push([entry])
       return groups
     }, []).map(group => <li key={group[0].id} className="audit-day">
-      <h4>{dayHeading(group[0].at)}</h4>
+      <h4>{dayHeading(group[0].at, now)}</h4>
       <ul className="audit-list">{group.map(entry => <Row key={entry.id} entry={entry} />)}</ul>
     </li>)}</ol>
     {asking?.failed && <p className="error" role="alert">Could not load more. {asking.failed}</p>}

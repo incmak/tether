@@ -26,6 +26,7 @@ import backlog
 import graph_client
 import paths
 import reminders
+import tether_zone
 
 PREFIX = '/mobile/api/tasks'
 POSTS = {f'{PREFIX}/{action}' for action in ('sync', 'settings', 'backlog')}
@@ -128,7 +129,7 @@ def _graph_id(value):
 
 
 def _time(value):
-    """(date, epoch, uncertain), with timed values shown in the reminder display zone."""
+    """(date, epoch, uncertain), with dates and times as supplied by Microsoft."""
     zone = 'UTC'
     if isinstance(value, dict):
         zone, value = value.get('timeZone'), value.get('dateTime')
@@ -145,7 +146,7 @@ def _time(value):
             except (ZoneInfoNotFoundError, ValueError, TypeError):
                 local, uncertain = timezone.utc, True
             parsed = parsed.replace(tzinfo=local)
-        return parsed.astimezone(reminders.ZONE).date().isoformat(), parsed.timestamp(), uncertain
+        return parsed.date().isoformat(), parsed.timestamp(), uncertain
     except (OverflowError, OSError, ValueError):
         raise TaskError('Microsoft returned an invalid task date.', 502) from None
 
@@ -383,6 +384,7 @@ def listing():
     connection = graph_client.status(loaded)
     account = list(_account(loaded[0])) if connection['tasks'] else None
     snapshots = _account_snapshots(mirror, account)
+    zone = tether_zone.zone()
     syncing = _syncing()
     sources, tasks = [], []
     for key, label in LABELS.items():
@@ -409,9 +411,12 @@ def listing():
             task = dict(row, backlog=saved['backlog'].get(row['key']),
                         reminder=saved['reminder'].get(row['key'], {}).get('id'))
             task.pop('listId', None)
+            due = task['due']
+            if due and due['at'] is not None:
+                task['due'] = dict(due, date=datetime.fromtimestamp(due['at'], zone).date().isoformat())
             tasks.append(task)
     now = time.time()
-    today = datetime.fromtimestamp(now, reminders.ZONE).date().isoformat()
+    today = datetime.fromtimestamp(now, zone).date().isoformat()
     return {'sources': sources, 'tasks': sorted(tasks, key=lambda row: _sort_key(row, now, today))}
 
 

@@ -21,10 +21,10 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import paths
 import prefs_sync
+import tether_zone
 
 PATH = '/mobile/api/activity'
 PUBLISH_PATH = '/mobile/api/activity/publish'
@@ -87,17 +87,6 @@ def seconds(minutes):
     return 60 * len(covered(minutes))
 
 
-def zone_of(name):
-    try:
-        return ZoneInfo(name) if name else None
-    except (ZoneInfoNotFoundError, ValueError, OSError):
-        return None
-
-
-def zone_name(zone):
-    return getattr(zone, 'key', '') or ''
-
-
 def _write_json(path, data):
     """Write through a new, exclusive temporary file, then rename it over the path. The rename replaces a link at
     the path itself; it never writes through one."""
@@ -139,11 +128,10 @@ class Store:
         self.publishing = False
         self.last_publish = None  # {'at', 'ok', 'error'}
 
-    # Configuration: the browser's time zone, the first marked minute and the publish folder. Owner-only, outside the repo.
+    # Configuration: the first marked minute and the publish folder. Owner-only, outside the repo.
     def config(self):
         data = _read_json(config_file()) or {}
-        return {'zone': data.get('zone') if isinstance(data.get('zone'), str) else '',
-                'since': _number(data.get('since')),
+        return {'since': _number(data.get('since')),
                 'publish': data.get('publish') if isinstance(data.get('publish'), str) else '',
                 'published': _number(data.get('published')) or 0,
                 'revision': int(_number(data.get('revision')) or 0),
@@ -159,8 +147,8 @@ class Store:
                 pass
             return data
 
-    def zone(self, config=None):
-        return zone_of((config or self.config())['zone']) or datetime.datetime.now().astimezone().tzinfo
+    def zone(self):
+        return tether_zone.zone()
 
     def project_of(self, path):
         now = self.clock()
@@ -213,13 +201,11 @@ class Store:
         return True
 
     def human(self, path, zone=''):
-        """The person used a tab whose folder is `path`. Returns why nothing was marked, or ''."""
+        """Mark the use of a tab in `path`. The browser zone is accepted for old clients."""
         if not enabled()[0]:
             return 'off'
         if not isinstance(path, str) or not path.startswith('/') or not os.path.isdir(path):
             return 'no-folder'
-        if zone and zone_of(zone) and self.config()['zone'] != zone:
-            self._save_config(zone=zone)
         return '' if self.mark('you', self.project_of(path)) or enabled()[0] else 'off'
 
     def observe(self, entries, status, tab_folder):
@@ -260,13 +246,13 @@ class Store:
                             out[who].setdefault(name, []).extend(m for m in minutes if isinstance(m, int) and not isinstance(m, bool))
         return out
 
-    def summary(self, recent=None):
-        """{day: {seconds, agent_seconds, projects, agent_projects}} by local day in the person's zone, from the
+    def summary(self, recent=None, *, zone=None):
+        """{day: {seconds, agent_seconds, projects, agent_projects}} by day in the Tether zone, from the
         first marked day to today. Days with no work are zero; days before the first mark are absent."""
         config = self.config()
         if config['since'] is None:
             return {}
-        zone = self.zone(config)
+        zone = zone or self.zone()
         today = datetime.datetime.fromtimestamp(self.clock(), zone).date()
         start = datetime.datetime.fromtimestamp(config['since'], zone).date()
         if recent:
@@ -304,13 +290,15 @@ class Store:
     def export(self):
         with self.lock:  # the revision is read first, so a later mark always stays pending
             revision = self.config()['revision']
-        return {'version': 1, 'source': 'tether', 'zone': zone_name(self.zone()), 'gap_minutes': GAP,
-                'generated': int(self.clock()), 'revision': revision, 'days': self.summary()}
+        zone = self.zone()
+        return {'version': 1, 'source': 'tether', 'zone': zone.key, 'gap_minutes': GAP,
+                'generated': int(self.clock()), 'revision': revision, 'days': self.summary(zone=zone)}
 
     def status(self):
         on, agents = enabled()
         config = self.config()
-        days = self.summary(recent=14)
+        zone = self.zone()
+        days = self.summary(recent=14, zone=zone)
         projects = {}
         for row in days.values():
             for key, who in (('projects', 'you'), ('agent_projects', 'agents')):
@@ -318,7 +306,7 @@ class Store:
                     projects.setdefault(name, {'name': name, 'you': 0, 'agents': 0})[who] += value
         top = sorted(projects.values(), key=lambda item: (-(item['you'] + item['agents']), item['name']))[:8]
         home = str(paths.HOME)
-        return {'enabled': on, 'agents': agents, 'zone': zone_name(self.zone(config)), 'since': config['since'],
+        return {'enabled': on, 'agents': agents, 'zone': zone.key, 'since': config['since'],
                 'store': str(folder()).replace(home, '~', 1),
                 'days': [{'day': day, 'you': row['seconds'], 'agents': row['agent_seconds']} for day, row in days.items()],
                 'projects': top,

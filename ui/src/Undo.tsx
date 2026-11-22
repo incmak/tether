@@ -6,6 +6,7 @@ import { useModal } from './hooks'
 import { IS_MAC } from './keys'
 import { PREFS_PULL_EVENT } from './prefs'
 import { UNDO_RUN_EVENT, setUndoNext } from './undoState'
+import { fmtTime, useTetherZone } from './zone'
 
 /** Undo and redo of Tether steps (server/undo.py): tab, session and stack changes, from this page, another device or an agent.
  *  ⌘Z / ⌘⇧Z (Ctrl off a Mac) act on the newest step, but never in a text field, the composer, the terminal or an open sheet:
@@ -51,7 +52,7 @@ const timeText = (at: number) => {
   const minutes = Math.round((Date.now() / 1000 - at) / 60)
   if (minutes < 1) return 'just now'
   if (minutes < 60) return `${minutes} min ago`
-  return new Date(at * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  return fmtTime(at * 1000, { hour: 'numeric', minute: '2-digit' })
 }
 
 /** Give focus back to the control that had it before a sheet opened (the sheets unmount without dialog.close()). */
@@ -79,6 +80,7 @@ function Confirm({ ask, busy, onYes, onClose }: { ask: Ask; busy: boolean; onYes
 }
 
 function HistorySheet({ api, busy, onRun, onClose, version }: { api: Api; busy: boolean; onRun: (direction: Direction, id: string) => void; onClose: () => void; version: number }) {
+  useTetherZone()
   const modal = useModal(true, onClose)
   useReturnFocus()
   const [data, setData] = useState<HistoryData | null>(null)

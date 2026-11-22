@@ -15,6 +15,7 @@ import backlog
 import paths
 import projects
 import projects_api
+import tether_zone
 from test_projects import Handler
 
 
@@ -88,7 +89,7 @@ class BacklogTests(unittest.TestCase):
         self.assertLessEqual(len(kept), backlog.ARCHIVE_TO)
         self.assertIn('- [ ] Inbox open #B60', kept)
         self.assertIn('- [x] Newest done #B62', done)
-        self.assertRegex(kept, r'- \[x\] Open web item #B61\n  - Done: [0-9-]+ [0-9:]+ · shipped')
+        self.assertRegex(kept, r'- \[x\] Open web item #B61\n  - Done: [0-9-]+ [0-9:]+ [+-]\d{4} · shipped')
         self.assertNotIn('Old 1 #B1', kept)
         self.assertTrue(done.startswith('# Finished backlog items'))
         self.assertRegex(done, r'\n## web \(moved [0-9-]+ [0-9:]+\)\n- \[x\] Newest done #B62\n  - Done: ok\n- \[x\] Old 1 #B1\n  - Done: word')
@@ -252,14 +253,14 @@ class BacklogTests(unittest.TestCase):
             backlog.mark_done('secret', 'tether')
         backlog.add_detail('LOGIN', 'second', 'tether')
         backlog.mark_done('Fix login', 'tether')
-        self.assertRegex(self.text(), r'^- \[x\] Fix login \(codex · chat a\) #B1\n  - first\n  - second\n  - Done: \d{4}-\d\d-\d\d \d\d:\d\d · finished\n- \[ \] Fix upload #B2\n\n## other\n- \[ \] Fix secret #B3\n$')
+        self.assertRegex(self.text(), r'^- \[x\] Fix login \(codex · chat a\) #B1\n  - first\n  - second\n  - Done: \d{4}-\d\d-\d\d \d\d:\d\d [+-]\d{4} · finished\n- \[ \] Fix upload #B2\n\n## other\n- \[ \] Fix secret #B3\n$')
         with self.assertRaises(projects.ProjectError):
             backlog.mark_done('Fix login', 'tether')
 
     def test_an_exact_match_beats_a_longer_one(self):
         backlog.save('- [ ] Fix\n- [ ] Fix login\n', backlog.read()['version'])
         backlog.mark_done('fix')
-        self.assertRegex(self.text(), r'^- \[x\] Fix #B1\n  - Done: \d{4}-\d\d-\d\d \d\d:\d\d · finished\n- \[ \] Fix login #B2\n$')
+        self.assertRegex(self.text(), r'^- \[x\] Fix #B1\n  - Done: \d{4}-\d\d-\d\d \d\d:\d\d [+-]\d{4} · finished\n- \[ \] Fix login #B2\n$')
 
     def test_versions_keep_a_direct_overwrite_and_stay_limited(self):
         state = backlog.save('- [ ] One\n', backlog.read()['version'])
@@ -411,7 +412,7 @@ class BacklogTests(unittest.TestCase):
         self.assertEqual(self.text(), '- [ ] Fix login (codex · chat a) #B1\n  - Doing: claude · pane %5 · chat y\n  - why\n')
         self.assertEqual(backlog.list_open(), 'Inbox:\n- [ ] Fix login (codex · chat a) #B1\n  - Doing: claude · pane %5 · chat y\n  - why')
         backlog.mark_done('B1', result='fixed in 1234abc', who='claude · chat y')
-        self.assertRegex(self.text(), r'^- \[x\] Fix login \(codex · chat a\) #B1\n  - why\n  - Done: \d{4}-\d\d-\d\d \d\d:\d\d · fixed in 1234abc \(claude · chat y\)\n$')
+        self.assertRegex(self.text(), r'^- \[x\] Fix login \(codex · chat a\) #B1\n  - why\n  - Done: \d{4}-\d\d-\d\d \d\d:\d\d [+-]\d{4} · fixed in 1234abc \(claude · chat y\)\n$')
         with self.assertRaises(projects.ProjectError):
             backlog.start('B1', 'claude')
 
@@ -428,7 +429,7 @@ class BacklogTests(unittest.TestCase):
             self.assertEqual(agent_backlog_cli.main(['start', 'B1']), 0)
             self.assertIn('  - Doing: claude · chat abc', self.text())
             self.assertEqual(agent_backlog_cli.main(['done', 'B1', 'shipped in PR 9']), 0)
-        self.assertRegex(self.text(), r'^- \[x\] Fix it #B1\n  - Done: \d{4}-\d\d-\d\d \d\d:\d\d · shipped in PR 9 \(claude · chat abc\)\n$')
+        self.assertRegex(self.text(), r'^- \[x\] Fix it #B1\n  - Done: \d{4}-\d\d-\d\d \d\d:\d\d [+-]\d{4} · shipped in PR 9 \(claude · chat abc\)\n$')
 
     def test_reword_and_move_keep_the_id_source_and_details(self):
         backlog.save('## other-app\n- [ ] A long title (claude · chat a) #B1\n  - Doing: claude\n\n## tether\n- [ ] Other #B2\n', backlog.read()['version'])
@@ -574,8 +575,9 @@ class BoardTests(unittest.TestCase):
         patch = mock.patch.object(paths, 'TETHER', Path(temp.name))
         patch.start()
         self.addCleanup(patch.stop)
-        today = time.strftime('%Y-%m-%d %H:%M')
-        old = time.strftime('%Y-%m-%d %H:%M', time.localtime(time.time() - 8 * 86400))
+        now = time.time()
+        today = tether_zone.stamp(now)
+        old = tether_zone.stamp(now - 8 * 86400)
         self.text = (f'- [ ] Inbox item (codex · chat a) #B1\n  - why it matters\n\n'
                      f'## tether\n- [ ] Started #B2\n  - Doing: claude · pane %4\n  - [ ] a sub step\n'
                      f'- [x] Shipped #B3\n  - Done: {today} · in 1234abc (claude)\n'
@@ -618,7 +620,7 @@ class BoardTests(unittest.TestCase):
         self.assertEqual((card['stage'], card['doing'], card['details']), ('ready', None, ['a sub step']))
         card = backlog.set_stage('B2', 'done', card['version'])
         self.assertEqual(card['stage'], 'done')
-        self.assertRegex(self.file(), r'- \[x\] Started #B2\n  - \[ \] a sub step\n  - Done: [0-9-]+ [0-9:]+ · finished \(Mak\)\n')
+        self.assertRegex(self.file(), r'- \[x\] Started #B2\n  - \[ \] a sub step\n  - Done: [0-9-]+ [0-9:]+ [+-]\d{4} · finished \(Mak\)\n')
         card = backlog.set_stage('B3', 'ready', self.card('B3')['version'])
         self.assertEqual((card['stage'], card['done']), ('ready', None))
         self.assertIn('- [ ] Shipped #B3\n- [x] Ticked', self.file())
@@ -668,8 +670,9 @@ class BoardTests(unittest.TestCase):
         self.assertNotIn('Inbox item', done)
 
     def test_the_last_done_line_counts_for_the_card_and_the_archive(self):
-        today = time.strftime('%Y-%m-%d %H:%M')
-        old = time.strftime('%Y-%m-%d %H:%M', time.localtime(time.time() - 8 * 86400))
+        now = time.time()
+        today = tether_zone.stamp(now)
+        old = tether_zone.stamp(now - 8 * 86400)
         twice = f'- [x] Done twice #B9\n  - Done: {old} · first\n  - Done: {today} · again\n'
         filler = ''.join(f'- [x] Old {n} #B{n + 10}\n  - Done: ' + 'word ' * 200 + '\n' for n in range(60))
         (backlog.folder() / 'BACKLOG.md').write_text(twice + filler)
@@ -679,7 +682,7 @@ class BoardTests(unittest.TestCase):
         self.assertEqual(self.card('B9')['stage'], 'done')
 
     def test_this_weeks_done_items_move_too_when_the_list_would_not_fit(self):
-        today = time.strftime('%Y-%m-%d %H:%M')
+        today = tether_zone.stamp()
         done = ''.join(f'- [x] Done {n} ' + 'x' * 900 + f' #B{n}\n  - Done: {today} · ok\n' for n in range(1, 41))
         open_part = '- [ ] Open ' + 'y' * (backlog.LIMIT - 1000) + ' #B41\n'
         backlog.save(done + open_part, backlog.read()['version'])

@@ -12,10 +12,6 @@ export function eventPane(target: EventTarget | null): string {
   return target instanceof Element ? target.closest<HTMLElement>(TAB)?.dataset.pane ?? '' : ''
 }
 
-function zone() {
-  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || '' } catch { return '' }
-}
-
 /** Tell the server the person used a tab: a key, a click, a tap or a scroll inside that tab while the page is visible. */
 export function useActivityPing(api: Api, on: boolean) {
   const last = useRef<Record<string, number>>({})
@@ -26,7 +22,7 @@ export function useActivityPing(api: Api, on: boolean) {
       const now = Date.now()
       if (!pane || document.visibilityState !== 'visible' || now - (last.current[pane] ?? 0) < EVERY) return
       last.current[pane] = now
-      api('activity', { pane, zone: zone() }).catch(() => { /* activity time is best effort */ })
+      api('activity', { pane }).catch(() => { /* activity time is best effort */ })
     }
     for (const name of INPUT) window.addEventListener(name, ping, { capture: true, passive: true })
     return () => { for (const name of INPUT) window.removeEventListener(name, ping, { capture: true }) }

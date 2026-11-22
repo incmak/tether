@@ -235,3 +235,4 @@
 .auto-merge-pass { color: var(--muted); font-weight: 600; }
 .auto-merge-fail { color: var(--error); font-weight: 600; }
 .auto-merge-heading:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.preferences .time-zone-device { margin-top: 12px; }

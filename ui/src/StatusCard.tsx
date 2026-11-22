@@ -3,6 +3,7 @@ import { ChevronDown, CircleAlert, CircleCheck, Hand, MessageCircleQuestion, Rad
 import type { StatusTab } from './api'
 import { FileLink, TabOpener } from './MediaLink'
 import { stamp } from './messageTime'
+import { useTetherZone } from './zone'
 import type { StatusUpdate, TabUpdate, TabUpdateState } from './statusText'
 
 // The words the card shows for each state, and the order of the rows: what needs the person comes first.
@@ -64,6 +65,7 @@ const COUNTS: { state: TabUpdateState; words: string; short: string }[] = [
 /** Tether's "[Tether status]" prompt in the coordinator tab. It starts folded to one line; open it for one row per tab,
  *  what needs the person first. */
 export function StatusCard({ id, status, time, tabs }: { id: string; status: StatusUpdate; time?: string; tabs?: StatusTab[] }) {
+  useTetherZone()
   const [open, setOpen] = useState(false)
   const listId = useId()
   const rows = status.tabs.map((update, at) => ({ update, at })).sort((a, b) => STATE[a.update.state].rank - STATE[b.update.state].rank || a.at - b.at)

@@ -14,6 +14,11 @@ The person sets the mode in Settings. Nothing else changes it.
 
 The installed Git commit-msg hook checks the final message file for Claude, Codex and terminal commits.
 It logs one verdict and skips merges, replays that invoke the hook, and fixup, squash and amend! commits.
+The hook records the index tree, HEAD, the HEAD reflog position, the per-worktree Git directory and the Git
+process identity before Git makes the commit. Review binding skips a row only when Git proves the commit did
+not land. Pending and uncertain rows keep their worktree. To confirm a landing, Git must show a commit-making
+reflog entry in that worktree and a commit that matches the row's tree, parents, message HMAC and recorded dates.
+The new commit must be HEAD now or be the old HEAD of a later entry.
 The hook checks ordinary amendments. Claude's PreToolUse check can defer to the hook.
 PostToolUse matches each hook row to one landed commit by worktree, tree, all parents, message HMAC and dates.
 A merge skip row can lack the author date. PostToolUse checks uncovered commits and skips new merges.
@@ -94,6 +99,12 @@ HOOK_MESSAGE_BYTES = 1_000_000
 FIXUP_PREFIXES = ('fixup! ', 'squash! ', 'amend! ')
 SCISSORS = re.compile(r'. -{24} >8 -{24}')
 GIT_OID = re.compile(r'[0-9a-f]{40}(?:[0-9a-f]{24})?')
+# Git trims empty subjects. The sequencer also uses "cherry-pick: fast-forward" when it reuses a commit.
+COMMIT_REFLOG_ACTION = re.compile(
+    rb'^(?:(?:commit(?: \([a-z-]+\))?|cherry-pick(?!: fast-forward$)|revert|'
+    rb'rebase(?: -i)? \((?:pick|reword|edit|squash|fixup|continue)\)):(?: |$)|'
+    rb"(?:merge .+|pull(?: .*)?): (?:Merge made by the '[^']+' strategy\.|In-index merge)$)"
+)
 
 
 class GateError(Exception):
@@ -181,8 +192,9 @@ ANSI_QUOTE = re.compile(r"\$'((?:[^'\\]|\\[\s\S])*)'")
 ANSI_ESCAPE = re.compile(rb'\\([0-7]{1,3}|x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|.)', re.S)
 ANSI_BYTES = dict(zip(b"""abefnrtvE\\'"?""", b"""\a\b\x1b\f\n\r\t\v\x1b\\'"?"""))
 REDIRECTION = re.compile(rf'(?P<fd>(?:[0-9]{LINE_JOIN})*)'
-                         rf'(?P<op><{LINE_JOIN}<{LINE_JOIN}<|>{LINE_JOIN}[>&]|<{LINE_JOIN}&|[<>])')
-COMPOUND_OPERATOR = re.compile(rf'&{LINE_JOIN}[&>]|\|{LINE_JOIN}[|&]|;{LINE_JOIN}[;&]')
+                         rf'(?P<op><{LINE_JOIN}<{LINE_JOIN}<|>{LINE_JOIN}[>&]|<{LINE_JOIN}&|[<>])'
+                         rf'|&{LINE_JOIN}>{LINE_JOIN}>?')
+COMPOUND_OPERATOR = re.compile(rf'&{LINE_JOIN}&|\|{LINE_JOIN}[|&]|;{LINE_JOIN}[;&]')
 FOLDER_SEPARATORS = {None, '&&', ';', '\n'}
 HEREDOC_MARK = '@@TETHER-HEREDOC-{}@@'
 HEREDOC_FOUND = re.compile(r'@@TETHER-HEREDOC-(\d+)@@')
@@ -194,9 +206,13 @@ HEREDOC = re.compile(
     rf'''<{LINE_JOIN}<(-)?[ \t]*(['"]?)([A-Za-z0-9_][A-Za-z0-9_.-]*)\2(?=[ \t\n;&|()<>]|$)([^\n]*)\n'''
     r'''(?:(.*?)\n)?(?(1)\t*)\3(?=\n|$)''', re.S)
 ASSIGNMENT = re.compile(r'[A-Za-z_][A-Za-z0-9_]*=.*', re.S)
+ASSIGNMENT_LIKE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)(?:\[.*\])?\+?=.*', re.S)
+REDIRECTION_VARIABLE = re.compile(r'\{[A-Za-z_][A-Za-z0-9_]*\}')
 WRAPPERS = {'command', 'env', 'time', 'nohup'}
+COMMAND_WRAPPERS = {'command', 'builtin', 'time', 'noglob', 'nocorrect', 'exec', 'nohup', 'repeat', '-'}  # - and repeat: zsh
 KEYWORDS = set('if then else elif fi for while until do done case esac function select time coproc ! [[ ]]'.split())
 KEYWORD_PREFIXES = {'if', 'then', 'else', 'elif', 'while', 'until', 'do', 'time', '!', '{'}
+MOVING_WORDS = {'cd', 'pushd', 'popd', 'source', '.', 'eval', 'builtin'}
 SHELL_COMMANDS = {'eval', 'source', '.', 'exec', 'xargs', 'sh', 'bash', 'zsh'}
 GIT_VALUE_OPTIONS = {'-c', '--namespace', '--super-prefix', '--config-env', '--exec-path'}
 GIT_PLACE_OPTIONS = {'--git-dir', '--work-tree'}  # they move the repository: the folder is then not known
@@ -384,13 +400,14 @@ def _segments(tokens):
             words.append(token)
         elif redirect := REDIRECTION.fullmatch(token):
             redirected = True
+            uncertain = uncertain or token in ('&>', '&>>')
             if index >= len(tokens) or not isinstance(tokens[index], _Word):
                 uncertain = True
                 continue
             target = tokens[index]
             index += 1
             fd = redirect['fd']
-            on_stdin = not fd.strip('0') if fd else redirect['op'].startswith('<')
+            on_stdin = not fd.strip('0') if fd else token.startswith('<')
             mark = HEREDOC_FOUND.fullmatch(target.text) if target.fill and target.bare else None
             if on_stdin:
                 stdin = int(mark[1]) if mark else None
@@ -722,6 +739,31 @@ def _cd_guard(segment):
             and [word.text for word in words] in (['exit'], ['exit', '1'], ['return']))
 
 
+def _command_word(words):
+    """Return the index of a command after known prefixes, or None if it cannot be identified."""
+    wrapper, count = None, False
+    for index, word in enumerate(words):
+        text = word.text
+        if count:
+            count = False  # the count after zsh `repeat`
+        elif word.plain and text in COMMAND_WRAPPERS:
+            wrapper, count = text, text == 'repeat'
+        elif word.bare and (text in KEYWORD_PREFIXES or REDIRECTION_VARIABLE.fullmatch(text)):
+            wrapper = None
+        elif not word.plain:
+            return None
+        elif text == '--':
+            wrapper = None
+        elif wrapper and text.startswith('-'):
+            if wrapper == 'command' and ('v' in text or 'V' in text):
+                return index  # `command -v cd` only looks the name up
+        elif ASSIGNMENT_LIKE.fullmatch(text):
+            wrapper = None
+        else:
+            return index if text and not any(char in text for char in '[]=${}') else None
+    return None
+
+
 def evaluate(command, cwd=None):
     """None when the command has no `git commit`. Else {'verdict': 'pass' | 'missing' | 'unknown', 'reason': str,
     'count': the number of commits, 'folder': where git runs, or None when not known}.
@@ -779,10 +821,13 @@ def evaluate(command, cwd=None):
                 folder = logical = None
             alone = alone and folder is not None
             continue
-        while words and words[0].bare and words[0].text in KEYWORD_PREFIXES:
-            words = words[1:]
-        uncertain = uncertain or _shell_launcher(words)
-        commit = _git_commit(words) if words else None
+        position = _command_word(words)
+        name = words[position].text if position is not None else None
+        git_words = words
+        while git_words and git_words[0].bare and git_words[0].text in KEYWORD_PREFIXES:
+            git_words = git_words[1:]
+        uncertain = uncertain or _shell_launcher(git_words)
+        commit = _git_commit(git_words) if git_words else None
         if commit:
             args, _, folders, known, config = commit
             here = folder if known and not git_context_changed else None
@@ -797,20 +842,28 @@ def evaluate(command, cwd=None):
                     verdict, reason = 'unknown', 'folder'
                 verdicts.append((verdict, reason))
                 where = here if len(verdicts) == 1 or where == here else None
-        # A simple command cannot move the shell, except these. Any command can write a message file.
-        moving = ('cd', 'pushd', 'popd', 'source', '.', 'eval', 'builtin')  # these can move the shell; not followed
-        if first.text in moving or (first.text == 'command' and len(words) > 1 and words[1].text in moving):
+        # An unrecognised prefix, or a segment glued to ( or ) (as in X=$(...)suffix cd), can hide the command word.
+        # Then every word counts.
+        start = next(index for index, token in enumerate(tokens) if token is words[0])
+        exact = position is not None and not (start and tokens[start - 1] in ('(', ')'))
+        possible_commands = {name} if exact else {word.text for word in words}
+        if MOVING_WORDS.intersection(possible_commands):
             folder = logical = None
-        if first.text in ('set', 'setopt', 'unsetopt'):
+        if possible_commands.intersection(('set', 'setopt', 'unsetopt')):
             steady = False  # later cd and glob behavior can depend on shell options
-        if commit is None:
+        if commit is None and not git_context_changed:
             # These commands can explicitly change the Git worktree or hooks. Keep the folder unknown for probes.
-            git_context_changed = git_context_changed or (
-                any(os.path.basename(word.text) == 'git' for word in words[:-1])
-                and any(word.text == 'config' for word in words[1:]))
-            if ASSIGNMENT.fullmatch(first.text) or first.text in ('export', 'unset'):
-                git_context_changed = git_context_changed or any(
-                    GIT_CONFIG_ENV.fullmatch(word.text.split('=', 1)[0]) for word in words)
+            if not exact:
+                assignments, env_names = words, words
+            else:
+                env_names = words[position + 1:] if name in ('export', 'unset', 'declare', 'typeset') else []
+                assignments = words[:position] + env_names
+            git_context_changed = (
+                (any(os.path.basename(word.text) == 'git' for word in git_words[:-1])
+                 and any(word.text == 'config' for word in git_words[1:]))
+                or any(GIT_CONFIG_ENV.fullmatch(assignment[1]) for word in assignments
+                       if (assignment := ASSIGNMENT_LIKE.fullmatch(word.text)))
+                or any(GIT_CONFIG_ENV.fullmatch(word.text) for word in env_names))
         alone = False
     if not verdicts:
         return None
@@ -978,11 +1031,14 @@ def _write_session(session, state, now):
     _write(path, json.dumps(state))
 
 
-def _git(folder, *args, text=True, env=None):
+def _git(folder, *args, text=True, env=None, input=None, deadline=None):
+    timeout = 0.5 if deadline is None else min(0.5, deadline - time.monotonic())
+    if timeout <= 0:
+        return None
     try:
-        return subprocess.run(['git', '-C', folder, *args], capture_output=True, text=text, timeout=0.5,
-                              errors='replace' if text else None, env=env)
-    except (OSError, subprocess.SubprocessError):
+        return subprocess.run(['git', '-C', folder, *args], capture_output=True, text=text, timeout=timeout,
+                              input=input, errors='replace' if text else None, env=env)
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
 
 
@@ -1006,12 +1062,59 @@ def _tree(folder):
     return root if os.path.isabs(root) else None
 
 
-def _git_path(folder, *args):
-    shown = _git(folder, 'rev-parse', '--path-format=absolute', *args, text=False)
+def _git_path(folder, *args, deadline=None):
+    shown = _git(folder, 'rev-parse', '--path-format=absolute', *args, text=False, deadline=deadline)
     if shown is None or shown.returncode != 0:
         return None
     path = Path(os.fsdecode(shown.stdout).removesuffix('\n'))
     return path if path.is_absolute() else None
+
+
+def _git_dir_identity(path):
+    try:
+        info = os.stat(path, follow_symlinks=False)
+    except (OSError, ValueError):
+        return None
+    if stat_module.S_ISDIR(info.st_mode):
+        return {'path': str(path), 'dev': info.st_dev, 'ino': info.st_ino}
+    return None
+
+
+def git_dir_key(identity):
+    if not isinstance(identity, dict):
+        return None
+    path, dev, ino = (identity.get(field) for field in ('path', 'dev', 'ino'))
+    if (not isinstance(path, str) or not os.path.isabs(path)
+            or any(type(value) is not int or value < 0 for value in (dev, ino))):
+        return None
+    return path, dev, ino
+
+
+def cached_git_dir_matches(folder, key):
+    """Check the live checkout's Git directory without starting Git."""
+    path, _, _ = key
+    dot_git = os.path.join(os.path.realpath(folder), '.git')
+    if dot_git != path:
+        # A linked worktree can move while its metadata directory keeps the same inode.
+        # Check the gitfile in the live folder before trusting the cached inode.
+        try:
+            with open(dot_git, 'rb', opener=lambda name, mode: os.open(name, mode | os.O_NONBLOCK)) as source:
+                data = source.read((1 << 20) + 1)
+        except IsADirectoryError:  # A symlink or a non-canonical folder path to a .git directory.
+            if os.path.realpath(dot_git) != path:
+                return False
+        except (OSError, ValueError):
+            return False
+        else:
+            if not data.startswith(b'gitdir: ') or len(data) > (1 << 20):
+                return False
+            target = data.removeprefix(b'gitdir: ').rstrip(b'\r\n')
+            if not target or b'\0' in target:
+                return False
+            live = os.path.join(os.path.dirname(dot_git), os.fsdecode(target))
+            if live != path and os.path.realpath(live) != path:
+                return False
+    return git_dir_key(_git_dir_identity(path)) == key
 
 
 def _head_reflog_position(folder):
@@ -1030,10 +1133,7 @@ def _head_reflog_position(folder):
     return None
 
 
-def _head_reflog(folder, start):
-    """Return the HEAD before each commit's first entry since start, or None if unavailable.
-
-    The first entry is the one that made the commit. Later checkouts and resets cannot replace it."""
+def reflog_position_key(start):
     if not isinstance(start, dict) or not {'size', 'ino', 'dev'} <= start.keys():
         return None
     offset, ino, dev = start['size'], start['ino'], start['dev']
@@ -1042,9 +1142,14 @@ def _head_reflog(folder, start):
     missing = offset == 0 and ino is None and dev is None
     if not missing and any(type(value) is not int or value < 0 for value in (ino, dev)):
         return None
-    path = _git_path(folder, '--git-path', 'logs/HEAD')
-    if path is None:
+    return offset, ino, dev
+
+
+def _head_reflog_entries(path, start):
+    """Read all (old, new, message) HEAD entries since start, or None if the reflog cannot be read."""
+    if path is None or (position := reflog_position_key(start)) is None:
         return None
+    offset, ino, dev = position
     try:
         if not stat_module.S_ISREG(path.lstat().st_mode):
             return None
@@ -1056,27 +1161,135 @@ def _head_reflog(folder, start):
             length = found.st_size - offset
             if not 0 <= length <= REFLOG_BYTES:
                 return None
-            if not missing and (found.st_ino, found.st_dev) != (ino, dev):
+            if ino is not None and (found.st_ino, found.st_dev) != (ino, dev):
                 return None  # The file was replaced, even if it was empty.
             if offset:
                 source.seek(offset - 1)
                 if source.read(1) != b'\n':
                     return None
             tail = source.read(length + 1)
-        if len(tail) != length or not tail.endswith(b'\n'):
+        if len(tail) != length or (tail and not tail.endswith(b'\n')):
             return None
-        heads = {}
+        entries = []
         for line in tail.split(b'\n')[:-1]:
             old, new, ident = line.split(b' ', 2)
             old, new = old.decode('ascii'), new.decode('ascii')
             if not GIT_OID.fullmatch(old) or not GIT_OID.fullmatch(new):
                 return None
-            if not re.fullmatch(rb'[^<>\0]* <[^<>\0]*> \d+ [+-]\d{4}(?:\t[^\0]*)?', ident):
+            parsed = re.fullmatch(rb'[^<>\0]* <[^<>\0]*> \d+ [+-]\d{4}(?:\t([^\0]*))?', ident)
+            if parsed is None:
                 return None
-            heads.setdefault(new, old)
-        return heads
+            entries.append((old, new, parsed[1] or b''))
+        return entries
     except (OSError, ValueError):
         return None
+
+
+def _head_reflog(folder, start):
+    """Return the HEAD before each commit's first entry since start, or None if unavailable.
+
+    The first entry is the one that made the commit. Later checkouts and resets cannot replace it."""
+    entries = _head_reflog_entries(_git_path(folder, '--git-path', 'logs/HEAD'), start)
+    if not entries:
+        return None
+    heads = {}
+    for old, new, _ in entries:
+        heads.setdefault(new, old)
+    return heads
+
+
+def worktree_head(folder, *, deadline):
+    shown = _git(folder, 'rev-parse', '--verify', 'HEAD^{commit}', deadline=deadline)
+    if shown is not None and shown.returncode == 0 and GIT_OID.fullmatch(head := shown.stdout.strip()):
+        return head
+    return None
+
+
+def record_landed(row, *, deadline=None):
+    """Return True for a confirmed landing, or 'pending' if Git was alive and no landing is confirmed.
+
+    False means the attempt did not land. None means the evidence is uncertain, including when the row lacks
+    the process identity needed to tell an in-flight commit from an aborted one. The deadline is absolute and
+    monotonic.
+    """
+    if deadline is None:
+        deadline = time.monotonic() + 1.0
+    # Sample before reading the reflog: Git can land and exit between the two reads.
+    alive = _hook_git_alive(row, deadline=deadline)
+    landed = _confirm_landing(row, deadline=deadline)
+    if landed is False and alive is None:
+        return None
+    position = reflog_position_key(row.get('reflog'))
+    if landed is False and (position is None or position[1] is None):
+        # The hook saw no HEAD reflog (logging off, or another ref backend). Git can still create one later, so
+        # later entries can confirm a landing, but no entry proves nothing.
+        return None
+    return 'pending' if alive and landed is not True else landed
+
+
+def _confirm_landing(row, *, deadline):
+    folder, tree = row.get('folder'), row.get('tree')
+    identity = git_dir_key(row.get('git_dir'))
+    if (not isinstance(tree, str) or not GIT_OID.fullmatch(tree) or not isinstance(folder, str)
+            or not os.path.isabs(folder) or identity is None or time.monotonic() >= deadline):
+        return None
+    hook = _hook_commit(row)
+    if hook is None or (key := _message_key()) is None:
+        return None
+    head = hook.head
+    git_dir = _git_path(folder, '--absolute-git-dir', deadline=deadline)
+    if git_dir is None or git_dir_key(_git_dir_identity(git_dir)) != identity:
+        return None
+    # Git's files backend stores logs/HEAD in the per-worktree directory.
+    entries = _head_reflog_entries(git_dir / 'logs' / 'HEAD', row.get('reflog'))
+    if entries is None or time.monotonic() >= deadline:
+        return None
+    # Check non-commit moves in the same batch. A matching tree on one of those makes the result uncertain.
+    candidates = dict.fromkeys(new for old, new, _ in entries if old == (head or '0' * len(old)))
+    if not candidates and head is None:
+        return False
+    current = worktree_head(folder, deadline=deadline)
+    if current is None:
+        return None
+    if head is not None:
+        candidates.setdefault(head)  # Compare the replaced commit's parents for an amend, in the same batch.
+    commits = _batch_commits(folder, candidates, deadline=deadline)
+    if commits is None:
+        return None
+    replaced = commits.get(head)
+    uncertain = False
+    later_heads = {current}
+    for old, new, message in reversed(entries):
+        if time.monotonic() >= deadline:
+            return None
+        commit = commits.get(new)
+        if commit is not None and commit.tree == tree and old == (head or '0' * len(old)):
+            if not COMMIT_REFLOG_ACTION.match(message):
+                uncertain = True
+            elif new in later_heads:
+                # Git can append the entry before the corresponding ref update succeeds.
+                if _matches_hook_commit(commit, _commit_digest(key, commit), hook, lambda: (
+                        replaced is not None and replaced.parent_list == commit.parent_list)):
+                    return True
+                uncertain = True  # The repo's commit-msg hook may have rewritten the message after Tether read it.
+        later_heads.add(old)
+    if replaced is not None and _could_be_same_oid_amend(replaced, hook, row, tree):
+        # A detached same-OID amend lands with no reflog entry, and a repo hook can restore the old message, so
+        # Git cannot prove that this attempt did not land.
+        return None
+    return None if uncertain else False
+
+
+def _could_be_same_oid_amend(replaced, hook, row, tree):
+    """True when this attempt could have rewritten the old HEAD to the same OID with no reflog entry.
+
+    Only a detached HEAD can do that: on a branch, Git logs the amend in the HEAD reflog. A row without
+    head_attached could be either. Clocks are not used: a corrected clock can move any time window.
+    The message is not compared: a repo hook can restore the old message after Tether reads it.
+    """
+    if row.get('head_attached') is True:
+        return False
+    return replaced.tree == tree and (hook.author_date is None or hook.author_date == replaced.author_date)
 
 
 def _message_hook(folder):
@@ -1103,15 +1316,75 @@ class _LandedCommit(NamedTuple):
     body: str | None
 
 
+COMMIT_LOG_FORMAT = '--format=%H%x00%T%x00%P%x00%ad%x00%cd%x00%B'
+
+
+class _HookCommit(NamedTuple):
+    head: str | None
+    messages: list
+    author_date: str | None
+    committer_date: str | None
+    merge_heads: tuple[str, ...]
+
+
+def _hook_commit(row, *, require_author=False):
+    head, messages = row.get('head'), row.get('messages')
+    if ('head' not in row or (head is not None and (not isinstance(head, str) or not GIT_OID.fullmatch(head)))
+            or not isinstance(messages, list) or not messages):
+        return None
+    merge = row.get('verdict') == 'skip' and row.get('reason') == 'merge'
+    heads = row.get('merge_heads') if merge else []
+    if merge and (not isinstance(heads, list) or not heads or not all(
+            isinstance(oid, str) and GIT_OID.fullmatch(oid) for oid in heads)):
+        return None
+    author, committer = row.get('author_date'), row.get('committer_date')
+    if (not isinstance(author, str) and ('author_date' in row or (require_author and not merge))
+            or not isinstance(committer, str) and 'committer_date' in row):
+        return None
+    return _HookCommit(head, messages, author, committer, tuple(heads))
+
+
+def _commit_digest(key, commit):
+    return None if commit.body is None else _message_digest(key, _normalize_message(commit.body.split('\n')))
+
+
+def _matches_hook_commit(commit, digest, hook, amend_matches):
+    """Compare a commit of the recorded tree. The caller supplies the amend's parent and reflog proof."""
+    if (digest is None or digest not in hook.messages
+            or (hook.author_date is not None and hook.author_date != commit.author_date)
+            or (hook.committer_date is not None and hook.committer_date != commit.committer_date)):
+        return False
+    if hook.head == commit.parent:
+        return commit.parent_list[1:] == hook.merge_heads
+    return not hook.merge_heads and amend_matches()
+
+
+def _batch_commits(folder, oids, *, deadline):
+    """Read candidate commits in one Git call, with the same parent view as PostToolUse."""
+    found = _git(folder, 'log', '--no-walk=unsorted', '--stdin', '--no-show-signature', '--no-notes',
+                 '-z', '--date=raw', '--encoding=UTF-8', COMMIT_LOG_FORMAT, text=False,
+                 input=''.join(f'{oid}\n' for oid in oids).encode('ascii'), deadline=deadline)
+    if (found is None or found.returncode != 0 or found.stderr or not found.stdout.endswith(b'\0')
+            or time.monotonic() >= deadline):
+        return None
+    try:
+        commits = {commit.oid: commit for commit in _parse_landed_commits(found.stdout)}
+    except ValueError:
+        return None
+    return commits if commits.keys() == oids.keys() and time.monotonic() < deadline else None
+
+
 def _landed(folder, head):
     """Commits made since `head`, newest first. [] when none landed, None when Git cannot tell."""
-    shown = _git(folder, 'log', '--first-parent', '-n', '20', '-z', '--date=raw',
-                 '--format=%H%x00%T%x00%P%x00%ad%x00%cd%x00%B',
+    shown = _git(folder, 'log', '--first-parent', '-n', '20', '-z', '--date=raw', COMMIT_LOG_FORMAT,
                  f'{head}..HEAD' if head else 'HEAD', text=False)
     if shown is None or shown.returncode != 0:
         return [] if head == '' else None
-    fields = shown.stdout.split(b'\0')[:-1]
-    commits = []
+    return list(_parse_landed_commits(shown.stdout))
+
+
+def _parse_landed_commits(output):
+    fields = output.split(b'\0')[:-1]
     for index in range(0, len(fields), 6):
         oid, tree, parents, author_date, raw_committer_date, raw = fields[index:index + 6]
         try:
@@ -1124,9 +1397,8 @@ def _landed(folder, head):
         parent = parent_list[0] if parent_list else None
         committer_date = raw_committer_date.decode('ascii')
         committed = int(committer_date.partition(' ')[0])
-        commits.append(_LandedCommit(oid.decode('ascii'), tree.decode('ascii'), parent, parent_list,
-                                     author_date.decode('ascii'), committed, committer_date, status, body))
-    return commits
+        yield _LandedCommit(oid.decode('ascii'), tree.decode('ascii'), parent, parent_list,
+                            author_date.decode('ascii'), committed, committer_date, status, body)
 
 
 # ---- the hook ----
@@ -1413,31 +1685,16 @@ def _claim_covering_rows(waiting, commits, worktree, rows, key, claims, amend_pa
         if (row.get('via') != 'commit-msg' or row.get('verdict') == 'block'
                 or type(at) not in (float, int) or not since <= at <= sys.float_info.max):
             continue
-        tree, folder, messages = row.get('tree'), row.get('folder'), row.get('messages')
+        tree, folder = row.get('tree'), row.get('folder')
         if not isinstance(tree, str) or tree not in trees or not isinstance(folder, str):
             continue
-        if not isinstance(messages, list) or not messages or 'head' not in row or os.path.realpath(folder) != worktree:
+        hook = _hook_commit(row, require_author=True)
+        if hook is None or os.path.realpath(folder) != worktree:
             continue
-        merge = row.get('verdict') == 'skip' and row.get('reason') == 'merge'
-        merge_heads = ()
-        if merge:
-            heads = row.get('merge_heads')
-            if not isinstance(heads, list) or not heads or not all(
-                    isinstance(oid, str) and GIT_OID.fullmatch(oid) for oid in heads):
-                continue
-            merge_heads = tuple(heads)
-        author_date = row.get('author_date')
-        if not isinstance(author_date, str) and ('author_date' in row or not merge):
-            continue
-        committer_date, started = row.get('committer_date'), row.get('started')
-        if 'committer_date' in row and not isinstance(committer_date, str):
-            continue
+        started = row.get('started')
         if 'committer_override' in row or type(started) is not int:
             started = None
-        head = row['head']
-        if head is None or (isinstance(head, str) and GIT_OID.fullmatch(head)):
-            rows_by_tree.setdefault(tree, []).append(
-                (at, f'{at}:{folder}', head, messages, author_date, committer_date, started, merge_heads))
+        rows_by_tree.setdefault(tree, []).append((at, f'{at}:{folder}', hook, started))
     for candidates in rows_by_tree.values():
         candidates.sort(key=lambda row: row[0])
 
@@ -1447,31 +1704,25 @@ def _claim_covering_rows(waiting, commits, worktree, rows, key, claims, amend_pa
         if not candidates or commit.body is None:
             uncovered.append(commit)
             continue
-        digest = _message_digest(key, _normalize_message(commit.body.split('\n')))
+        digest = _commit_digest(key, commit)
         match = None
-        for at, row_key, head, messages, author_date, committer_date, started, merge_heads in candidates:
-            if author_date is not None and author_date != commit.author_date:
-                continue
-            if committer_date is not None:
-                if committer_date != commit.committer_date:
-                    continue
-            elif (commit.committed > at + LOG_TIME_TOLERANCE
-                  or (started is not None and commit.committed < started)):
+        for at, row_key, hook, started in candidates:
+            if hook.committer_date is None and (commit.committed > at + LOG_TIME_TOLERANCE
+                                               or (started is not None and commit.committed < started)):
                 continue
             claimed = claims.get(row_key)
-            if claimed not in (None, commit.oid) or digest not in messages:
+            if claimed not in (None, commit.oid):
                 continue
             if match is not None and claimed is None:
                 continue  # Keep the oldest eligible row unless a covering claim already exists.
-            if head == commit.parent:
-                if commit.parent_list[1:] != merge_heads:
-                    continue
-            else:
-                if merge_heads or amend_parents(head) != commit.parent_list:
-                    continue
-                heads = reflog()  # Only the reflog proves an amend. Matching parents can also be a re-merge.
-                if heads is None or heads.get(commit.oid) != head:
-                    continue
+
+            def amend_matches():
+                # Only the reflog proves an amend. Matching parents can also be a re-merge.
+                return (amend_parents(hook.head) == commit.parent_list
+                        and (heads := reflog()) is not None and heads.get(commit.oid) == hook.head)
+
+            if not _matches_hook_commit(commit, digest, hook, amend_matches):
+                continue
             if claimed == commit.oid:
                 match = row_key  # Reuse the existing claim on overlapping PostToolUse calls.
                 break
@@ -1593,6 +1844,83 @@ def _ps_started(elapsed, now):
     return now - (days * 86400 + hours * 3600 + minutes * 60 + seconds)
 
 
+def _linux_process(pid, clock):
+    entry = Path(f'/proc/{pid}/stat').read_bytes()
+    start, end = entry.index(b'('), entry.rindex(b')')
+    comm = os.fsdecode(entry[start + 1:end])
+    fields = entry[end + 1:].split()
+    state, parent = fields[0], int(fields[1])
+    started = None
+    if clock is not None:
+        boot, ticks = clock
+        try:
+            started = boot + int(fields[19]) / ticks  # starttime is field 22.
+        except (ValueError, IndexError):
+            pass
+    return parent, comm, started, state
+
+
+def _linux_start_ticks(pid):
+    """(starttime clock ticks since boot, state). Raw ticks do not move when the wall-clock boot time is corrected."""
+    entry = Path(f'/proc/{pid}/stat').read_bytes()
+    fields = entry[entry.rindex(b')') + 1:].split()
+    return int(fields[19]), fields[0]
+
+
+def _ps_git_started(pid, *, timeout):
+    """Return a stable macOS ps start token rather than estimating it from elapsed time."""
+    if timeout <= 0:
+        return None
+    try:
+        shown = subprocess.run(['ps', '-o', 'stat=,lstart=', '-p', str(pid)], capture_output=True,
+                               text=True, check=True, timeout=timeout, env={**os.environ, 'LC_ALL': 'C', 'TZ': 'UTC0'})
+        state, started = shown.stdout.split(maxsplit=1)
+        return started.strip() if not state.startswith('Z') else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _hook_git_alive(row, *, deadline):
+    """True for a live match, False for no live match, None for an unusable process identity."""
+    pid, expected = row.get('git_pid'), row.get('git_started')
+    linux = sys.platform.startswith('linux')
+    if type(pid) is not int or pid <= 0:
+        return None
+    if linux:
+        if type(expected) is not int or expected < 0:
+            return None  # Rows from before B369 round 5 stored a wall-clock time: unknown.
+    elif not isinstance(expected, str) or not re.fullmatch(
+            r'[A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}', expected):
+        return None
+    if time.monotonic() >= deadline:
+        return None
+    if linux:
+        try:
+            started, state = _linux_start_ticks(pid)
+        except (FileNotFoundError, ProcessLookupError):
+            return False  # The process is gone.
+        except (OSError, ValueError, IndexError):
+            return None
+        return state not in (b'Z', b'X') and started == expected
+    # Only a clean ps answer counts. A timeout or a failure to run ps is unknown, not "Git exited".
+    timeout = min(0.5, deadline - time.monotonic())
+    if timeout <= 0:
+        return None
+    try:
+        shown = subprocess.run(['ps', '-o', 'stat=,lstart=', '-p', str(pid)], capture_output=True, text=True,
+                               timeout=timeout, env={**os.environ, 'LC_ALL': 'C', 'TZ': 'UTC0'})
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if shown.returncode != 0:
+        # ps exits 1 with no output for a missing pid. Any diagnostic means ps did not answer.
+        return False if shown.returncode == 1 and not shown.stdout.strip() and not shown.stderr.strip() else None
+    try:
+        state, started = shown.stdout.split(maxsplit=1)
+    except ValueError:
+        return None
+    return not state.startswith('Z') and started.strip() == expected
+
+
 def _ancestors():
     """Nearest parents first. A vanished process or a slow ps ends the walk."""
     pid = os.getppid()
@@ -1603,20 +1931,9 @@ def _ancestors():
         remaining = deadline - time.monotonic()
         if pid < 1 or remaining <= 0:
             break
-        started = None
         try:
             if linux:
-                entry = Path(f'/proc/{pid}/stat').read_bytes()
-                start, end = entry.index(b'('), entry.rindex(b')')
-                comm = os.fsdecode(entry[start + 1:end])
-                fields = entry[end + 1:].split()
-                ppid = int(fields[1])
-                if clock is not None:
-                    boot, ticks = clock
-                    try:
-                        started = boot + int(fields[19]) / ticks  # starttime is field 22.
-                    except (ValueError, IndexError):
-                        pass
+                ppid, comm, started, _ = _linux_process(pid, clock)
             else:
                 shown = subprocess.run(['ps', '-o', 'ppid=,etime=,comm=', '-p', str(pid)], capture_output=True,
                                        text=True, check=True, timeout=remaining)
@@ -1781,11 +2098,31 @@ def commit_msg(path, env=os.environ, cwd=None, now=None):
         source, session = _source_session(ancestors, env)
         record.update(source=source, session=session)
         record.update(_hook_identity(cwd))
+        git_dir = _git_path(cwd, '--absolute-git-dir')
+        if git_dir is not None and (identity := _git_dir_identity(git_dir)) is not None:
+            record['git_dir'] = identity
+            try:
+                # A same-OID amend writes a HEAD reflog entry only when HEAD is on a branch.
+                record['head_attached'] = Path(git_dir, 'HEAD').read_bytes().startswith(b'ref: ')
+            except OSError:
+                pass
+        if (reflog := _head_reflog_position(cwd)) is not None:
+            record['reflog'] = reflog
         if author_date := re.fullmatch(r'@(\d+ [+-]\d{4})', env.get('GIT_AUTHOR_DATE', '')):
             record['author_date'] = author_date[1]
         git_process = next((ancestor for ancestor in ancestors if os.path.basename(ancestor.comm) == 'git'), None)
-        if git_process is not None and git_process.started is not None:
-            record['started'] = math.floor(git_process.started) - 1  # Allow for clock tick rounding.
+        if git_process is not None:
+            if git_process.started is not None:
+                record['started'] = math.floor(git_process.started) - 1  # Allow for clock tick rounding.
+            if sys.platform.startswith('linux'):
+                try:
+                    started = _linux_start_ticks(git_process.pid)[0]
+                except (OSError, ValueError, IndexError):
+                    started = None
+            else:
+                started = _ps_git_started(git_process.pid, timeout=0.05)
+            if started is not None:
+                record.update(git_pid=git_process.pid, git_started=started)
         if env.get('GIT_COMMITTER_DATE'):
             ident = _git(cwd, 'var', 'GIT_COMMITTER_IDENT', env=env)
             date = (re.search(r' (\d+ [+-]\d{4})\Z', ident.stdout.rstrip('\n'))
@@ -1794,7 +2131,6 @@ def commit_msg(path, env=os.environ, cwd=None, now=None):
                 record['committer_override'] = True
             else:
                 record['committer_date'] = date[1]
-        git_dir = _git_path(cwd, '--git-dir')
         if git_dir is None:
             raise GateError(400, 'Git could not find the repository for the commit message.')
         verdict, reason, readings = _final_verdict(path, cwd, git_dir)

@@ -169,7 +169,8 @@ def _eligible(entry):
     thread = entry.get('thread')
     return (entry.get('agent') in ('claude', 'codex') and entry.get('writable') is True
             and isinstance(thread, str) and UUID.fullmatch(thread)
-            and not entry.get('pending_conversation') and _session(entry) != side_shells.SESSION)
+            and not entry.get('pending_conversation') and not entry.get('friday_draft')
+            and _session(entry) != side_shells.SESSION)
 
 
 def _prune(now):

@@ -27,6 +27,7 @@ import { NewGroup, SuggestStacks, TabGroupPicker } from './Groups'
 import type { MainModel } from './prefs'
 import { placeName } from './groups'
 import { wheelSideways } from './wheelSideways'
+import { fmtDateTime, useTetherZone } from './zone'
 
 type PaneLevel = 'all' | 'important' | 'urgent' | 'off'
 type Delivery = 'sound' | 'silent' | 'off'
@@ -64,6 +65,7 @@ export function MuteItem({ api, pane, disabled = false }: { api: Api; pane: stri
 
 
 export function Usage({ footer, onClose }: { footer: Footer; onClose: () => void }) {
+  useTetherZone()
   const modal = useModal(true, onClose)
   const context = footer.context
   const credits = creditsLabel(footer.credits)
@@ -75,7 +77,7 @@ export function Usage({ footer, onClose }: { footer: Footer; onClose: () => void
         {context.tokens != null && context.limit != null && <small>{context.tokens.toLocaleString()} / {context.limit.toLocaleString()} tokens</small>}</div>}
       {footer.windows?.map(window => <div className="usage-row" key={window.label}><div><strong>{usageLabel(window.label)}</strong><span>{window.percent}% used</span></div>
         <div className="meter-bar" role="meter" aria-label={`${usageLabel(window.label)} used`} aria-valuenow={window.percent} aria-valuemin={0} aria-valuemax={100}><span style={{ width: `${Math.max(0, Math.min(100, window.percent))}%` }} /></div>
-        {window.resets_at != null && <small>Resets {new Date(window.resets_at * 1000).toLocaleString()}</small>}</div>)}
+        {window.resets_at != null && <small>Resets {fmtDateTime(window.resets_at * 1000)}</small>}</div>)}
       {credits && <dl className="info-list"><div><dt>Credits</dt><dd>{credits}</dd></div></dl>}
     </div>
   </dialog>

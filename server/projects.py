@@ -459,7 +459,7 @@ def _render(pid, data, home, group=None, backlog_project=None):
                  'Write a handoff note in the work-notes folder (goal, state, decisions, evidence, files, open PRs and branches, what not to redo). '
                  'Run `agent_tab_cli.py start --owner self --name "B12 two to four words" --cwd ITEM_REPO "TASK"`; TASK gives the note path and says to run `start B12` first. '
                  'Then leave the item and report the new tab name. Hand off one item, then stop.\n'
-                 '- Reminders for the user, only when asked: `agent_reminder_cli.py` in the same folder, `add "text" --at "tomorrow 10:00"` (IST), `list`, `done R3`.\n')
+                 '- Reminders for the user, only when asked: `agent_reminder_cli.py` in the same folder, `add "text" --at "tomorrow 10:00"` (Tether time zone), `list`, `done R3`.\n')
     waiting = []
     if backlog_project is not None:
         import backlog as backlog_store  # backlog imports this module

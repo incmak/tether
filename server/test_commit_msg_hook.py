@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import select
 import shlex
 import shutil
 import stat
@@ -15,6 +16,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -28,6 +30,41 @@ PID = 'abcdef012345'
 SESSION = 'test-session'
 STAMP = 'Verified: tests(server 412 ok)'
 SCISSORS = '# ------------------------ >8 ------------------------'
+# A well-formed start token that cannot belong to the current process.
+EXITED_GIT_IDENTITY = {'git_pid': os.getpid(),
+                       'git_started': 0 if sys.platform.startswith('linux') else 'Sat Jan  1 00:00:00 2000'}
+HOLD_COMMIT_HOOK = (
+    f'exec {shlex.quote(sys.executable)} -c '
+    + shlex.quote('import os; print("hook ready", flush=True); os.read(int(os.environ["TETHER_TEST_HOOK_FD"]), 1)')
+)
+
+
+@contextmanager
+def held_commit(command, *, cwd, env):
+    """Wait for the hook, then release it and reap Git even when an assertion fails."""
+    hook_read, release = os.pipe()
+    with os.fdopen(hook_read, 'rb') as reader, os.fdopen(release, 'wb') as writer:
+        env = dict(env, TETHER_TEST_HOOK_FD=str(reader.fileno()))
+        with subprocess.Popen(command, cwd=cwd, env=env, pass_fds=(reader.fileno(),),
+                              stderr=subprocess.PIPE, text=True) as git:
+            reader.close()
+            try:
+                if not select.select([git.stderr], [], [], 10)[0]:
+                    raise AssertionError('Git hook did not report readiness')
+                ready = git.stderr.readline()
+                if ready != 'hook ready\n':
+                    raise AssertionError(f'Git hook did not report readiness: {ready!r}')
+                yield git
+            finally:
+                writer.close()
+                try:
+                    _, stderr = git.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    git.kill()
+                    git.communicate()
+                    raise
+            if git.returncode:
+                raise subprocess.CalledProcessError(git.returncode, command, stderr=stderr)
 
 
 class AncestorTimes(unittest.TestCase):
@@ -56,6 +93,7 @@ class CommitMsgHook(unittest.TestCase):
         self.home = self.root / 'home'
         self.config = self.root / 'config'
         self.cache = self.root / 'cache'
+        self.enterContext(mock.patch.object(paths, 'CACHE', self.cache))
         self.tether = self.root / 'tether'
         self.log = self.root / 'log' / 'commit-gate.log'
         self.socket = self.root / 'tmux-sockets'
@@ -166,6 +204,8 @@ sys.exit(main(sys.argv[2:]))
         digest = hmac.digest(key, b'private test message', 'sha256').hex()[:32]
         self.assertRegex(check['messages'][0], r'^[0-9a-f]{32}$')
         started = check.pop('started')
+        self.assertGreater(check.pop('git_pid'), 0)
+        self.assertTrue(check.pop('git_started'))
         author_date, committed = self.git('log', '-1', '--date=raw', '--format=%ad%n%ct').stdout.splitlines()
         self.assertIs(type(started), int)
         self.assertLessEqual(started, int(committed))
@@ -175,10 +215,375 @@ sys.exit(main(sys.argv[2:]))
             'project': None, 'mode': 'observe', 'verdict': 'would_block', 'reason': 'no-line',
             'count': 1, 'folder': str(self.repo), 'head': None,
             'tree': self.git('rev-parse', 'HEAD^{tree}').stdout.strip(),
+            'reflog': {'size': 0, 'ino': None, 'dev': None},
+            'git_dir': self.git_dir_fields(), 'head_attached': True,
             'author_date': author_date,
             'messages': [digest],
         })
+        self.assertIs(commit_gate.record_landed(check), True)
         self.assertNotIn('private test message', self.log.read_text())
+
+    def test_record_landed_for_commit_and_amend_after_reset(self):
+        self.commit('-m', 'base')
+        base = self.git('rev-parse', 'HEAD').stdout.strip()
+        before = commit_gate._head_reflog_position(self.repo)
+        self.install()
+        self.write_file('initial change')
+        self.commit('-m', 'initial')
+        initial = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.write_file('amended change')
+        self.commit('--amend', '-m', 'amended')
+        commit, amend = self.rows()
+        self.assertEqual(commit['reflog'], before)
+        self.assertEqual(amend['head'], initial)
+        self.assertEqual(self.git('rev-parse', 'HEAD^').stdout.strip(), base)
+        self.git('reset', '--hard', base)
+        self.assertIs(commit_gate.record_landed(commit), True)
+        self.assertIs(commit_gate.record_landed(amend), True)
+
+    def test_hook_records_linked_worktree_git_directory(self):
+        self.commit('-m', 'base')
+        self.install()
+        worktree = self.root / 'linked worktree'
+        self.git('worktree', 'add', '-qb', 'linked', str(worktree))
+        self.git('commit', '--allow-empty', '-m', 'linked commit', cwd=worktree)
+        row, = self.rows()
+        self.assertEqual(row['git_dir'], self.git_dir_fields(cwd=worktree))
+        self.assertIs(commit_gate.record_landed(row), True)
+
+    def test_record_landed_for_merge(self):
+        self.prepare_merge()
+        head = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.git('merge', '--no-ff', '--no-commit', 'side')
+        self.commit('-m', 'merge side')
+        row, = self.rows()
+        self.assertEqual(row['head'], head)
+        self.assertEqual(len(self.git('show', '-s', '--format=%P').stdout.split()), 2)
+        self.assertIs(commit_gate.record_landed(row), True)
+
+    def test_record_landed_for_direct_merge_with_hook(self):
+        self.prepare_merge()
+        self.git('merge', '--no-ff', '--no-edit', 'side')
+        row, = self.rows()
+        self.assertIs(commit_gate.record_landed(row), True)
+
+    def test_record_landed_for_in_index_merge(self):
+        self.prepare_merge()
+        self.git('merge', '--no-ff', '--no-edit', '-s', 'resolve', 'side')
+        row, = self.rows()
+        self.assertIn('In-index merge', self.git('reflog', '-1', '--format=%gs').stdout)
+        self.assertIs(commit_gate.record_landed(row), True)
+
+    def test_record_landed_for_empty_commit_message(self):
+        self.install()
+        self.commit('--allow-empty-message', '-m', '')
+        row, = self.rows()
+        self.assertIs(commit_gate.record_landed(row), True)
+
+    def test_record_landed_for_same_oid_amend(self):
+        date = '2000-01-01T00:00:00+00:00'
+        self.env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+        self.commit('-m', 'base')
+        self.install()
+        self.commit('--amend', '--no-edit')
+        row, = self.rows()
+        self.assertEqual(row['head'], self.git('rev-parse', 'HEAD').stdout.strip())
+        self.assertIs(commit_gate.record_landed(row), True)
+
+    def test_detached_same_oid_amend_without_reflog_is_unknown(self):
+        date = '2000-01-01T00:00:00+00:00'
+        self.env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+        self.commit('-m', 'base')
+        self.git('checkout', '-qb', 'side')
+        self.write_file('other tree')
+        self.commit('-m', 'side')
+        self.git('switch', '-q', '--detach', 'side~1')
+        before = commit_gate._head_reflog_position(self.repo)
+        self.install()
+        self.commit('--amend', '--no-edit')
+        row, = self.rows()
+        self.assertEqual(row['head'], self.git('rev-parse', 'HEAD').stdout.strip())
+        self.assertEqual(commit_gate._head_reflog_position(self.repo), before)
+        self.assertIs(row['head_attached'], False)
+        self.assertIsNone(commit_gate.record_landed(row))
+        # No clock window: a corrected clock or an explicit future date must not rule the amend out.
+        for moved in ({'started': 10 ** 10}, {'at': 1.0}, {'committer_date': '4102444800 +0000'}):
+            with self.subTest(moved=moved):
+                self.assertIsNone(commit_gate.record_landed(row | moved))
+        # A later checkout of another tree must not turn the landed amend into a proven non-landing.
+        self.git('checkout', '-q', '--detach', 'side')
+        self.assertNotEqual(self.git('rev-parse', 'HEAD^{tree}').stdout.strip(), row['tree'])
+        self.assertIsNone(commit_gate.record_landed(row))
+
+    def test_no_reflog_at_hook_time_never_proves_an_abort(self):
+        self.git('config', 'core.logAllRefUpdates', 'false')
+        self.commit('-m', 'base')
+        logs = Path(self.git('rev-parse', '--git-path', 'logs/HEAD').stdout.strip())
+        if not logs.is_absolute():
+            logs = self.repo / logs
+        logs.unlink(missing_ok=True)
+        self.git('branch', 'side')
+        self.install()
+        self.write_file('landed change')
+        self.commit('-m', 'landed without a reflog')
+        row, = self.rows()
+        self.assertIsNone(row['reflog']['ino'])
+        self.assertIsNone(commit_gate.record_landed(row))
+        # A later logged checkout creates the first entry. It does not show the commit, and still proves nothing.
+        self.git('-c', 'core.logAllRefUpdates=always', 'checkout', '-q', 'side')
+        self.assertTrue(logs.exists())
+        self.assertIsNone(commit_gate.record_landed(row))
+
+    def test_detached_same_oid_amend_after_a_hook_restores_the_message_is_unknown(self):
+        date = '2000-01-01T00:00:00+00:00'
+        self.env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+        self.commit('-m', 'base')
+        self.git('switch', '--detach', 'HEAD')
+        before = commit_gate._head_reflog_position(self.repo)
+        # Tether reads "changed"; the repo hook after it writes the old message back, so the OID stays the same.
+        self.script(self.hook, f'{self.user_hook_line()}\nprintf "base\\n" > "$1"')
+        head = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.commit('--amend', '-m', 'changed')
+        self.assertEqual(self.git('rev-parse', 'HEAD').stdout.strip(), head)
+        self.assertEqual(commit_gate._head_reflog_position(self.repo), before)
+        row, = self.rows()
+        self.assertIsNone(commit_gate.record_landed(row))
+
+    def test_amend_at_shallow_boundary_uses_gits_parent_list(self):
+        self.commit('-m', 'base')
+        self.commit('-m', 'tip')
+        shallow = self.root / 'shallow'
+        self.git('clone', '--depth=1', self.repo.as_uri(), str(shallow))
+        self.install(repo=shallow)
+        self.git('commit', '--amend', '--allow-empty', '-m', 'Amended shallow tip', cwd=shallow)
+        row, = self.rows()
+        self.assertIs(commit_gate.record_landed(row), True)
+
+    def test_later_commit_with_different_message_cannot_confirm_an_aborted_row(self):
+        self.commit('-m', 'base')
+        self.write_file('change')
+        hook = self.user_hook_line()
+        self.script(self.hook, f'{hook}\nexit 1')
+        self.assertNotEqual(self.commit('-m', 'Same subject', '-m', 'Aborted body', check=False).returncode, 0)
+        self.script(self.hook, hook)
+        self.commit('-m', 'Same subject', '-m', 'Landed body')
+        aborted, landed = self.rows()
+        self.assertEqual(aborted['tree'], landed['tree'])
+        self.assertEqual(aborted['head'], landed['head'])
+        self.assertIsNone(commit_gate.record_landed(aborted))
+        self.assertIs(commit_gate.record_landed(landed), True)
+
+    def test_message_rewritten_after_the_gate_is_unknown(self):
+        self.script(self.hook, f'{self.user_hook_line()}\nprintf "Rewritten message\\n" > "$1"')
+        self.commit('-m', 'Original message')
+        row, = self.rows()
+        self.assertEqual(self.git('log', '-1', '--format=%B').stdout.strip(), 'Rewritten message')
+        self.assertIsNone(commit_gate.record_landed(row))
+
+    def test_merge_row_requires_the_recorded_merge_parents(self):
+        self.prepare_merge()
+        self.git('merge', '--no-ff', '--no-edit', 'side')
+        row, = self.rows()
+        self.assertEqual(row['merge_heads'], [self.git('rev-parse', 'side').stdout.strip()])
+        self.assertIs(commit_gate.record_landed(row), True)
+        self.assertIsNone(commit_gate.record_landed({**row, 'merge_heads': [row['head']]}))
+
+    def test_landing_requires_explicit_dates_when_recorded(self):
+        self.commit('-m', 'base')
+        date = '2000-01-01T00:00:00+00:00'
+        self.env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+        self.install()
+        self.commit('-m', 'dated commit')
+        row, = self.rows()
+        self.assertIs(commit_gate.record_landed(row), True)
+        for field in ('author_date', 'committer_date'):
+            with self.subTest(field=field):
+                self.assertIsNone(commit_gate.record_landed({**row, field: '1 +0000'}))
+
+    def git_dir_fields(self, *, cwd=None):
+        path = Path(self.git('rev-parse', '--absolute-git-dir', cwd=cwd).stdout.rstrip('\n'))
+        info = path.stat()
+        return {'path': str(path), 'dev': info.st_dev, 'ino': info.st_ino}
+
+    def test_record_landed_is_unknown_after_checkout_to_staged_tree(self):
+        self.commit('-m', 'base')
+        self.git('switch', '-qc', 'same-tree')
+        self.write_file('same change')
+        self.commit('-m', 'matching tree')
+        self.git('switch', '-q', 'main')
+        self.script(self.hook, f'{self.user_hook_line()}\nexit 1')
+        self.write_file('same change')
+        self.assertNotEqual(self.commit('-m', 'abort', check=False).returncode, 0)
+        row, = self.rows()
+        self.git('switch', '-qf', 'same-tree')
+        self.assertNotEqual(self.git('rev-parse', 'HEAD').stdout.strip(), row['head'])
+        self.assertEqual(self.git('rev-parse', 'HEAD^{tree}').stdout.strip(), row['tree'])
+        self.assertIsNone(commit_gate.record_landed(row))
+
+    def test_record_landed_is_unknown_after_cherry_pick_fast_forward(self):
+        self.commit('-m', 'base')
+        self.git('switch', '-qc', 'existing')
+        self.write_file('same change')
+        self.commit('-m', 'existing commit')
+        self.git('switch', '-q', 'main')
+        self.script(self.hook, f'{self.user_hook_line()}\nexit 1')
+        self.write_file('same change')
+        self.assertNotEqual(self.commit('-m', 'abort', check=False).returncode, 0)
+        row, = self.rows()
+        self.git('reset', '--hard', 'HEAD')
+        self.git('cherry-pick', '--ff', 'existing')
+        self.assertEqual(self.git('reflog', '-1', '--format=%gs').stdout.strip(), 'cherry-pick: fast-forward')
+        self.assertEqual(self.git('rev-parse', 'HEAD^{tree}').stdout.strip(), row['tree'])
+        self.assertIsNone(commit_gate.record_landed(row))
+
+    def test_record_landed_is_false_when_reflog_write_precedes_failed_ref_update(self):
+        self.commit('-m', 'base')
+        self.script(self.hook, f'{self.user_hook_line()}\nexit 1')
+        self.write_file('aborted change')
+        self.assertNotEqual(self.commit('-m', 'abort', check=False).returncode, 0)
+        row, = self.rows()
+        dangling = self.git('commit-tree', row['tree'], '-p', row['head'], '-m', 'abort').stdout.strip()
+        reflog = self.repo / '.git' / 'logs' / 'HEAD'
+        ident = self.git('var', 'GIT_COMMITTER_IDENT').stdout.strip()
+        with reflog.open('a') as stream:
+            stream.write(f"{row['head']} {dangling} {ident}\tcommit: abort\n")
+        self.assertEqual(self.git('rev-parse', 'HEAD').stdout.strip(), row['head'])
+        self.assertIs(commit_gate.record_landed(row), False)
+
+    def test_record_landed_is_unknown_for_root_row_in_replacement_repository(self):
+        self.script(self.hook, f'{self.user_hook_line()}\nexit 1')
+        self.assertNotEqual(self.commit('-m', 'abort', check=False).returncode, 0)
+        row, = self.rows()
+        self.assertIsNone(row['head'])
+        self.repo.rename(self.root / 'original')
+        self.repo.mkdir()
+        self.git('init', '-q', '-b', 'main', '--template=')
+        self.commit('-m', 'same tree')
+        self.assertEqual(self.git('rev-parse', 'HEAD^{tree}').stdout.strip(), row['tree'])
+        self.assertIsNone(commit_gate.record_landed(row))
+
+    def test_record_landed_rejects_aborted_commit_and_unrelated_checkout(self):
+        self.commit('-m', 'base')
+        self.git('checkout', '-qb', 'other')
+        self.write_file('unrelated change')
+        self.commit('-m', 'other')
+        self.git('checkout', '-q', 'main')
+        self.script(self.hook, f'{self.user_hook_line()}\nexit 1')
+        self.write_file('aborted change')
+        self.assertNotEqual(self.commit('-m', 'abort', check=False).returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['verdict'], 'would_block')
+        self.assertIs(commit_gate.record_landed(row), False)
+        self.git('checkout', '-qf', 'other')
+        self.assertNotEqual(self.git('rev-parse', 'HEAD^{tree}').stdout.strip(), row['tree'])
+        self.assertIs(commit_gate.record_landed(row), False)
+
+    def test_record_landed_is_unknown_while_hook_runs_without_process_identity(self):
+        self.commit('-m', 'base')
+        self.script(self.hook, f'{self.user_hook_line()}\n{HOLD_COMMIT_HOOK}')
+        with held_commit(['git', 'commit', '--allow-empty', '-qm', 'Held commit'], cwd=self.repo, env=self.env) as git:
+            row, = self.rows()
+            self.assertEqual(row['git_pid'], git.pid)
+            self.assertEqual(commit_gate.record_landed(row), 'pending')
+            self.assertEqual(commit_gate._head_reflog_position(self.repo), row['reflog'])
+            no_identity = {key: value for key, value in row.items() if key not in ('git_pid', 'git_started')}
+            for identity in ({}, {'git_pid': git.pid}, {'git_started': row['git_started']},
+                             {'git_pid': True, 'git_started': row['git_started']},
+                             {'git_pid': git.pid, 'git_started': 'invalid'}):
+                with self.subTest(identity=identity):
+                    self.assertIsNone(commit_gate.record_landed(no_identity | identity))
+        self.assertIs(commit_gate.record_landed(no_identity), True)
+
+    def test_hook_git_alive_is_unknown_when_the_process_cannot_be_read(self):
+        """A slow ps or an unreadable /proc must not look like an exited Git (that would skip a live commit)."""
+        deadline = time.monotonic() + 5
+        linux_row = {'git_pid': 4242, 'git_started': 100}
+        mac_row = {'git_pid': 4242, 'git_started': 'Sat Jan  1 00:00:00 2000'}
+        with mock.patch.object(commit_gate.sys, 'platform', 'darwin'), \
+                mock.patch.object(commit_gate.subprocess, 'run', side_effect=AssertionError('ps ran')):
+            for token in (None, '', 'invalid', 100):  # a missing or malformed token is unknown, never "exited"
+                with self.subTest(mac_token=token):
+                    row = {key: value for key, value in mac_row.items() if token is not None or key != 'git_started'}
+                    if token is not None:
+                        row['git_started'] = token
+                    self.assertIsNone(commit_gate._hook_git_alive(row, deadline=deadline))
+        with mock.patch.object(commit_gate.sys, 'platform', 'linux'):
+            for legacy in (100.0, -1, None, '100'):  # a wall-clock start from older rows is unknown
+                with self.subTest(legacy=legacy):
+                    self.assertIsNone(commit_gate._hook_git_alive({**linux_row, 'git_started': legacy},
+                                                                  deadline=deadline))
+            for error, expected in ((PermissionError(), None), (ValueError(), None),
+                                    (FileNotFoundError(), False), (ProcessLookupError(), False)):
+                with self.subTest(linux=type(error).__name__), \
+                        mock.patch.object(commit_gate, '_linux_start_ticks', side_effect=error):
+                    self.assertIs(commit_gate._hook_git_alive(linux_row, deadline=deadline), expected)
+            # Raw start ticks: a corrected wall-clock boot time (btime) does not change the answer.
+            for answer, expected in (((100, b'S'), True), ((101, b'S'), False), ((100, b'Z'), False)):
+                with self.subTest(linux=answer), \
+                        mock.patch.object(commit_gate, '_linux_start_ticks', return_value=answer), \
+                        mock.patch.object(commit_gate, '_boot_clock', side_effect=AssertionError('btime read')):
+                    self.assertIs(commit_gate._hook_git_alive(linux_row, deadline=deadline), expected)
+        done = subprocess.CompletedProcess
+        with mock.patch.object(commit_gate.sys, 'platform', 'darwin'):
+            for result, expected in ((subprocess.TimeoutExpired('ps', 0.5), None), (OSError(), None),
+                                     (done([], 1, '', ''), False), (done([], 2, '', 'ps: bad'), None),
+                                     (done([], 1, '', 'ps: kvm_getprocs: error\n'), None),
+                                     (done([], 0, 'S    Sat Jan  1 00:00:00 2000\n', ''), True),
+                                     (done([], 0, 'Z    Sat Jan  1 00:00:00 2000\n', ''), False),
+                                     (done([], 0, 'S    Sun Jan  2 00:00:00 2000\n', ''), False),
+                                     (done([], 0, '', ''), None)):
+                kwargs = {'side_effect': result} if isinstance(result, BaseException) else {'return_value': result}
+                with self.subTest(mac=repr(result)), mock.patch.object(commit_gate.subprocess, 'run', **kwargs):
+                    self.assertIs(commit_gate._hook_git_alive(mac_row, deadline=deadline), expected)
+
+    def test_record_landed_uses_all_reflog_entries_for_the_same_commit(self):
+        date = '2000-01-01T00:00:00+00:00'
+        self.env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+        self.commit('-m', 'base')
+        self.git('checkout', '-qb', 'other')
+        self.write_file('change')
+        self.commit('-m', 'other')
+        self.git('checkout', '-q', 'main')
+        self.git('checkout', '-qb', 'intermediate')
+        self.write_file('intermediate change')
+        self.commit('-m', 'intermediate')
+        self.git('checkout', '-q', 'main')
+        row = {'folder': str(self.repo), 'head': self.git('rev-parse', 'HEAD').stdout.strip(),
+               'tree': self.git('rev-parse', 'other^{tree}').stdout.strip(),
+               'reflog': commit_gate._head_reflog_position(self.repo), 'git_dir': self.git_dir_fields(),
+               'messages': [commit_gate._message_digest(commit_gate._message_key(create=True), 'other')],
+               **EXITED_GIT_IDENTITY}
+        self.git('checkout', '-q', 'intermediate')
+        self.git('checkout', '-q', 'other')
+        self.assertIs(commit_gate.record_landed(row), False)
+        self.git('checkout', '-q', 'main')
+        self.write_file('change')
+        self.commit('-m', 'other')
+        self.assertEqual(self.git('rev-parse', 'HEAD').stdout, self.git('rev-parse', 'other').stdout)
+        self.assertIs(commit_gate.record_landed(row), True)
+
+    def test_record_landed_is_unknown_without_reliable_git_evidence(self):
+        self.commit('-m', 'base')
+        self.install()
+        self.commit('-m', 'landed')
+        row, = self.rows()
+        for field in ('tree', 'head', 'reflog', 'git_dir', 'messages'):
+            with self.subTest(missing=field):
+                self.assertIsNone(commit_gate.record_landed({k: v for k, v in row.items() if k != field}))
+        for fields in ({'tree': 'bad'}, {'head': 'bad'}, {'reflog': {'size': -1, 'ino': None, 'dev': None}},
+                       {'folder': str(self.root / 'removed')}, {'folder': '.'}):
+            with self.subTest(fields=fields):
+                self.assertIsNone(commit_gate.record_landed(row | fields))
+        reflog = self.repo / '.git' / 'logs' / 'HEAD'
+        original = reflog.read_bytes()
+        for tail in (b'malformed\n', b'x' * commit_gate.REFLOG_BYTES):
+            reflog.write_bytes(original + tail)
+            with self.subTest(tail_length=len(tail)):
+                self.assertIsNone(commit_gate.record_landed(row))
+        replacement = reflog.with_name('HEAD.replaced')
+        replacement.write_bytes(original)
+        replacement.replace(reflog)
+        self.assertIsNone(commit_gate.record_landed(row))
 
     def test_enforce_checks_stamp_grammar_and_never_counts_terminal_blocks(self):
         self.mode('enforce')

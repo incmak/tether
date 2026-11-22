@@ -2,7 +2,7 @@
 import json, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from friday_agent import SendProposal, send_readback, tool_schemas  # noqa: E402
+from friday_agent import SendProposal, prompt_readback_proposal, send_readback, tool_schemas  # noqa: E402
 TOOLS = {t['function']['name'] for t in tool_schemas()}
 
 STATE = {"busy": ["login-fix"], "idle": 5,
@@ -429,8 +429,76 @@ for prefix, split in (("", D), ("h-", H)):
     case(prefix + "topic-drop-negated", "topic_notes", split, "don't delete the auth notes",
          {"tool": None}, topic_notes=AUTH_NOTES)
 
+AUTH_TEXT = (
+    "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that "
+    "depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests."
+)
+DRAFT_TARGETS = [dict(name="api-server", pane="%42", thread="api-thread", agent="codex"),
+                 dict(name="docs-site", pane="%43", thread="docs-thread", agent="claude")]
+
+
+def auth_draft(rev):
+    revisions = [dict(rev=1, text=AUTH_TEXT, skill=None, summary="Keep the token check.", edit=None, at=1)]
+    if rev == 2:
+        revisions.append(dict(rev=2, text=AUTH_TEXT + " Also run the full suite.", skill=None,
+                              summary="Keep the token check and run the full suite.", edit="Run the full suite.", at=2))
+    return [dict(id="T1", title="Auth", chat="api-server", notes=[dict(text="Keep the token check.", at=1)],
+                 state="open", created=1, updated=rev, sent_at=None, sent_to=None,
+                 draft=dict(state="ready", error=None, started=1, updated=rev, asked_close=False, revisions=revisions,
+                            chat=dict(pane="%44", thread="draft-thread", name="Draft Auth")))]
+
+
+def pinned_draft(rev):
+    latest = auth_draft(rev)[0]["draft"]["revisions"][-1]
+    return [dict(AUTH_NOTES[0], chat="api-server", draft=dict(state="ready", rev=rev, summary=latest["summary"],
+                                                             skill=latest["skill"], length=len(latest["text"])))]
+
+
+def expect_draft(chat="api-server", rev=1, read_all=False):
+    return dict(tool="send_prompt", readback_ok=True, readback_tool="send_prompt", readback_chat=chat,
+                args=dict(topic="(?i)^auth$", read_all=f"^{read_all}$"), reply=rf"version {rev}\b")
+
+
+auth_prompt = prompt_readback_proposal(dict(topic="Auth"), 0, auth_draft(1), lambda chat: DRAFT_TARGETS[0])
+pending = {key: getattr(auth_prompt, key) for key in
+           ("name", "chat", "payload", "target", "topic", "requested_topic", "summary", "skill")}
+auth_readback = say("Send it to api-server.", send_readback(auth_prompt))
+ready_notice = say("Make a prompt for the auth notes.",
+                   "The prompt for Auth is ready, version 1. Keep the token check. "
+                   "Say send it to a chat, read all of it, or a change.")
+
+for prefix, split in (("", D), ("h-", H)):
+    case(prefix + "make a prompt for the auth notes", "topic_notes", split,
+         "make a prompt for the auth notes" if not prefix else "draft a full prompt from the auth notes",
+         dict(tool="make_prompt", args=dict(topic="(?i)auth")), topic_notes=AUTH_NOTES)
+    change = "add a step to run the tests" if not prefix else "add a step to check expired tokens"
+    case(prefix + "add a step to run the tests", "topic_notes", split, change,
+         dict(tool="edit_prompt", args=dict(topic="(?i)auth", change=f"(?i)^{change}$")),
+         history=ready_notice, topic_notes=pinned_draft(1))
+    case(prefix + "send it to api-server", "topic_notes", split,
+         "send it to api-server" if not prefix else "send that to api-server now",
+         expect_draft(), history=ready_notice, topic_notes=pinned_draft(1), draft_topics=auth_draft(1))
+    case(prefix + "read all of it", "topic_notes", split,
+         "read all of it" if not prefix else "let me hear the whole prompt",
+         expect_draft(read_all=True), history=auth_readback, pending=pending,
+         topic_notes=pinned_draft(1), draft_topics=auth_draft(1))
+    case(prefix + "send the auth prompt to api-server", "topic_notes", split,
+         "send the auth prompt to api-server" if not prefix else "send my drafted auth prompt to api-server",
+         expect_draft(), history=ready_notice, topic_notes=pinned_draft(1), draft_topics=auth_draft(1))
+    case(prefix + "yes after an edit", "topic_notes", split, "yes" if not prefix else "yes send it",
+         expect_draft(rev=2), history=auth_readback, pending=pending,
+         topic_notes=pinned_draft(2), draft_topics=auth_draft(2))
+    case(prefix + "yes to the wrong chat", "topic_notes", split,
+         "yes, send it to docs-site" if not prefix else "yes, to docs-site",
+         expect_draft("docs-site"), history=auth_readback, pending=pending,
+         topic_notes=pinned_draft(1), draft_topics=auth_draft(1))
+    case(prefix + "yes after a Friday question", "topic_notes", split, "yes" if not prefix else "go ahead",
+         expect_draft(), history=auth_readback + say("How long is it?", "It is on screen. Do you want me to send it?"),
+         pending=pending, topic_notes=pinned_draft(1), draft_topics=auth_draft(1))
+
 output = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).with_name("cases.json")
 with output.open("w", encoding="utf-8") as stream:
-    json.dump({"version": 1, "state": STATE, "tool_results": RESULTS, "cases": cases}, stream, indent=1)
+    json.dump({"version": 1, "state": STATE, "tool_results": RESULTS, "draft_targets": DRAFT_TARGETS,
+               "cases": cases}, stream, indent=1)
     stream.write("\n")
 print(len(cases), sum(c["split"] == "dev" for c in cases))

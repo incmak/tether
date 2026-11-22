@@ -69,6 +69,7 @@ def tmux_new_session():
     return [TMUX]
 
 CLAUDE = HOME / '.claude'
+CLAUDE_JSON = HOME / '.claude.json'
 CODEX = HOME / '.codex'
 CODEX_HOOKS = Path(os.environ.get('MOBILE_TMUX_CODEX_HOOKS') or
                    Path(os.environ.get('CODEX_HOME') or CODEX) / 'hooks.json')
@@ -88,6 +89,11 @@ def reminders():
 def friday_notes():
     """Topic notes shared by the server and the Friday worker."""
     return Path(os.environ.get('TETHER_FRIDAY_NOTES') or TETHER / 'friday-notes')
+
+
+def friday_drafts():
+    """Private fallback workspace for Friday's draft chats."""
+    return Path(os.environ.get('TETHER_FRIDAY_DRAFTS') or TETHER / 'friday-drafts')
 
 
 def task_sources():

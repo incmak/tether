@@ -46,6 +46,7 @@ import { useNow } from './attention'
 import { HOLD_MS } from './gesture'
 import { field, matchSessions, searchWords } from './search'
 import type { SearchEntry, SessionMatch } from './search'
+import { fmtDateTime, useTetherZone } from './zone'
 
 // The avatars layout variant (layouts.css) shows a round avatar per session and tab: up to two initials, a colour from the name.
 const initials = (name: string) => (name.match(/[\p{L}\p{N}]+/gu) ?? ['?']).slice(0, 2).map(word => [...word][0]).join('').toUpperCase()
@@ -64,6 +65,7 @@ const LucideIcon = lazy(() => import('lucide-react/dynamic').then(module => ({ d
 // A tab with session cron jobs (Claude's CronCreate) shows a clock; its name, schedule and next run are in the tooltip
 // and in the row's accessible name.
 function CronMark({ pane }: { pane: Pane }) {
+  useTetherZone()
   if (!pane.crons?.length) return null
   const text = cronSummary(pane.crons)
   return <span className="cron-mark" title={`Scheduled: ${text}`}><CalendarClock size={12} aria-hidden="true" /><span className="visually-hidden">, scheduled: {text}</span></span>
@@ -1046,7 +1048,7 @@ export function PlanUsage({ api, onClose }: { api: Api; onClose: () => void }) {
 }
 
 const WINDOW_NAMES: Record<string, string> = { '5h': '5-hour limit', '7d': 'Weekly limit' }
-const when = (seconds: number) => new Date(seconds * 1000).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })
+const when = (seconds: number) => fmtDateTime(seconds * 1000, { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })
 function MergeConfirm({ source, target, marks, onMerge, onCancel }: { source: Session; target: Session; marks?: ProjectMarks; onMerge: (keep?: Keep) => void; onCancel: () => void }) {
   const modal = useModal(true, onCancel)
   const [keep, setKeep] = useState<Keep | null>(null)
@@ -1068,6 +1070,7 @@ function reportedAgo(value: string | number | null) {
 }
 
 function UsageSheet({ data, api, onDone, onClose }: { data: UsageData; api: Api; onDone: () => Promise<void> | void; onClose: () => void }) {
+  useTetherZone()
   const modal = useModal(true, onClose)
   const [loading, setLoading] = useState(false)
   // Refresh asks the server for a live Codex check (at most 30 s old), then redraws the meters from it.

@@ -51,7 +51,7 @@ export interface AutoEntry {
   failed?: boolean
   undo?: { session: string; thread: string | null; ask: string; entry: string } | null
 }
-export interface AutoLog { entries: AutoEntry[]; handled_today: number; today_start: number }
+export interface AutoLog { entries: AutoEntry[]; handled_today: number; today_start: number; zone: string }
 export interface AttentionState { later: Ask[]; handled_today: number | null; log_error?: boolean; rules: { stale: boolean }; digest: Digest }
 
 export function confirmStaleRule(current: { confirmed: boolean | null; shown: boolean | null }, value: boolean | null, show: boolean) {

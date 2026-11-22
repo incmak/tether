@@ -85,6 +85,7 @@ async function main() {
   const pageErrors = [], unexpected = new Set(), asks = [], posts = []
   let mode = 'rows'  // rows | empty | error
   let all = entries(), level = 3, rev = 0, autonomy = 4, projectCodex = { override: false, level: 3 }
+  let serverZone = 'America/New_York', timeZone, prefsVersion = 1
   // A request the test holds: `seen` resolves when it arrives, and it is answered only on `release()`, or with
   // release({ status, json }) instead. The test waits on these events, never on a timer.
   const gates = []
@@ -137,7 +138,7 @@ async function main() {
       if (url.pathname.endsWith('/sw.js')) return route.fulfill({ status: 404, body: '' })
       if (url.pathname.includes('/api/')) {
         const endpoint = url.pathname.split('/api/')[1]
-        if (request.method() !== 'GET' && endpoint === 'prefs') return route.fulfill({ json: { prefs: {}, version: 1 } })
+        if (endpoint === 'prefs') return route.fulfill({ json: { prefs: { timeZone }, version: prefsVersion, zone: serverZone } })
         if (request.method() === 'POST' && endpoint === 'ui-usage') return route.fulfill({ json: { gen: '' } })
         if (endpoint === 'audit') {
           if (request.method() !== 'GET') { unexpected.add(`${request.method()} audit`); return route.fulfill({ status: 405, json: { error: 'read only' } }) }
@@ -436,12 +437,35 @@ async function main() {
         && asks[asks.length - 1].get('actor') === 'An agent tab')
       await section.locator('.audit-tools').getByRole('button', { name: 'Clear filters' }).click()
       await page.waitForFunction(() => document.querySelectorAll('section.activity-log .audit-row').length === 50)
-      // Date range: From today sends since = the start of today, local time.
-      // The browser's day and time zone, not the runner's: they differ when CI sets TZ (B56 review).
-      const [day, since] = await page.evaluate(() => { const now = new Date(); return [now.toLocaleDateString('en-CA'), String(new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 1000)] })
-      await section.locator('.audit-dates input').first().fill(day)
-      await page.waitForFunction(() => document.querySelectorAll('section.activity-log .audit-row').length === 5)
-      check(`${at} From sends the start of the local day`, asks[asks.length - 1].get('since') === since, `${asks[asks.length - 1].get('since')} ${since}`)
+      // A date filter covers a whole day in Tether, including the 23-hour spring DST day.
+      const from = section.locator('.audit-dates input').first(), to = section.locator('.audit-dates input').last()
+      const dateRange = (start, end) => page.waitForRequest(request => isAudit(new URL(request.url()), params => (
+        Number(params.get('since')) === Date.parse(start) / 1000 && Number(params.get('until')) === Date.parse(end) / 1000)))
+      const ranges = (start, end) => dateRange(`2026-03-08T${start}Z`, `2026-03-09T${end}Z`)
+      const pullPrefs = () => page.evaluate(() => window.dispatchEvent(new Event('tether-prefs-pull')))
+      const spring = ranges('05:00:00', '04:00:00')
+      await from.fill('2026-03-08')
+      await to.fill('2026-03-08')
+      await spring
+      check(`${at} the server's zone covers the 23-hour day`, true)
+      timeZone = 'Asia/Kolkata'; prefsVersion++
+      const kolkata = dateRange('2026-03-07T18:30:00Z', '2026-03-08T18:30:00Z')
+      await pullPrefs()
+      await kolkata
+      check(`${at} the synced override updates the open date filter`, true)
+      timeZone = undefined; prefsVersion++
+      const restored = ranges('05:00:00', '04:00:00')
+      await pullPrefs()
+      await restored
+      serverZone = 'UTC'
+      const utc = ranges('00:00:00', '00:00:00')
+      await pullPrefs()
+      await utc
+      check(`${at} the server default updates without a prefs version change`, true)
+      serverZone = 'America/New_York'
+      const resetZone = ranges('05:00:00', '04:00:00')
+      await pullPrefs()
+      await resetZone
       await section.locator('.audit-tools').getByRole('button', { name: 'Clear filters' }).click()
 
       // Empty and error states.
