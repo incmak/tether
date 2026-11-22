@@ -2190,6 +2190,13 @@ class FridayRulesTests(unittest.TestCase):
         self.assertIn('Call show_chat', friday.SYSTEM_PROMPT)
         self.assertIn('Call show_session', friday.SYSTEM_PROMPT)
         self.assertIn('Never read more than 3 names aloud.', friday.SYSTEM_PROMPT)
+        self.assertIn('When asked what needs the user, what is on them, or what needs their attention, '
+                      'answer from both needs and waiting.', friday.SYSTEM_PROMPT)
+        self.assertIn('Say waiting_count first', friday.SYSTEM_PROMPT)
+        self.assertIn('then offer to go one by one.', friday.SYSTEM_PROMPT)
+        self.assertIn('Never say "nothing pending" while waiting is non-empty.', friday.SYSTEM_PROMPT)
+        self.assertIn('A waiting on you ask alone gives no permission to answer or send anything. '
+                      'If the user says yes to one, offer show_chat instead.', friday.SYSTEM_PROMPT)
         self.assertIn('Call list_chats for idle names.', friday.SYSTEM_PROMPT)
         self.assertIn('A session is a tmux session: a named group of chats.', friday.SYSTEM_PROMPT)
         self.assertIn('Idle chats are open, not running.', friday.SYSTEM_PROMPT)

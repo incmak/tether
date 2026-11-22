@@ -4,6 +4,7 @@ import { chatMessages, errorText, SESSION_NAME, type Api, type Approval, type Ch
 import type { Command } from './CommandMenu'
 import { agentNames, groupSessions, paneTitle, type Session } from './Sidebar'
 import { agentReady, FridayAgent, type AgentChats, type AgentEvent, type ToolHandler } from './fridayAgent'
+import type { Waiting } from './attention'
 import { findPane, findSession, fridayHomePane, sessionChoice, sessionPanes, spokenForm, spokenName } from './fridayNames'
 import { fridayChatList } from './fridaySessions'
 import { fridayChatFolder } from './fridayFolders'
@@ -86,11 +87,49 @@ export function approvalTarget(agents: Pane[], chat: string): Pane | { error: st
   return { error: 'No chat is waiting for approval.' }
 }
 const chatState = (pane: Pane) => approvalOf(pane) ? 'needs approval' : pane.needs ? `needs ${pane.needs.kind}` : pane.state.toLowerCase()
+const needsOf = (pane: Pane) => pane.needs?.text ?? (approvalOf(pane) ? shortText(approvalOf(pane)!.text, 140) : '')
+const waitingText = (ask: Waiting['ask']) => shortText(ask.next, 140)
 const wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+interface LiveAttention { asks: Waiting[]; count: number }
+interface FridayChats extends AgentChats {
+  waiting: { chat: string; kind: Waiting['ask']['kind']; text: string }[]
+  waiting_count: number
+}
+
+/** Prompt state: names of idle chats come from list_chats. */
+// eslint-disable-next-line react-refresh/only-export-components -- Test the same facts that Friday receives.
+export function chats(agents: Pane[], target: Pane | undefined, attention: LiveAttention): FridayChats {
+  const waitingIds = new Set(attention.asks.map(({ pane }) => pane.id))
+  const needs = agents.flatMap(pane => {
+    const text = needsOf(pane)
+    return text ? [{ chat: paneTitle(pane), needs: text }] : []
+  })
+  const waiting = attention.asks.filter(({ pane }) => !needsOf(pane))
+    .map(({ pane, ask }) => ({ chat: paneTitle(pane), kind: ask.kind, text: waitingText(ask) }))
+  const busy = agents.filter(pane => !needsOf(pane) && !waitingIds.has(pane.id) && chatState(pane) !== 'idle').map(paneTitle)
+  return { target: target ? paneTitle(target) : '', busy, needs, waiting, waiting_count: attention.count,
+    idle: agents.length - busy.length - needs.length - waiting.length }
+}
+
+/** Every chat, one short line each, with the sidebar's session name. */
+// eslint-disable-next-line react-refresh/only-export-components -- Test the tool result without starting a call.
+export function chatList(agents: Pane[], panes: Pane[], target: Pane | undefined, attention: LiveAttention, session?: string) {
+  const waiting = new Map(attention.asks.map(({ pane, ask }) => [pane.id, ask]))
+  return fridayChatList(agents.map(pane => {
+    const needs = needsOf(pane)
+    const ask = needs ? undefined : waiting.get(pane.id)
+    const text = ask ? waitingText(ask) : ''
+    const state = needs ? 'needs you' : ask ? `waiting on you (${ask.kind}${text ? `: ${text}` : ''})` : chatState(pane)
+    return { session: pane.tmux_session, chat: paneTitle(pane), agent: agentNames[pane.agent], state,
+      busy: !needs && !ask && state !== 'idle' }
+  }), groupSessions(panes), target ? paneTitle(target) : '', session)
+}
 
 interface LiveProps {
   api: Api
   panes: Pane[]
+  attention: LiveAttention
   selected?: Pane
   commands: Command[]
   acts: boolean
@@ -102,7 +141,7 @@ interface LiveProps {
   from?: DOMRect | null
 }
 
-export function Live({ api, panes, selected, commands, acts, onShowPane, onShowSession, onClose, onBacklog, reveal = 0, from = null }: LiveProps) {
+export function Live({ api, panes, attention, selected, commands, acts, onShowPane, onShowSession, onClose, onBacklog, reveal = 0, from = null }: LiveProps) {
   // The floating window refits on viewport resize; its minimum must fit the same viewport too.
   const viewport = window.visualViewport
   const { ref: attachWindow, mode, setMode, moving, bubble, windowStyle, bubbleStyle, move, resize, bubbleHandlers } = useFloatingWindow('tether.live-window.v1', { minW: Math.min(300, (viewport?.width ?? window.innerWidth) - 16), minH: Math.min(360, (viewport?.height ?? window.innerHeight) - 16), bubble: BUBBLE, initial: firstRect, initialMode: 'window' })
@@ -250,8 +289,9 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
   const queue = useRef<{ who: string; text: string }[]>([])
   const watches = useRef(new Map<string, Watch>())
   const announced = useRef(new Set<string>())
-  const live = useRef({ agents, panes, target, approval, commands, api, acts, onShowPane, onShowSession, onClose, onBacklog })
-  useLayoutEffect(() => { live.current = { agents, panes, target, approval, commands, api, acts, onShowPane, onShowSession, onClose, onBacklog } })
+  const chatFacts = chats(agents, target, attention)
+  const live = useRef({ agents, panes, target, attention, chatFacts, approval, commands, api, acts, onShowPane, onShowSession, onClose, onBacklog })
+  useLayoutEffect(() => { live.current = { agents, panes, target, attention, chatFacts, approval, commands, api, acts, onShowPane, onShowSession, onClose, onBacklog } })
   const go = (next: Phase) => { phaseNow.current = next; setPhase(next) }
 
   // Every step reads the latest panes and commands through `live`, so the voice callbacks never go stale.
@@ -438,7 +478,10 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
 
   // The tools Friday's brain calls. They run here, with the page's own sign-in, and reply in short facts.
   const tools = useRef<Record<string, ToolHandler>>({
-    list_chats: async ({ session }) => ({ ...chatList(typeof session === 'string' && session.trim() ? session : undefined) }),
+    list_chats: async ({ session }) => {
+      const { agents, panes, target, attention } = live.current
+      return { ...chatList(agents, panes, target, attention, typeof session === 'string' && session.trim() ? session : undefined) }
+    },
     send_to_chat: async ({ chat, prompt }) => {
       const choice = sessionChoice(live.current.agents, String(chat ?? ''))
       if (choice) return choice
@@ -572,24 +615,6 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
     const data = await live.current.api<{ text: string }>(BACKLOG_PATH)
     return parseBacklog(data.text).filter((row): row is Item => row.kind === 'item' && !row.done)
   }
-  /** The chats as Friday sees them: name, agent, state, and what each needs from you. */
-  function needsOf(pane: Pane) { return pane.needs?.text ?? (approvalOf(pane) ? shortText(approvalOf(pane)!.text, 140) : '') }
-  /** Prompt state: only what matters now. Names of idle chats come from list_chats. */
-  function chats(): AgentChats {
-    const { agents, target } = live.current
-    const needs = agents.filter(pane => needsOf(pane)).map(pane => ({ chat: paneTitle(pane), needs: needsOf(pane) }))
-    const busy = agents.filter(pane => !needsOf(pane) && chatState(pane) !== 'idle').map(pane => paneTitle(pane))
-    return { target: target ? paneTitle(target) : '', busy, needs, idle: agents.length - busy.length - needs.length }
-  }
-  /** Every chat, one short line each, with the sidebar's session name. */
-  function chatList(session?: string) {
-    const { agents, panes, target } = live.current
-    return fridayChatList(agents.map(pane => ({
-      session: pane.tmux_session, chat: paneTitle(pane), agent: agentNames[pane.agent],
-      state: needsOf(pane) ? 'needs you' : chatState(pane), busy: !needsOf(pane) && chatState(pane) !== 'idle',
-    })), groupSessions(panes), target ? paneTitle(target) : '', session)
-  }
-
   // Start: the Friday agent when its worker runs, else the phrase loop. Then a short briefing.
   useEffect(() => {
     const { release: releaseReadAloud, ready: readAloudReady } = holdReadAloud()
@@ -660,7 +685,7 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
         await friday.open()
         if (gone) return
         // No spoken briefing: Friday has the chat state and answers when asked.
-        friday.state(chats())
+        friday.state(live.current.chatFacts)
         go('listening')
       } catch (failure) {
         reportVoice({ kind: 'friday', event: 'start-failed', detail: errorText(failure) })
@@ -684,8 +709,8 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
   }, [attempt])
 
   // Friday hears the chat list whenever it changes, so it can answer "what's running" from facts.
-  const chatsKey = JSON.stringify([agents.map(pane => [pane.id, paneTitle(pane), pane.state, approvalOf(pane)?.id, pane.needs?.text]), target?.id])
-  useEffect(() => { if (agentOn) agent.current?.state(chats()) }, [agentOn, chatsKey])
+  const chatsKey = JSON.stringify(chatFacts)
+  useEffect(() => { if (agentOn) agent.current?.state(live.current.chatFacts) }, [agentOn, chatsKey])
 
   // Keep the screen on. The browser drops the lock when the page hides, so ask again when it shows.
   useEffect(() => {
