@@ -33,6 +33,74 @@ let playback: AbortController | null = null
 let generation = 0
 let ttsDown = false
 
+const holdName = 'tether-read-aloud-hold'
+const locks = typeof navigator !== 'undefined' && typeof BroadcastChannel !== 'undefined' ? navigator.locks : undefined
+const channel = locks ? new BroadcastChannel('tether-read-aloud') : undefined
+let localHolds = 0
+let lockHeld = false
+let held = false
+const heldListeners = new Set<() => void>()
+
+function updateHeld() {
+  const next = localHolds > 0 || lockHeld
+  if (held === next) return
+  held = next
+  heldListeners.forEach(listener => listener())
+}
+
+async function refreshHeld() {
+  if (locks) {
+    try {
+      const state = await locks.query()
+      lockHeld = [...state.held ?? [], ...state.pending ?? []].some(lock => lock.name === holdName)
+    } catch { /* Keep the last snapshot if the document cannot query locks. */ }
+    updateHeld()
+  }
+  return held
+}
+
+if (channel) {
+  channel.onmessage = ({ data }) => {
+    if (data?.t === 'hold') stopSpeaking()
+    if (data?.t === 'hold' || data?.t === 'release') void refreshHeld()
+  }
+  // A tab can disappear without sending a release message. Check again when the user returns.
+  window.addEventListener('focus', () => void refreshHeld())
+}
+
+export function holdReadAloud(): () => void {
+  stopSpeaking()
+  localHolds++
+  updateHeld()
+
+  const pending = new AbortController()
+  const released = new Promise<void>(resolve => pending.signal.addEventListener('abort', () => resolve(), { once: true }))
+  const request = locks?.request(holdName, { mode: 'shared', signal: pending.signal }, () => released).catch(() => {})
+  channel?.postMessage({ t: 'hold' })
+
+  return () => {
+    if (pending.signal.aborted) return
+    localHolds--
+    updateHeld()
+    pending.abort()
+    // The lock manager updates its snapshot before the request promise settles.
+    void request?.then(() => {
+      channel?.postMessage({ t: 'release' })
+      void refreshHeld()
+    })
+  }
+}
+
+function subscribeHeld(listener: () => void) {
+  if (!heldListeners.size) void refreshHeld()
+  heldListeners.add(listener)
+  return () => { heldListeners.delete(listener) }
+}
+
+export function useReadAloudHeld(): boolean {
+  return useSyncExternalStore(subscribeHeld, () => held)
+}
+
 function splitParts(text: string) {
   const parts: string[] = []
   let group = ''
@@ -140,18 +208,27 @@ function playOnDevice(text: string, stop: AbortSignal) {
   })
 }
 
-async function readParts(parts: string[], stop: AbortSignal) {
-  let at = 0
+async function readParts(id: string, parts: string[], stop: AbortSignal) {
+  let audio: AudioContext | undefined
+  let ready: Promise<boolean> | undefined
   if (Context && !ttsDown) {
     try {
-      const audio = context ??= new Context()
+      audio = context ??= new Context()
       // Call resume before the first await so the Read aloud tap unlocks audio.
-      const ready = audio.resume().then(() => true, () => false)
+      ready = audio.resume().then(() => true, () => false)
+    } catch { /* Web Audio failed. Continue on the device. */ }
+  }
+  if ((locks && await refreshHeld()) || stop.aborted) return false
+  set(id)
+  let at = 0
+  if (audio && ready) {
+    try {
       let next = clip(audio, ready, parts[at], stop)
       for (; at < parts.length; at++) {
         const buffer = await next
         if (stop.aborted) return false
         if (!buffer) break
+        if ((locks && await refreshHeld()) || stop.aborted) return false
         const playing = play(audio, buffer)
         if (at + 1 < parts.length) next = clip(audio, ready, parts[at + 1], stop)
         await playing
@@ -160,7 +237,8 @@ async function readParts(parts: string[], stop: AbortSignal) {
     } catch { /* Web Audio failed. Continue from the current part on the device. */ }
   }
   for (; at < parts.length; at++) {
-    if (stop.aborted || !canSpeak || !await playOnDevice(parts[at], stop)) return false
+    if (stop.aborted || !canSpeak || (locks && await refreshHeld()) || stop.aborted) return false
+    if (!await playOnDevice(parts[at], stop)) return false
   }
   return !stop.aborted
 }
@@ -169,12 +247,13 @@ async function readParts(parts: string[], stop: AbortSignal) {
 // needed later, after the server voice fails, when the tap is over. So an empty utterance in the tap unlocks it now.
 let deviceUnlocked = false
 function unlockDeviceVoice() {
-  if (deviceUnlocked || !canSpeak || !navigator.userActivation?.isActive) return
+  if (held || deviceUnlocked || !canSpeak || !navigator.userActivation?.isActive) return
   deviceUnlocked = true
   try { speechSynthesis.speak(new SpeechSynthesisUtterance('')) } catch { /* The device voice stays locked. */ }
 }
 
 export function speak(id: string, markdown: string, onEnd?: () => void) {
+  if (localHolds) return
   stopSpeaking()
   if (!canReadAloud) return
   unlockDeviceVoice()
@@ -182,14 +261,13 @@ export function speak(id: string, markdown: string, onEnd?: () => void) {
   if (!parts.length) return
   const current = generation
   const controller = playback = new AbortController()
-  set(id)
   const finish = (read: boolean) => {
     if (generation !== current) return
     playback = null
-    set(null)
+    if (speaking !== null) set(null)
     if (read) onEnd?.()
   }
-  void readParts(parts, controller.signal).then(finish, () => finish(false))
+  void readParts(id, parts, controller.signal).then(finish, () => finish(false))
 }
 
 // Auto-read starts with no tap, and browsers keep audio locked until a tap. While auto-read is on, each tap or key
@@ -210,12 +288,13 @@ export function keepAudioUnlocked() {
 }
 
 export function stopSpeaking() {
+  const cancelVoice = canSpeak && (!localHolds || playback !== null)
   generation++
   playback?.abort()
   playback = null
   source?.stop()
   source = null
-  if (canSpeak) speechSynthesis.cancel()
+  if (cancelVoice) speechSynthesis.cancel()
   if (speaking !== null) set(null)
 }
 

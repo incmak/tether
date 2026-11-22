@@ -12,7 +12,7 @@ import { LiveVoice, sentences } from './liveVoice'
 import { useBackStep } from './backNav'
 import { useFloatingWindow, type Edge, type FloatMode, type Point, type Rect } from './floatingWindow'
 import { bloomFromBubble, foldToBubble, openFrom, popBubble, settle } from './liveMotion'
-import { speakable } from './speech'
+import { holdReadAloud, speakable } from './speech'
 import { BACKLOG_PATH } from './backlogNews'
 import { addReminders, listReminders } from './fridayReminders'
 import { closeDraft, createDraftWatch, dropNotes, editPrompt, holdNotes, makePrompt, readNotes, sendPrompt, useHeldNotes } from './fridayNotes'
@@ -590,6 +590,7 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
 
   // Start: the Friday agent when its worker runs, else the phrase loop. Then a short briefing.
   useEffect(() => {
+    const releaseReadAloud = holdReadAloud()
     let gone = false
     const watches = createDraftWatch(live.current.api, (text, show) => {
       void held.current()
@@ -666,6 +667,7 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
       window.removeEventListener('pagehide', stopDraftWatches)
       stopDraftWatches()
       agent.current?.close('ended'); agent.current = null; voice.current?.close(); voice.current = null
+      releaseReadAloud()
     }
   }, [])
 

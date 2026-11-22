@@ -19,7 +19,7 @@ import { ToolGroup } from './ToolGroup'
 import { SentContent, sentContent } from './SentImages'
 import { InlineCode, Link, remarkPaths } from './MediaLink'
 import { remarkTabs } from './tabLinks'
-import { canReadAloud, speak, stopSpeaking, useSpeaking } from './speech'
+import { canReadAloud, speak, stopSpeaking, useReadAloudHeld, useSpeaking } from './speech'
 import { RateButtons } from './ReplyFeedback'
 
 
@@ -320,8 +320,10 @@ function ShareButton({ text }: { text: string }) {
 function SpeakButton({ text }: { text: string }) {
   // The text is the key, so the button also shows a reply that is read aloud by itself at the end of a turn.
   const reading = useSpeaking() === text
+  const disabled = useReadAloudHeld() && !reading
   if (!canReadAloud) return null
-  return <button type="button" className="icon-button" aria-label={reading ? 'Stop reading' : 'Read aloud'} title={reading ? 'Stop reading' : 'Read aloud'} aria-pressed={reading} onClick={() => reading ? stopSpeaking() : speak(text, text)}>{reading ? <Square size={14} /> : <Play size={16} />}</button>
+  const label = disabled ? 'Read aloud is off during Live mode' : reading ? 'Stop reading' : 'Read aloud'
+  return <button type="button" className="icon-button" disabled={disabled} aria-label={label} title={label} aria-pressed={reading} onClick={() => reading ? stopSpeaking() : speak(text, text)}>{reading ? <Square size={14} /> : <Play size={16} />}</button>
 }
 function CodeHeader({ language, code }: { language: string | undefined; code: string }) {
   return <div className="code-header"><span>{language || 'code'}</span><CopyButton text={code} label="Copy code" className="code-copy" /></div>
