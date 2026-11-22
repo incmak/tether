@@ -197,6 +197,24 @@ class PlannerTest(unittest.TestCase):
         self.assertEqual(self.planner.tick([told, untold])['placed'], 'call-2')
         self.assertEqual(self.agendas[-1], [untold])
 
+    def test_failed_open_logs_and_still_opens_the_other_told_asks(self):
+        first, second = self.candidate(), self.candidate('b', pane='%2')
+        self.assertEqual(self.planner.tick([first, second])['placed'], 'call-1')
+        self.mark_opened.side_effect = [RuntimeError('disk'), False]
+        self.assertTrue(self.planner.finish('call-1', 'answered', ('a', 'b')))
+        self.assertEqual(self.mark_opened.call_count, 2)
+        self.log.assert_any_call('open_failed', ask='b', error='gone')
+        failed = [c for c in self.log.call_args_list if c.args == ('open_failed',)]
+        self.assertEqual(len(failed), 2)
+        self.assertTrue(all(self.state()['asks'][key]['done'] for key in ('a', 'b')))
+
+    def test_calls_back_on_releases_a_long_expired_pending_hold_slot(self):
+        ask = self.candidate()
+        self.assertTrue(self.planner.finish(self.planner.tick([ask])['placed'], 'declined'))
+        self.clock.advance(urgent_call.HOLD + urgent_call.LATE + 1)
+        self.planner.calls_back_on()
+        self.assertEqual(self.planner.tick([ask])['placed'], 'call-2')
+
     def test_unknown_outcome_counts_as_declined(self):
         for i, outcome in enumerate((None, 'established')):
             with self.subTest(outcome=outcome):
@@ -357,7 +375,7 @@ class PlannerTest(unittest.TestCase):
         self.assertEqual(self.place_and_finish(self.candidate()), 'call-1')
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
 
-    def test_failed_save_places_nothing_and_never_makes_up_the_slot(self):
+    def test_failed_save_places_nothing_and_gives_the_slot_back(self):
         ask = self.candidate()
         with mock.patch.object(urgent_call.os, 'replace', side_effect=OSError('denied')):
             self.assertIsNone(self.planner.tick([ask])['placed'])
@@ -365,9 +383,18 @@ class PlannerTest(unittest.TestCase):
         self.assertEqual(list(self.path.parent.iterdir()), [])
         self.assertEqual(self.agendas, [])
         self.clock.advance(1)
-        self.assertIsNone(self.planner.tick([ask])['placed'])
-        self.clock.now = ask['grace_end'] + 10 * 60
         self.assertEqual(self.planner.tick([ask])['placed'], 'call-1')
+        self.assertEqual(self.state()['asks']['a']['decided'], [0])
+
+    def test_pruning_keeps_asks_seen_in_this_tick(self):
+        with mock.patch.object(urgent_call, 'ASK_KEEP', 2):
+            later = [self.candidate(f'x{i}', grace_end=self.clock.now + 3600) for i in range(3)]
+            call_id = self.planner.tick([self.candidate(), *later])['placed']
+            self.assertEqual(call_id, 'call-1')
+            self.assertIsNotNone(self.load())
+            self.assertFalse(self.load().broken)
+            self.assertTrue(self.planner.finish(call_id, 'unanswered'))
+            self.assertIn('a', self.state()['asks'])
 
     def test_slot_found_more_than_ten_minutes_late_is_skipped(self):
         ask = self.candidate()

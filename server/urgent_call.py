@@ -196,10 +196,6 @@ class Planner:
                 live = None
             self.state['calls'] = [call for call in self.state['calls'] if call['at'] >= now - 48 * 3600]
             eligible = sorted(self._eligible(candidates, now, decide), key=lambda item: item[0]['grace_end'], reverse=True)
-            if len(self.state['asks']) > ASK_KEEP:
-                keep = set(sorted(self.state['asks'], key=lambda key: self.state['asks'][key]['seen_at'])[-ASK_KEEP:])
-                keep |= set(live['panes']) if live is not None else set()
-                self.state['asks'] = {key: ask for key, ask in self.state['asks'].items() if key in keep}
             if live is not None:
                 # A slot that comes due for an ask already on the live call is used by that call.
                 for candidate, ask, slots in eligible:
@@ -227,16 +223,28 @@ class Planner:
                 if pending is not None:
                     ask['calls'] += 1
                 decide(candidate, ask, slots, decision, rule)
+            if len(self.state['asks']) > ASK_KEEP:
+                keep = set(sorted(self.state['asks'], key=lambda key: self.state['asks'][key]['seen_at'])[-ASK_KEEP:])
+                keep |= {candidate['id'] for candidate in candidates}
+                current = self._call(self.state['live'])
+                keep |= set(current['panes']) if current is not None else set()
+                self.state['asks'] = {key: ask for key, ask in self.state['asks'].items() if key in keep}
             try:
                 if self._dirty or self.state != before:
                     self._save()
             except OSError:
                 # Keep the slot decisions so a blocked slot never rings later (C2). Cancel only the new call.
                 if pending is not None:
+                    # The call was never placed: give its slots back, so it can ring once a save works.
                     self.state['calls'] = [call for call in self.state['calls'] if call['id'] != pending]
                     self.state['live'] = None
-                    for _, ask, _ in targets:
+                    for _, ask, slots in targets:
                         ask['calls'] -= 1
+                        for slot in slots:
+                            if slot == 'hold':
+                                ask['hold_slot'] = 'pending'
+                            else:
+                                ask['decided'].remove(slot)
                 self._dirty = True
                 self.log('save_failed')
                 return dict(placed=None, blocked=None, joined=[])
@@ -313,7 +321,8 @@ class Planner:
         if self.mark_opened is not None:
             for pane, ask_id in opened:
                 try:
-                    self.mark_opened(pane, ask_id)
+                    if not self.mark_opened(pane, ask_id):
+                        self.log('open_failed', ask=ask_id, error='gone')
                 except Exception as exc:  # The ask stays done here: Mak heard it. Tether just shows it unopened.
                     self.log('open_failed', ask=ask_id, error=type(exc).__name__)
         return True
@@ -330,7 +339,7 @@ class Planner:
     def calls_back_on(self):
         with self.lock:
             before = deepcopy(self.state)
-            self.state.update(dnd_until=0, hold_until=min(self.state['hold_until'], self.clock()))
+            self.state.update(dnd_until=0, hold_until=self.clock())
             self._commit(before)
 
     def status(self, now=None):

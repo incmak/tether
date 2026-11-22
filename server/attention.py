@@ -496,15 +496,19 @@ class Attention:
 
     def mark_opened(self, pane, ask_id):
         """Mark the ask opened by its id. The pane is a hint: the ask may have moved to another pane."""
-        with self.lock:
-            ask = self.asks.get(pane)
-            if not ask or ask['id'] != ask_id:
-                pane, ask = next(((key, value) for key, value in self.asks.items() if value['id'] == ask_id),
-                                 (None, None))
-            if ask is None:
-                return False
-            thread = ask.get('thread')
-        return self.act(pane, thread, 'opened', ask_id=ask_id)
+        for _ in range(3):  # the ask can move between the lookup and the write
+            with self.lock:
+                ask = self.asks.get(pane)
+                if not ask or ask['id'] != ask_id:
+                    pane, ask = next(((key, value) for key, value in self.asks.items() if value['id'] == ask_id),
+                                     (None, None))
+                if ask is None:
+                    return False
+                thread = ask.get('thread')
+            result = self.act(pane, thread, 'opened', ask_id=ask_id)
+            if result:
+                return result
+        return False
 
     def due_pings(self, now=None):
         """Send due urgent pings once, after recording the attempts on disk."""

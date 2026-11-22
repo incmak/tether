@@ -131,6 +131,22 @@ class AttentionTest(unittest.TestCase):
         self.assertEqual(self.store.call_candidates(), [])
         self.assertTrue(self.store.ask('%1', 't1')['urgent'])
 
+    def test_mark_opened_retries_when_the_ask_moves_before_the_write(self):
+        self.world.turn('%1', 'Urgent: Pick one?\nNeeds you: yes', 10)
+        self.world.observe(entry())
+        ask = self.store.ask('%1', 't1')
+        act = self.store.act
+
+        def move_then_act(pane, thread, action, ask_id=None):
+            if pane == '%1':
+                with self.store.lock:
+                    self.store.asks['%3'] = self.store.asks.pop('%1')
+            return act(pane, thread, action, ask_id=ask_id)
+
+        with mock.patch.object(self.store, 'act', side_effect=move_then_act):
+            self.assertTrue(self.store.mark_opened('%1', ask['id'])['opened'])
+        self.assertTrue(self.store.asks['%3']['opened'])
+
     def test_call_candidates_are_private_snapshots_and_mark_opened_checks_id(self):
         self.world.turn('%1', 'Urgent: Pick one?\nNeeds you: yes', 10)
         self.world.observe(entry())
