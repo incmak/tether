@@ -240,6 +240,8 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
   const focusLater = useRef<{ id: string; neighbors: string[] } | null>(null)
   const focusUndo = useRef('')
   const now = useNow()
+  // A zone change moves "today" on the server and every time shown here, so reload the log.
+  const zone = useTetherZone()
   const [log, setLog] = useState<AutoLog | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
@@ -257,7 +259,7 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
     target?.focus()
   })
   useEffect(() => { heading.current?.focus() }, [])
-  useEffect(() => { const controller = new AbortController(); void load(controller.signal); return () => controller.abort() }, [load])
+  useEffect(() => { const controller = new AbortController(); void load(controller.signal); return () => controller.abort() }, [load, zone])
   const back = async (id: string, write: () => Promise<unknown>, done: string, source: { undo: AutoEntry } | { index: number }) => {
     if (busy) return
     setBusy(id); setRowError(null)

@@ -28,7 +28,7 @@ ENV = {**os.environ, 'GIT_AUTHOR_NAME': 'T', 'GIT_AUTHOR_EMAIL': 't@example.com'
 
 
 def at(hour, day=DAY):
-    return datetime.strptime(f'{day} {hour:02d}:00', '%Y-%m-%d %H:%M').timestamp()
+    return datetime.fromisoformat(f'{day}T{hour:02d}:00').replace(tzinfo=tether_zone.zone()).timestamp()
 
 
 class Case(unittest.TestCase):
@@ -132,10 +132,10 @@ class FactTests(Case):
             '- 2026-11-17 10:00 UTC · ccccccc Hotfix · Verified: none (urgent)',
             '- 2026-11-17 11:00 UTC · ddddddd No stamp line',
             'not a deploy line']))
-        start, end = at(0), at(0) + 86400
         self.enterContext(mock.patch.object(prefs_sync, 'FILE', self.root / 'cache' / 'prefs.json'))
         prefs_sync.save({'timeZone': 'UTC'})
-        found = ops_agent.deploys(str(self.repo), DAY, *ops_agent.day_bounds(DAY))
+        start, end = ops_agent.day_bounds(DAY)
+        found = ops_agent.deploys(str(self.repo), DAY, start, end)
         self.assertEqual([(row['commit'], row['stamp']) for row in found],
                          [('bbbbbbb', 'verified'), ('ccccccc', 'none'), ('ddddddd', 'missing')])
         self.assertEqual(found[1]['text'], 'ccccccc Hotfix')

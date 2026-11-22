@@ -112,9 +112,12 @@ class HookCronTests(unittest.TestCase):
         claude_hooks.capture(dict(session_id='abc123', hook_event_name=event, **extra), now)
 
     def test_overlay_and_tab_list_show_jobs_long_after_the_stop(self):
-        stop = local(2026, 11, 17, 12, 0)
-        host_zone = datetime.datetime.fromtimestamp(stop).astimezone().tzinfo
-        self.enterContext(patch.object(tether_zone, 'zone', return_value=host_zone))
+        self.addCleanup(time.tzset)
+        self.enterContext(patch.dict(os.environ, TZ='UTC'))
+        time.tzset()
+        zone = ZoneInfo('UTC')
+        self.enterContext(patch.object(tether_zone, 'zone', return_value=zone))
+        stop = datetime.datetime(2026, 11, 17, 12, tzinfo=zone).timestamp()
         self.feed('Stop', stop, session_crons=[self.job])
         later = stop + 3 * 3600 + 60  # far past the 30 minute task window: a job is still scheduled
         expected = {'id': 'c1', 'label': 'Check the build', 'schedule': '*/5 * * * *', 'every': 'Every 5 minutes',

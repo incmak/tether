@@ -10,6 +10,7 @@ from pathlib import Path
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -39,6 +40,10 @@ def message(role, content, **extra):
 
 class FridayCallsTest(unittest.TestCase):
     def setUp(self):
+        # Digest paths and IDs have always used the host clock.
+        self.addCleanup(time.tzset)
+        self.enterContext(patch.dict(os.environ, TZ='UTC'))
+        time.tzset()
         self.scratch = self.enterContext(tempfile.TemporaryDirectory())
         self.directory = Path(self.scratch) / 'calls'
         self.state = self.directory / 'state.json'
@@ -184,7 +189,9 @@ class FridayCallsTest(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         self.assertFalse(self.state.exists())
         start = datetime.fromisoformat(data['start'])
-        self.assertEqual(json_path, self.directory / f'{start:%Y-%m-%d}' / f'{start:%H%M%S}-000-23-runner-synthetic.json')
+        host_start = start.astimezone(timezone.utc)
+        self.assertEqual(json_path, self.directory / f'{host_start:%Y-%m-%d}'
+                         / f'{host_start:%H%M%S}-000-23-runner-synthetic.json')
         self.assertEqual(lines, [f"friday-call {start:%H:%M} 13s turns=2 ended=clean "
                                  f"flags=blocked:send_to_chat:3,blocked_repeat:1,tool_error:1,user_repeat:1 "
                                  f"digest={md_path}"])
@@ -205,7 +212,7 @@ class FridayCallsTest(unittest.TestCase):
         self.assertEqual(data['start'], '2026-03-08T01:59:59-05:00')
         self.assertEqual(data['end'], '2026-03-08T03:00:01-04:00')
         path, = self.digests()
-        self.assertEqual(path.parent.name, at.astimezone().strftime('%Y-%m-%d'))
+        self.assertEqual(path.parent.name, '2026-03-08')
         self.assertIn('- 03:00:00 **user:** A request', path.with_suffix('.md').read_text())
 
         prefs_sync.save({'timeZone': 'Pacific/Auckland'})
@@ -333,7 +340,7 @@ class FridayCallsTest(unittest.TestCase):
             self.append(runner('finished', name), __REALTIME_TIMESTAMP=str(self.base + offset + 100))
         self.assertEqual(len(self.scan()), 3)
         paths = self.digests()
-        start = friday_calls.decode_entry(self.rows[0]).at
+        start = datetime.fromtimestamp(self.base / 1e6, timezone.utc)
         self.assertEqual(sorted(path.stem for path in paths), [
             f'{start:%H%M%S}-000-23-runner_x', f'{start:%H%M%S}-250-23-runner_x',
             f'{start:%H%M%S}-250-23-runner_x-2',
@@ -403,7 +410,7 @@ class FridayCallsTest(unittest.TestCase):
 
     def test_runner_distinguishes_calls_started_at_the_same_time_under_one_pid(self):
         self.directory.mkdir()
-        start = datetime.fromtimestamp(self.base / 1e6).astimezone().isoformat()
+        start = datetime.fromtimestamp(self.base / 1e6, timezone.utc).isoformat()
         legacy_id = f'{start}-23'
         self.state.write_text(json.dumps({'cursor': None, 'done': [legacy_id]}))
         for name in ('runner/x', 'runner:x'):
@@ -448,9 +455,10 @@ class FridayCallsTest(unittest.TestCase):
         for data in (normal, markdown_write, last):
             self.assertEqual(data['transcript'], [message('user', 'literal surrogate ?')])
             self.assertEqual(data['events'][0]['text'], 'Friday bye ?')
+        start = friday_calls.decode_entry(self.rows[6]).at
         self.assertEqual(broken, {
-            'id': friday_calls.decode_entry(self.rows[6]).at.isoformat() + '-23-broken',
-            'start': friday_calls.decode_entry(self.rows[6]).at.isoformat(),
+            'id': start.astimezone(timezone.utc).isoformat() + '-23-broken',
+            'start': start.isoformat(),
             'end': friday_calls.decode_entry(self.rows[9]).at.isoformat(),
             'error': 'RuntimeError', 'flags': {'digest_error': 1},
         })
@@ -465,7 +473,7 @@ class FridayCallsTest(unittest.TestCase):
         self.directory.symlink_to(target, target_is_directory=True)
         self.start()
         self.append(runner('finished'))
-        start = friday_calls.decode_entry(self.rows[1]).at
+        start = datetime.fromtimestamp(int(self.rows[1]['__REALTIME_TIMESTAMP']) / 1e6, timezone.utc)
         day = self.directory / f'{start:%Y-%m-%d}'
         args = ('scan', '--since', '2030-01-01 00:00')
         for link in (self.directory, day):
@@ -604,7 +612,7 @@ class FridayCallsTest(unittest.TestCase):
         self.assertEqual(json.loads(self.state.read_text())['cursor'], self.rows[-1]['__CURSOR'])
 
     def test_tightens_existing_output_and_day_directory_modes(self):
-        start = friday_calls.decode_entry({'__CURSOR': 'dummy', '__REALTIME_TIMESTAMP': str(self.base)}).at
+        start = datetime.fromtimestamp(self.base / 1e6, timezone.utc)
         day = self.directory / f'{start:%Y-%m-%d}'
         day.mkdir(parents=True)
         for directory in (self.directory, day):

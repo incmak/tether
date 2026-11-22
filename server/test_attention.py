@@ -698,14 +698,15 @@ class AttentionTest(unittest.TestCase):
     def test_digest_is_off_by_default_and_sends_once_a_day(self):
         self.world.turn('%1', 'Next: a.\nNeeds you: yes', 10)
         self.world.observe(entry())
-        morning = datetime(2026, 11, 8, 9, 5)
+        zone = tether_zone.zone()
+        morning = datetime(2026, 11, 8, 9, 5, tzinfo=zone)
         self.assertIsNone(self.store.digest_due(morning))
         self.store.set_digest(True, 9)
-        self.assertIsNone(self.store.digest_due(datetime(2026, 11, 8, 8, 59)))
+        self.assertIsNone(self.store.digest_due(datetime(2026, 11, 8, 8, 59, tzinfo=zone)))
         self.clock.now += 3 * 86400
         payload = self.store.digest_due(morning)
         self.assertEqual(payload['body'], '1 tab waits on you, oldest 3 days.')
-        self.assertIsNone(self.store.digest_due(datetime(2026, 11, 8, 15, 0)))
+        self.assertIsNone(self.store.digest_due(datetime(2026, 11, 8, 15, tzinfo=zone)))
         with self.assertRaises(ValueError):
             self.store.set_digest(True, 24)
 
@@ -726,6 +727,7 @@ class AttentionTest(unittest.TestCase):
 
 
     def test_digest_includes_lesson_review_with_or_without_asks(self):
+        zone = tether_zone.zone()
         for asks in (False, True):
             for reason, count in (('disputed', 7), ('new', 7), ('time', 20)):
                 with self.subTest(asks=asks, reason=reason):
@@ -735,28 +737,29 @@ class AttentionTest(unittest.TestCase):
                     if asks:
                         self.world.turn('%1', 'Next: choose.\nNeeds you: yes', 10)
                         self.world.observe(entry())
-                    payload = self.store.digest_due(datetime(2026, 11, 8, 9, 5))
+                    payload = self.store.digest_due(datetime(2026, 11, 8, 9, 5, tzinfo=zone))
                     expected = (f'1 tab waits on you, oldest 1 minutes. {count} lessons to review.' if asks
                                 else f'Lessons to review: {count}.')
                     self.assertEqual(payload['body'], expected)
                     self.assertEqual(payload['url'], '/chat/?go=attention')
-                    self.assertIsNone(self.store.digest_due(datetime(2026, 11, 8, 15)))
+                    self.assertIsNone(self.store.digest_due(datetime(2026, 11, 8, 15, tzinfo=zone)))
 
     def test_digest_review_count_of_one_is_singular(self):
         self.store.set_digest(True, 9)
         self.review.return_value = {'due': True, 'reason': 'disputed', 'new': 0, 'disputed': 1, 'total': 4}
         self.world.turn('%1', 'Next: choose.\nNeeds you: yes', 10)
         self.world.observe(entry())
-        payload = self.store.digest_due(datetime(2026, 11, 8, 9, 5))
+        payload = self.store.digest_due(datetime(2026, 11, 8, 9, 5, tzinfo=tether_zone.zone()))
         self.assertEqual(payload['body'], '1 tab waits on you, oldest 1 minutes. 1 lesson to review.')
 
     def test_digest_review_error_keeps_previous_behavior(self):
+        zone = tether_zone.zone()
         self.store.set_digest(True, 9)
         self.review.side_effect = RuntimeError('review unavailable')
-        self.assertIsNone(self.store.digest_due(datetime(2026, 11, 8, 9)))
+        self.assertIsNone(self.store.digest_due(datetime(2026, 11, 8, 9, tzinfo=zone)))
         self.world.turn('%1', 'Next: choose.\nNeeds you: yes', 10)
         self.world.observe(entry())
-        payload = self.store.digest_due(datetime(2026, 11, 9, 9))
+        payload = self.store.digest_due(datetime(2026, 11, 9, 9, tzinfo=zone))
         self.assertEqual(payload['body'], '1 tab waits on you, oldest 1 minutes.')
 
 
@@ -772,7 +775,7 @@ class StaleAskTest(unittest.TestCase):
     def setUp(self):
         folder = self.enterContext(tempfile.TemporaryDirectory())
         self.path = Path(folder) / 'attention.json'
-        self.clock = Clock(datetime(2026, 11, 5, 10).timestamp())
+        self.clock = Clock(datetime(2026, 11, 5, 10, tzinfo=tether_zone.zone()).timestamp())
         self.log = FakeLog(self.clock)
         self.on_urgent = mock.Mock()
         self.store = attention.Attention(self.path, self.clock, on_urgent=self.on_urgent, log=self.log)
@@ -1177,7 +1180,7 @@ class RouteTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.path = Path(self.dir.name) / 'a.json'
-        self.clock = Clock(datetime(2026, 11, 21, 11).timestamp())
+        self.clock = Clock(datetime(2026, 11, 21, 11, tzinfo=tether_zone.zone()).timestamp())
         self.log = FakeLog(self.clock)
         self.store = attention.Attention(self.path, self.clock, log=self.log)
         self.store.note_reply('%1', 't1', 'Next: a.\nNeeds you: yes', 'first')
@@ -1504,7 +1507,7 @@ class RouteTest(unittest.TestCase):
         return move
 
     def test_undo_dated_before_midnight_counts_the_same_on_home_and_log(self):
-        midnight = attention._local_midnight(datetime(2026, 11, 23, 12).timestamp())
+        midnight = datetime(2026, 11, 23, tzinfo=tether_zone.zone()).timestamp()
         move = self.undo_with_pending_line(midnight + 10)
         self.clock.now = midnight - 10                     # the clock steps back across midnight
         self.store._failed_undos.clear()
@@ -1610,7 +1613,7 @@ class RouteTest(unittest.TestCase):
 
     def test_get_log_adds_undo_targets_and_counts_moves_since_local_midnight(self):
         today = self.clock.now
-        midnight = datetime(2026, 11, 21).timestamp()
+        midnight = datetime(2026, 11, 21, tzinfo=tether_zone.zone()).timestamp()
         ask = self.store.ask('%1', 't1')
         self.clock.now = today - 8 * 86400
         self.log.record('auto.stale_ask', 'Outside the window')
@@ -1667,13 +1670,14 @@ class RouteTest(unittest.TestCase):
                 }))
                 self.assertEqual(self.post('rules', {'stale': False}), (200, {'rules': {'stale': False}}))
 
-    def test_log_today_start_is_server_local_midnight(self):
+    def test_log_today_start_is_tether_zone_midnight(self):
+        zone = tether_zone.zone()
         for day, hour in ((21, 23), (22, 0)):
             with self.subTest(day=day, hour=hour):
-                self.clock.now = datetime(2026, 11, day, hour, 15).timestamp()
+                self.clock.now = datetime(2026, 11, day, hour, 15, tzinfo=zone).timestamp()
                 status, log = self.get('/log')
                 self.assertEqual(status, 200)
-                self.assertEqual(log['today_start'], datetime(2026, 11, day).timestamp())
+                self.assertEqual(log['today_start'], datetime(2026, 11, day, tzinfo=zone).timestamp())
 
 
 class AnswerEndpointTest(unittest.TestCase):

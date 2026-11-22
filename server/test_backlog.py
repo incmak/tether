@@ -15,6 +15,7 @@ import backlog
 import paths
 import projects
 import projects_api
+import tether_zone
 from test_projects import Handler
 
 
@@ -574,8 +575,9 @@ class BoardTests(unittest.TestCase):
         patch = mock.patch.object(paths, 'TETHER', Path(temp.name))
         patch.start()
         self.addCleanup(patch.stop)
-        today = time.strftime('%Y-%m-%d %H:%M')
-        old = time.strftime('%Y-%m-%d %H:%M', time.localtime(time.time() - 8 * 86400))
+        now = time.time()
+        today = tether_zone.stamp(now)
+        old = tether_zone.stamp(now - 8 * 86400)
         self.text = (f'- [ ] Inbox item (codex · chat a) #B1\n  - why it matters\n\n'
                      f'## tether\n- [ ] Started #B2\n  - Doing: claude · pane %4\n  - [ ] a sub step\n'
                      f'- [x] Shipped #B3\n  - Done: {today} · in 1234abc (claude)\n'
@@ -668,8 +670,9 @@ class BoardTests(unittest.TestCase):
         self.assertNotIn('Inbox item', done)
 
     def test_the_last_done_line_counts_for_the_card_and_the_archive(self):
-        today = time.strftime('%Y-%m-%d %H:%M')
-        old = time.strftime('%Y-%m-%d %H:%M', time.localtime(time.time() - 8 * 86400))
+        now = time.time()
+        today = tether_zone.stamp(now)
+        old = tether_zone.stamp(now - 8 * 86400)
         twice = f'- [x] Done twice #B9\n  - Done: {old} · first\n  - Done: {today} · again\n'
         filler = ''.join(f'- [x] Old {n} #B{n + 10}\n  - Done: ' + 'word ' * 200 + '\n' for n in range(60))
         (backlog.folder() / 'BACKLOG.md').write_text(twice + filler)
@@ -679,7 +682,7 @@ class BoardTests(unittest.TestCase):
         self.assertEqual(self.card('B9')['stage'], 'done')
 
     def test_this_weeks_done_items_move_too_when_the_list_would_not_fit(self):
-        today = time.strftime('%Y-%m-%d %H:%M')
+        today = tether_zone.stamp()
         done = ''.join(f'- [x] Done {n} ' + 'x' * 900 + f' #B{n}\n  - Done: {today} · ok\n' for n in range(1, 41))
         open_part = '- [ ] Open ' + 'y' * (backlog.LIMIT - 1000) + ' #B41\n'
         backlog.save(done + open_part, backlog.read()['version'])

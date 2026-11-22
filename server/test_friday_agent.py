@@ -335,7 +335,7 @@ class CallLogTests(unittest.TestCase):
                  (120, 'user', 'Keep this "quote" and é.')]
         transcript, count = friday.format_call_transcript(turns)
         self.assertEqual(count, 1)
-        local_time = datetime.fromtimestamp(120).strftime('%H:%M')
+        local_time = datetime.fromtimestamp(120, friday.tether_zone.zone()).strftime('%H:%M')
         self.assertEqual(transcript, f'[2 earlier turns cut]\nVoice call transcript (1 turn, '
                          f'from {local_time} to {local_time}):\nUser: Keep this "quote" and é.')
         self.assertLessEqual(len(json.dumps(transcript)), 40000)
