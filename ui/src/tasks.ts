@@ -4,6 +4,7 @@
 import { useCallback } from 'react'
 import type { Api } from './api'
 import { usePolling } from './hooks'
+import { tetherZone, validDateMs, zoneParts } from './zone'
 
 export type SourceId = 'todo' | 'planner'
 export type SourceState = 'ok' | 'off' | 'error' | 'syncing'
@@ -18,7 +19,7 @@ export interface TaskSource {
 export interface TaskDue { date: string; at: number | null }
 export interface ExternalTask {
   key: string; source: SourceId; list: string; title: string
-  due: TaskDue | null; reminderAt: number | null; importance?: string; link: string; modified?: number
+  due: TaskDue | null; reminderAt: number | null; importance?: string; link: string; modified?: number | null
   /** The app gave a time zone Tether could not read, so the time may be off. */
   timeUncertain?: boolean
   /** The backlog item this task was copied to. */
@@ -29,33 +30,34 @@ export interface ExternalTask {
 export interface TaskListing { sources: TaskSource[]; tasks: ExternalTask[] }
 
 const POLL_MS = 60000
-const OFFSET = 330 * 60  // IST, seconds east of UTC
-
-/** The IST day number of an instant, and of a 'YYYY-MM-DD' date (a date names a calendar day, not an instant). */
-const dayOfInstant = (at: number) => Math.floor((at + OFFSET) / 86400)
+/** A day number names a calendar day, so it increases by one even at an offset change. */
+const dayOfParts = ({ year, month, date }: ReturnType<typeof zoneParts>) => Date.UTC(year, month, date) / 86400000
+const dayOfInstant = (at: number, zone: string) => dayOfParts(zoneParts(at * 1000, zone))
 const dayOfDate = (date: string) => {
   const [y, m, d] = date.split('-').map(Number)
   return Math.floor(Date.UTC(y, m - 1, d) / 86400000)
 }
-export const dueDay = (due: TaskDue) => due.at !== null ? dayOfInstant(due.at) : dayOfDate(due.date)
+export const dueDay = (due: TaskDue, zone = tetherZone()) => due.at !== null ? dayOfInstant(due.at, zone) : dayOfDate(due.date)
 
 export interface TaskGroups { overdue: ExternalTask[]; today: ExternalTask[]; upcoming: ExternalTask[]; someday: ExternalTask[] }
 
 /** Overdue, Today, Upcoming (soonest first) and No due date (by title), like To Do's own Planned view. */
-export function groupTasks(tasks: ExternalTask[], now: number): TaskGroups {
-  const today = dayOfInstant(now)
+export function groupTasks(tasks: ExternalTask[], now: number, zone = tetherZone()): TaskGroups {
+  const today = dayOfInstant(now, zone)
   const groups: TaskGroups = { overdue: [], today: [], upcoming: [], someday: [] }
+  const days = new Map<TaskDue, number>()
   for (const task of tasks) {
     if (!task.due) groups.someday.push(task)
     else {
-      const day = dueDay(task.due)
+      const day = dueDay(task.due, zone)
+      days.set(task.due, day)
       // A due time today that has passed is overdue; a due date of today is not, until the day ends.
       if (day < today || (day === today && task.due.at !== null && task.due.at < now)) groups.overdue.push(task)
       else if (day === today) groups.today.push(task)
       else groups.upcoming.push(task)
     }
   }
-  const byDue = (a: ExternalTask, b: ExternalTask) => (dueDay(a.due!) - dueDay(b.due!)) || ((a.due!.at ?? 0) - (b.due!.at ?? 0)) || a.title.localeCompare(b.title)
+  const byDue = (a: ExternalTask, b: ExternalTask) => (days.get(a.due!)! - days.get(b.due!)!) || ((a.due!.at ?? 0) - (b.due!.at ?? 0)) || a.title.localeCompare(b.title)
   groups.overdue.sort(byDue); groups.today.sort(byDue); groups.upcoming.sort(byDue)
   groups.someday.sort((a, b) => a.title.localeCompare(b.title))
   return groups
@@ -65,15 +67,17 @@ const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const pad = (value: number) => String(value).padStart(2, '0')
 
-/** "Today", "Tomorrow", "Yesterday", "Wed 25 Nov", with the IST time when the task has one. */
+/** "Today", "Tomorrow", "Yesterday", "Wed 25 Nov", with the time when the task has one. */
 export function dueLabel(due: TaskDue, now: number) {
-  const days = dueDay(due) - dayOfInstant(now)
-  const day = new Date(dueDay(due) * 86400000)
+  const today = zoneParts(now * 1000)
+  const time = due.at === null ? null : zoneParts(due.at * 1000)
+  const dueNumber = time ? dayOfParts(time) : dayOfDate(due.date)
+  const days = dueNumber - dayOfParts(today)
+  // This Date represents the due calendar day, including a date-only task's day.
+  const date = new Date(dueNumber * 86400000)
   const name = days === 0 ? 'Today' : days === 1 ? 'Tomorrow' : days === -1 ? 'Yesterday'
-    : `${DAYS[day.getUTCDay()]} ${day.getUTCDate()} ${MONTHS[day.getUTCMonth()]}${day.getUTCFullYear() === new Date((now + OFFSET) * 1000).getUTCFullYear() ? '' : ` ${day.getUTCFullYear()}`}`
-  if (due.at === null) return name
-  const time = new Date((due.at + OFFSET) * 1000)
-  return `${name} ${pad(time.getUTCHours())}:${pad(time.getUTCMinutes())}`
+    : `${DAYS[date.getUTCDay()]} ${date.getUTCDate()} ${MONTHS[date.getUTCMonth()]}${date.getUTCFullYear() === today.year ? '' : ` ${date.getUTCFullYear()}`}`
+  return time ? `${name} ${pad(time.hour)}:${pad(time.minute)}` : name
 }
 
 /** "just now", "4 min ago", "2 h ago", "3 days ago". */
@@ -92,7 +96,7 @@ export const syncNow = (api: Api) => api<TaskListing>('tasks/sync', {})
 export const toBacklog = (api: Api, key: string) => api<{ id: string; created: boolean }>('tasks/backlog', { key })
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
-const isTime = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
+const isTime = (value: unknown): value is number => typeof value === 'number' && validDateMs(value * 1000)
 const isDue = (value: unknown): value is TaskDue => isObject(value) && typeof value.date === 'string' && /^\d{4}-\d\d-\d\d$/.test(value.date) && (value.at === null || isTime(value.at))
 const isRef = (value: unknown) => value === null || value === undefined || typeof value === 'string'
 const isSourceId = (value: unknown): value is SourceId => value === 'todo' || value === 'planner'
@@ -102,11 +106,13 @@ export function cleanListing(body: unknown): TaskListing {
   if (!isObject(body) || !Array.isArray(body.sources) || !Array.isArray(body.tasks)) throw new Error('Tether returned an unreadable todo list.')
   const sources = body.sources.filter((source): source is TaskSource => isObject(source) && isSourceId(source.id) && typeof source.label === 'string'
     && typeof source.enabled === 'boolean' && typeof source.alerts === 'boolean' && typeof source.state === 'string'
-    && (source.syncedAt === null || isTime(source.syncedAt)) && typeof source.complete === 'boolean' && isTime(source.count)
+    && (source.syncedAt === null || isTime(source.syncedAt)) && typeof source.complete === 'boolean'
+    && typeof source.count === 'number' && Number.isFinite(source.count)
     && (source.why === undefined || typeof source.why === 'string') && (source.command === undefined || source.command === null || typeof source.command === 'string'))
   const tasks = body.tasks.filter((task): task is ExternalTask => isObject(task) && typeof task.key === 'string' && isSourceId(task.source)
     && typeof task.title === 'string' && typeof task.list === 'string' && typeof task.link === 'string'
     && (task.due === null || isDue(task.due)) && (task.reminderAt === null || isTime(task.reminderAt))
+    && (task.modified == null || isTime(task.modified))
     && isRef(task.backlog) && isRef(task.reminder))
   return { sources, tasks }
 }

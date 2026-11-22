@@ -16,6 +16,7 @@ import sys
 import time
 
 import graph_client
+import tether_zone
 import work_feeds
 import work_items
 
@@ -136,7 +137,7 @@ def feed_status(args):
             if state['by'] == 'agent':
                 print(f'{name}: {feed}, read by the project\'s own agent')
                 continue
-            when = time.strftime('%H:%M', time.localtime(state['at'])) if state.get('at') else 'not yet'
+            when = tether_zone.stamp(state['at'], '%H:%M') if state.get('at') else 'not yet'
             line = f'{name}: {feed}, {state["status"]} (last read {when}, {state["items"]} items)'
             print(line + (f': {state["error"]}' if state.get('error') else ''))
     return 0

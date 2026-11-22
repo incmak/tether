@@ -18,10 +18,12 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import audit
 import needs
 import paths
+import tether_zone
 import urgent_ping
 from notification_priority import status_line
 
@@ -49,8 +51,11 @@ class AttentionError(Exception):
     pass
 
 
-def _local_midnight(now):
-    return datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0, fold=0).timestamp()
+def _local_midnight(now, tz=None):
+    """The first instant of today in the Tether zone."""
+    if tz is None:
+        tz = tether_zone.zone()
+    return tether_zone.day_start(datetime.fromtimestamp(now, tz).date(), tz=tz)
 
 
 def _clip(text):
@@ -401,7 +406,7 @@ class Attention:
                 page = self._query_log(text=ask_id, kinds=['auto.stale_ask'], since=since, limit=200)
                 move = next((row for row in page['entries'] if row.get('detail', {}).get('ask') == ask_id), None)
                 if move is None:
-                    day = datetime.fromtimestamp(asked_at)
+                    day = tether_zone.now(asked_at)
                     name = entry.get('pane_name') or entry.get('label') or entry.get('tmux_session') or pane
                     move = self.log.record('auto.stale_ask', f'Moved an ask from {day.day} {day:%b} to Later',
                                            actor={'source': 'server'}, pane=pane, thread=marker[0] or '', ask=ask_id,
@@ -674,12 +679,13 @@ class Attention:
         # Read the audit log and the Undo outbox under the same lock.
         with self.lock:
             now = self.clock()
-            today_start = _local_midnight(now)
+            zone = tether_zone.name()
+            today_start = _local_midnight(now, ZoneInfo(zone))
             page = self._query_log(kinds=['automation'], since=now - AUTOMATION_HISTORY, limit=100)
             handled_today, undone, asks = self._automation_today(today_start, page)
             entries = [self._move_row(row, undone, asks) if row['kind'] == 'auto.stale_ask' else row
                        for row in page['entries']]
-        return {'entries': entries, 'handled_today': handled_today, 'today_start': today_start}
+        return {'entries': entries, 'handled_today': handled_today, 'today_start': today_start, 'zone': zone}
 
     def _move_row(self, row, undone, asks):
         if self._move_failed(row, asks):
@@ -710,8 +716,8 @@ class Attention:
         return {'enabled': self.digest['enabled'], 'hour': self.digest['hour']}
 
     def digest_due(self, now=None):
-        """The daily summary notification, once a day at the chosen hour (local time), when something waits."""
-        now = now or datetime.now()
+        """The daily summary notification, once a day at the chosen hour (Tether time), when something waits."""
+        now = now or tether_zone.now()
         today = now.strftime('%Y-%m-%d')
         if not self.digest['enabled'] or now.hour < self.digest['hour'] or self.digest.get('sent') == today:
             return None

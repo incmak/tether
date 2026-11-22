@@ -290,7 +290,7 @@ class VerifiedStampTest(GuardCase):
         clean = 'tests(server 412 ok, ui 91/93) screenshots(24) review(codex APPROVED)'
         self.assertEqual(self.record()['verified'], clean)
         line, = self.log.read_text().splitlines()
-        self.assertRegex(line, r'^- \d{4}-\d{2}-\d{2} \d{2}:\d{2} \S+ · ')
+        self.assertRegex(line, r'^- \d{4}-\d{2}-\d{2} \d{2}:\d{2} [+-]\d{4} · ')
         self.assertTrue(line.endswith(f'{self.live[:7]} UI deploy: live feature · Verified: {clean}'), line)
 
     def test_explicit_none_installs_and_is_listed_as_unverified(self):

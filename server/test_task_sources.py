@@ -15,6 +15,7 @@ import agent_feed_cli
 import backlog
 import graph_client
 import paths
+import prefs_sync
 import reminders
 import server
 import task_sources
@@ -594,6 +595,19 @@ class TaskTests(unittest.TestCase):
         self.assertTrue(indexed['todo:t3']['timeUncertain'])
         self.assertNotIn('timeUncertain', indexed['todo:t2'])
         self.assertEqual(indexed['todo:date']['due'], {'date': '2026-11-20', 'at': None})
+
+    def test_saved_timed_tasks_follow_the_display_zone_without_reinterpreting_source_dates(self):
+        self.enterContext(mock.patch.object(prefs_sync, 'FILE', self.folder.parent / 'prefs.json'))
+        prefs_sync.save({'timeZone': 'America/New_York'})
+        timed = todo('timed', dueDateTime={'dateTime': '2026-11-19T22:00:00', 'timeZone': 'Pacific Standard Time'})
+        date_only = todo('date', dueDateTime={'dateTime': '2026-11-19', 'timeZone': 'Pacific Standard Time'})
+        at = datetime(2026, 11, 20, 6, tzinfo=timezone.utc).timestamp()
+        first = {row['key']: row['due'] for row in self.poll(timed, date_only)['tasks']}
+        self.assertEqual(first, {'todo:timed': {'date': '2026-11-20', 'at': at},
+                                 'todo:date': {'date': '2026-11-19', 'at': None}})
+        prefs_sync.save({'timeZone': 'America/Los_Angeles'})
+        second = {row['key']: row['due'] for row in task_sources.listing()['tasks']}
+        self.assertEqual(second, {**first, 'todo:timed': {'date': '2026-11-19', 'at': at}})
 
     def test_backlog_copy_is_at_most_once_and_keeps_title_literal(self):
         backlog.add('Existing item')

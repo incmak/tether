@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { ArrowUp, History } from 'lucide-react'
 import type { ChatMessage } from './api'
+import { fmtDateTime, zoneParts } from './zone'
 
 // The bar covers the top of the chat: a message that starts under it counts as out of view.
 export const MINE_BAR_SPACE = 52
@@ -80,8 +81,8 @@ export function MineBar({ view, messages, earlier, onReveal, onEarlier }: {
 /** "8 Nov, 1:59 PM"; the year shows only when it is not this year. */
 export function startedLabel(iso: string | null | undefined) {
   if (!iso) return null
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return null
-  const year = date.getFullYear() !== new Date().getFullYear()
-  return date.toLocaleString(undefined, { day: 'numeric', month: 'short', ...year ? { year: 'numeric' } : {}, hour: 'numeric', minute: '2-digit' })
+  const date = Date.parse(iso)
+  if (Number.isNaN(date)) return null
+  const year = zoneParts(date).year !== zoneParts(Date.now()).year
+  return fmtDateTime(date, { day: 'numeric', month: 'short', ...year ? { year: 'numeric' } : {}, hour: 'numeric', minute: '2-digit' })
 }

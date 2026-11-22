@@ -1,6 +1,7 @@
-import { Bell, Bot, FolderOpen, History, Keyboard, Palette, SlidersHorizontal } from 'lucide-react'
+import { Bell, Bot, FolderOpen, Globe, History, Keyboard, Palette, SlidersHorizontal } from 'lucide-react'
 
 export const SETTINGS_GROUPS = [
+  { id: 'general', title: 'General', description: 'Time zone for all of Tether', icon: Globe },
   { id: 'appearance', title: 'Appearance', description: 'Layout, style, theme, colors, text size and app icon', icon: Palette },
   { id: 'workspace', title: 'Sessions & chat', description: 'Default folder, sidebar and chat behavior', icon: FolderOpen },
   { id: 'voice', title: 'Voice & alerts', description: 'Microphone, read aloud, Friday and notifications', icon: Bell },

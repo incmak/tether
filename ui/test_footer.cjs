@@ -104,7 +104,7 @@ async function main() {
   const apiOutput = { exports: {} }
   let ok = true, valid = false, bodyError
   runInNewContext(compile(readFileSync('src/api.ts', 'utf8')), {
-    exports: apiOutput.exports, AbortSignal,
+    exports: apiOutput.exports, AbortSignal, require: name => { assert.equal(name, './zone'); return {} },
     fetch: async () => ({ ok, status: ok ? 200 : 503, headers: new Headers(), json: async () => { if (bodyError) throw bodyError; if (!valid) throw new SyntaxError('invalid JSON'); return { status: 'OK' } } }),
   })
   await assert.rejects(apiOutput.exports.request('footer?session=%25fixture'), { name: 'SyntaxError' })

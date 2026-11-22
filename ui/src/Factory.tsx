@@ -8,8 +8,9 @@ import type { Row } from './backlogItems'
 import { BACKLOG_PATH } from './backlogNews'
 import { useBackStep } from './backNav'
 import { formatElapsed } from './paneState'
-import { PHASES, PHASE_NAMES, STATE_NAMES, SWEEP_NAMES, attentionOrder, buildFloor, clock, groupsOf, historyMoves, nearest, phaseSince, toMs } from './factoryModel'
+import { PHASES, PHASE_NAMES, STATE_NAMES, SWEEP_NAMES, attentionOrder, buildFloor, clock, deployLabel, groupsOf, historyMoves, nearest, phaseSince, toMs } from './factoryModel'
 import type { Agent, Direction, FactoryData, History, Phase, Sweep, SweepKind, SweepLine, Task } from './factoryModel'
+import { fmtDate, sameDay, useTetherZone } from './zone'
 import './Factory.css'
 
 /* The Factory view: every agent tab and backlog item as work moving through phases, on one canvas with four zoom
@@ -44,7 +45,7 @@ const load = <T,>(key: string, fallback: T): T => { try { const raw = localStora
 const save = (key: string, value: unknown) => { try { localStorage.setItem(key, JSON.stringify(value)) } catch { /* private mode: preference lasts this visit */ } }
 const ago = (ms: number, now: number) => ms ? formatElapsed((now - ms) / 1000) : 'unknown'
 /** A time, with the day when it is not today. */
-const when = (ms: number) => new Date(ms).toDateString() === new Date().toDateString() ? clock(ms) : `${new Date(ms).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} ${clock(ms)}`
+const when = (ms: number) => sameDay(ms, Date.now()) ? clock(ms) : `${fmtDate(ms, { day: 'numeric', month: 'short' })} ${clock(ms)}`
 /** When it last moved: a working agent is moving now, not "0s ago". */
 const lastMove = (busy: boolean, ms: number, now: number) => busy ? 'active now' : ms ? `moved ${ago(ms, now)} ago` : ''
 const visible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden'
@@ -71,6 +72,7 @@ function usePoll<T>(api: Api, path: string | null, every: number) {
 }
 
 export function Factory({ api, panes, groups, onOpen, onClose }: Props) {
+  const zone = useTetherZone()
   const dialog = useRef<HTMLDialogElement>(null)
   const body = useRef<HTMLDivElement>(null)
   const factory = usePoll<FactoryData>(api, 'factory', FACTORY_MS)
@@ -80,7 +82,7 @@ export function Factory({ api, panes, groups, onOpen, onClose }: Props) {
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(timer) }, [])
   const stackName = useCallback((pane: Pane) => Object.values(groups ?? {}).flat().find(group => group.id === pane.group)?.name, [groups])
   const ready = !!factory.data && !!backlog.data
-  const floor = useMemo(() => ready ? buildFloor({ panes: panes ?? [], rows, data: factory.data, groupName: stackName, now }) : null, [ready, panes, rows, factory.data, stackName, now])
+  const floor = useMemo(() => ready ? buildFloor({ panes: panes ?? [], rows, data: factory.data, groupName: stackName, now, zone }) : null, [ready, panes, rows, factory.data, stackName, now, zone])
 
   const history = factory.data?.history ?? {}
   const report = useRef<{ data: FactoryData; inFlight: boolean } | null>(null)
@@ -496,7 +498,7 @@ function TaskLevel({ task, history, now, zoom }: { task: Task; history: History[
     </section>
     <section aria-labelledby="factory-proof"><h3 id="factory-proof">Proof</h3>
       <ul className="factory-list">
-        {task.deploys.map(line => <li key={line.at + line.text}><b>DEPLOYED.md</b> {line.timed ? clock(line.at * 1000) : new Date(line.at * 1000).toLocaleDateString()}: {line.text}</li>)}
+        {task.deploys.map(line => <li key={line.at + line.text}><b>DEPLOYED.md</b> {deployLabel(line)}: {line.text}</li>)}
         {proof.map(({ agent, tool }, index) => <li key={index}><b>{agent}</b> {tool.error ? 'failed: ' : ''}{tool.name}: {tool.title} {tool.at ? <span>{clock(toMs(tool.at))}</span> : null}</li>)}
         {task.item?.status?.kind === 'done' && <li><b>Backlog</b> Done: {task.item.status.text}</li>}
         {task.item?.details.filter(detail => /screenshot|shots|test|proof|verified/i.test(detail.text)).map(detail => <li key={detail.line}><b>Backlog note</b> {detail.text}</li>)}

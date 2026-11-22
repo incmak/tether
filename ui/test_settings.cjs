@@ -17,7 +17,7 @@ assert(!match(mic, 'notifications'), 'Category descriptions must not return unre
 assert(match(colors, 'rose'), 'Search accepts unaccented palette names')
 assert(match(colors, 'appearance'))
 assert(!match(colors, 'no-such-setting'))
-assert.equal(output.SETTINGS_GROUPS.length, 7)
+assert.equal(output.SETTINGS_GROUPS.length, 8)
 const activity = { id: 'activity-log', group: 'activity', title: 'Activity log', keywords: 'audit history' }
 assert(match(activity, 'activity log'))
 assert(!match(activity, 'voice alerts'))

@@ -1,5 +1,4 @@
 """One read-only advisor check at a time; suggestions never change lessons."""
-from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
@@ -14,6 +13,7 @@ import advisor
 import decisions
 import lessons
 import paths
+import tether_zone
 
 TIMEOUT = 900
 UNREADABLE = 'The advisor reply was not readable. Try again.'
@@ -132,7 +132,7 @@ def _prompt(rows):
         evidence.append(item)
     data = [{key: row[key] for key in ('id', 'kind', 'text', 'status', 'hits', 'quote')} | {
         'project_name': row['project_name'] if row['project'] is not None else 'All projects',
-        'created': datetime.fromtimestamp(row['created']).strftime('%Y-%m-%d'),
+        'created': tether_zone.stamp(row['created'], '%Y-%m-%d'),
         'disputes': [item['reason'] for item in row['disputes']]} for row in rows]
     return (PROMPT + '\nEvidence:\n' + json.dumps(evidence, ensure_ascii=False)
             + '\nLessons:\n' + json.dumps(data, ensure_ascii=False) + '\n' + OUTPUT)

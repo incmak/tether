@@ -10,6 +10,7 @@ import { useAutonomy } from './Autonomy'
 import type { Learning, Lesson } from './Autonomy'
 import { LessonsReview } from './LessonsReview'
 import { reviewReason } from './lessonsReview'
+import { fmtDate, useTetherZone } from './zone'
 
 // Learning from feedback (server: lessons.py, agent_lessons_cli.py). When the user corrects an agent, the agent writes
 // an "avoid" lesson; when the user confirms a choice, a "keep" lesson. The autonomy hook gives the best lessons to
@@ -20,7 +21,7 @@ const SOURCE: Record<Lesson['source'], string> = { user: 'From your feedback', r
 const AGENT: Record<string, string> = { claude: 'Claude', codex: 'Codex' }
 
 function when(seconds: number) {
-  return new Date(seconds * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
+  return fmtDate(seconds * 1000, { day: 'numeric', month: 'short' })
 }
 
 function meta(lesson: Lesson, where?: string) {
@@ -69,6 +70,7 @@ export function LearningSettings({ api }: { api: Api }) {
 }
 
 export function LessonText({ lesson, now, where }: { lesson: Lesson; now: number; where?: string }) {
+  useTetherZone()
   const fresh = now - lesson.created < DAY
   const trial = lesson.status === 'trial'
   return <span className="lesson-text">

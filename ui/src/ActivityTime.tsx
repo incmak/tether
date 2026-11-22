@@ -3,6 +3,7 @@ import { errorText } from './api'
 import type { Api } from './api'
 import { usePolling } from './hooks'
 import type { Prefs } from './prefs'
+import { fmtDateTime, useTetherZone } from './zone'
 
 // Activity time, kept on this server (server/activity_time.py). Off until the person turns it on in Settings.
 interface Publish { folder: string; file: string; busy: boolean; pending: boolean; published: number | null; last: { at: number; ok: boolean; error: string } | null }
@@ -26,7 +27,7 @@ function dayLabel(day: string, today: string) {
 }
 
 function when(seconds: number | null | undefined) {
-  return seconds ? new Date(seconds * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : ''
+  return seconds ? fmtDateTime(seconds * 1000, { dateStyle: 'medium', timeStyle: 'short' }) : ''
 }
 
 function Toggle({ title, note, checked, disabled = false, onChange }: { title: string; note: string; checked: boolean; disabled?: boolean; onChange: (value: boolean) => void }) {
@@ -64,6 +65,7 @@ function Projects({ status, agents }: { status: ActivityStatus; agents: boolean 
 }
 
 function PublishForm({ api, status, onStatus }: { api: Api; status: ActivityStatus; onStatus: (status: ActivityStatus) => void }) {
+  useTetherZone()
   const saved = status.publish.folder
   const [folder, setFolder] = useState(saved)
   const [pending, setPending] = useState(false)

@@ -8,6 +8,7 @@ import type { Api, Ask, Pane } from './api'
 import { ApiError, errorText } from './api'
 import type { Reminder } from './reminders'
 import { whenLabel } from './reminders'
+import { canFormat, fmtDate, fmtTime, tetherZone, tetherZoneConfirmed, useTetherZone, useTetherZoneConfirmed } from './zone'
 import { askAction, confirmStaleRule, LATE, splitToday, staleRuleQueue, stillWait, useNow } from './attention'
 import type { AskAction, AttentionState, StaleRuleResult, AutoEntry, AutoLog, Digest, Waiting } from './attention'
 import { useModal } from './hooks'
@@ -18,10 +19,10 @@ import './attention.css'
 
 const seenText = (ask: Ask) => ask.opened ? 'Opened, not answered' : 'Not opened'
 const DONE: Record<AskAction, string> = { handled: 'Handled.', snooze: 'Snoozed until tomorrow.', opened: '', later: 'Moved to Later.', back: 'Back in the queue.' }
-const DAY = new Intl.DateTimeFormat([], { day: 'numeric', month: 'short' })
-const TIME = new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit' })
+const spoken = (zone: string) => zone.replace(/_/g, ' ')
+const clock = (at: number) => fmtTime(at * 1000, { hour: '2-digit', minute: '2-digit' })
 const ago = (at: number, now: number) => { const text = age(at, now); return text === 'now' ? 'just now' : `${text} ago` }
-const dayText = (at: number) => DAY.format(new Date(at * 1000))
+const dayText = (at: number) => fmtDate(at * 1000, { day: 'numeric', month: 'short' })
 /** "In Later since 16 Nov, moved by Tether" */
 const laterText = (later: NonNullable<Ask['later']>, now: number) =>
   `In Later ${now - later.at < 86400 ? `for ${age(later.at, now)}` : `since ${dayText(later.at)}`}, moved by ${later.by === 'rule' ? 'Tether' : 'you'}`
@@ -35,6 +36,7 @@ export interface ReviewEntry { label: string; onOpen: () => void }
 export interface DueReminders { items: Reminder[]; onOpen: () => void }
 
 export function ReminderRows({ due, now, className, list = false }: { due: DueReminders; now: number; className: string; list?: boolean }) {
+  useTetherZone()
   const catchup = className.startsWith('catchup')
   return <>{due.items.map(item => {
     const when = `${item.late ? 'Late, was due' : 'Due'} ${whenLabel(item.due, now)}`
@@ -239,14 +241,38 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
   const focusLater = useRef<{ id: string; neighbors: string[] } | null>(null)
   const focusUndo = useRef('')
   const now = useNow()
-  const [log, setLog] = useState<AutoLog | null>(null)
-  const [error, setError] = useState('')
+  // Reload when the zone changes locally and when the server confirms it.
+  const zone = useTetherZone()
+  const confirmed = useTetherZoneConfirmed()
+  const [loaded, setLoaded] = useState<AutoLog | null>(null)
+  const [failure, setFailure] = useState<{ api: Api; zone: string; confirmed: boolean; text: string } | null>(null)
+  const latestRequest = useRef(0)
+  const unsupportedZone = loaded !== null && loaded.zone !== zone && !canFormat(loaded.zone)
+  const log = loaded?.zone === zone || unsupportedZone ? loaded : null
+  const currentFailure = failure?.api === api && failure.zone === zone && failure.confirmed === confirmed ? failure : null
+  if (failure && !currentFailure) setFailure(null)
+  const error = currentFailure?.text ?? ''
   const [busy, setBusy] = useState('')
   const [rowError, setRowError] = useState<{ id: string; text: string } | null>(null)
   const [status, setStatus] = useState('')
-  const load = useCallback((signal?: AbortSignal) => api<AutoLog>('attention/log', undefined, signal)
-    .then(data => { setLog(data); setError('') })
-    .catch(reason => { if (!signal?.aborted) setError(errorText(reason)) }), [api])
+  const load = useCallback((signal?: AbortSignal) => {
+    const request = ++latestRequest.current
+    const requestedZone = tetherZone()
+    const requestedConfirmation = tetherZoneConfirmed()
+    const isCurrent = () => request === latestRequest.current && !signal?.aborted
+      && tetherZone() === requestedZone && tetherZoneConfirmed() === requestedConfirmation
+    return api<AutoLog>('attention/log', undefined, signal).then(data => {
+      if (!isCurrent()) return
+      setLoaded(data)
+      setFailure(null)
+    }).catch(reason => {
+      if (isCurrent()) setFailure({ api, zone: requestedZone, confirmed: requestedConfirmation, text: errorText(reason) })
+    })
+  }, [api])
+  const reload = () => {
+    setFailure(null)
+    return load()
+  }
   useLayoutEffect(() => {
     const pending = focusLater.current
     if (!pending || later.some(item => laterKey(item) === pending.id)) return
@@ -256,7 +282,7 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
     target?.focus()
   })
   useEffect(() => { heading.current?.focus() }, [])
-  useEffect(() => { const controller = new AbortController(); void load(controller.signal); return () => controller.abort() }, [load])
+  useEffect(() => { const controller = new AbortController(); void load(controller.signal); return () => controller.abort() }, [load, zone, confirmed])
   const back = async (id: string, write: () => Promise<unknown>, done: string, source: { undo: AutoEntry } | { index: number }) => {
     if (busy) return
     setBusy(id); setRowError(null)
@@ -264,7 +290,7 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
       await write()
       if ('undo' in source) {
         focusUndo.current = id
-        setLog(current => current && {
+        setLoaded(current => current && {
           ...current,
           entries: current.entries.map(row => row.id === id ? { ...row, undone: true, undo: null } : row),
           handled_today: source.undo.at >= current.today_start ? Math.max(0, current.handled_today - 1) : current.handled_today,
@@ -275,7 +301,7 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
       }
       setStatus(done)
       onChanged()
-      await load()
+      await reload()
     } catch (reason) {
       setRowError({ id, text: errorText(reason) })
     } finally {
@@ -288,7 +314,7 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
     const tab = entryTab(entry), rule = String(entry.detail?.rule ?? '')
     const target = entry.undo
     return <li key={entry.id} className="handled-line">
-      <time dateTime={new Date(entry.at * 1000).toISOString()}>{isToday ? TIME.format(new Date(entry.at * 1000)) : `${dayText(entry.at)} ${TIME.format(new Date(entry.at * 1000))}`}</time>
+      <time dateTime={new Date(entry.at * 1000).toISOString()}>{isToday ? clock(entry.at) : `${dayText(entry.at)} ${clock(entry.at)}`}</time>
       <span className="handled-text">{tab && <b>{tab}</b>}<span>{entry.summary}</span>{rule && <small>{rule}</small>}</span>
       {target ? <button type="button" className="secondary sm handled-undo" aria-disabled={!!busy}
         aria-label={`Undo: ${entry.summary}${tab ? ` on ${tab}` : ''}`} onClick={() => void back(entry.id, () => api('attention/back', target), `Put the ask on ${tab || 'the tab'} back in the queue.`, { undo: entry })}>
@@ -329,9 +355,10 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
     </section>
     <section className="handled-section" aria-labelledby="handled-log">
       <h3 id="handled-log">Today <span className="handled-count">{log ? log.handled_today : ''}</span></h3>
+      {log && unsupportedZone && <p className="sheet-sub sheet-note">This browser has no time data for {spoken(log.zone)}. Times show in {spoken(zone)}; Today follows {spoken(log.zone)}.</p>}
       {!log && !error && <p className="handled-empty" role="status">Loading the log…</p>}
       {error && <div className="handled-error" role="alert"><p className="error">Could not load the log. {error}</p>
-        <button type="button" className="secondary sm" onClick={() => void load()}><RotateCw size={14} aria-hidden="true" />Retry</button></div>}
+        <button type="button" className="secondary sm" onClick={() => void reload()}><RotateCw size={14} aria-hidden="true" />Retry</button></div>}
       {log && (today.length ? <ol className="handled-list">{today.map(entry => line(entry, true))}</ol> : <p className="handled-empty">Nothing was handled for you today.</p>)}
     </section>
     {older.length > 0 && <section className="handled-section" aria-labelledby="handled-older">

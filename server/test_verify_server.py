@@ -270,6 +270,7 @@ COMPUTED_ROUTES = {
     # These variables or functions supply the path and possibly its query.
     ('ActivityLog.tsx', 'GET', 'api', 'path'): ('audit',),
     ('ActivityLog.tsx', 'GET', 'api', 'queryOf(filters, next)'): ('audit',),
+    ('ActivityLog.tsx', 'GET', 'api', 'queryOf(filters, zone, next)'): ('audit',),
     ('Autonomy.tsx', 'GET', 'api', 'path'): ('autonomy',),
     ('Chat.tsx', 'GET', 'usePolling', 'streamPath'): ('stream',),
     ('ClaudeAdvisor.tsx', 'GET', 'api', 'path'): ('claude-advisor',),

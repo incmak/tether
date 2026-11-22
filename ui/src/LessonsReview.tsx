@@ -14,6 +14,7 @@ import { reviewReason } from './lessonsReview'
 import './Settings.css'
 import './lessonsReview.css'
 import type { CheckAdvice, CheckVerdict, LessonsCheck, ReviewGroupKey, ReviewLesson, ReviewState } from './lessonsReview'
+import { fmtTime, useTetherZone } from './zone'
 
 const GROUP: Record<ReviewGroupKey, { title: string; note?: string }> = {
   disputed: { title: 'Questioned by an agent', note: 'An agent found evidence against these. Read its reason, then decide.' },
@@ -24,11 +25,12 @@ const GROUP: Record<ReviewGroupKey, { title: string; note?: string }> = {
 }
 
 const VERDICT: Record<CheckVerdict, string> = { keep: 'Keep', edit: 'Fix', remove: 'Remove', unsure: 'Not sure' }
-const clock = (seconds: number) => new Date(seconds * 1000).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+const clock = (seconds: number) => fmtTime(seconds * 1000, { hour: '2-digit', minute: '2-digit' })
 const lessonsWord = (count: number) => `${count} ${count === 1 ? 'lesson' : 'lessons'}`
 
 /** The advisor check: one button, then running, done or failed. */
 function CheckPanel({ check, busy, error, onStart }: { check: LessonsCheck; busy: boolean; error: string; onStart: () => void }) {
+  useTetherZone()
   const running = check.state === 'running'
   const who = check.label ? `The advisor (${check.label})` : 'The advisor you chose in Settings › Agents'
   return <section className="review-check" aria-labelledby="review-check-title">

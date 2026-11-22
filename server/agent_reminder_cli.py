@@ -1,7 +1,8 @@
 """Set and manage reminders for Mak from an agent's tab. Tether delivers each one at its time (push, urgent ping,
 Waiting on you). It works on the reminder file directly: a Codex sandbox blocks the Tether port, not that folder.
 
-Times: "2026-11-19 10:00" (Asia/Kolkata unless it has an offset), "10:00" (next), "tomorrow 10:00", "in 90m", "in 2h".
+Times: "2026-11-19 10:00", "10:00" (next), "tomorrow 10:00", "in 90m", "in 2h".
+Times without an offset use the Tether time zone (Settings > General).
 Add --every day|weekday|week|month|year to repeat a reminder when you mark it Done.
 Use --interval N to repeat every N units (default 1). Use --last-day with --every month.
 """
@@ -13,11 +14,12 @@ from datetime import datetime, timezone
 
 import agent_backlog_cli
 import reminders
+import tether_zone
 from projects import ProjectError
 
 
 def shown(record, now=None):
-    zone = datetime.fromtimestamp(record['due'], reminders.ZONE).strftime('%Y-%m-%d %H:%M %Z')
+    zone = tether_zone.stamp(record['due'], '%Y-%m-%d %H:%M %Z')
     utc = datetime.fromtimestamp(record['due'], timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     state = record['state'] + (' (late)' if record.get('late') and record['state'] == 'due' else '')
     rule = record.get('repeat')

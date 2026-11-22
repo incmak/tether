@@ -60,6 +60,7 @@ import notification_priority
 import push
 import shortcuts
 import prefs_sync
+import tether_zone
 import tab_brief
 import backlog
 import codex_provider
@@ -2598,7 +2599,9 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/mobile/api/shortcuts':
                 self.respond(200, {'shortcuts': shortcuts.load()})
             elif path == '/mobile/api/prefs':
-                saved = prefs_sync.load()
+                with prefs_sync.LOCK:
+                    saved = prefs_sync.load()
+                    saved['zone'] = tether_zone.name()
                 saved['prefs'].setdefault('task_auto_close', False)
                 self.respond(200, saved)
             elif path == task_tree_api.PLAN:
@@ -3270,6 +3273,7 @@ class Handler(BaseHTTPRequestHandler):
                     with prefs_sync.LOCK:  # the read before, the save and the record are one step for an undo (undo.run)
                         before = prefs_sync.load()['prefs']
                         saved = prefs_sync.save(body.get('changes'))
+                        saved['zone'] = tether_zone.name()
                         for key in ('order', 'paneOrder'):  # a drag that reorders sessions or tabs
                             if isinstance(body.get('changes'), dict) and key in body['changes']:
                                 undo.record_order(key, before.get(key), saved['prefs'].get(key))

@@ -10,6 +10,9 @@ const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const NOW = Date.parse('2026-11-18T06:30:00Z') / 1000
 const TOMORROW = Date.parse('2026-11-19T04:30:00Z') / 1000
+const KOLKATA = 'Asia/Kolkata'
+const KOLKATA_LABEL = new Intl.DateTimeFormat('en-US', { timeZone: KOLKATA, timeZoneName: 'short' })
+  .formatToParts(NOW * 1000).find(part => part.type === 'timeZoneName').value
 const API = '/mobile/api/'
 const MISSING_OCC = 'Include the reminder occurrence (occ) as an integer.'
 const STALE_OCC = 'This reminder changed after that notice. Open Reminders to see it.'
@@ -19,7 +22,7 @@ const fixtures = {
   chat: { messages: [], busy: false, thread: PANE.thread, agent: PANE.agent, writable: true, session: PANE.id, earlier: 0, limit: 100, state: 'Idle' },
   footer: { observed: false, notices: [] },
   subagents: { main: { model: null, context: null, title: null }, agents: [], tasks: [] },
-  prefs: { prefs: {}, version: 1 }, 'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
+  'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
   update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Fixture', office: false },
   catalog: { commands: [], plugins: [], mcp: [], note: '' }, 'codex-runs': { pane: PANE.id, running: 0, runs: [] },
   'browser/agents': { enabled: false, available: false, reason: 'off', agents: [], asks: [] },
@@ -67,15 +70,20 @@ async function fixtureServer(t) {
 
 async function open(t, browser, origin, viewport, {
   records = [], panes = [PANE], selected = PANE.id, layout = 'islands', theme = 'light', now = NOW,
-  loadGate, failFirst = false, go = true,
+  loadGate, failFirst = false, go = true, zone = KOLKATA, holdPrefsSave = false,
 } = {}) {
-  const context = await browser.newContext({ viewport, serviceWorkers: 'block', reducedMotion: 'reduce' })
+  const context = await browser.newContext({ viewport, serviceWorkers: 'block', reducedMotion: 'reduce', timezoneId: 'UTC' })
   const errors = []
   const live = new Map(records.map(item => [item.id, item]))
   const deleted = new Map()
   let nextId = 10, reads = 0, closing = false
+  let releasePrefsGet, releasePrefsSave
+  const prefsPostStarted = new Promise(resolve => { releasePrefsGet = resolve })
+  const prefsSaveReleased = new Promise(resolve => { releasePrefsSave = resolve })
   t.after(async () => {
     closing = true
+    releasePrefsGet()
+    releasePrefsSave()
     await context.close()
     assert.deepEqual(errors, [], 'uncaught page errors')
   })
@@ -86,6 +94,18 @@ async function open(t, browser, origin, viewport, {
     if (url.origin !== origin) return route.abort('blockedbyclient')
     if (url.pathname.startsWith(API)) {
       const endpoint = url.pathname.slice(API.length)
+      if (endpoint === 'prefs') {
+        const read = request.method() === 'GET'
+        if (holdPrefsSave) {
+          // Return the server zone while the local seen stamp is in flight.
+          if (read) await prefsPostStarted
+          else {
+            releasePrefsGet()
+            await prefsSaveReleased
+          }
+        }
+        return route.fulfill({ json: { prefs: {}, version: 1, ...(read ? { zone } : {}) } })
+      }
       if (endpoint === 'reminders') {
         const first = ++reads === 1
         if (first && loadGate) await loadGate
@@ -185,7 +205,7 @@ async function open(t, browser, origin, viewport, {
   await page.clock.setFixedTime(new Date(now * 1000))
   await page.goto(`${origin}/chat/${go ? '?go=reminders' : ''}`)
   const sheet = page.getByRole('dialog', { name: 'Reminders', exact: true })
-  return { page, sheet }
+  return { page, sheet, releasePrefsSave }
 }
 
 async function post(page, action, trigger, status = 200) {
@@ -241,7 +261,7 @@ test('Reminders in Chromium', async t => {
       const { page, sheet } = await open(t, browser, origin, viewport)
       await empty(sheet).waitFor()
       const text = sheet.getByRole('textbox', { name: 'Remind me to' })
-      const when = sheet.getByRole('textbox', { name: 'When (IST)' })
+      const when = sheet.getByRole('textbox', { name: `When (${KOLKATA_LABEL})` })
       const add = button(sheet, 'Add reminder')
       const link = sheet.getByRole('checkbox', { name: 'Link to this tab: Deploy check' })
       await text.fill('  Send the invoice  ')
@@ -250,7 +270,7 @@ test('Reminders in Chromium', async t => {
       assert.ok(await add.isDisabled())
       assert.equal(await when.getAttribute('aria-invalid'), 'true')
       await button(sheet, 'Tomorrow 10:00').click()
-      await sheet.getByText('Thu 19 Nov 2026, 10:00 IST', { exact: true }).waitFor()
+      await sheet.getByText(`Thu 19 Nov 2026, 10:00 ${KOLKATA_LABEL}`, { exact: true }).waitFor()
       assert.equal(await when.inputValue(), 'tomorrow 10:00')
       assert.deepEqual(await post(page, 'add', () => add.click()), { text: 'Send the invoice', due: TOMORROW, repeat: null })
       await sheet.getByText('Send the invoice', { exact: true }).waitFor()
@@ -659,6 +679,24 @@ test('Reminders in Chromium', async t => {
     assert.equal(await row.locator('.reminder-links').getByRole('button').count(), 0)
   })
 
+  for (const width of [320, 1280]) {
+    await t.test(`${width}px uses the synced zone to schedule a typed time after a DST change`, async t => {
+      const now = Date.parse('2026-03-07T16:00:00Z') / 1000
+      const due = Date.parse('2026-03-08T14:00:00Z') / 1000
+      const { page, sheet, releasePrefsSave } = await open(t, browser, origin, { width, height: 800 }, {
+        now, zone: 'America/New_York', holdPrefsSave: width === 320,
+      })
+      await sheet.getByText(/Times are in EST \(America\/New_York\)/).waitFor()
+      releasePrefsSave()
+      await sheet.getByRole('textbox', { name: 'Remind me to' }).fill('Check the rollout')
+      await sheet.getByRole('textbox', { name: 'When (EST)' }).fill('tomorrow 10:00')
+      await sheet.getByText('Sun 8 Mar 2026, 10:00 EDT', { exact: true }).waitFor()
+      assert.deepEqual(await post(page, 'add', () => button(sheet, 'Add reminder').click()), { text: 'Check the rollout', due, repeat: null })
+      await sheet.getByRole('listitem').filter({ hasText: 'Check the rollout' }).getByText('Tomorrow 10:00').waitFor()
+      assert.ok(await sheet.evaluate(dialog => dialog.scrollWidth <= dialog.clientWidth), 'zone guidance fits the sheet')
+    })
+  }
+
   await t.test('Home keeps the IST time after two seconds and moves focus to the next card after Done', async t => {
     const working = { ...PANE, state: 'Working', since: NOW - 10 }
     const { page, sheet } = await open(t, browser, origin, phone, { records: [late], panes: [working], selected: null, go: false })
@@ -673,7 +711,7 @@ test('Reminders in Chromium', async t => {
     await page.clock.runFor(2000)
     await agentTimer.and(page.getByText('12s', { exact: true })).waitFor()
     assert.equal(await time.textContent(), 'Today 11:00')
-    assert.equal(await time.getAttribute('title'), 'Wed 18 Nov 2026, 11:00 IST')
+    assert.equal(await time.getAttribute('title'), `Wed 18 Nov 2026, 11:00 ${KOLKATA_LABEL}`)
     await openReminder.click()
     await sheet.waitFor()
     await button(sheet, 'Close').click()
@@ -688,7 +726,7 @@ test('Reminders in Chromium', async t => {
     await t.test(`When input border meets 3:1 contrast in ${theme} theme`, async t => {
       const { page, sheet } = await open(t, browser, origin, phone, { layout: 'classic', theme })
       await page.locator(`html[data-theme="${theme}"]`).waitFor({ state: 'attached' })
-      const result = await sheet.getByRole('textbox', { name: 'When (IST)' }).evaluate(input => {
+      const result = await sheet.getByRole('textbox', { name: `When (${KOLKATA_LABEL})` }).evaluate(input => {
         const border = getComputedStyle(input).borderTopColor
         const background = getComputedStyle(input.closest('dialog')).backgroundColor
         // Canvas converts computed colors such as color(srgb ...) to sRGB channels.

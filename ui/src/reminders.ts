@@ -1,11 +1,11 @@
 // Reminders (server/reminders.py): Tether delivers reminders at their time on the urgent channels
-// (push, urgent ping, Waiting on you). Times are UTC epoch seconds on the wire and show in India Standard Time.
-// IST has no daylight saving time, so a fixed +05:30 offset converts both ways.
+// (push, urgent ping, Waiting on you). Times are UTC epoch seconds on the wire and show in Tether's time zone.
 import { useCallback, useEffect } from 'react'
 import { parse as parseDate } from 'chrono-node'
 import type { Api } from './api'
 import type { MenuOption } from './SelectMenu'
 import { usePolling } from './hooks'
+import { offsetMinutes, pickZone, tetherZone, zoneLabel, zoneParts, zonedTime, zonedTimes } from './zone'
 
 export type ReminderState = 'scheduled' | 'due' | 'done'
 export type Repeat = 'day' | 'weekday' | 'week' | 'month' | 'year'
@@ -33,25 +33,21 @@ export type Action = 'add' | 'edit' | 'done' | 'reopen' | 'snooze' | 'delete' | 
 
 export const PATH = 'reminders'
 export const TEXT_LIMIT = 500
-export const ZONE = 'Asia/Kolkata'
-export const ZONE_LABEL = 'IST'
-const OFFSET = 330 * 60  // IST, seconds east of UTC
 const DONE_SHOWN = 20
 const POLL_MS = 15000
 /** Others (the sheet, the sidebar) refresh at once after a change, instead of after the next poll. */
 const EVENT = 'tether-reminders-changed'
 
-/** The IST calendar parts of an instant. */
-function parts(at: number) {
-  const day = new Date((at + OFFSET) * 1000)
-  return { year: day.getUTCFullYear(), month: day.getUTCMonth(), date: day.getUTCDate(), hour: day.getUTCHours(), minute: day.getUTCMinutes(), weekday: day.getUTCDay() }
+/** Keep the zone on stored rules. An unknown stored zone uses Tether's current zone. */
+function parts(at: number, zone = tetherZone()) {
+  return zoneParts(at * 1000, zone === tetherZone() ? zone : pickZone(zone, tetherZone()))
 }
-/** The instant of an IST wall time. Day overflow (date 32) rolls into the next month. */
-export const istTime = (year: number, month: number, date: number, hour: number, minute = 0) => Date.UTC(year, month, date, hour, minute) / 1000 - OFFSET
-const dayNumber = (at: number) => Math.floor((at + OFFSET) / 86400)
+/** Epoch seconds of a wall time in Tether's zone. Day overflow rolls into the next month. */
+export const zoneTime = (year: number, month: number, date: number, hour: number, minute = 0) => zonedTime(year, month, date, hour, minute) / 1000
+const dayNumber = ({ year, month, date }: ReturnType<typeof parts>) => Date.UTC(year, month, date) / 86400000
 
 const pad = (value: number) => String(value).padStart(2, '0')
-const clock = (at: number) => { const p = parts(at); return `${pad(p.hour)}:${pad(p.minute)}` }
+const clock = ({ hour, minute }: ReturnType<typeof parts>) => `${pad(hour)}:${pad(minute)}`
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -67,27 +63,15 @@ export function ordinal(value: number) {
   return value + (tens >= 11 && tens <= 13 ? 'th' : ones === 1 ? 'st' : ones === 2 ? 'nd' : ones === 3 ? 'rd' : 'th')
 }
 
-/** The calendar parts of an instant in a rule's zone. The server keeps a series' zone on a rule-only edit, so a series
- *  made under another server zone repeats on that zone's dates. An unknown zone falls back to IST, as on the server. */
-const ZONE_DAYS: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }
-function zoneParts(at: number, zone?: string) {
-  if (!zone || zone === ZONE) return parts(at)
-  try {
-    const fields = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: zone, year: 'numeric', month: 'numeric', day: 'numeric', weekday: 'short' })
-      .formatToParts(new Date(at * 1000)).map(part => [part.type, part.value]))
-    return { year: Number(fields.year), month: Number(fields.month) - 1, date: Number(fields.day), weekday: ZONE_DAYS[fields.weekday] }
-  } catch { return parts(at) }
-}
-
 /** The calendar facts a rule repeats on: from the rule's own day and month when it has them, else from a date in
- *  `zone` (the kept rule's zone; IST for a new rule). */
+ *  `zone` (the kept rule's zone or Tether's current zone for a new rule). */
 interface Target { weekday: number; day: number; month: number }
 function target(at: number, rule?: RepeatRule | null, zone = rule?.zone): Target {
-  const p = zoneParts(at, zone)
+  const p = parts(at, zone)
   const keeps = rule && (rule.every === 'month' || rule.every === 'year') && typeof rule.day === 'number'
   return { weekday: p.weekday, day: keeps ? rule.day! : p.date, month: keeps && rule.every === 'year' && typeof rule.month === 'number' ? rule.month - 1 : p.month }
 }
-const lastDay = (at: number, zone?: string) => { const p = zoneParts(at, zone); return new Date(Date.UTC(p.year, p.month + 1, 0)).getUTCDate() }
+const lastDay = (at: number, zone?: string) => { const p = parts(at, zone); return new Date(Date.UTC(p.year, p.month + 1, 0)).getUTCDate() }
 
 function describe(every: Repeat, interval: number, on: Target) {
   const each = interval > 1 ? `Every ${interval} ${unitName(every === 'weekday' ? 'day' : every, interval)}` : ''
@@ -165,7 +149,7 @@ export function repeatOptions(at: number | null, rule?: RepeatRule | null, curre
     { value: 'month', label: 'Every month', detail: on ? `On the ${ordinal(on.day)}${shorter}` : 'Same date each month' },
   ]
   // The last day differs from "the same date" only for a date that ends a month shorter than 31 days (30 Nov, 28 Feb).
-  if (current === 'last' || (at !== null && on && on.day === zoneParts(at, zone).date && on.day === lastDay(at, zone) && on.day < 31)) {
+  if (current === 'last' || (at !== null && on && on.day === parts(at, zone).date && on.day === lastDay(at, zone) && on.day < 31)) {
     options.push({ value: 'last', label: 'Last day of every month', detail: 'The 28th to the 31st, as the month ends' })
   }
   options.push(
@@ -177,30 +161,31 @@ export function repeatOptions(at: number | null, rule?: RepeatRule | null, curre
 
 /** "Today 10:00", "Tomorrow 10:00", "Yesterday 18:00", "Wed 25 Nov 10:00", "Wed 25 Nov 2027 10:00". */
 export function whenLabel(at: number, now: number) {
-  const days = dayNumber(at) - dayNumber(now)
-  if (days === 0) return `Today ${clock(at)}`
-  if (days === 1) return `Tomorrow ${clock(at)}`
-  if (days === -1) return `Yesterday ${clock(at)}`
-  const p = parts(at), year = parts(now).year === p.year ? '' : ` ${p.year}`
-  return `${DAYS[p.weekday]} ${p.date} ${MONTHS[p.month]}${year} ${clock(at)}`
+  const p = parts(at), today = parts(now)
+  const days = dayNumber(p) - dayNumber(today)
+  if (days === 0) return `Today ${clock(p)}`
+  if (days === 1) return `Tomorrow ${clock(p)}`
+  if (days === -1) return `Yesterday ${clock(p)}`
+  const year = today.year === p.year ? '' : ` ${p.year}`
+  return `${DAYS[p.weekday]} ${p.date} ${MONTHS[p.month]}${year} ${clock(p)}`
 }
 
 /** The full date and time with the zone, for titles and screen readers. */
 export function fullLabel(at: number) {
   const p = parts(at)
-  return `${DAYS[p.weekday]} ${p.date} ${MONTHS[p.month]} ${p.year}, ${clock(at)} ${ZONE_LABEL}`
+  return `${DAYS[p.weekday]} ${p.date} ${MONTHS[p.month]} ${p.year}, ${clock(p)} ${zoneLabel(tetherZone(), at * 1000)}`
 }
 
 /** typed: the When text a pick fills in, so the field stays the one source of the time. */
 export interface Pick { label: string; at: number; typed: string }
 
-const tomorrowAt = (now: number, hour: number) => { const p = parts(now); return istTime(p.year, p.month, p.date + 1, hour) }
+const tomorrowAt = (now: number, hour: number) => { const p = parts(now); return zoneTime(p.year, p.month, p.date + 1, hour) }
 
 /** Quick picks for a new reminder (research: Slack, Apple Reminders, Things). "This evening" only before 17:00. */
 export function quickPicks(now: number): Pick[] {
   const p = parts(now)
   const picks: Pick[] = [{ label: 'In 1 h', at: Math.round(now / 60) * 60 + 3600, typed: 'in 1 hour' }]
-  if (p.hour < 17) picks.push({ label: 'This evening 18:00', at: istTime(p.year, p.month, p.date, 18), typed: 'today 18:00' })
+  if (p.hour < 17) picks.push({ label: 'This evening 18:00', at: zoneTime(p.year, p.month, p.date, 18), typed: 'today 18:00' })
   picks.push({ label: 'Tomorrow 10:00', at: tomorrowAt(now, 10), typed: 'tomorrow 10:00' })
   return picks
 }
@@ -212,20 +197,35 @@ export function snoozePicks(now: number): Pick[] {
 
 const PART_OF_DAY = /\b(tonight|evening|morning|afternoon|noon|midnight|night)\b/i
 
-/** A typed time ("tomorrow 10am", "in 2 h", "fri 18:00", "3 dec 15:00") in IST, the next such time when it is ambiguous.
+/** A typed time ("tomorrow 10am", "in 2 h", "fri 18:00", "3 dec 15:00") in Tether's zone.
  *  A day without a time means 09:00, as in Slack and Apple Reminders. null: not a time. */
 export function parseWhen(text: string, now: number): number | null {
   const typed = text.trim()
   if (!typed) return null
-  const found = parseDate(typed, { instant: new Date(now * 1000), timezone: OFFSET / 60 }, { forwardDate: true })[0]
+  // An elapsed time is plain arithmetic. Chrono adds it on the device's calendar, which is off by an hour across a
+  // device DST change, so read it here, as the server does ("in 90m", "in 2h", "in 1d").
+  const elapsed = /^in\s+(\d{1,5})\s*(m|mins?|minutes?|h|hrs?|hours?|d|days?)\.?$/i.exec(typed)
+  if (elapsed) return now + Number(elapsed[1]) * ({ m: 60, h: 3600, d: 86400 } as Record<string, number>)[elapsed[2][0].toLowerCase()]
+  const instant = new Date(now * 1000)
+  // Chrono accepts offsets and abbreviations. Use the current offset for its reference date.
+  const found = parseDate(typed, { instant, timezone: offsetMinutes(tetherZone(), instant.getTime()) }, { forwardDate: true })[0]
   // Text around the time ("call mom tomorrow") belongs in the reminder text, not here.
   if (!found || found.text.length < typed.replace(/[\s.,]+$/, '').length - 1) return null
-  let at = Math.floor(found.date().getTime() / 1000)
-  if (!found.start.isCertain('hour') && !PART_OF_DAY.test(typed) && !/\bin\s+\d/i.test(typed)) {
-    const p = parts(at)
-    at = istTime(p.year, p.month, p.date, 9)
+  const time = found.start
+  const year = time.get('year')!, month = time.get('month')! - 1, date = time.get('day')!
+  if (!time.isCertain('hour') && !PART_OF_DAY.test(typed) && !/\bin\s+\d/i.test(typed)) return zoneTime(year, month, date, 9)
+  // Explicit offsets and elapsed times already identify an instant.
+  if (time.isCertain('timezoneOffset')) return Math.floor(found.date().getTime() / 1000)
+  const hour = time.get('hour')!, minute = time.get('minute') ?? 0, second = time.get('second') ?? 0
+  if (time.isCertain('hour') && !time.isCertain('day') && !time.isCertain('weekday') && !time.isCertain('month')) {
+    // Chrono's reference offset cannot resolve a bare clock time across an offset change.
+    const today = parts(now)
+    const upcoming = zonedTimes(today.year, today.month, today.date, hour, minute)
+      .map(at => at / 1000 + second).find(at => at > now)
+    return upcoming ?? (zoneTime(today.year, today.month, today.date + 1, hour, minute) + second)
   }
-  return at
+  // Re-read wall times in the zone at the target date, where its offset may differ.
+  return zoneTime(year, month, date, hour, minute) + second
 }
 
 export interface Groups { due: Reminder[]; upcoming: Reminder[]; done: Reminder[] }

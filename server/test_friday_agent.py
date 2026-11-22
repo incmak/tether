@@ -335,7 +335,7 @@ class CallLogTests(unittest.TestCase):
                  (120, 'user', 'Keep this "quote" and é.')]
         transcript, count = friday.format_call_transcript(turns)
         self.assertEqual(count, 1)
-        local_time = datetime.fromtimestamp(120).strftime('%H:%M')
+        local_time = datetime.fromtimestamp(120, friday.tether_zone.zone()).strftime('%H:%M')
         self.assertEqual(transcript, f'[2 earlier turns cut]\nVoice call transcript (1 turn, '
                          f'from {local_time} to {local_time}):\nUser: Keep this "quote" and é.')
         self.assertLessEqual(len(json.dumps(transcript)), 40000)
@@ -2047,7 +2047,7 @@ class FridayRulesTests(unittest.TestCase):
         original = copy.deepcopy(messages)
         for zone, expected in (('Asia/Kolkata', 'Thu 19 Nov 2026 00:31 IST'),
                                ('America/Los_Angeles', 'Wed 18 Nov 2026 11:01 PST')):
-            with self.subTest(zone=zone), patch.object(friday.reminders, 'ZONE', ZoneInfo(zone)), \
+            with self.subTest(zone=zone), patch.object(friday.tether_zone, 'name', return_value=zone), \
                     own_time(friday, time=lambda: now):
                 result = friday.with_state_time(messages)
                 self.assertEqual(friday.with_state_time(messages, None), result)
@@ -4052,7 +4052,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         create = AsyncMock()
         try:
             with patch.object(llm._client.chat.completions, 'create', create), \
-                    patch.object(friday.reminders, 'ZONE', ZoneInfo('Asia/Kolkata')):
+                    patch.object(friday.tether_zone, 'name', return_value='Asia/Kolkata'):
                 for now, expected in ((epoch, 'Wed 18 Nov 2026 23:59 IST'),
                                       (epoch + 60, 'Thu 19 Nov 2026 00:00 IST')):
                     with own_time(friday, time=lambda: now):

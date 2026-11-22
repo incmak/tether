@@ -1,0 +1,37 @@
+[
+  {
+    "zone": "America/New_York",
+    "instant": "2026-11-01T05:30:00Z",
+    "stamp": "2026-11-01 01:30 -0400"
+  },
+  {
+    "zone": "America/New_York",
+    "instant": "2026-11-01T06:30:00Z",
+    "stamp": "2026-11-01 01:30 -0500"
+  },
+  {
+    "zone": "America/New_York",
+    "instant": "2026-11-01T07:30:00Z",
+    "stamp": "2026-11-01 02:30 -0500"
+  },
+  {
+    "zone": "Australia/Lord_Howe",
+    "instant": "2026-04-04T14:45:00Z",
+    "stamp": "2026-04-05 01:45 +1100"
+  },
+  {
+    "zone": "Australia/Lord_Howe",
+    "instant": "2026-04-04T15:15:00Z",
+    "stamp": "2026-04-05 01:45 +1030"
+  },
+  {
+    "zone": "America/Havana",
+    "instant": "2026-11-01T04:30:00Z",
+    "stamp": "2026-11-01 00:30 -0400"
+  },
+  {
+    "zone": "America/Havana",
+    "instant": "2026-11-01T05:30:00Z",
+    "stamp": "2026-11-01 00:30 -0500"
+  }
+]

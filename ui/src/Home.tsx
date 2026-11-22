@@ -25,6 +25,7 @@ import { AgentIcon, agentNames, chatTitle, sessionName, shownIndex } from './Sid
 import { BacklogNews } from './Backlog'
 import { Bone, Loading } from './Skeleton'
 import { rememberCount, rememberedCount } from './skeletonCounts'
+import { useTetherZone } from './zone'
 import './Home.css'
 
 // Home answers one question: what do my agents need, across every session? Needs you, Working and Done.
@@ -146,6 +147,7 @@ function AsksGroup({ api, items, reminders, sessions, sort, onOpen }: { api: Api
 
 /** A due reminder on Home: the text opens the Reminders sheet; Done and Snooze 1 h act here. */
 function ReminderCard({ api, item, now, onOpen }: { api: Api; item: Reminder; now: number; onOpen: () => void }) {
+  useTetherZone()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const when = `${item.late ? 'Late, was due' : 'Due'} ${whenLabel(item.due, now)}`

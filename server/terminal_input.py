@@ -9,6 +9,7 @@ import shlex
 import sqlite3
 import subprocess
 import time
+import unicodedata
 import uuid
 
 from antigravity import process_start, ROOT as AGY_ROOT, CACHE as AGY_CACHE, capture_notices
@@ -325,6 +326,7 @@ INPUT_HINT = detection_rules.pattern('common', 'INPUT_HINT')
 
 
 RULE_LINE = detection_rules.pattern('common', 'RULE_LINE')
+CLAUDE_NAMED_RULE = detection_rules.pattern('claude', 'INPUT_NAMED_RULE')
 PICKER_CURSOR = detection_rules.pattern('common', 'PICKER_CURSOR', groups=1)
 PICKER_MORE = detection_rules.pattern('common', 'PICKER_MORE', groups=2)
 PICKER_HINT = detection_rules.pattern('common', 'PICKER_HINT')
@@ -435,19 +437,38 @@ def menu_lines(lines, limit=80):
 MENU_HINT_START = detection_rules.pattern('common', 'MENU_HINT_START')
 
 
+def _terminal_columns(text):
+    columns = 0
+    for char in text:
+        if unicodedata.combining(char) or unicodedata.category(char) in ('Cf', 'Mn', 'Me'):
+            continue
+        columns += 2 if unicodedata.east_asian_width(char) in ('W', 'F') else 1
+    return columns
+
+
 def claude_input_box(lines, row):
-    """Distinguish a ruled draft from a menu whose key hint follows its closing rule."""
+    """Distinguish a ruled draft from a menu whose key hint follows its closing rule.
+
+    Claude 2.1.330 draws the session name in the top rule. A narrow pane drops the
+    leading dashes and cuts the name with ….
+    """
     if row < 0:
         return False
     above = next((line for line in reversed(lines[:row]) if line.strip()), '')
-    if not above or not RULE_LINE.match(above):
+    if not above or not (RULE_LINE.match(above) or CLAUDE_NAMED_RULE.match(above)):
         return False
     for index in range(row + 1, len(lines)):
         line = lines[index]
         if INPUT_HINT.search(line) or MENU_HINT_START.match(line):
             return False
-        if line.strip() and RULE_LINE.match(line):
-            return not any(INPUT_HINT.search(after) for after in lines[index + 1:])
+        if line.lstrip().startswith(tuple('─━│┃╭╮╰╯┌┐└┘├┤┬┴┼═║')):
+            closing = line.rstrip()  # no indent: spaces must not make up for missing dashes
+            if (not closing or closing.strip('─')
+                    or _terminal_columns(line.rstrip()) != _terminal_columns(above.rstrip())):
+                return False
+            after = lines[index + 1:]
+            return not (any(INPUT_HINT.search(line) for line in after)
+                        or INPUT_HINT.search(joined_lines(after)))
     return False
 
 
