@@ -3,7 +3,7 @@
 const { strict: assert } = require('node:assert')
 const { mkdirSync } = require('node:fs')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, prefsStore } = require('./browser_test_helper.cjs')
 
 const origin = 'http://127.0.0.1:5142'
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
@@ -19,18 +19,20 @@ async function main() {
     page.setDefaultTimeout(15000)
     page.on('pageerror', error => errors.push(error.message))
     await page.routeWebSocket('**/*', socket => socket.close())
+    const prefs = prefsStore()
     await page.route('**/*', route => {
       const request = route.request(), url = new URL(request.url())
       if (url.pathname.endsWith('/sw.js')) return route.fulfill({ status: 404, body: '' })
       if (url.pathname.includes('/api/')) {
         const endpoint = url.pathname.split('/api/')[1]
+        if (endpoint === 'prefs') return route.fulfill({ json: request.method() === 'GET' ? prefs.get() : prefs.post(request.postDataJSON()) })
         if (request.method() !== 'GET') { writes.push(endpoint); return route.fulfill({ json: { ok: true } }) }
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
         const pane = panes.find(item => item.id === url.searchParams.get('session')) || panes[0]
         const fixtures = {
           sessions: { sessions: panes, default_thread: panes[0].thread },
           chat: { messages: [], earlier: 0, limit: 40, session: pane.id, thread: pane.thread, agent: pane.agent, state: 'Idle', writable: true },
-          footer: { observed: true }, prefs: { prefs: {}, version: 1 }, host: { name: 'Fixture' },
+          footer: { observed: true }, host: { name: 'Fixture' },
           'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
           catalog: { commands: [], plugins: [], mcp: [] }, usage: { claude: null, codex: null },
           subagents: { main: {}, agents: [], tasks: [] }, 'codex-runs': { runs: [] },

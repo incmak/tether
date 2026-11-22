@@ -99,8 +99,8 @@ async function testFlush(error, newer, expected, retries, warns) {
     forgetRejections() {},
     restoreRejected() {},
     setZoneRejection() {},
-    request: async (path, body) => {
-      calls.push({ path, body: JSON.parse(JSON.stringify(body)) })
+    requestStored: async body => {
+      calls.push(plain(body))
       // The sent batch stays on disk until the server answers, so closing the page mid-request loses nothing.
       assert.deepEqual(plain(loadPending()), plain(changes))
       pending.current = { ...newer }
@@ -118,7 +118,7 @@ async function testFlush(error, newer, expected, retries, warns) {
     compilerOptions: { target: ts.ScriptTarget.ES2020 },
   }).outputText, context)
   await context.flush()
-  assert.deepEqual(calls, [{ path: 'prefs', body: { changes } }])
+  assert.deepEqual(calls, [{ changes }])
   assert.deepEqual(JSON.parse(JSON.stringify(pending.current)), expected)
   assert.deepEqual(plain(loadPending()), expected)
   if (!Object.keys(expected).length) assert.equal(localStorage.getItem(pendingKey), null)
@@ -135,13 +135,16 @@ function prefsHarness(initial, get, post, localStorage = storage()) {
   const slots = []
   let slot = 0
   let pull
-  let flush
+  let timer, renderError
   const layouts = []
   const react = {
     useState: init => {
       const i = slot++
       if (!(i in slots)) slots[i] = typeof init === 'function' ? init() : init
-      return [slots[i], update => { slots[i] = typeof update === 'function' ? update(slots[i]) : update }]
+      return [slots[i], update => {
+        try { slots[i] = typeof update === 'function' ? update(slots[i]) : update }
+        catch (error) { renderError = error }  // React can run a state updater during render, outside the caller's try.
+      }]
     },
     useRef: current => (slots[slot++] ??= { current }),
     useCallback: callback => callback,
@@ -154,10 +157,14 @@ function prefsHarness(initial, get, post, localStorage = storage()) {
       return body ? post(plain(body.changes)) : typeof get === 'function' ? get() : get
     },
   } }, {
-    localStorage, document: { addEventListener() {} },
-    window: { setInterval() {}, addEventListener() {}, clearTimeout() {}, setTimeout: callback => { flush = callback } },
+    Object, localStorage, document: { addEventListener() {} },  // Mock API bodies come from this realm.
+    window: {
+      setInterval() {}, addEventListener() {}, clearTimeout() { timer = undefined },
+      setTimeout: (callback, delay) => { timer = { callback, delay } },
+    },
   })
   const render = () => {
+    if (renderError) throw renderError
     slot = 0
     const result = usePrefs()
     for (const effect of layouts.splice(0)) effect()
@@ -172,7 +179,12 @@ function prefsHarness(initial, get, post, localStorage = storage()) {
       await new Promise(setImmediate)
       return render()
     },
-    flush: () => flush(),
+    flush: () => {
+      const { callback } = timer
+      timer = undefined
+      return callback()
+    },
+    retryDelay: () => timer?.delay,
     saved: () => JSON.parse(localStorage.getItem(prefsKey)),
     queued: () => localStorage.getItem(pendingKey),
   }
@@ -212,6 +224,42 @@ test('prefs still uses the saved choice when an older backend omits zone', async
   const prefs = zonePrefs(undefined, { prefs: { timeZone: 'America/New_York' }, version: 1 })
   await prefs.pull()
   assert.equal(zone.tetherZone(), 'America/New_York')
+})
+
+test('prefs retries a malformed POST success and keeps the local choice', async () => {
+  const stored = { prefs: { timeZone: 'America/New_York' }, version: 1, zone: 'America/New_York' }
+  const choice = 'Pacific/Auckland'
+  const batches = []
+  const prefs = zonePrefs(stored.zone, stored, changes => {
+    batches.push(changes)
+    if (batches.length === 1) return { ok: true, accepted: true }
+    return { prefs: changes, version: 2, zone: choice }
+  })
+  const [, update] = await prefs.pull()
+  update(() => ({ timeZone: choice }))
+  await assert.doesNotReject(prefs.flush)
+  const [current, , rejection] = prefs.render()
+  assert.equal(rejection, undefined)
+  assert.equal(current.timeZone, choice)
+  assert.equal(zone.tetherZone(), choice)
+  assert.deepEqual(JSON.parse(prefs.queued()), { timeZone: choice })
+  assert.equal(prefs.retryDelay(), 2000)
+
+  await prefs.flush()
+  assert.deepEqual(batches, [{ timeZone: choice }, { timeZone: choice }])
+  assert.equal(prefs.queued(), null)
+  assert.equal(prefs.retryDelay(), undefined)
+})
+
+test('prefs ignores a malformed GET success and keeps the local choice', async () => {
+  const choice = 'America/New_York'
+  const prefs = zonePrefs(choice, {})
+  const [before] = prefs.render()
+  const [after] = await prefs.pull()
+  assert.equal(after, before)
+  assert.deepEqual(prefs.saved(), { timeZone: choice })
+  assert.equal(zone.tetherZone(), choice)
+  assert.equal(prefs.queued(), null)
 })
 
 test('prefs keeps POST confirmation when an older GET arrives late', async () => {

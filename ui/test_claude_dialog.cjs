@@ -5,7 +5,7 @@ const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
 const { execFileSync } = require('node:child_process')
-const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal, prefsStore } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = process.env.SHOTS || ''
@@ -43,7 +43,7 @@ function fixtures(name) {
     chat: { messages, busy: false, thread: pane.thread, agent: pane.agent, writable: true, session: pane.id, earlier: 0, limit: 100,
       state: 'Idle', approval: null, attention },
     footer: { observed: true, model: 'Claude', mode: 'default', notices: [] },
-    prefs: { prefs: {}, version: 1 }, 'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
+    'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
     update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Test server', office: false },
     catalog: { commands: [], plugins: [], mcp: [], note: '' }, stream: {},
     'codex-runs': { pane: '%1', running: 0, runs: [] }, 'autonomy/review': { due: false, reason: null, new: 0, disputed: 0, total: 0, last_review: 0, snoozed_until: 0, groups: [] },
@@ -81,6 +81,7 @@ async function main() {
     for (const state of NAMES) for (const width of [320, 390, 1280]) {
       const name = `${state}-${width}`, errors = [], sent = [], pageErrors = []
       const fixture = fixtures(state)
+      const prefs = prefsStore()
       if (page) await page.close().catch(() => {})
       page = await context.newPage()
       page.setDefaultTimeout(10000)
@@ -93,11 +94,13 @@ async function main() {
         if (url.pathname.includes('/api/')) {
           const endpoint = url.pathname.split('/api/')[1]
           if (request.method() !== 'GET') {
-            sent.push({ endpoint, ...request.postDataJSON() })
+            const body = request.postDataJSON()
+            sent.push({ endpoint, ...body })
+            if (endpoint === 'prefs') return route.fulfill({ json: prefs.post(body) })
             return route.fulfill({ json: { ok: true, accepted: true } })
           }
           if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
-          return route.fulfill({ json: fixture[endpoint] || {} })
+          return route.fulfill({ json: endpoint === 'prefs' ? prefs.get() : fixture[endpoint] || {} })
         }
         if (url.origin === origin && url.pathname.startsWith('/chat/')) return serveLocal(route)
         return route.abort('blockedbyclient')
@@ -145,7 +148,9 @@ async function main() {
           const marked = card.locator('.dlg-list button[aria-current="true"]')
           if (await card.locator('.dlg-list button[tabindex="0"]').count() !== 1) errors.push('want one Tab stop in the list')
           await marked.focus()
-          const before = sent.length
+          // Prefs saves (seen, layout) and UI usage batches go out on their own timers. Neither reaches the terminal.
+          const toTerminal = () => sent.filter(item => !['prefs', 'ui-usage'].includes(item.endpoint))
+          const before = toTerminal().length
           const focused = () => page.evaluate(() => document.activeElement?.textContent ?? '')
           const start = await focused()
           await page.keyboard.press('ArrowDown')
@@ -154,7 +159,7 @@ async function main() {
           const last = await focused()
           await page.keyboard.press('Home')
           if (await focused() === last) errors.push('Home did not move the focus')
-          if (sent.length !== before) errors.push(`moving the focus sent a request: ${JSON.stringify(sent.slice(before))}`)
+          if (toTerminal().length !== before) errors.push(`moving the focus sent a request: ${JSON.stringify(toTerminal().slice(before))}`)
           // A click on the marked row runs its action, as Enter does in the terminal.
           if (!(await marked.innerText()).includes('Confirm')) errors.push('the marked row does not name its action')
           await clickAction(marked, 'key:Enter')

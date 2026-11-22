@@ -8,6 +8,7 @@ const https = require('node:https')
 const os = require('node:os')
 const path = require('node:path')
 const { createInterface } = require('node:readline')
+const { prefsStore } = require('./browser_test_helper.cjs')
 
 const VERSION = '1.13.0'
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
@@ -37,6 +38,7 @@ async function serveFixture(work) {
   const cert = path.join(work, 'localhost.crt')
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
     '-subj', '/CN=127.0.0.1', '-keyout', key, '-out', cert], { stdio: 'ignore' })
+  const prefs = prefsStore()
   const server = https.createServer({ key: await fs.readFile(key), cert: await fs.readFile(cert) }, async (req, res) => {
     const { pathname } = new URL(req.url, 'https://127.0.0.1')
     if (pathname === '/before') {
@@ -53,8 +55,17 @@ async function serveFixture(work) {
     if (pathname.startsWith('/mobile/api/')) {
       const endpoint = pathname.slice('/mobile/api/'.length)
       if (endpoint === 'stream') res.writeHead(204).end()
+      else if (endpoint === 'prefs') {
+        let stored = prefs.get()
+        if (req.method === 'POST') {
+          const chunks = []
+          for await (const chunk of req) chunks.push(chunk)
+          stored = prefs.post(JSON.parse(Buffer.concat(chunks)))
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(stored))
+      }
       else {
-        const fixtures = { sessions: { sessions: [], default_thread: null }, prefs: { prefs: {}, version: 1 },
+        const fixtures = { sessions: { sessions: [], default_thread: null },
           'projects/backlog': { text: '' }, 'work/board': { revision: 1, projects: [], items: [], stages: [] },
           reminders: { reminders: [], deleted: [], now: 0 } }
         res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(fixtures[endpoint] ?? {}))

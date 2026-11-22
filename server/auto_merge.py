@@ -45,6 +45,7 @@ if str(HERE) not in sys.path:
 
 import approval  # noqa: E402
 import paths  # noqa: E402
+import review_gate  # noqa: E402
 
 MODES = (
     ('off', 'Off', 'Tether does not check branches.'),
@@ -1394,8 +1395,8 @@ def merge(plan, reviewer, job):
     _check_push_url(root, plan['url'])
     with _mode_lock:
         def confirm():
-            """Runs right before each network command of the push. Order: the Git reads of the worktree, then the
-            binding check (_check_bound), then one in-process read of the approval. Each check sees one moment; a
+            """Runs right before each network command of the push. Order: the Git reads of the worktree and the review gate,
+            then the binding check (_check_bound), then one in-process read of the approval. Each check sees one moment; a
             change while the next Git command runs, or after the last read, is out of reach (the residual race)."""
             problem = _authorization_problem(read_setting(), job.get('approved_at'))
             if problem:
@@ -1414,6 +1415,13 @@ def merge(plan, reviewer, job):
                 raise NotAuthorized(str(exc)) from exc
             if dirty:
                 raise NotAuthorized(dirty)
+            # The review gate runs Git, so it goes before the binding check; the approval read stays last.
+            try:
+                approved = review_gate.check(folder, head, pane=job['worker'])
+            except review_gate.GateRefused as exc:
+                raise NotAuthorized(str(exc)) from exc
+            if approved is None:
+                raise NotAuthorized('The review link is no longer available.')
             if job.get('tab') is not None:
                 _check_bound(job.get('folder'), folder, job.get('repo'), job['tab'])
             # Last: one in-process read of the approval store (no subprocess). The network command follows at once.
@@ -1460,6 +1468,12 @@ def process(job, alert=None):
     decision.setdefault('head', job.get('commit'))
     decision.pop('folder', None)
     at = job.get('approved_at')
+    if plan is not None:
+        try:
+            review_gate.check(job['folder'], decision['head'], pane=job['worker'])
+        except review_gate.GateRefused as exc:
+            decision['checks'].append({'key': 'review', 'ok': False, 'text': str(exc)})
+            plan = None
     if plan is None:
         decision['outcome'] = 'wait'
     elif not ENFORCE_AVAILABLE or setting['mode'] != 'enforce':

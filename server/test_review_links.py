@@ -6304,6 +6304,26 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertEqual(self.links()[0]['approved_commit'], self.NEXT)
         self.assertNotIn('stale_rounds', self.links()[0])
 
+    def test_later_findings_or_stale_approval_clear_every_approval_field(self):
+        for verdict in ('The lock is not released.', f'APPROVED {self.HASH}', f'APPROVED {self.NEXT}'):
+            with self.subTest(verdict=verdict):
+                self.add()
+                self.send.reset_mock(side_effect=True)
+                self.bind()
+                self.request_review()
+                self.finish_review(f'APPROVED {self.HASH}')
+                self.assertEqual(review_links.approved_commits()['%13']['%12']['commit'], self.HASH)
+                self.assertIn('approved_folder', self.links()[0])
+
+                self.bind(self.NEXT)
+                self.request_review()
+                if verdict == f'APPROVED {self.NEXT}':
+                    self.send.side_effect = lambda entry, text, state: (
+                        setattr(self, 'head', self.HASH) if entry is self.worker else None)
+                self.finish_review(verdict)
+                self.assertFalse({'approved_commit', 'approved_at', 'approved_folder', 'approved_repo'} & self.links()[0].keys())
+                self.assertEqual(review_links.approved_commits(), {})
+
     def test_approval_that_names_another_commit_is_not_forwarded(self):
         self.bind()
         self.request_review()

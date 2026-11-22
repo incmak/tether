@@ -101,7 +101,7 @@ const imports = { './api': apiModule, './AgentBrowser': browserModule }
 const { sendAnswer, answerError, optionForKey, isAnswerKey } = load('useAnswers.ts', imports)
 const { AnswerActions } = load('answers.tsx', imports)
 const approvalItem = needs.inboxItems([approval], {})[0]
-const menuItem = { pane: question, kind: 'question', text: 'Pick', at: 10, menu: [{ id: 1, text: 'First' }, { id: 2, text: 'Second' }, { id: 3, text: 'Third' }] }
+const menuItem = { pane: { ...question, attention: { menu_verified: 'menu-revision' } }, kind: 'question', text: 'Pick', at: 10, menu: [{ id: 1, text: 'First' }, { id: 2, text: 'Second' }, { id: 3, text: 'Third' }] }
 const stale = new apiModule.ApiError(409, 'Browser changed')
 assert.equal(answerError(stale), 'This pane changed. Open it to check.')
 assert.equal(answerError(new Error('Offline')), 'Offline')
@@ -155,10 +155,11 @@ async function main() {
   const api = async (path, body) => { calls.push([path, plain(body)]) }
   await sendAnswer(api, approvalItem, approvalItem.yes)
   await sendAnswer(api, menuItem, menuItem.menu[1])
+  await sendAnswer(api, { ...menuItem, pane: question }, menuItem.menu[1])
   assert.deepEqual(calls, [
     ['approval', { session: approval.id, thread: approval.thread, approval: 'permit', choice: 1 }],
-    ['menu', { session: question.id, thread: question.thread, choice: 2, label: 'Second' }],
-  ])
+    ['menu', { session: question.id, thread: question.thread, choice: 2, label: 'Second', revision: 'menu-revision' }],
+  ], 'An unverified menu sends no request')
   const browserItem = { pane: browser, kind: 'browser', ask: 'ask', tab: 'tab' }
   const failures = []
   const browserTree = AnswerActions({ ...props, api, item: browserItem, onFail: (...args) => failures.push(args) })

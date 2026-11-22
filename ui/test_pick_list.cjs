@@ -3,7 +3,7 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal, prefsStore } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const PICKER = { id: 'picker-1', reason: 'picker', title: 'Rewind', subtitle: 'Restore the code and the chat to the point before…', text: 'Rewind',
@@ -11,14 +11,14 @@ const PICKER = { id: 'picker-1', reason: 'picker', title: 'Rewind', subtitle: 'R
 const MULTI = { ...PICKER, id: 'picker-2', title: 'Select tools',
   choice: { selection: 'multi', focus: 0, filter: null, tabs: null, items: [{ id: 1, text: 'Read', selected: true, checked: true }, { id: 2, text: 'Write', selected: false, checked: false }], more_above: 0, more_below: 0, hints: [] },
   items: [{ text: 'Read', selected: true }, { text: 'Write', selected: false }], more_above: 0 }
-const MENU = { id: 'menu-1', reason: 'menu', question: 'Select Model and Effort', text: 'Select Model and Effort',
+const MENU = { id: 'menu-1', reason: 'menu', menu_verified: 'a'.repeat(64), question: 'Select Model and Effort', text: 'Select Model and Effort',
   options: [{ id: 1, text: 'GPT-6.2-Sol (current)', detail: 'Latest workhorse model.', selected: true }, { id: 2, text: 'GPT-6.2-Astra', detail: 'Most capable model.', selected: false }, { id: 3, text: 'GPT-6-Luna', detail: 'Fast model.', selected: false }],
   choice: { selection: 'single', focus: 0, filter: null, tabs: null, more_above: 0, more_below: -1, hints: ['enter select', 'esc back'] } }
 // A Claude numbered list with boxes: a click on a row ticks it (Space), and Done sends Enter.
-const TICKS = { id: 'menu-2', reason: 'menu', question: 'Choose features?', text: 'Choose features?',
+const TICKS = { id: 'menu-2', reason: 'menu', menu_verified: 'b'.repeat(64), question: 'Choose features?', text: 'Choose features?',
   options: [{ id: 1, text: '☐ Alpha', detail: '', selected: true }, { id: 2, text: '☐ Beta', detail: '', selected: false }, { id: 3, text: '☐ Gamma', detail: '', selected: false }],
-  choice: { selection: 'multi', focus: 0, filter: null, tabs: null, items: [{ id: 1, text: 'Alpha', selected: true, checked: false }, { id: 2, text: 'Beta', selected: false, checked: false }, { id: 3, text: 'Gamma', selected: false, checked: false }], more_above: 0, more_below: 0, hints: ['Space to toggle', 'Enter to confirm', 'Esc to cancel'] } }
-const CASES = { picker: PICKER, multi: MULTI, menu: MENU, ticks: TICKS }
+  choice: { selection: 'multi', focus: 0, filter: null, tabs: null, items: [{ id: 1, text: 'Alpha', selected: true, checked: true }, { id: 2, text: 'Beta', selected: false, checked: false }, { id: 3, text: 'Gamma', selected: false, checked: false }], more_above: 0, more_below: 0, hints: ['Space to toggle', 'Enter to confirm', 'Esc to cancel'] } }
+const CASES = { picker: PICKER, multi: MULTI, menu: MENU, ticks: TICKS, unverified: { ...TICKS, menu_verified: false } }
 // The list name each pick must carry: the picker title, or the question of a numbered menu.
 const HEADINGS = { picker: 'Rewind', multi: 'Select tools', menu: 'Select Model and Effort', ticks: 'Choose features?' }
 
@@ -28,7 +28,7 @@ function fixtures(attention, agent) {
     sessions: { sessions: [pane], default_thread: pane.thread },
     chat: { messages: [{ id: 'm1', role: 'user', text: 'Start.', time: '2026-11-17T08:00:00Z' }], busy: false, thread: pane.thread, agent, writable: true, session: pane.id, earlier: 0, limit: 100, state: 'Idle', approval: null, attention },
     footer: { observed: true, model: agent, mode: 'default', notices: [] },
-    prefs: { prefs: {}, version: 1 }, 'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
+    'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
     update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Test server', office: false },
     catalog: { commands: [], plugins: [], mcp: [], note: '' }, stream: {},
     'codex-runs': { pane: '%1', running: 0, runs: [] }, 'autonomy/review': { due: false, reason: null, new: 0, disputed: 0, total: 0, last_review: 0, snoozed_until: 0, groups: [] },
@@ -68,11 +68,13 @@ async function main() {
       page.on('pageerror', error => pageErrors.push(error.message))
       await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'light' })
       await page.routeWebSocket('**/*', socket => socket.close())
+      const prefs = prefsStore()
       await page.route('**/*', async route => {
         const request = route.request(), url = new URL(request.url())
         if (url.pathname.endsWith('/sw.js')) return route.fulfill({ status: 404, body: '' })
         if (url.pathname.includes('/api/')) {
           const endpoint = url.pathname.split('/api/')[1]
+          if (endpoint === 'prefs') return route.fulfill({ json: request.method() === 'GET' ? prefs.get() : prefs.post(request.postDataJSON()) })
           if (request.method() !== 'GET') { sent.push({ endpoint, ...request.postDataJSON() }); return route.fulfill({ json: { ok: true, accepted: true } }) }
           if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
           return route.fulfill({ json: fixture[endpoint] || {} })
@@ -92,6 +94,12 @@ async function main() {
         await page.waitForSelector('.composer textarea')
         const dock = page.locator('.choice-dock').first()
         await dock.waitFor()
+        const choiceWrites = () => sent.filter(item => ['pick', 'key', 'keys', 'menu'].includes(item.endpoint))
+        const clickPick = async button => {
+          const reply = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/mobile/api/pick')
+          const [response] = await Promise.all([reply, button.click()])
+          return response.request().postDataJSON()
+        }
         const picks = () => sent.filter(item => item.endpoint === 'pick').map(item => !Array.isArray(item.labels) ? `bad labels ${JSON.stringify(item)}`
           : item.heading !== HEADINGS[state] ? `bad heading ${JSON.stringify(item.heading)}` : `${item.row}:${item.labels[item.row].replace('\n', '|')}:${item.then}:${item.labels.length}`)
         const noKeys = () => { if (sent.some(item => item.endpoint === 'key')) errors.push(`Done used the unchecked key route: ${JSON.stringify(sent)}`) }
@@ -104,7 +112,7 @@ async function main() {
           const now = await page.evaluate(() => ({ text: document.activeElement?.textContent ?? '', tab: document.activeElement?.getAttribute('tabindex') }))
           if (now.text === start) errors.push('ArrowDown did not move the focus')
           if (now.tab !== '0' || await dock.locator(`${rowSelector}[tabindex="0"]`).count() !== 1) errors.push('the Tab stop did not follow the focus')
-          if (sent.some(item => ['pick', 'key', 'keys', 'menu'].includes(item.endpoint))) errors.push(`moving the focus sent ${JSON.stringify(sent)}`)
+          if (choiceWrites().length) errors.push(`moving the focus sent ${JSON.stringify(choiceWrites())}`)
         }
         // The agent moves its mark after the user moved the focus: still one Tab stop, on the row with the focus.
         const markMoves = async rowSelector => {
@@ -125,35 +133,37 @@ async function main() {
           await roving('.pick-list button[data-row]')
           await markMoves('.pick-list button[data-row]')
           if (state === 'picker') {
-            await rows.filter({ hasText: 'Fix the login bug' }).click()
-            await page.waitForTimeout(150)
-            await dock.getByRole('button', { name: /Show 4 more above/ }).click()
-            await page.waitForTimeout(150)
+            await clickPick(rows.filter({ hasText: 'Fix the login bug' }))
+            await clickPick(dock.getByRole('button', { name: /Show 4 more above/ }))
             if (picks().join() !== '0:Fix the login bug:Enter:3,0:Fix the login bug:Up:3') errors.push(`picks: ${picks().join()}`)
           } else {
-            await rows.filter({ hasText: 'Write' }).click()
-            await page.waitForTimeout(150)
-            await dock.getByRole('button', { name: /^Done/ }).click()
-            await page.waitForTimeout(150)
+            await clickPick(rows.filter({ hasText: 'Write' }))
+            await clickPick(dock.getByRole('button', { name: /^Done/ }))
             if (picks().join() !== '1:Write:Space:2,0:Read:Enter:2') errors.push(`picks: ${picks().join()}`)
             noKeys()
           }
+        } else if (state === 'unverified') {
+          await dock.getByText('Answer this in the terminal.', { exact: true }).waitFor()
+          const terminal = dock.getByRole('button', { name: 'Open terminal', exact: true })
+          await terminal.focus()
+          if (await dock.getByRole('button').count() !== 1 || !await terminal.evaluate(node => node === document.activeElement)) errors.push('want one focusable Open terminal button')
+          if (choiceWrites().length) errors.push(`unverified dock sent ${JSON.stringify(choiceWrites())}`)
         } else {
           if (await dock.locator('.choice-options button').count() !== 3) errors.push('want 3 option buttons')
           if (await dock.locator('.choice-options [role="listitem"]').count()) errors.push('option buttons lost their button role')
           await roving('.choice-options button[data-row]')
           await markMoves('.choice-options button[data-row]')
           if (state === 'menu') {
-            await dock.getByRole('button', { name: /Show more below/ }).click()
-            await page.waitForTimeout(150)
+            await clickPick(dock.getByRole('button', { name: /Show more below/ }))
             if (picks().join() !== '2:GPT-6-Luna|Fast model.:Down:3') errors.push(`picks: ${picks().join()}`)
           } else {
-            await dock.locator('.choice-options button').filter({ hasText: 'Beta' }).click()
-            await page.waitForTimeout(150)
-            if (sent.some(item => item.endpoint === 'menu')) errors.push(`a tick chose a numbered option: ${JSON.stringify(sent)}`)
-            await dock.getByRole('button', { name: /^Done/ }).click()
-            await page.waitForTimeout(150)
-            if (picks().join() !== '1:☐ Beta:Space:3,2:☐ Gamma:Enter:3') errors.push(`picks: ${picks().join()}`)
+            const tick = await clickPick(dock.locator('.choice-options button').filter({ hasText: 'Beta' }))
+            if (choiceWrites().some(item => item.endpoint === 'menu')) errors.push(`a tick chose a numbered option: ${JSON.stringify(choiceWrites())}`)
+            const submit = await clickPick(dock.getByRole('button', { name: /^Done/ }))
+            if (tick.heading !== HEADINGS.ticks || tick.revision !== TICKS.menu_verified || tick.row !== 1 || tick.ticked !== false || tick.then !== 'Space'
+                || JSON.stringify(tick.labels) !== JSON.stringify(['☐ Alpha', '☐ Beta', '☐ Gamma'])) errors.push(`bad tick: ${JSON.stringify(tick)}`)
+            if (submit.heading !== HEADINGS.ticks || submit.revision !== TICKS.menu_verified || 'row' in submit || 'ticked' in submit || submit.then !== 'Enter'
+                || JSON.stringify(submit.labels) !== JSON.stringify(['☐ Alpha'])) errors.push(`bad submit: ${JSON.stringify(submit)}`)
             noKeys()
           }
         }

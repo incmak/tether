@@ -171,6 +171,19 @@ export function savePending(pending: Shared): void {
 }
 
 interface Stored { prefs: Shared; version: number; zone?: string }
+
+function isPlainObject(value: unknown) {
+  return value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype
+}
+
+async function requestStored(body?: { changes: Shared }): Promise<Stored> {
+  const stored = await request<Stored>('prefs', body)
+  if (!isPlainObject(stored) || !isPlainObject(stored.prefs) || !Number.isFinite(stored.version)
+    || ('zone' in stored && typeof stored.zone !== 'string')) {
+    throw new Error('Invalid preferences response.')
+  }
+  return stored
+}
 const PULL_MS = 20000
 export const PREFS_PULL_EVENT = 'tether-prefs-pull'
 
@@ -287,7 +300,7 @@ export function usePrefs({ syncZone = true } = {}) {
       return
     }
     try {
-      const serverCopy = await request<Stored>('prefs')
+      const serverCopy = await requestStored()
       rememberZone(serverCopy)
       apply(serverCopy, true)
     } catch { /* offline: keep this device's copy until the next successful pull */ }
@@ -305,7 +318,7 @@ export function usePrefs({ syncZone = true } = {}) {
     }
     if (changes.drafts) changes.drafts = keptDrafts(changes.drafts)
     try {
-      const stored = await request<Stored>('prefs', { changes })
+      const stored = await requestStored({ changes })
       forgetRejections(SYNCED.filter(key => key in changes))
       rememberZone(stored)
       apply(stored)
@@ -331,7 +344,7 @@ export function usePrefs({ syncZone = true } = {}) {
     if (Object.keys(pending.current).length) { void flush(); return }
     const requestedAtVersion = lastStored.current?.version
     try {
-      const stored = await request<Stored>('prefs')
+      const stored = await requestStored()
       if (lastStored.current?.version !== requestedAtVersion) return
       // A queued local write can defer the shared prefs, but the server's fallback zone is still usable.
       rememberZone(stored)
