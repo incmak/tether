@@ -324,9 +324,10 @@ def review_turn_source(entry):
 REVIEW_GATE_TAIL_BYTES = 256 * 1024
 REVIEW_GATE_TAIL = (None, {})  # (path, size, mtime) -> the newest rows per (agent, thread)
 REVIEW_GATE_ROWS = 8
-REVIEW_GATE_LANDED = {}  # (folder, at, head, tree) -> the reflog position of a confirmed row
+REVIEW_GATE_LANDED = {}  # (folder, at, head, tree, git_dir, reflog) for confirmed rows
 REVIEW_GATE_LANDED_MAX = 256
 REVIEW_GATE_LANDED_LOCK = threading.Lock()
+REVIEW_GATE_SECONDS = 1.5
 
 
 def review_gate_records():
@@ -369,29 +370,38 @@ def review_gate_records():
             continue
         identity = (source, session)
         recent = records.setdefault(identity, [])
-        recent.append({field: row[field] for field in ('at', 'folder', 'head', 'tree', 'reflog') if field in row})
+        recent.append({field: row[field] for field in ('at', 'folder', 'head', 'tree', 'git_dir', 'reflog')
+                       if field in row})
         recent.sort(key=lambda record: record['at'], reverse=True)
         del recent[REVIEW_GATE_ROWS:]
     REVIEW_GATE_TAIL = key, records
     return records
 
 
-def _review_gate_landed(row):
+def _review_gate_landed(row, *, deadline, require_head):
     tree = row.get('tree')
-    if 'head' not in row or not isinstance(tree, str):
+    identity = commit_gate.git_dir_key(row.get('git_dir'))
+    position = commit_gate.reflog_position_key(row.get('reflog'))
+    if ('head' not in row or not isinstance(tree, str) or identity is None or position is None
+            or time.monotonic() >= deadline):
         return None
-    key = (row['folder'], row['at'], row['head'], tree)
-    position = row.get('reflog')
-    cached = REVIEW_GATE_LANDED.get(key)
-    if cached is not None and cached == position and all(
-            type(cached[field]) is type(position[field]) for field in ('size', 'ino', 'dev')):
+    folder = row['folder']
+    key = (folder, row['at'], row['head'], tree, identity, position)
+    if key in REVIEW_GATE_LANDED:
+        if not commit_gate.cached_git_dir_matches(folder, identity):
+            return None
+        # A cold confirmation already reads HEAD. A fresh request still needs HEAD on a cache hit.
+        if require_head and not commit_gate.worktree_head(folder, deadline=deadline):
+            return None
+        if time.monotonic() >= deadline:
+            return None
         return True
-    landed = commit_gate.record_landed(row)
+    landed = commit_gate.record_landed(row, deadline=deadline)
     if landed is True:
         with REVIEW_GATE_LANDED_LOCK:
             if key not in REVIEW_GATE_LANDED and len(REVIEW_GATE_LANDED) >= REVIEW_GATE_LANDED_MAX:
                 del REVIEW_GATE_LANDED[next(iter(REVIEW_GATE_LANDED))]
-            REVIEW_GATE_LANDED[key] = position
+            REVIEW_GATE_LANDED[key] = True
     return landed
 
 
@@ -415,13 +425,14 @@ def review_folder(entry):
             if started_ms is not None:
                 threshold = started_ms / 1000
         if threshold is not None:
+            deadline = time.monotonic() + REVIEW_GATE_SECONDS
             for record in review_gate_records().get((source, thread), ()):
                 if not record['at'] > threshold:
                     break
-                landed = _review_gate_landed(record)
+                landed = _review_gate_landed(record, deadline=deadline, require_head=not follow_up)
                 if landed is False:
                     continue
-                if landed is True and (follow_up or review_scope.head(record['folder'])):
+                if landed is True:
                     return record['folder']
                 break  # Unavailable evidence or HEAD: use the usual fallback.
     return folder if after is not None else folder or agent_folder(entry)

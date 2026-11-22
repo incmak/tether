@@ -14,8 +14,9 @@ The person sets the mode in Settings. Nothing else changes it.
 
 The installed Git commit-msg hook checks the final message file for Claude, Codex and terminal commits.
 It logs one verdict and skips merges, replays that invoke the hook, and fixup, squash and amend! commits.
-The hook records the index tree, HEAD and the HEAD reflog position before Git makes the commit.
-For review binding, a later HEAD reflog entry must move from that HEAD to a commit with that tree.
+The hook records the index tree, HEAD, the HEAD reflog position and the per-worktree Git directory before Git
+makes the commit. Review binding needs a commit-making reflog entry in that worktree with that old HEAD and
+tree. The new commit must be HEAD now or be the old HEAD of a later entry.
 The hook checks ordinary amendments. Claude's PreToolUse check can defer to the hook.
 PostToolUse matches each hook row to one landed commit by worktree, tree, all parents, message HMAC and dates.
 A merge skip row can lack the author date. PostToolUse checks uncovered commits and skips new merges.
@@ -96,6 +97,12 @@ HOOK_MESSAGE_BYTES = 1_000_000
 FIXUP_PREFIXES = ('fixup! ', 'squash! ', 'amend! ')
 SCISSORS = re.compile(r'. -{24} >8 -{24}')
 GIT_OID = re.compile(r'[0-9a-f]{40}(?:[0-9a-f]{24})?')
+# Git trims empty subjects. The sequencer also uses "cherry-pick: fast-forward" when it reuses a commit.
+COMMIT_REFLOG_ACTION = re.compile(
+    rb'^(?:(?:commit(?: \([a-z-]+\))?|cherry-pick(?!: fast-forward$)|revert|'
+    rb'rebase(?: -i)? \((?:pick|reword|edit|squash|fixup|continue)\)):(?: |$)|'
+    rb"(?:merge .+|pull(?: .*)?): (?:Merge made by the '[^']+' strategy\.|In-index merge)$)"
+)
 
 
 class GateError(Exception):
@@ -1022,11 +1029,14 @@ def _write_session(session, state, now):
     _write(path, json.dumps(state))
 
 
-def _git(folder, *args, text=True, env=None):
+def _git(folder, *args, text=True, env=None, input=None, deadline=None):
+    timeout = 0.5 if deadline is None else min(0.5, deadline - time.monotonic())
+    if timeout <= 0:
+        return None
     try:
-        return subprocess.run(['git', '-C', folder, *args], capture_output=True, text=text, timeout=0.5,
-                              errors='replace' if text else None, env=env)
-    except (OSError, subprocess.SubprocessError):
+        return subprocess.run(['git', '-C', folder, *args], capture_output=True, text=text, timeout=timeout,
+                              input=input, errors='replace' if text else None, env=env)
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
 
 
@@ -1050,12 +1060,59 @@ def _tree(folder):
     return root if os.path.isabs(root) else None
 
 
-def _git_path(folder, *args):
-    shown = _git(folder, 'rev-parse', '--path-format=absolute', *args, text=False)
+def _git_path(folder, *args, deadline=None):
+    shown = _git(folder, 'rev-parse', '--path-format=absolute', *args, text=False, deadline=deadline)
     if shown is None or shown.returncode != 0:
         return None
     path = Path(os.fsdecode(shown.stdout).removesuffix('\n'))
     return path if path.is_absolute() else None
+
+
+def _git_dir_identity(path):
+    try:
+        info = os.stat(path, follow_symlinks=False)
+    except (OSError, ValueError):
+        return None
+    if stat_module.S_ISDIR(info.st_mode):
+        return {'path': str(path), 'dev': info.st_dev, 'ino': info.st_ino}
+    return None
+
+
+def git_dir_key(identity):
+    if not isinstance(identity, dict):
+        return None
+    path, dev, ino = (identity.get(field) for field in ('path', 'dev', 'ino'))
+    if (not isinstance(path, str) or not os.path.isabs(path)
+            or any(type(value) is not int or value < 0 for value in (dev, ino))):
+        return None
+    return path, dev, ino
+
+
+def cached_git_dir_matches(folder, key):
+    """Check the live checkout's Git directory without starting Git."""
+    path, _, _ = key
+    dot_git = os.path.join(os.path.realpath(folder), '.git')
+    if dot_git != path:
+        # A linked worktree can move while its metadata directory keeps the same inode.
+        # Check the gitfile in the live folder before trusting the cached inode.
+        try:
+            with open(dot_git, 'rb', opener=lambda name, mode: os.open(name, mode | os.O_NONBLOCK)) as source:
+                data = source.read((1 << 20) + 1)
+        except IsADirectoryError:  # A symlink or a non-canonical folder path to a .git directory.
+            if os.path.realpath(dot_git) != path:
+                return False
+        except (OSError, ValueError):
+            return False
+        else:
+            if not data.startswith(b'gitdir: ') or len(data) > (1 << 20):
+                return False
+            target = data.removeprefix(b'gitdir: ').rstrip(b'\r\n')
+            if not target or b'\0' in target:
+                return False
+            live = os.path.join(os.path.dirname(dot_git), os.fsdecode(target))
+            if live != path and os.path.realpath(live) != path:
+                return False
+    return git_dir_key(_git_dir_identity(path)) == key
 
 
 def _head_reflog_position(folder):
@@ -1074,8 +1131,7 @@ def _head_reflog_position(folder):
     return None
 
 
-def _head_reflog_entries(folder, start):
-    """Read all (old, new) HEAD entries since start, or None if the reflog cannot be read."""
+def reflog_position_key(start):
     if not isinstance(start, dict) or not {'size', 'ino', 'dev'} <= start.keys():
         return None
     offset, ino, dev = start['size'], start['ino'], start['dev']
@@ -1084,9 +1140,14 @@ def _head_reflog_entries(folder, start):
     missing = offset == 0 and ino is None and dev is None
     if not missing and any(type(value) is not int or value < 0 for value in (ino, dev)):
         return None
-    path = _git_path(folder, '--git-path', 'logs/HEAD')
-    if path is None:
+    return offset, ino, dev
+
+
+def _head_reflog_entries(path, start):
+    """Read all (old, new, message) HEAD entries since start, or None if the reflog cannot be read."""
+    if path is None or (position := reflog_position_key(start)) is None:
         return None
+    offset, ino, dev = position
     try:
         if not stat_module.S_ISREG(path.lstat().st_mode):
             return None
@@ -1098,7 +1159,7 @@ def _head_reflog_entries(folder, start):
             length = found.st_size - offset
             if not 0 <= length <= REFLOG_BYTES:
                 return None
-            if not missing and (found.st_ino, found.st_dev) != (ino, dev):
+            if ino is not None and (found.st_ino, found.st_dev) != (ino, dev):
                 return None  # The file was replaced, even if it was empty.
             if offset:
                 source.seek(offset - 1)
@@ -1113,9 +1174,10 @@ def _head_reflog_entries(folder, start):
             old, new = old.decode('ascii'), new.decode('ascii')
             if not GIT_OID.fullmatch(old) or not GIT_OID.fullmatch(new):
                 return None
-            if not re.fullmatch(rb'[^<>\0]* <[^<>\0]*> \d+ [+-]\d{4}(?:\t[^\0]*)?', ident):
+            parsed = re.fullmatch(rb'[^<>\0]* <[^<>\0]*> \d+ [+-]\d{4}(?:\t([^\0]*))?', ident)
+            if parsed is None:
                 return None
-            entries.append((old, new))
+            entries.append((old, new, parsed[1] or b''))
         return entries
     except (OSError, ValueError):
         return None
@@ -1125,31 +1187,71 @@ def _head_reflog(folder, start):
     """Return the HEAD before each commit's first entry since start, or None if unavailable.
 
     The first entry is the one that made the commit. Later checkouts and resets cannot replace it."""
-    entries = _head_reflog_entries(folder, start)
+    entries = _head_reflog_entries(_git_path(folder, '--git-path', 'logs/HEAD'), start)
     if not entries:
         return None
     heads = {}
-    for old, new in entries:
+    for old, new, _ in entries:
         heads.setdefault(new, old)
     return heads
 
 
-def record_landed(row):
-    """Return whether a commit-msg row matches a HEAD move, or None if Git cannot tell."""
+def worktree_head(folder, *, deadline):
+    shown = _git(folder, 'rev-parse', '--verify', 'HEAD^{commit}', deadline=deadline)
+    if shown is not None and shown.returncode == 0 and GIT_OID.fullmatch(head := shown.stdout.strip()):
+        return head
+    return None
+
+
+def record_landed(row, *, deadline=None):
+    """Check if a hook row landed, using an absolute monotonic deadline. None means the evidence is uncertain."""
+    if deadline is None:
+        deadline = time.monotonic() + 1.0
     folder, head, tree = (row.get(field) for field in ('folder', 'head', 'tree'))
+    identity = git_dir_key(row.get('git_dir'))
     if (not isinstance(tree, str) or not GIT_OID.fullmatch(tree) or 'head' not in row
             or (head is not None and (not isinstance(head, str) or not GIT_OID.fullmatch(head)))
-            or not isinstance(folder, str) or not os.path.isabs(folder) or not os.path.isdir(folder)):
+            or not isinstance(folder, str) or not os.path.isabs(folder) or identity is None
+            or time.monotonic() >= deadline):
         return None
-    entries = _head_reflog_entries(folder, row.get('reflog'))
-    if entries is None:
+    git_dir = _git_path(folder, '--absolute-git-dir', deadline=deadline)
+    if git_dir is None or git_dir_key(_git_dir_identity(git_dir)) != identity:
         return None
-    for old, new in entries:
-        if old == (head or '0' * len(old)):
-            found = _git(folder, 'rev-parse', '--verify', '-q', f'{new}^{{tree}}')
-            if found is not None and found.returncode == 0 and found.stdout.strip() == tree:
+    # Git's files backend stores logs/HEAD in the per-worktree directory.
+    entries = _head_reflog_entries(git_dir / 'logs' / 'HEAD', row.get('reflog'))
+    if entries is None or time.monotonic() >= deadline:
+        return None
+    # Check non-commit moves in the same batch. A matching tree on one of those makes the result uncertain.
+    candidates = dict.fromkeys(new for old, new, _ in entries if old == (head or '0' * len(old)))
+    if not candidates:
+        return False
+    found = _git(folder, 'cat-file', '--batch-check=%(objectname) %(objecttype)',
+                 input=''.join(f'{oid}^{{tree}}\n' for oid in candidates), deadline=deadline)
+    if found is None or found.returncode != 0 or found.stderr or time.monotonic() >= deadline:
+        return None
+    trees = found.stdout.splitlines()
+    if (len(trees) != len(candidates)
+            or any(not line.endswith(' tree') or not GIT_OID.fullmatch(line.removesuffix(' tree')) for line in trees)):
+        return None
+    matching = {oid for oid, candidate_tree in zip(candidates, trees) if candidate_tree == f'{tree} tree'}
+    if not matching:
+        return False
+    current = worktree_head(folder, deadline=deadline)
+    if current is None:
+        return None
+    uncertain = False
+    later_heads = {current}
+    for old, new, message in reversed(entries):
+        if time.monotonic() >= deadline:
+            return None
+        if new in matching and old == (head or '0' * len(old)):
+            if not COMMIT_REFLOG_ACTION.match(message):
+                uncertain = True
+            elif new in later_heads:
+                # Git can append the entry before the corresponding ref update succeeds.
                 return True
-    return False
+        later_heads.add(old)
+    return None if uncertain else False
 
 
 def _message_hook(folder):
@@ -1854,6 +1956,9 @@ def commit_msg(path, env=os.environ, cwd=None, now=None):
         source, session = _source_session(ancestors, env)
         record.update(source=source, session=session)
         record.update(_hook_identity(cwd))
+        git_dir = _git_path(cwd, '--absolute-git-dir')
+        if git_dir is not None and (identity := _git_dir_identity(git_dir)) is not None:
+            record['git_dir'] = identity
         if (reflog := _head_reflog_position(cwd)) is not None:
             record['reflog'] = reflog
         if author_date := re.fullmatch(r'@(\d+ [+-]\d{4})', env.get('GIT_AUTHOR_DATE', '')):
@@ -1869,7 +1974,6 @@ def commit_msg(path, env=os.environ, cwd=None, now=None):
                 record['committer_override'] = True
             else:
                 record['committer_date'] = date[1]
-        git_dir = _git_path(cwd, '--git-dir')
         if git_dir is None:
             raise GateError(400, 'Git could not find the repository for the commit message.')
         verdict, reason, readings = _final_verdict(path, cwd, git_dir)

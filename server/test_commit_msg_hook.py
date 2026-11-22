@@ -176,6 +176,7 @@ sys.exit(main(sys.argv[2:]))
             'count': 1, 'folder': str(self.repo), 'head': None,
             'tree': self.git('rev-parse', 'HEAD^{tree}').stdout.strip(),
             'reflog': {'size': 0, 'ino': None, 'dev': None},
+            'git_dir': self.git_dir_fields(),
             'author_date': author_date,
             'messages': [digest],
         })
@@ -200,6 +201,16 @@ sys.exit(main(sys.argv[2:]))
         self.assertIs(commit_gate.record_landed(commit), True)
         self.assertIs(commit_gate.record_landed(amend), True)
 
+    def test_hook_records_linked_worktree_git_directory(self):
+        self.commit('-m', 'base')
+        self.install()
+        worktree = self.root / 'linked worktree'
+        self.git('worktree', 'add', '-qb', 'linked', str(worktree))
+        self.git('commit', '--allow-empty', '-m', 'linked commit', cwd=worktree)
+        row, = self.rows()
+        self.assertEqual(row['git_dir'], self.git_dir_fields(cwd=worktree))
+        self.assertIs(commit_gate.record_landed(row), True)
+
     def test_record_landed_for_merge(self):
         self.prepare_merge()
         head = self.git('rev-parse', 'HEAD').stdout.strip()
@@ -209,6 +220,97 @@ sys.exit(main(sys.argv[2:]))
         self.assertEqual(row['head'], head)
         self.assertEqual(len(self.git('show', '-s', '--format=%P').stdout.split()), 2)
         self.assertIs(commit_gate.record_landed(row), True)
+
+    def test_record_landed_for_direct_merge_with_hook(self):
+        self.prepare_merge()
+        self.git('merge', '--no-ff', '--no-edit', 'side')
+        row, = self.rows()
+        self.assertIs(commit_gate.record_landed(row), True)
+
+    def test_record_landed_for_in_index_merge(self):
+        self.prepare_merge()
+        self.git('merge', '--no-ff', '--no-edit', '-s', 'resolve', 'side')
+        row, = self.rows()
+        self.assertIn('In-index merge', self.git('reflog', '-1', '--format=%gs').stdout)
+        self.assertIs(commit_gate.record_landed(row), True)
+
+    def test_record_landed_for_empty_commit_message(self):
+        self.install()
+        self.commit('--allow-empty-message', '-m', '')
+        row, = self.rows()
+        self.assertIs(commit_gate.record_landed(row), True)
+
+    def test_record_landed_for_same_oid_amend(self):
+        date = '2000-01-01T00:00:00+00:00'
+        self.env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+        self.commit('-m', 'base')
+        self.install()
+        self.commit('--amend', '--no-edit')
+        row, = self.rows()
+        self.assertEqual(row['head'], self.git('rev-parse', 'HEAD').stdout.strip())
+        self.assertIs(commit_gate.record_landed(row), True)
+
+    def git_dir_fields(self, *, cwd=None):
+        path = Path(self.git('rev-parse', '--absolute-git-dir', cwd=cwd).stdout.rstrip('\n'))
+        info = path.stat()
+        return {'path': str(path), 'dev': info.st_dev, 'ino': info.st_ino}
+
+    def test_record_landed_is_unknown_after_checkout_to_staged_tree(self):
+        self.commit('-m', 'base')
+        self.git('switch', '-qc', 'same-tree')
+        self.write_file('same change')
+        self.commit('-m', 'matching tree')
+        self.git('switch', '-q', 'main')
+        self.script(self.hook, f'{self.user_hook_line()}\nexit 1')
+        self.write_file('same change')
+        self.assertNotEqual(self.commit('-m', 'abort', check=False).returncode, 0)
+        row, = self.rows()
+        self.git('switch', '-qf', 'same-tree')
+        self.assertNotEqual(self.git('rev-parse', 'HEAD').stdout.strip(), row['head'])
+        self.assertEqual(self.git('rev-parse', 'HEAD^{tree}').stdout.strip(), row['tree'])
+        self.assertIsNone(commit_gate.record_landed(row))
+
+    def test_record_landed_is_unknown_after_cherry_pick_fast_forward(self):
+        self.commit('-m', 'base')
+        self.git('switch', '-qc', 'existing')
+        self.write_file('same change')
+        self.commit('-m', 'existing commit')
+        self.git('switch', '-q', 'main')
+        self.script(self.hook, f'{self.user_hook_line()}\nexit 1')
+        self.write_file('same change')
+        self.assertNotEqual(self.commit('-m', 'abort', check=False).returncode, 0)
+        row, = self.rows()
+        self.git('reset', '--hard', 'HEAD')
+        self.git('cherry-pick', '--ff', 'existing')
+        self.assertEqual(self.git('reflog', '-1', '--format=%gs').stdout.strip(), 'cherry-pick: fast-forward')
+        self.assertEqual(self.git('rev-parse', 'HEAD^{tree}').stdout.strip(), row['tree'])
+        self.assertIsNone(commit_gate.record_landed(row))
+
+    def test_record_landed_is_false_when_reflog_write_precedes_failed_ref_update(self):
+        self.commit('-m', 'base')
+        self.script(self.hook, f'{self.user_hook_line()}\nexit 1')
+        self.write_file('aborted change')
+        self.assertNotEqual(self.commit('-m', 'abort', check=False).returncode, 0)
+        row, = self.rows()
+        dangling = self.git('commit-tree', row['tree'], '-p', row['head'], '-m', 'abort').stdout.strip()
+        reflog = self.repo / '.git' / 'logs' / 'HEAD'
+        ident = self.git('var', 'GIT_COMMITTER_IDENT').stdout.strip()
+        with reflog.open('a') as stream:
+            stream.write(f"{row['head']} {dangling} {ident}\tcommit: abort\n")
+        self.assertEqual(self.git('rev-parse', 'HEAD').stdout.strip(), row['head'])
+        self.assertIs(commit_gate.record_landed(row), False)
+
+    def test_record_landed_is_unknown_for_root_row_in_replacement_repository(self):
+        self.script(self.hook, f'{self.user_hook_line()}\nexit 1')
+        self.assertNotEqual(self.commit('-m', 'abort', check=False).returncode, 0)
+        row, = self.rows()
+        self.assertIsNone(row['head'])
+        self.repo.rename(self.root / 'original')
+        self.repo.mkdir()
+        self.git('init', '-q', '-b', 'main', '--template=')
+        self.commit('-m', 'same tree')
+        self.assertEqual(self.git('rev-parse', 'HEAD^{tree}').stdout.strip(), row['tree'])
+        self.assertIsNone(commit_gate.record_landed(row))
 
     def test_record_landed_rejects_aborted_commit_and_unrelated_checkout(self):
         self.commit('-m', 'base')
@@ -240,7 +342,7 @@ sys.exit(main(sys.argv[2:]))
         self.git('checkout', '-q', 'main')
         row = {'folder': str(self.repo), 'head': self.git('rev-parse', 'HEAD').stdout.strip(),
                'tree': self.git('rev-parse', 'other^{tree}').stdout.strip(),
-               'reflog': commit_gate._head_reflog_position(self.repo)}
+               'reflog': commit_gate._head_reflog_position(self.repo), 'git_dir': self.git_dir_fields()}
         self.git('checkout', '-q', 'intermediate')
         self.git('checkout', '-q', 'other')
         self.assertIs(commit_gate.record_landed(row), False)
@@ -255,7 +357,7 @@ sys.exit(main(sys.argv[2:]))
         self.install()
         self.commit('-m', 'landed')
         row, = self.rows()
-        for field in ('tree', 'head', 'reflog'):
+        for field in ('tree', 'head', 'reflog', 'git_dir'):
             with self.subTest(missing=field):
                 self.assertIsNone(commit_gate.record_landed({k: v for k, v in row.items() if k != field}))
         for fields in ({'tree': 'bad'}, {'head': 'bad'}, {'reflog': {'size': -1, 'ino': None, 'dev': None}},

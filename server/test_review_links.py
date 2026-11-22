@@ -8323,9 +8323,12 @@ class ApprovalTurnWorktreeTests(ApprovalTurnFixture):
         ).stdout.strip()
 
     def gate_fields(self, folder, *, unborn=False):
+        path = Path(self.git("rev-parse", "--absolute-git-dir", cwd=folder))
+        info = path.stat()
         return {
             "folder": str(folder), "head": None if unborn else self.git("rev-parse", "HEAD", cwd=folder),
             "tree": self.git("write-tree", cwd=folder), "reflog": commit_gate._head_reflog_position(folder),
+            "git_dir": {"path": str(path), "dev": info.st_dev, "ino": info.st_ino},
         }
 
     def record_gate_check(self, **fields):
