@@ -354,9 +354,46 @@ async function main() {
       ['none', 'none', 'none', 'none'], 'The wide menu hides all four folded items')
     console.log(`ok a wide slot shows its header controls and hides the fold items (${wide}px slot)`)
 
+    await open(2)
+    const secondSlot = '.workspace .slot[data-slot="1"]'
+    const selectedSlot = page.locator('.workspace .slot.focused')
+    const assertWideSlots = async () => {
+      const widths = await page.locator('.workspace .slot > .chat-panel').evaluateAll(panels => panels.map(panel => panel.getBoundingClientRect().width))
+      assert.ok(widths.length === 2 && widths.every(width => width > 420), `Both panes must stay above the fold breakpoint: ${widths}`)
+    }
+    await assertWideSlots()
+    await tools.terminal.focus()
+    await page.keyboard.press('Tab')
+    assert.ok(await focused(keys), 'Tab must focus the … button in slot 1')
+    assert.equal(await selectedSlot.getAttribute('data-slot'), '0', 'Slot 1 starts selected')
+    await page.locator(`${secondSlot} .chat-empty h2`).click()
+    await page.locator(`${secondSlot}.focused`).waitFor()
+    assert.ok(await page.evaluate(() => document.activeElement === document.body), 'Clicking the empty chat in slot 2 must leave focus on the body')
+
+    for (const [axis, size] of [['height', { width: 1280, height: 760 }], ['width', { width: 1240, height: 760 }]]) {
+      await panel.evaluate((element, axis) => {
+        const before = element.getBoundingClientRect()[axis]
+        window.slotResized = new Promise(resolve => {
+          const observer = new ResizeObserver(() => {
+            if (element.getBoundingClientRect()[axis] === before) return
+            observer.disconnect()
+            // Check on the next frame, after the app's resize observers have run.
+            requestAnimationFrame(() => resolve())
+          })
+          observer.observe(element)
+        })
+      }, axis)
+      await page.setViewportSize(size)
+      await page.evaluate(() => window.slotResized)
+      await assertWideSlots()
+      assert.ok(!await focused(keys), `A ${axis}-only resize must not return focus to the … button in slot 1`)
+      assert.equal(await selectedSlot.getAttribute('data-slot'), '1', `Slot 2 must stay selected after a ${axis}-only resize`)
+    }
+    console.log('ok resizing wide slots keeps slot 2 selected and focus away from the … button in slot 1')
+
     assert.deepEqual(writes.filter(write => write.endpoint !== 'prefs'), [], 'Header actions send no API writes except local fixture preference sync')
     assert.deepEqual(errors, [], 'No uncaught browser exceptions')
-    console.log('12 scenarios passed. No terminal writes or uncaught browser exceptions.')
+    console.log('13 scenarios passed. No terminal writes or uncaught browser exceptions.')
   } finally {
     await browser.close()
   }
