@@ -131,7 +131,7 @@ if __name__ == '__main__':
 
 
 class GutterAskTests(unittest.TestCase):
-    """Claude 2.1.330 draws a dim "│" gutter left of a question that wraps (live captures, 120 columns)."""
+    """Claude 2.1.330 draws a dim "│" gutter left of a question that wraps (live captures at 120 and 44 columns)."""
     DIR = Path(__file__).parent / 'fixtures/claude_2.1.330_ask_gutter'
 
     def setUp(self):
@@ -148,9 +148,9 @@ class GutterAskTests(unittest.TestCase):
         return {'id': '%gutter', 'agent': 'claude', 'transcript': str(transcript)}
 
     def test_wrapped_question_verifies_without_the_gutter(self):
-        for name in ('long', 'two', 'short'):
-            with self.subTest(name=name):
-                frame = (self.DIR / f'{name}-120.ansi').read_text()
+        for name, width in (('long', 120), ('long', 44), ('two', 120), ('short', 120)):
+            with self.subTest(name=name, width=width):
+                frame = (self.DIR / f'{name}-{width}.ansi').read_text()
                 expected = self.asks[name]['questions'][0]
                 self.assertEqual(choice_state.ask_current(frame)['question'], ' '.join(expected['question'].split()))
                 menu = terminal.verified_numbered_menu(self.entry(name), frame)
@@ -163,7 +163,7 @@ class GutterAskTests(unittest.TestCase):
     def test_a_gutter_on_only_some_rows_is_refused(self):
         frame = (self.DIR / 'long-120.ansi').read_text()
         lines = frame.split('\n')
-        at = next(i for i, line in enumerate(lines) if '│' in line and 'exist on dev today' in line)
+        at = next(i for i, line in enumerate(lines) if '│' in line and 'exist on the main branch' in line)
         lines[at] = terminal.ANSI_SGR.sub('', lines[at]).replace('│', ' ', 1)
         self.assertIsNone(terminal.verified_numbered_menu(self.entry('long'), '\n'.join(lines)))
 

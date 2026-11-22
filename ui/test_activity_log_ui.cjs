@@ -1,4 +1,4 @@
-// Settings › Activity (ActivityLog.tsx) and the level Undo toast (LevelUndo.tsx), against an existing build. Every API
+// Settings › Activity log (ActivityLog.tsx) and the level Undo toast (LevelUndo.tsx), against an existing build. Every API
 // request stays in this page's fixtures; no terminal and no real setting is touched.
 // Run: cd ui && npm run test:ui (or node test_activity_log_ui.cjs after a build).
 const http = require('node:http')

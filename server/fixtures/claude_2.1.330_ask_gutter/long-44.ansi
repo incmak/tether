@@ -1,0 +1,40 @@
+[48;5;237m  [38;5;231mbusy. The browser proof becomes part of [39m
+  [38;5;231mthe editor fix."}, {"label": "Hold until [39m
+  [38;5;231mthe editor fix", "description": "Keep [39m
+  [38;5;231mboth commits local. Fix the editor first [39m
+  [38;5;231min a new tab, then prove the export end [39m
+  [38;5;231mto end in a browser, then push."}]}]}[39m
+[38;5;246m[49m────────────────────────────────────────────
+[38;5;16m[48;5;153m ☐ Ship plan [39m[49m
+
+[2m│[0m [1m[38;5;231mRelease proof: the two cases that show the
+[0;2m│[0m [1m[38;5;231mnew export path cannot be reached in a [0m
+[2m│[0m [1m[38;5;231mbrowser because of bugs that also exist on
+[0;2m│[0m [1m[38;5;231mthe main branch today. (1) A report with [0m
+[2m│[0m [1m[38;5;231ma missing chart never opens the editor, so
+[0;2m│[0m [1m[38;5;231mthe upload button can't be reached. (2) A[0m
+[2m│[0m [1m[38;5;231mbundle with more than 50 chart files is [0m
+[2m│[0m [1m[38;5;231mrefused. The behaviour is proven by [0m
+[2m│[0m [1m[38;5;231mpipeline tests and database tests, and a [0m
+[2m│[0m [1m[38;5;231mreviewer approved it. How do you want it [0m
+[2m│[0m [1m[38;5;231mshipped?[0m
+
+[38;5;153m❯[39m [38;5;246m1.[39m [38;5;153mShip, label proof (Recommended)[39m
+     [38;5;246mPush both branches once (pipeline [39m
+     [38;5;246mfirst). The notes say 'export path not
+[39m     [38;5;246mproven in browser' and name the two [39m
+     [38;5;246mblocking bugs. I run one browser check
+[39m     [38;5;246mthat a normal import still exports when
+[39m     [38;5;246mthe host is busy. The browser proof [39m
+     [38;5;246mbecomes part of the editor fix.[39m
+  [38;5;246m2.[39m Hold until the editor fix
+     [38;5;246mKeep both commits local. Fix the editor
+[39m     [38;5;246mfirst in a new tab, then prove the [39m
+     [38;5;246mexport end to end in a browser, then [39m
+     [38;5;246mpush.[39m
+  [38;5;246m3. Type something.[39m
+[38;5;246m────────────────────────────────────────────
+[39m  4. Chat about this
+
+[38;5;246mEnter to select · ↑/↓ to navigate · Esc to [39m
+[38;5;246mcancel[39m

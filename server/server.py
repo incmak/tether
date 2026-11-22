@@ -940,7 +940,7 @@ def brief_messages(entry):
 
 
 def brief_enabled():
-    """Settings › Main AI model = Local only keeps every chat on the server."""
+    """Settings › Models & helpers › Main AI model = Local only keeps every chat on the server."""
     return prefs_sync.load()['prefs'].get('mainModel') != 'none'
 
 

@@ -32,7 +32,7 @@ const lessonsWord = (count: number) => `${count} ${count === 1 ? 'lesson' : 'les
 function CheckPanel({ check, busy, error, onStart }: { check: LessonsCheck; busy: boolean; error: string; onStart: () => void }) {
   useTetherZone()
   const running = check.state === 'running'
-  const who = check.label ? `The advisor (${check.label})` : 'The advisor you chose in Settings › Agents'
+  const who = check.label ? `The advisor (${check.label})` : 'The advisor you chose in Settings › Models & helpers'
   return <section className="review-check" aria-labelledby="review-check-title">
     <h3 id="review-check-title">Advisor check</h3>
     {running ? <p className="review-check-status" role="status"><span className="review-check-pulse" aria-hidden="true" />The advisor is checking {check.count ? lessonsWord(check.count) : 'the lessons'}. It takes a few minutes. You can close this sheet.</p>

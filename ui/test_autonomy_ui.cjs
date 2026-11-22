@@ -68,7 +68,7 @@ let setup = setupFresh()
 let keys = []
 const b64 = bytes => Buffer.from(bytes).toString('base64url')
 const approved = body => !!body.approval?.challenge_id && !!body.approval?.credential?.response?.signature
-const needsKey = () => ({ status: 403, json: keys.length ? { error: 'Approve with your passkey.', approval: 'required' } : { error: 'Add a passkey in Settings › Setup first.', approval: 'no-passkey' } })
+const needsKey = () => ({ status: 403, json: keys.length ? { error: 'Approve with your passkey.', approval: 'required' } : { error: 'Add a passkey in Settings › Autonomy › Setup first.', approval: 'no-passkey' } })
 
 async function main() {
   let browser, page, server, failed = 0
@@ -128,7 +128,7 @@ async function main() {
             return route.fulfill({ json: body.action === 'ping-test' ? { ...setup, test: { ok: true, code: 0, detail: '' } } : setup })
           }
           if (endpoint === 'autonomy/review' && body.action === 'check') {
-            if (checkMode === 'off') return route.fulfill({ status: 400, json: { error: 'Turn on the advisor in Settings › Agents first.' } })
+            if (checkMode === 'off') return route.fulfill({ status: 400, json: { error: 'Turn on the advisor in Settings › Models & helpers first.' } })
             if (checkMode === 'busy') {
               reviewState = { ...reviewState, check: { ...reviewState.check, state: 'running', started: now + 5, finished: null, count: 3 } }
               return route.fulfill({ status: 409, json: { error: 'The advisor is already checking the lessons.' } })
@@ -397,7 +397,7 @@ async function main() {
       await page.screenshot({ path: path.join(SHOTS, `settings-reviewer-sheet-${width}.png`) })
       await sheet.getByRole('button', { name: 'Done' }).click()
       await sheet.waitFor({ state: 'hidden' })
-      if (await search.count()) await search.fill('learning')
+      await search.fill('learning from feedback')
       const learnSwitch = page.getByRole('switch', { name: /Learn from your feedback/ })
       await learnSwitch.waitFor()
       await learnSwitch.scrollIntoViewIfNeeded()
@@ -428,7 +428,7 @@ async function main() {
       checkMode = 'off'
       mark0 = posts.length
       await reviewSheet.getByRole('button', { name: 'Ask the advisor to check these' }).click()
-      await reviewSheet.getByText('Turn on the advisor in Settings › Agents first.').waitFor()
+      await reviewSheet.getByText('Turn on the advisor in Settings › Models & helpers first.').waitFor()
       check(`${at} check posts action check`, posts.slice(mark0).some(post => post.endpoint === 'autonomy/review' && post.body.action === 'check'))
       checkMode = 'ok'
       await reviewSheet.getByRole('button', { name: 'Try again' }).click()

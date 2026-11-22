@@ -236,7 +236,7 @@ const cases = [
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
     await page.waitForFunction(() => history.state?.layer === 1)
     const openedState = await page.evaluate(() => history.state)
-    await settings.getByRole('button', { name: /^About & system/ }).click()
+    await settings.getByRole('button', { name: 'About & updates', exact: true }).click()
     url = page.url()
     const finished = page.waitForEvent('requestfinished', { predicate: request => request.isNavigationRequest() && request.url() === url })
     const failed = page.waitForEvent('requestfailed', { predicate: request => request.isNavigationRequest() && request.url() === url })

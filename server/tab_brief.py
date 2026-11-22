@@ -55,7 +55,7 @@ Reply with one JSON object and nothing else: {"name": "...", "description": "...
 NOT_SENT = {
     'foundry': 'Tab briefs are off for Foundry Codex tabs.',
     'other': 'Tab briefs are off for this Codex provider.',
-    'off': 'Tab briefs are off: Settings › Main AI model is Local only.',
+    'off': 'Tab briefs are off: Settings › Models & helpers › Main AI model is Local only.',
 }
 
 SECRETS = [

@@ -1,4 +1,4 @@
-// The commit gate in Settings › Agents (src/CommitGate.tsx, server/commit_gate.py) against an existing build: the
+// The commit gate in Settings › Commit & merge (src/CommitGate.tsx, server/commit_gate.py) against an existing build: the
 // skeleton while it loads, the load error, the empty log, the numbers, a mode change, a failed save, the keyboard, and
 // 320 px and 1280 px without overflow, in light and dark. Every API request stays in this page's fixtures.
 // Run: cd ui && npm run test:ui (or DIST=<build> node test_commit_gate_ui.cjs).

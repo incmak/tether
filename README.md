@@ -145,13 +145,13 @@ To rotate the token, remove `~/.config/mobile-tmux/token` and restart the servic
 Treat the token like an SSH key. Shell commands run as the server user.
 Report security problems privately; see [SECURITY.md](SECURITY.md).
 
-Passkey approvals (Settings › Setup) guard requests that raise agent power, such as a higher autonomy level.
+Passkey approvals (Settings › Autonomy › Setup) guard requests that raise agent power, such as a higher autonomy level.
 They stop requests through the Tether API. They do not stop a process that runs as your user: agents run as that user, so they can change Tether's files directly.
 For the same reason, the first passkey needs no approval: no local check can tell you from an agent.
 When the first passkey is added, or the last passkey is removed, Tether sends a push notice and an urgent ping, when one is set up. The urgent ping goes out even when urgent pings are switched off.
 If you did not add that first passkey, Settings cannot remove it: removal needs a passkey you hold. Delete `~/.config/mobile-tmux/passkeys.json` on the Tether host, add your own passkey, and check your agents.
 
-Answers from Teams: when the urgent ping goes to the BriskBot 1:1 chat (Settings › Agents › Urgent pings in Teams, Send to: Direct chat), each card gets a reply box.
+Answers from Teams: when the urgent ping goes to the BriskBot 1:1 chat (Settings › Autonomy › Setup › Urgent pings in Teams, Send to: Direct chat), each card gets a reply box.
 Type the answer in the box and select **Send to the tab**, or quote-reply the card.
 Tether reads the answer back with `chat-replies.py` (next to `post-update.py`) and types it into the tab that asked, as `[Answer from Teams] …`.
 It sends the answer only when that tab still shows the same conversation, and not while the tab waits on an approval or a picker or has an unsent draft.
@@ -244,7 +244,7 @@ Set `MOBILE_TMUX_DEV_PREVIEW_PORTS` to change the pool (`7700-7704`), or to `off
 ## Commit gate
 
 Install the Git commit gate from the worktree with `python3 server/commit_gate.py install-hook`. It checks the final
-`Verified:` line for Claude, Codex and terminal commits, using the mode in Settings › Agents. If you already have your
+`Verified:` line for Claude, Codex and terminal commits, using the mode in Settings › Commit & merge. If you already have your
 own `commit-msg` hook, the installer gives you a line to add before the hook exits with status 0. Add
 `--uninstall` to remove the Tether hook. Both forms let the commit through if the gate takes more than 10 seconds.
 For the line in your own hook, the helper uses `python3` unless you set `TETHER_PYTHON`.
@@ -274,7 +274,7 @@ message of each uncovered commit and logs one `hook-silent` row per worktree and
 
 Auto-merge checks a low-risk worker branch against `main` at the push URL for `origin` after a reviewer tab approves it.
 The available modes are **Observe** and **Off**. Tether starts in Observe and records what it would merge in
-Settings › Agents › Auto-merge. Off stops the checks. The Enforce engine is built and tested. It will become
+Settings › Commit & merge › Auto-merge. Off stops the checks. The Enforce engine is built and tested. It will become
 available when auto-merge has its own identity, so agents on the same OS account cannot change its trust or approve it.
 
 A branch passes the checks when all of this holds:
