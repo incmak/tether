@@ -7,6 +7,7 @@ when the conversation returns to a live pane. Opening the tab only marks it open
 Urgent asks get a three-minute grace period before an unopened ask can send a Teams ping.
 The state lives in one JSON file (paths.ATTENTION), written atomically, so asks survive a restart.
 """
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -17,6 +18,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import audit
 import needs
@@ -49,9 +51,11 @@ class AttentionError(Exception):
     pass
 
 
-def _local_midnight(now):
+def _local_midnight(now, tz=None):
     """The first instant of today in the Tether zone."""
-    return tether_zone.day_start(tether_zone.now(now).date())
+    if tz is None:
+        tz = tether_zone.zone()
+    return tether_zone.day_start(datetime.fromtimestamp(now, tz).date(), tz=tz)
 
 
 def _clip(text):
@@ -675,12 +679,13 @@ class Attention:
         # Read the audit log and the Undo outbox under the same lock.
         with self.lock:
             now = self.clock()
-            today_start = _local_midnight(now)
+            zone = tether_zone.name()
+            today_start = _local_midnight(now, ZoneInfo(zone))
             page = self._query_log(kinds=['automation'], since=now - AUTOMATION_HISTORY, limit=100)
             handled_today, undone, asks = self._automation_today(today_start, page)
             entries = [self._move_row(row, undone, asks) if row['kind'] == 'auto.stale_ask' else row
                        for row in page['entries']]
-        return {'entries': entries, 'handled_today': handled_today, 'today_start': today_start}
+        return {'entries': entries, 'handled_today': handled_today, 'today_start': today_start, 'zone': zone}
 
     def _move_row(self, row, undone, asks):
         if self._move_failed(row, asks):

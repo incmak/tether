@@ -2,6 +2,7 @@ import { useSyncExternalStore } from 'react'
 
 export const DEFAULT_ZONE = 'Asia/Kolkata'
 let current = DEFAULT_ZONE
+let currentConfirmed = false
 const listeners = new Set<() => void>()
 const formatters = new Map<string, Intl.DateTimeFormat | null>()
 
@@ -21,10 +22,12 @@ function formatter(zone: string, options: Intl.DateTimeFormatOptions, locale?: s
 }
 
 export const tetherZone = () => current
+export const tetherZoneConfirmed = () => currentConfirmed
 /** confirmed: the server answered with this zone; an old name applies when its renamed copy formats. */
 export function setTetherZone(name: string, confirmed = false) {
-  if (!name || name === current || !(confirmed ? canFormat(name) : acceptsZone(name))) return
+  if (!name || (name === current && confirmed === currentConfirmed) || !(confirmed ? canFormat(name) : acceptsZone(name))) return
   current = name
+  currentConfirmed = confirmed
   for (const listener of listeners) listener()
 }
 
@@ -35,6 +38,10 @@ function subscribe(listener: () => void) {
 
 export function useTetherZone() {
   return useSyncExternalStore(subscribe, tetherZone, tetherZone)
+}
+
+export function useTetherZoneConfirmed() {
+  return useSyncExternalStore(subscribe, tetherZoneConfirmed, tetherZoneConfirmed)
 }
 
 const RENAMED: Record<string, string> = {

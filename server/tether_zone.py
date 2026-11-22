@@ -79,10 +79,11 @@ def parse(text):
     return wall_times(wall, zone())[-1]
 
 
-def day_start(text_or_date):
+def day_start(text_or_date, *, tz=None):
     """Unix seconds at the first instant of a local day, or the next instant if the day was skipped."""
     day = date.fromisoformat(text_or_date) if isinstance(text_or_date, str) else text_or_date
-    tz = zone()
+    if tz is None:
+        tz = zone()
     midnight = datetime(day.year, day.month, day.day)
     at = int(midnight.replace(tzinfo=tz).timestamp())
     if datetime.fromtimestamp(at, tz).replace(tzinfo=None) == midnight:

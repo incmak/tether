@@ -8,7 +8,7 @@ import type { Api, Ask, Pane } from './api'
 import { ApiError, errorText } from './api'
 import type { Reminder } from './reminders'
 import { whenLabel } from './reminders'
-import { fmtDate, fmtTime, tetherZone, useTetherZone } from './zone'
+import { fmtDate, fmtTime, tetherZone, tetherZoneConfirmed, useTetherZone, useTetherZoneConfirmed } from './zone'
 import { askAction, confirmStaleRule, LATE, splitToday, staleRuleQueue, stillWait, useNow } from './attention'
 import type { AskAction, AttentionState, StaleRuleResult, AutoEntry, AutoLog, Digest, Waiting } from './attention'
 import { useModal } from './hooks'
@@ -240,25 +240,31 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
   const focusLater = useRef<{ id: string; neighbors: string[] } | null>(null)
   const focusUndo = useRef('')
   const now = useNow()
-  // A zone change moves "today" on the server and every time shown here, so reload the log.
+  // Reload when the zone changes locally and when the server confirms it.
   const zone = useTetherZone()
-  const [loaded, setLoaded] = useState<(AutoLog & { zone: string }) | null>(null)
-  const [failure, setFailure] = useState<{ zone: string; text: string } | null>(null)
-  if (failure && failure.zone !== zone) setFailure(null)
+  const confirmed = useTetherZoneConfirmed()
+  const [loaded, setLoaded] = useState<AutoLog | null>(null)
+  const [failure, setFailure] = useState<{ api: Api; zone: string; confirmed: boolean; text: string } | null>(null)
+  const latestRequest = useRef(0)
   const log = loaded?.zone === zone ? loaded : null
-  const error = failure?.zone === zone ? failure.text : ''
+  const currentFailure = failure?.api === api && failure.zone === zone && failure.confirmed === confirmed ? failure : null
+  if (failure && !currentFailure) setFailure(null)
+  const error = currentFailure?.text ?? ''
   const [busy, setBusy] = useState('')
   const [rowError, setRowError] = useState<{ id: string; text: string } | null>(null)
   const [status, setStatus] = useState('')
   const load = useCallback((signal?: AbortSignal) => {
+    const request = ++latestRequest.current
     const requestedZone = tetherZone()
-    const isCurrent = () => !signal?.aborted && tetherZone() === requestedZone
+    const requestedConfirmation = tetherZoneConfirmed()
+    const isCurrent = () => request === latestRequest.current && !signal?.aborted
+      && tetherZone() === requestedZone && tetherZoneConfirmed() === requestedConfirmation
     return api<AutoLog>('attention/log', undefined, signal).then(data => {
       if (!isCurrent()) return
-      setLoaded({ ...data, zone: requestedZone })
+      setLoaded(data)
       setFailure(null)
     }).catch(reason => {
-      if (isCurrent()) setFailure({ zone: requestedZone, text: errorText(reason) })
+      if (isCurrent()) setFailure({ api, zone: requestedZone, confirmed: requestedConfirmation, text: errorText(reason) })
     })
   }, [api])
   const reload = () => {
@@ -274,7 +280,7 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
     target?.focus()
   })
   useEffect(() => { heading.current?.focus() }, [])
-  useEffect(() => { const controller = new AbortController(); void load(controller.signal); return () => controller.abort() }, [load, zone])
+  useEffect(() => { const controller = new AbortController(); void load(controller.signal); return () => controller.abort() }, [load, zone, confirmed])
   const back = async (id: string, write: () => Promise<unknown>, done: string, source: { undo: AutoEntry } | { index: number }) => {
     if (busy) return
     setBusy(id); setRowError(null)

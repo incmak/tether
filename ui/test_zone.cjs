@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict')
 const { readFileSync } = require('node:fs')
 const { test } = require('node:test')
+const React = require('react')
 const ts = require('typescript')
 
 const mod = new module.constructor('src/zone.ts')
@@ -10,8 +11,31 @@ mod._compile(ts.transpileModule(readFileSync('src/zone.ts', 'utf8'), {
 }).outputText, 'src/zone.ts')
 const {
   DEFAULT_ZONE, dayKey, fmtDate, fmtDateTime, fmtDay, fmtTime, offsetLabel, pickZone,
-  sameDay, setTetherZone, startOfDay, tetherZone, zonedTime, zoneLabel, zoneList, zoneParts,
+  sameDay, setTetherZone, startOfDay, tetherZone, useTetherZone, useTetherZoneConfirmed, zonedTime, zoneLabel, zoneList, zoneParts,
 } = mod.exports
+
+test('the zone store notifies when only confirmation changes and keeps the name snapshot', t => {
+  t.mock.method(React, 'useSyncExternalStore', (subscribe, snapshot) => ({ subscribe, snapshot }))
+  const name = 'America/New_York'
+  setTetherZone(name, false)
+  const zone = useTetherZone()
+  const zoneUpdates = []
+  const unsubscribeZone = zone.subscribe(() => zoneUpdates.push(zone.snapshot()))
+  t.after(unsubscribeZone)
+
+  // Record what the name-only hook sees when the first confirmation arrives.
+  setTetherZone(name, true)
+  assert.deepEqual(zoneUpdates, [name])
+  const confirmation = useTetherZoneConfirmed()
+  assert.equal(confirmation.snapshot(), true)
+  const confirmationUpdates = []
+  t.after(confirmation.subscribe(() => confirmationUpdates.push(confirmation.snapshot())))
+  setTetherZone(name, true)
+  setTetherZone(name, false)
+  setTetherZone(name, true)
+  assert.deepEqual(confirmationUpdates, [false, true])
+  assert.deepEqual(zoneUpdates, [name, name, name])
+})
 
 test('Havana day starts at the first midnight in a fold and the first valid time in a gap', () => {
   for (const [instant, expected] of [

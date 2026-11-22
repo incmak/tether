@@ -12,8 +12,9 @@ const NY = 'America/New_York'
 const LA = 'America/Los_Angeles'
 const seconds = time => Date.parse(time) / 1000
 const entry = { id: 'overnight', at: seconds('2026-11-21T06:00Z'), kind: 'auto.move', summary: 'Overnight move' }
-const nyLog = { today_start: seconds('2026-11-21T05:00Z'), handled_today: 1, entries: [entry] }
-const laLog = { today_start: seconds('2026-11-21T08:00Z'), handled_today: 0, entries: [entry] }
+const nyLog = { zone: NY, today_start: seconds('2026-11-21T05:00Z'), handled_today: 1, entries: [entry] }
+const laLog = { zone: LA, today_start: seconds('2026-11-21T08:00Z'), handled_today: 0, entries: [entry] }
+const emptyNY = { ...nyLog, handled_today: 0, entries: [] }
 const todayEntry = {
   ...entry, id: 'morning', at: seconds('2026-11-21T09:00Z'), summary: 'Morning move',
   undo: { session: '%1', thread: 'fixture', ask: 'ask-1', entry: 'morning' },
@@ -53,7 +54,7 @@ w.settle = async (index: number, log: unknown) => {
   await request.promise.catch(() => {})
   markSettled(index + 1)
 }
-w.changeZone = (zone: string) => flushSync(() => setTetherZone(zone))
+w.changeZone = (zone: string, confirmed = false) => flushSync(() => setTetherZone(zone, confirmed))
 w.logState = () => ({
   rows: Array.from(document.querySelectorAll('.handled-line'), row => row.textContent),
   count: document.querySelector('#handled-log .handled-count')?.textContent,
@@ -104,18 +105,20 @@ async function main() {
     const retry = sheet.getByRole('button', { name: 'Retry' })
     const readLog = () => page.evaluate(() => window.logState())
     const waitForRequest = (index, zone) => page.waitForFunction(([i, name]) => window.requests[i]?.zone === name, [index, zone])
-    const switchToLA = () => page.evaluate(zone => window.changeZone(zone), LA)
+    const changeZone = (zone, confirmed = false) => page.evaluate(([name, saved]) => window.changeZone(name, saved), [zone, confirmed])
+    const switchToLA = () => changeZone(LA)
     const settle = async (index, log) => {
       await page.evaluate(([i, data]) => window.settle(i, data), [index, log])
       await page.locator(`[data-settled="${index + 1}"]`).waitFor()
     }
-    const open = async () => {
+    const open = async (zone = NY) => {
       await page.goto('http://fixture.invalid/')
       await page.addStyleTag({ content: css })
       await page.addScriptTag({ content: bundle.outputFiles[0].text })
+      await changeZone(zone)
       await page.getByRole('button', { name: /^Handled for you today:/ }).click()
       await sheet.waitFor()
-      await waitForRequest(0, NY)
+      await waitForRequest(0, zone)
     }
     const expectOvernightInLA = async () => {
       await older.waitFor()
@@ -205,6 +208,63 @@ async function main() {
       assert.equal(await today.getByRole('heading').textContent(), 'Today 0')
       assert.equal(await undone.evaluate(node => document.activeElement === node), true)
       await expectOvernightInLA()
+    })
+
+    await test('the log waits for the server zone and reloads on confirmation of the same name', async () => {
+      await open(LA)
+      await settle(0, nyLog)
+      assert.deepEqual(await readLog(), hiddenLog)
+      await changeZone(LA, true)
+      await waitForRequest(1, LA)
+      assert.equal(await page.evaluate(() => window.requests[0].signal.aborted), true)
+      assert.deepEqual(await readLog(), hiddenLog)
+      await settle(1, laLog)
+      await expectLA()
+    })
+
+    await test('a rejected zone save keeps the mismatched log in the loading state', async () => {
+      await open()
+      await settle(0, laLog)
+      assert.deepEqual(await readLog(), hiddenLog)
+    })
+
+    await test('an old New York Retry cannot overwrite the new New York log after switching back', async () => {
+      await open()
+      await settle(0, null)
+      await retry.click()
+      await waitForRequest(1, NY)
+      await switchToLA()
+      await waitForRequest(2, LA)
+      await settle(2, laLog)
+      await expectLA()
+      await changeZone(NY)
+      await waitForRequest(3, NY)
+      await settle(3, emptyNY)
+      assert.equal(await today.getByRole('heading').textContent(), 'Today 0')
+      await settle(1, nyLog)
+      assert.deepEqual(await readLog(), { ...hiddenLog, count: '0', loading: false })
+    })
+
+    await test('a post-Undo load cannot overwrite a newer Retry', async () => {
+      await open()
+      const beforeUndo = { ...nyLog, entries: [todayEntry] }
+      await settle(0, beforeUndo)
+      await today.getByRole('button', { name: `Undo: ${todayEntry.summary}` }).click()
+      await waitForRequest(1, NY)
+      const undone = today.getByText('Undone', { exact: true })
+      await undone.waitFor()
+      assert.equal(await today.getByRole('heading').textContent(), 'Today 0')
+      await switchToLA()
+      await waitForRequest(2, LA)
+      await changeZone(NY)
+      await waitForRequest(3, NY)
+      await settle(3, null)
+      await retry.click()
+      await waitForRequest(4, NY)
+      await settle(4, emptyNY)
+      assert.equal(await today.getByRole('heading').textContent(), 'Today 0')
+      await settle(1, beforeUndo)
+      assert.deepEqual(await readLog(), { ...hiddenLog, count: '0', loading: false })
     })
   } finally {
     try { await context?.close() } finally { await browser.close() }

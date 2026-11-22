@@ -1789,3 +1789,24 @@ class TetherZoneDayTest(unittest.TestCase):
         for name, start in cases.items():
             with self.subTest(zone=name), mock.patch.object(tether_zone, 'zone', return_value=ZoneInfo(name)):
                 self.assertEqual(attention._local_midnight(at), start.timestamp())
+
+    def test_automation_log_uses_the_same_zone_for_the_name_and_today(self):
+        clock = Clock(datetime(2026, 11, 21, 12, tzinfo=timezone.utc).timestamp())
+        audit = FakeLog(clock)
+        audit.record('auto.stale_ask', 'Moved an ask to Later')
+        clock.now = datetime(2026, 11, 22, 3, tzinfo=timezone.utc).timestamp()
+        folder = self.enterContext(tempfile.TemporaryDirectory())
+        store = attention.Attention(Path(folder) / 'attention.json', clock, log=audit)
+        cases = (
+            ('America/New_York', datetime(2026, 11, 21, 5, tzinfo=timezone.utc), 1, 'Asia/Kolkata'),
+            ('Asia/Kolkata', datetime(2026, 11, 21, 18, 30, tzinfo=timezone.utc), 0, 'America/New_York'),
+        )
+        for name, start, count, changed in cases:
+            with self.subTest(zone=name), mock.patch.object(tether_zone, 'name', return_value=name) as zone_name:
+                # A preference change after the first read must not affect this response.
+                zone_name.side_effect = [name, changed, changed]
+                log = store.automation_log()
+                self.assertEqual(log['zone'], name)
+                self.assertEqual(log['today_start'], start.timestamp())
+                self.assertEqual(log['handled_today'], count)
+                zone_name.assert_called_once_with()
