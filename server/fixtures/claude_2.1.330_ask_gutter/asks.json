@@ -21,7 +21,7 @@
  "two": {
   "questions": [
    {
-    "question": "Should we ship the image provenance change today, or should we wait until the editor bug is fixed and proven in a real browser?",
+    "question": "Should we ship the dark theme color change today, or should we wait until the editor bug is fixed and proven in a real browser?",
     "header": "Ship",
     "multiSelect": false,
     "options": [
