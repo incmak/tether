@@ -129,14 +129,16 @@ async function main() {
       assert.ok(result.hit, `“${result.label}” must be hit-testable at (${result.x}, ${result.y})`)
       return result
     }
-    const activateMenuItem = async name => {
+    const tabToMenuItem = async item => {
       await keys.focus()
       await page.keyboard.press('Enter')
-      const item = menuItem(name)
       await item.waitFor()
       const tabStops = await menu.getByRole('button', { disabled: false }).count()
       for (let index = 0; index < tabStops && !await focused(item); index++) await page.keyboard.press('Tab')
-      assert.ok(await focused(item), `Tab must reach “${name}” from the … button`)
+      assert.ok(await focused(item), `Tab must reach “${(await item.textContent()).trim()}” from the … button`)
+    }
+    const activateMenuItem = async name => {
+      await tabToMenuItem(menuItem(name))
       await page.keyboard.press('Enter')
     }
     const closePickerWithEscape = async () => {
@@ -252,6 +254,67 @@ async function main() {
       `The menu must stay within 8px above or below its … button after resize: ${JSON.stringify({ anchor, resized })}`)
     console.log('ok all short-row menu buttons receive hits, a mouse click zooms, and resize preserves the anchor')
 
+    await page.setViewportSize({ width: 1280, height: 500 })
+    await open(4, { cols: { 4: [0.25] }, row: 0.15 })
+    const lastMenuButton = menu.getByRole('button').last()
+    await tabToMenuItem(lastMenuButton)
+    const beforeShrink = await menu.evaluate(element => ({ scrollTop: element.scrollTop, maxHeight: element.style.maxHeight }))
+    assert.ok(beforeShrink.scrollTop > 0, 'Tab to the last … menu button must scroll the short menu')
+    await page.setViewportSize({ width: 1280, height: 490 })
+    await page.waitForFunction(({ slot, previousHeight }) => {
+      const list = document.querySelector(`${slot} .keys-menu`)
+      return list && list.style.maxHeight !== previousHeight
+    }, { slot, previousHeight: beforeShrink.maxHeight })
+    const afterShrink = await lastMenuButton.evaluate(button => {
+      const list = button.closest('.keys-menu')
+      const item = button.getBoundingClientRect(), box = list.getBoundingClientRect()
+      return {
+        focused: document.activeElement === button,
+        scrollTop: list.scrollTop,
+        inMenu: item.top >= box.top && item.bottom <= box.bottom && item.left >= box.left && item.right <= box.right,
+        inViewport: item.top >= 0 && item.bottom <= innerHeight && item.left >= 0 && item.right <= innerWidth,
+      }
+    })
+    assert.ok(afterShrink.focused && afterShrink.scrollTop > 0 && afterShrink.inMenu && afterShrink.inViewport,
+      `Shrinking the short row must preserve scroll and keep the focused last button fully visible: ${JSON.stringify(afterShrink)}`)
+    console.log('ok shrinking the short row preserves menu scroll and keeps the last focused button visible')
+
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await open(4)
+    await tabToMenuItem(lastMenuButton)
+    const focusOutsideKeys = () => page.evaluate(slot => {
+      const active = document.activeElement
+      return !!active && active !== document.body && !active.closest(`${slot} .keys-container`)
+    }, slot)
+    await page.keyboard.press('Tab')
+    // A manual popover can be last in the tab order, with a stop in the browser chrome before tab order wraps.
+    if (!await focusOutsideKeys()) await page.keyboard.press('Tab')
+    assert.ok(await focusOutsideKeys(), 'Tab after the last … menu button must focus a control outside the … container')
+    assert.equal(await menu.count(), 0, 'Tab out of the … container must close the menu')
+    const focusUncovered = await page.evaluate(() => {
+      const active = document.activeElement
+      const { left, right, top, bottom } = active.getBoundingClientRect()
+      return active.contains(document.elementFromPoint((left + right) / 2, (top + bottom) / 2))
+    })
+    assert.ok(focusUncovered, 'The newly focused control must receive hits at its center')
+    console.log('ok Tab out closes the … menu and leaves the next focused control uncovered')
+
+    await open(3)
+    await widthIn('Focus before widening', 320, 420)
+    await tabToMenuItem(menuItem('Search this chat'))
+    await page.setViewportSize({ width: 1440, height: 800 })
+    await widthIn('Focus after widening', 420)
+    await menuItem('Search this chat').waitFor({ state: 'hidden' })
+    await page.waitForFunction(slot => {
+      const trigger = document.querySelector(`${slot} .keys-container > button`)
+      return trigger && document.activeElement === trigger
+    }, slot)
+    await menu.waitFor()
+    await page.keyboard.press('Escape')
+    await menu.waitFor({ state: 'detached' })
+    assert.ok(await focused(keys), 'Escape must leave focus on the … button after widening')
+    console.log('ok widening moves focus from the folded Search item to the … button and Escape closes the menu')
+
     await page.setViewportSize({ width: 1280, height: 800 })
     // Four slots form a 2×2 grid. Set an unequal column split to reach the smallest tier at the same viewport.
     await open(4, { cols: { 4: [0.25] } })
@@ -293,7 +356,7 @@ async function main() {
 
     assert.deepEqual(writes.filter(write => write.endpoint !== 'prefs'), [], 'Header actions send no API writes except local fixture preference sync')
     assert.deepEqual(errors, [], 'No uncaught browser exceptions')
-    console.log('9 scenarios passed. No terminal writes or uncaught browser exceptions.')
+    console.log('12 scenarios passed. No terminal writes or uncaught browser exceptions.')
   } finally {
     await browser.close()
   }
