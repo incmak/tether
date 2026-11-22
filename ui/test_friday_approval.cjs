@@ -131,7 +131,7 @@ test('Friday counts a finished turn once, with prompts and waiting asks taking p
   assert.deepEqual(state, {
     target: '', busy: ['Print'], needs: [{ chat: 'Catalog', needs: 'Publish the proof?' }],
     waiting: [{ chat: 'Palette', kind: 'question', text: 'Choose a palette' }], waiting_count: 2,
-    done: [{ chat: 'Proof', finished: 900 }], done_count: 1, idle: 1,
+    done: [{ chat: 'Proof' }], done_count: 1, idle: 1,
   })
   assert.equal(state.busy.length + state.needs.length + state.waiting.length + state.done_count + state.idle, agents.length)
   assert.deepEqual(plain(chatList(agents, agents, undefined, overlapping)), {
@@ -155,7 +155,7 @@ test('Friday preserves Home Done order and omits opened, hidden and waiting chat
   const agents = [proof, cover, read, selected, hidden, waiting]
   const home = homeAttention(agents, true, pane => pane.id === hidden.id, { [read.id]: read.finished }, selected.id)
   const state = plain(chats(agents, selected, home))
-  assert.deepEqual(state.done, [{ chat: 'Cover', finished: 950 }, { chat: 'Proof', finished: 900 }])
+  assert.deepEqual(state.done, [{ chat: 'Cover' }, { chat: 'Proof' }])
   assert.equal(state.done_count, 2)
   assert.equal(state.idle, 3)
   const list = plain(chatList(agents, agents, selected, home))

@@ -95,7 +95,7 @@ interface LiveAttention { asks: Waiting[]; count: number; done: string[] }
 interface FridayChats extends AgentChats {
   waiting: { chat: string; kind: Waiting['ask']['kind']; text: string }[]
   waiting_count: number
-  done: { chat: string; finished: number | null }[]
+  done: { chat: string }[]
   done_count: number
 }
 
@@ -114,7 +114,7 @@ export function chats(agents: Pane[], target: Pane | undefined, attention: LiveA
   const doneIds = new Set(attention.done)
   const done = [...doneIds].flatMap(id => {
     const pane = availableById.get(id)
-    return pane ? [{ chat: paneTitle(pane), finished: pane.finished ?? null }] : []
+    return pane ? [{ chat: paneTitle(pane) }] : []
   })
   const busy = available.filter(pane => !doneIds.has(pane.id) && chatState(pane) !== 'idle').map(paneTitle)
   return { target: target ? paneTitle(target) : '', busy, needs, waiting, waiting_count: attention.count,
