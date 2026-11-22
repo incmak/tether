@@ -315,6 +315,25 @@ sys.exit(main(sys.argv[2:]))
         self.assertNotEqual(self.git('rev-parse', 'HEAD^{tree}').stdout.strip(), row['tree'])
         self.assertIsNone(commit_gate.record_landed(row))
 
+    def test_no_reflog_at_hook_time_never_proves_an_abort(self):
+        self.git('config', 'core.logAllRefUpdates', 'false')
+        self.commit('-m', 'base')
+        logs = Path(self.git('rev-parse', '--git-path', 'logs/HEAD').stdout.strip())
+        if not logs.is_absolute():
+            logs = self.repo / logs
+        logs.unlink(missing_ok=True)
+        self.git('branch', 'side')
+        self.install()
+        self.write_file('landed change')
+        self.commit('-m', 'landed without a reflog')
+        row, = self.rows()
+        self.assertIsNone(row['reflog']['ino'])
+        self.assertIsNone(commit_gate.record_landed(row))
+        # A later logged checkout creates the first entry. It does not show the commit, and still proves nothing.
+        self.git('-c', 'core.logAllRefUpdates=always', 'checkout', '-q', 'side')
+        self.assertTrue(logs.exists())
+        self.assertIsNone(commit_gate.record_landed(row))
+
     def test_detached_same_oid_amend_after_a_hook_restores_the_message_is_unknown(self):
         date = '2000-01-01T00:00:00+00:00'
         self.env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)

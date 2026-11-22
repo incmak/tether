@@ -1219,6 +1219,11 @@ def record_landed(row, *, deadline=None):
     landed = _confirm_landing(row, deadline=deadline)
     if landed is False and alive is None:
         return None
+    position = reflog_position_key(row.get('reflog'))
+    if landed is False and (position is None or position[1] is None):
+        # The hook saw no HEAD reflog (logging off, or another ref backend). Git can still create one later, so
+        # later entries can confirm a landing, but no entry proves nothing.
+        return None
     return 'pending' if alive and landed is not True else landed
 
 
