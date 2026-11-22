@@ -173,6 +173,8 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
   const [muted, setMuted] = useState(false)
   const [awake, setAwake] = useState(false)
   const [problem, setProblem] = useState('')
+  const [attempt, setAttempt] = useState(0)  // Start again after a start that gave up runs the start effect again
+  const [stopped, setStopped] = useState(false)
   const notes = useHeldNotes(api)
   const [shownDraft, setShownDraft] = useState<{ id: string; rev: number; at: number } | null>(null)
   const draftWatches = useRef<ReturnType<typeof createDraftWatch> | null>(null)
@@ -619,8 +621,15 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
       })
     }
     void agentReady().then(async ready => {
-      await readAloudReady
+      const quiet = await readAloudReady
       if (gone) return
+      if (!quiet) {
+        releaseReadAloud()
+        setProblem('Another Tether tab is still playing audio. Stop it there, then press Start again.')
+        setStopped(true)
+        go('idle')
+        return
+      }
       if (!ready) { classic(); return }
       const friday = new FridayAgent({
         tools: tools.current,
@@ -670,7 +679,7 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
       agent.current?.close('ended'); agent.current = null; voice.current?.close(); voice.current = null
       releaseReadAloud()
     }
-  }, [])
+  }, [attempt])
 
   // Friday hears the chat list whenever it changes, so it can answer "what's running" from facts.
   const chatsKey = JSON.stringify([agents.map(pane => [pane.id, paneTitle(pane), pane.state, approvalOf(pane)?.id, pane.needs?.text]), target?.id])
@@ -866,6 +875,7 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
   }, [])
 
   function talk() {
+    if (stopped) { setStopped(false); setProblem(''); go('starting'); setAttempt(count => count + 1); return }
     if (agent.current) {  // Friday hears all the time: this only stops its reply. The mic button mutes.
       if (phase === 'speaking' || phase === 'thinking') agent.current.interrupt('tap', phase)
       // A tap while Friday thinks drops the answer it was about to give, so say so.
@@ -928,8 +938,8 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
   useEffect(() => { talkButton.current?.focus() }, [])
 
   const working = agents.filter(pane => pane.state === 'Working').length
-  const status = STATUS[phase]
-  const talkLabel = agentOn ? 'Interrupt' : phase === 'speaking' ? 'Interrupt' : phase === 'listening' ? 'Send now' : phase === 'paused' ? 'Resume' : 'Talk'
+  const status = stopped ? 'Not started' : STATUS[phase]
+  const talkLabel = stopped ? 'Start again' : agentOn ? 'Interrupt' : phase === 'speaking' ? 'Interrupt' : phase === 'listening' ? 'Send now' : phase === 'paused' ? 'Resume' : 'Talk'
   const picker = agents.map(pane => <button key={pane.id} type="button" role="menuitemradio" aria-checked={pane.id === targetId} className="live-pane" data-state={approvalOf(pane) ? 'asking' : pane.state === 'Working' ? 'working' : 'idle'} onClick={() => { setTargetId(pane.id); setMenu(false) }}>
     <i aria-hidden="true" /><span><b>{paneTitle(pane)}</b><small>{agentNames[pane.agent]}{approvalOf(pane) ? ' · needs your OK' : pane.state === 'Working' ? ' · working' : ''}</small></span><Check size={15} className="live-check" aria-hidden="true" />
   </button>)
@@ -995,7 +1005,7 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
       </div>}
 
       <div className="live-controls">
-        <div className="live-ctl"><button type="button" className="live-round" aria-pressed={muted} aria-label={agentOn ? 'Mute microphone' : muted ? 'Resume listening' : 'Pause listening'} onClick={togglePause} disabled={phase === 'starting'}>{muted ? <MicOff size={22} aria-hidden="true" /> : <Mic size={22} aria-hidden="true" />}</button><span>{agentOn ? (muted ? 'Unmute' : 'Mute') : muted ? 'Paused' : 'Pause'}</span></div>
+        <div className="live-ctl"><button type="button" className="live-round" aria-pressed={muted} aria-label={agentOn ? 'Mute microphone' : muted ? 'Resume listening' : 'Pause listening'} onClick={togglePause} disabled={phase === 'starting' || stopped}>{muted ? <MicOff size={22} aria-hidden="true" /> : <Mic size={22} aria-hidden="true" />}</button><span>{agentOn ? (muted ? 'Unmute' : 'Mute') : muted ? 'Paused' : 'Pause'}</span></div>
         <div className="live-ctl live-talk"><button ref={talkButton} type="button" className="live-pill" aria-label={talkLabel} onClick={talk} disabled={agentOn ? !interruptable : phase === 'starting'}>
           {mode !== 'bubble' && <i ref={lit} className="live-lit" aria-hidden="true" />}
           {phase === 'speaking' || (agentOn && interruptable) ? <Square size={20} fill="currentColor" aria-hidden="true" /> : agentOn ? null : phase === 'listening' ? <ArrowUp size={24} aria-hidden="true" /> : phase === 'paused' ? <Mic size={22} aria-hidden="true" /> : <AudioLines size={24} aria-hidden="true" />}

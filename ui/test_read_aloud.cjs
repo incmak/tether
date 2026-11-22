@@ -128,7 +128,7 @@ function silenceWav() {
       }
       const request = navigator.locks.request.bind(navigator.locks)
       navigator.locks.request = (name, options, callback) => {
-        if (name === 'tether-read-aloud-play' && options.mode === 'exclusive') voice.playWaitAt = now()
+        if (name === 'tether-read-aloud-play' && options.mode === 'exclusive') { voice.playWaitAt = now(); voice.playWaitPerf = performance.now() }
         return request(name, options, callback)
       }
       const query = navigator.locks.query.bind(navigator.locks)
@@ -479,6 +479,58 @@ function silenceWav() {
     check('ending Live re-enables the control and the next reply plays automatically', () => {
       assert.deepEqual(requests.map(request => request.text), [localResumed])
     })
+
+    // A reader that never stops: the hold message never arrives and its play lock is never released.
+    await page.evaluate(() => {
+      window.__voice.deferHold = true
+      navigator.locks.request('tether-read-aloud-play', { mode: 'shared' }, () => new Promise(resolve => { window.__unstick = resolve }))
+    })
+    const starter = await context.newPage()
+    starter.setDefaultTimeout(5000)
+    await starter.clock.install()
+    await starter.goto(`${origin}/chat/?session=%251&auto-read&no-hands-free`)
+    await starter.getByText('The phone reads the next reply after Live mode ends.').first().waitFor()
+    // Stop the page clock before Live starts. The target is 60 s ahead, so the real time that passes before the call
+    // cannot reach it. Then move the clock in 100 ms steps until the hold waits for the play lock.
+    await starter.clock.pauseAt(await starter.evaluate(() => Date.now() + 60000))
+    const opened = openLive(starter)
+    for (let step = 0; step < 100 && !(await starter.evaluate(() => !!window.__voice.playWaitPerf)); step++) await starter.clock.runFor(100)
+    await opened
+    const live = starter.getByRole('dialog', { name: 'Friday Live mode' })
+    // The deadline timer starts in the same task as the play lock request, on the same paused clock.
+    const left = await starter.evaluate(() => window.__voice.playWaitPerf + 5000 - performance.now())
+    await starter.clock.runFor(Math.max(0, Math.floor(left) - 50))
+    const waiting = await starter.evaluate(() => ({ micOpens: window.__voice.micOpens.length, alert: !!document.querySelector('.live-problem') }))
+    await starter.clock.runFor(100)
+    const alert = live.getByRole('alert')
+    await alert.waitFor()
+    const startAgain = live.getByRole('button', { name: 'Start again' })
+    const gaveUp = {
+      text: await alert.textContent(),
+      micOpens: await starter.evaluate(() => window.__voice.micOpens.length),
+      holds: await page.evaluate(async () => (await navigator.locks.query()).held.filter(lock => lock.name.startsWith('tether-read-aloud-hold:')).length),
+      startEnabled: await startAgain.isEnabled(),
+      status: await live.locator('.live-status').textContent(),
+      pauseEnabled: await live.getByRole('button', { name: 'Pause listening' }).isEnabled(),
+    }
+    check('a reader that never stops: Live gives up at the deadline, keeps the mic closed, releases its hold and says what to do', () => {
+      assert.deepEqual(waiting, { micOpens: 0, alert: false })
+      assert.deepEqual(gaveUp, {
+        text: 'Another Tether tab is still playing audio. Stop it there, then press Start again.',
+        micOpens: 0, holds: 0, startEnabled: true, status: 'Not started', pauseEnabled: false,
+      })
+    })
+    await page.evaluate(() => window.__unstick())
+    await starter.clock.resume()
+    await startAgain.click()
+    await starter.waitForFunction(() => window.__voice.micOpens.length === 1, null, { polling: 100 })
+    const restarted = { alert: await live.getByRole('alert').count(), mic: await starter.evaluate(() => window.__voice.micOpens[0]) }
+    check('Start again opens the mic after the other reader stops', () => {
+      assert.equal(restarted.alert, 0)
+      assert.deepEqual({ held: restarted.mic.held, reading: restarted.mic.reading }, { held: true, reading: false })
+    })
+    await closeLive(starter)
+    await starter.close()
   } finally { await context.close(); server.close() }
   console.log(`read aloud: all ${passed} checks pass`)
   process.exit(0)
