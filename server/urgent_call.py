@@ -23,8 +23,8 @@ CALL_MAX = 15 * 60 + 60
 ASK_KEEP = 1000  # ask records kept, newest first; a returning ask keeps its decided slots
 DEFAULT_SETTINGS = {'mode': 'on', 'day_start': '08:00', 'day_end': '22:00'}
 OUTCOMES = ('answered', 'declined', 'unanswered')
-# dnd_from..dnd_until and hold_from..hold_until are the latest blocks; released_at is the last "calls back on".
-TIMES = ('hold_until', 'dnd_until', 'hold_from', 'dnd_from', 'released_at')
+# released_at is the last "calls back on". blocks lists recent [rule, from, until] for do-not-disturb and the hold.
+TIMES = ('hold_until', 'dnd_until', 'released_at')
 
 
 class CallRefused(Exception):
@@ -38,7 +38,10 @@ def _number(value):
 def _valid(data):
     if (type(data['version']) is not int or data['version'] != 1
             or not isinstance(data['calls'], list) or not isinstance(data['asks'], dict)
-            or not all(_number(data[key]) for key in TIMES)):
+            or not all(_number(data[key]) for key in TIMES)
+            or not isinstance(data['blocks'], list)
+            or not all(isinstance(b, list) and len(b) == 3 and b[0] in ('dnd', 'hold') and _number(b[1])
+                       and _number(b[2]) and b[1] <= b[2] for b in data['blocks'])):
         return False
     ids, live = set(), None
     for call in data['calls']:
@@ -75,7 +78,7 @@ class Planner:
         self.log = log or (lambda event, **fields: None)
         self.lock = threading.Lock()
         self.broken = self._reported_broken = self._dirty = False
-        self.state = dict(version=1, calls=[], asks={}, live=None, **dict.fromkeys(TIMES, 0))
+        self.state = dict(version=1, calls=[], asks={}, live=None, blocks=[], **dict.fromkeys(TIMES, 0))
         try:
             data = json.loads(self.path.read_text())
             if not _valid(data):
@@ -144,6 +147,22 @@ class Planner:
         with self.lock:
             return self._blocked(now)
 
+    def _blocked_at(self, at, now):
+        """The rule of an ended block that covered time at, or None. A slot that fell inside do-not-disturb or the
+        hold stays blocked even if no tick ran before the block ended (C2). Active blocks are checked in tick."""
+        return next((rule for rule, start, until in self.state['blocks'] if start <= at < until <= now), None)
+
+    def _block(self, rule, now, until, extend):
+        """Start or change the active block of this rule, keeping ended blocks a slot may still need."""
+        self.state['blocks'] = [b for b in self.state['blocks'] if b[2] >= now - LATE - 60]
+        active = next((b for b in self.state['blocks'] if b[0] == rule and b[1] <= now < b[2]), None)
+        if active is not None and extend:
+            active[2] = max(active[2], until)
+            return
+        if active is not None:
+            active[2] = now
+        self.state['blocks'].append([rule, now, until])
+
     def _eligible(self, candidates, now, decide):
         for candidate in candidates:
             ask = self.state['asks'].setdefault(candidate['id'], dict(
@@ -155,18 +174,15 @@ class Planner:
             decide(candidate, ask, due[:-1] + late, 'skipped')
             slots = [] if late else due[-1:]
             if slots:
-                # A slot whose time fell inside a do-not-disturb or hold that has ended since stays blocked, even
-                # if no tick ran before the block ended (C2). A block still active is checked in tick, in order.
-                at = candidate['grace_end'] + SLOTS[slots[0]]
-                rule = next((rule for rule in ('dnd', 'hold')
-                             if self.state[rule + '_from'] <= at < self.state[rule + '_until'] <= now), None)
+                rule = self._blocked_at(candidate['grace_end'] + SLOTS[slots[0]], now)
                 if rule:
                     decide(candidate, ask, slots, rule, rule)
                     slots = []
             hold_end = max(self.state['hold_until'], self.state['released_at'])
             if ask['hold_slot'] == 'pending' and now >= self.state['hold_until']:
-                if now > hold_end + LATE:
-                    decide(candidate, ask, ['hold'], 'skipped')
+                rule = 'skipped' if now > hold_end + LATE else self._blocked_at(hold_end, now)
+                if rule:
+                    decide(candidate, ask, ['hold'], rule, None if rule == 'skipped' else rule)
                 else:
                     slots.append('hold')
             if not slots:
@@ -321,8 +337,7 @@ class Planner:
                         opened.append((call['panes'][ask_id], ask_id))
             elif outcome == 'declined':
                 now = self.clock()
-                if self.state['hold_until'] <= now:
-                    self.state['hold_from'] = now
+                self._block('hold', now, now + HOLD, extend=True)
                 self.state['hold_until'] = max(self.state['hold_until'], now + HOLD)
                 for ask_id in call['asks']:
                     ask = self.state['asks'][ask_id]
@@ -348,8 +363,7 @@ class Planner:
             if not _number(until) or not now < until <= now + DND_MAX:
                 raise ValueError('Do-not-disturb must end within the next 24 hours')
             before = deepcopy(self.state)
-            if self.state['dnd_until'] <= now:
-                self.state['dnd_from'] = now
+            self._block('dnd', now, until, extend=False)
             self.state['dnd_until'] = until
             self._commit(before)
 
@@ -358,6 +372,8 @@ class Planner:
             before = deepcopy(self.state)
             now = self.clock()
             # End both blocks now. A pending hold slot is due on the next tick (C6).
+            for block in self.state['blocks']:
+                block[2] = min(block[2], now)
             self.state.update(dnd_until=min(self.state['dnd_until'], now),
                               hold_until=min(self.state['hold_until'], now), released_at=now)
             self._commit(before)

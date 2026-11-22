@@ -425,6 +425,24 @@ class PlannerTest(unittest.TestCase):
         self.assertEqual(self.state()['asks']['b']['decided'], [0])
         self.assertEqual(self.planner.tick([first])['placed'], 'call-2')
 
+    def test_slot_inside_an_earlier_of_two_ended_dnd_blocks_does_not_ring(self):
+        ask = self.candidate(grace_end=self.clock.now + 30)
+        self.planner.set_dnd(self.clock.now + 60)
+        self.clock.advance(90)
+        self.planner.set_dnd(self.clock.now + 60)
+        self.clock.advance(61)
+        self.assertIsNone(self.planner.tick([ask])['placed'])
+        self.assertEqual(self.state()['asks']['a']['decided'], [0])
+
+    def test_hold_retry_due_inside_an_ended_dnd_does_not_ring(self):
+        ask = self.candidate()
+        self.assertTrue(self.planner.finish(self.planner.tick([ask])['placed'], 'declined'))
+        self.clock.now = ask['grace_end'] + urgent_call.HOLD - 30
+        self.planner.set_dnd(self.clock.now + 60)
+        self.clock.advance(61)
+        self.assertIsNone(self.planner.tick([ask])['placed'])
+        self.assertEqual(self.state()['asks']['a']['hold_slot'], 'used')
+
     def test_slot_blocked_while_save_fails_does_not_ring_when_the_block_ends(self):
         ask = self.candidate()
         self.planner.set_dnd(self.clock.now + 60)
