@@ -344,7 +344,11 @@ def ask_current(frame):
     first = next((i for i in range(top + 1, stop) if item_row.fullmatch(rows[i][0])), None)
     if first is None:
         return None
-    question = ' '.join(text.strip() for text, _ in rows[top + 1:first] if text.strip())
+    lines = [text.strip() for text, _ in rows[top + 1:first] if text.strip()]
+    # Claude 2.1.330 draws a "│" gutter left of a question that wraps. It is not part of the question text.
+    if lines and all(re.match(r'│(?:\s|$)', line) for line in lines):
+        lines = [line[1:].strip() for line in lines]
+    question = ' '.join(line for line in lines if line)
     if not question or '…' in question or '...' in question or any(RULE.fullmatch(text) or CHAT.match(text)
                                             for text, _ in rows[top + 1:first] if text.strip()):
         return None

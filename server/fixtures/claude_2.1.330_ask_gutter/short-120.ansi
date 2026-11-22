@@ -1,0 +1,40 @@
+[38;5;174m▝▜[48;5;16m█████[49m█▀[39m  [38;5;246mHaiku 5.5 with medium effort · Claude Ultra[39m
+[38;5;174m ▝▝   ▝▝ [39m  [38;5;246m/tmp/askrepro[39m
+
+
+[38;5;246m[48;5;237m❯ [38;5;231mCall the AskUserQuestion tool once, with exactly this input JSON and nothing else. Do not run any other tool first. [39m
+  [38;5;231m{"questions": [{"question": "B175 browser proof: the two cases that show B175's effect cannot be reached in a browser[39m
+  [38;5;231mbecause of bugs that also exist on dev today. (1) A report with a missing image never opens the editor (B500), so [39m
+  [38;5;231mthe attach button can't be reached. (2) A package with more than 50 image files is refused (B501). The B175 behaviour[39m
+  [38;5;231mis proven by pipeline tests and real-database tests, and a reviewer approved it. How do you want B175 shipped?", [39m
+  [38;5;231m"header": "B175 proof", "multiSelect": false, "options": [{"label": "Ship, label proof (Recommended)", "description":[39m
+  [38;5;231m"Push both PRs once (pipeline first). The PRs say 'B175 effect not proven in browser' and name the blocking bugs [39m
+  [38;5;231mB500 and B501. I run one browser check that a normal PDF import still exports when host load drops (it is about 450 [39m
+  [38;5;231mnow). The browser proof of B175 becomes part of B500's acceptance."}, {"label": "Hold until B500", "description": [39m
+  [38;5;231m"Keep both commits local. Fix B500 first in a new tab, then prove B175 end to end in a browser, then push. B175 waits[39m
+  [38;5;231muntil then."}]}]}[39m
+
+[38;5;246m[49m●[39m Declined to answer Claude's questions:
+[38;5;246m  ⎿  · B175 browser proof: the two cases that show B175's effect cannot be reached in a browser because of bugs that [39m
+     [38;5;246malso exist on dev today. (1) A report with a missing image never opens the editor (B500), so the attach button [39m
+     [38;5;246mcan't be reached. (2) A package with more than 50 image files is refused (B501). The B175 behaviour is proven by [39m
+     [38;5;246mpipeline tests and real-database tests, and a reviewer approved it. How do you want B175 shipped? (Ship, label [39m
+     [38;5;246mproof (Recommended) / Hold until B500)[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mCall AskUserQuestion once with exactly: {"questions":[{"question":"Ship it [39m
+  [38;5;231mnow?","header":"Ship","multiSelect":false,"options":[{"label":"Yes","description":"Push [39m
+  [38;5;231mnow."},{"label":"No","description":"Wait."}]}]}[39m
+[38;5;246m[49m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[38;5;16m[48;5;153m ☐ Ship [39m[49m
+
+[1m[38;5;231mShip it now?[0m
+
+[38;5;153m❯[39m [38;5;246m1.[39m [38;5;153mYes[39m
+     [38;5;246mPush now.[39m
+  [38;5;246m2.[39m No
+     [38;5;246mWait.[39m
+  [38;5;246m3. Type something.[39m
+[38;5;246m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  4. Chat about this
+
+[38;5;246mEnter to select · ↑/↓ to navigate · Esc to cancel[39m

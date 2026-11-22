@@ -128,3 +128,41 @@ class NativeAskKeyRouteTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class GutterAskTests(unittest.TestCase):
+    """Claude 2.1.330 draws a dim "│" gutter left of a question that wraps (live captures, 120 columns)."""
+    DIR = Path(__file__).parent / 'fixtures/claude_2.1.330_ask_gutter'
+
+    def setUp(self):
+        import tempfile
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.asks = json.loads((self.DIR / 'asks.json').read_text())
+
+    def entry(self, name):
+        transcript = Path(self.temp.name) / f'{name}.jsonl'
+        record = {'type': 'assistant', 'message': {'role': 'assistant', 'content': [
+            {'type': 'tool_use', 'id': f'tool-{name}', 'name': 'AskUserQuestion', 'input': self.asks[name]}]}}
+        transcript.write_text(json.dumps(record) + '\n')
+        return {'id': '%gutter', 'agent': 'claude', 'transcript': str(transcript)}
+
+    def test_wrapped_question_verifies_without_the_gutter(self):
+        for name in ('long', 'two', 'short'):
+            with self.subTest(name=name):
+                frame = (self.DIR / f'{name}-120.ansi').read_text()
+                expected = self.asks[name]['questions'][0]
+                self.assertEqual(choice_state.ask_current(frame)['question'], ' '.join(expected['question'].split()))
+                menu = terminal.verified_numbered_menu(self.entry(name), frame)
+                self.assertIsNotNone(menu)
+                self.assertEqual(menu['question'], expected['question'])
+                self.assertEqual([option['text'] for option in menu['options'][:2]],
+                                 [option['label'] for option in expected['options']])
+                self.assertTrue(terminal.menu_digest(menu))
+
+    def test_a_gutter_on_only_some_rows_is_refused(self):
+        frame = (self.DIR / 'long-120.ansi').read_text()
+        lines = frame.split('\n')
+        at = next(i for i, line in enumerate(lines) if '│' in line and 'exist on dev today' in line)
+        lines[at] = terminal.ANSI_SGR.sub('', lines[at]).replace('│', ' ', 1)
+        self.assertIsNone(terminal.verified_numbered_menu(self.entry('long'), '\n'.join(lines)))
