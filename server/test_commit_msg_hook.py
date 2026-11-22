@@ -56,6 +56,7 @@ class CommitMsgHook(unittest.TestCase):
         self.home = self.root / 'home'
         self.config = self.root / 'config'
         self.cache = self.root / 'cache'
+        self.enterContext(mock.patch.object(paths, 'CACHE', self.cache))
         self.tether = self.root / 'tether'
         self.log = self.root / 'log' / 'commit-gate.log'
         self.socket = self.root / 'tmux-sockets'
@@ -166,6 +167,8 @@ sys.exit(main(sys.argv[2:]))
         digest = hmac.digest(key, b'private test message', 'sha256').hex()[:32]
         self.assertRegex(check['messages'][0], r'^[0-9a-f]{32}$')
         started = check.pop('started')
+        self.assertGreater(check.pop('git_pid'), 0)
+        self.assertTrue(check.pop('git_started'))
         author_date, committed = self.git('log', '-1', '--date=raw', '--format=%ad%n%ct').stdout.splitlines()
         self.assertIs(type(started), int)
         self.assertLessEqual(started, int(committed))
@@ -249,6 +252,70 @@ sys.exit(main(sys.argv[2:]))
         row, = self.rows()
         self.assertEqual(row['head'], self.git('rev-parse', 'HEAD').stdout.strip())
         self.assertIs(commit_gate.record_landed(row), True)
+
+    def test_detached_same_oid_amend_without_reflog_is_unknown(self):
+        date = '2000-01-01T00:00:00+00:00'
+        self.env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+        self.commit('-m', 'base')
+        self.git('switch', '--detach', 'HEAD')
+        before = commit_gate._head_reflog_position(self.repo)
+        self.install()
+        self.commit('--amend', '--no-edit')
+        row, = self.rows()
+        self.assertEqual(row['head'], self.git('rev-parse', 'HEAD').stdout.strip())
+        self.assertEqual(commit_gate._head_reflog_position(self.repo), before)
+        self.assertIsNone(commit_gate.record_landed(row))
+
+    def test_amend_at_shallow_boundary_uses_gits_parent_list(self):
+        self.commit('-m', 'base')
+        self.commit('-m', 'tip')
+        shallow = self.root / 'shallow'
+        self.git('clone', '--depth=1', self.repo.as_uri(), str(shallow))
+        self.install(repo=shallow)
+        self.git('commit', '--amend', '--allow-empty', '-m', 'Amended shallow tip', cwd=shallow)
+        row, = self.rows()
+        self.assertIs(commit_gate.record_landed(row), True)
+
+    def test_later_commit_with_different_message_cannot_confirm_an_aborted_row(self):
+        self.commit('-m', 'base')
+        self.write_file('change')
+        hook = self.user_hook_line()
+        self.script(self.hook, f'{hook}\nexit 1')
+        self.assertNotEqual(self.commit('-m', 'Same subject', '-m', 'Aborted body', check=False).returncode, 0)
+        self.script(self.hook, hook)
+        self.commit('-m', 'Same subject', '-m', 'Landed body')
+        aborted, landed = self.rows()
+        self.assertEqual(aborted['tree'], landed['tree'])
+        self.assertEqual(aborted['head'], landed['head'])
+        self.assertIsNone(commit_gate.record_landed(aborted))
+        self.assertIs(commit_gate.record_landed(landed), True)
+
+    def test_message_rewritten_after_the_gate_is_unknown(self):
+        self.script(self.hook, f'{self.user_hook_line()}\nprintf "Rewritten message\\n" > "$1"')
+        self.commit('-m', 'Original message')
+        row, = self.rows()
+        self.assertEqual(self.git('log', '-1', '--format=%B').stdout.strip(), 'Rewritten message')
+        self.assertIsNone(commit_gate.record_landed(row))
+
+    def test_merge_row_requires_the_recorded_merge_parents(self):
+        self.prepare_merge()
+        self.git('merge', '--no-ff', '--no-edit', 'side')
+        row, = self.rows()
+        self.assertEqual(row['merge_heads'], [self.git('rev-parse', 'side').stdout.strip()])
+        self.assertIs(commit_gate.record_landed(row), True)
+        self.assertIsNone(commit_gate.record_landed({**row, 'merge_heads': [row['head']]}))
+
+    def test_landing_requires_explicit_dates_when_recorded(self):
+        self.commit('-m', 'base')
+        date = '2000-01-01T00:00:00+00:00'
+        self.env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+        self.install()
+        self.commit('-m', 'dated commit')
+        row, = self.rows()
+        self.assertIs(commit_gate.record_landed(row), True)
+        for field in ('author_date', 'committer_date'):
+            with self.subTest(field=field):
+                self.assertIsNone(commit_gate.record_landed({**row, field: '1 +0000'}))
 
     def git_dir_fields(self, *, cwd=None):
         path = Path(self.git('rev-parse', '--absolute-git-dir', cwd=cwd).stdout.rstrip('\n'))
@@ -342,7 +409,8 @@ sys.exit(main(sys.argv[2:]))
         self.git('checkout', '-q', 'main')
         row = {'folder': str(self.repo), 'head': self.git('rev-parse', 'HEAD').stdout.strip(),
                'tree': self.git('rev-parse', 'other^{tree}').stdout.strip(),
-               'reflog': commit_gate._head_reflog_position(self.repo), 'git_dir': self.git_dir_fields()}
+               'reflog': commit_gate._head_reflog_position(self.repo), 'git_dir': self.git_dir_fields(),
+               'messages': [commit_gate._message_digest(commit_gate._message_key(create=True), 'other')]}
         self.git('checkout', '-q', 'intermediate')
         self.git('checkout', '-q', 'other')
         self.assertIs(commit_gate.record_landed(row), False)
@@ -357,7 +425,7 @@ sys.exit(main(sys.argv[2:]))
         self.install()
         self.commit('-m', 'landed')
         row, = self.rows()
-        for field in ('tree', 'head', 'reflog', 'git_dir'):
+        for field in ('tree', 'head', 'reflog', 'git_dir', 'messages'):
             with self.subTest(missing=field):
                 self.assertIsNone(commit_gate.record_landed({k: v for k, v in row.items() if k != field}))
         for fields in ({'tree': 'bad'}, {'head': 'bad'}, {'reflog': {'size': -1, 'ino': None, 'dev': None}},

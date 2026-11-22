@@ -324,10 +324,11 @@ def review_turn_source(entry):
 REVIEW_GATE_TAIL_BYTES = 256 * 1024
 REVIEW_GATE_TAIL = (None, {})  # (path, size, mtime) -> the newest rows per (agent, thread)
 REVIEW_GATE_ROWS = 8
-REVIEW_GATE_LANDED = {}  # (folder, at, head, tree, git_dir, reflog) for confirmed rows
+REVIEW_GATE_LANDED = {}  # digest of the log row for confirmed landings
 REVIEW_GATE_LANDED_MAX = 256
 REVIEW_GATE_LANDED_LOCK = threading.Lock()
 REVIEW_GATE_SECONDS = 1.5
+_REVIEW_GATE_PENDING = object()
 
 
 def review_gate_records():
@@ -370,8 +371,7 @@ def review_gate_records():
             continue
         identity = (source, session)
         recent = records.setdefault(identity, [])
-        recent.append({field: row[field] for field in ('at', 'folder', 'head', 'tree', 'git_dir', 'reflog')
-                       if field in row})
+        recent.append(dict(row, cache_key=hashlib.sha256(line).digest()))
         recent.sort(key=lambda record: record['at'], reverse=True)
         del recent[REVIEW_GATE_ROWS:]
     REVIEW_GATE_TAIL = key, records
@@ -379,15 +379,12 @@ def review_gate_records():
 
 
 def _review_gate_landed(row, *, deadline, require_head):
-    tree = row.get('tree')
-    identity = commit_gate.git_dir_key(row.get('git_dir'))
-    position = commit_gate.reflog_position_key(row.get('reflog'))
-    if ('head' not in row or not isinstance(tree, str) or identity is None or position is None
-            or time.monotonic() >= deadline):
+    if time.monotonic() >= deadline:
         return None
     folder = row['folder']
-    key = (folder, row['at'], row['head'], tree, identity, position)
+    key = row['cache_key']
     if key in REVIEW_GATE_LANDED:
+        identity = commit_gate.git_dir_key(row.get('git_dir'))
         if not commit_gate.cached_git_dir_matches(folder, identity):
             return None
         # A cold confirmation already reads HEAD. A fresh request still needs HEAD on a cache hit.
@@ -407,6 +404,11 @@ def _review_gate_landed(row, *, deadline, require_head):
 
 def review_folder(entry):
     """Resolve a bound request, a post-verdict scope, or a new request's folder."""
+    folder = _review_folder(entry)
+    return None if folder is _REVIEW_GATE_PENDING else folder
+
+
+def _review_folder(entry, *, agent_fallback=True):
     folder, after = entry.get('review_folder'), entry.get('review_after')
     follow_up = 'review_after' in entry
     if folder and not follow_up:
@@ -434,8 +436,10 @@ def review_folder(entry):
                     continue
                 if landed is True:
                     return record['folder']
+                if landed == 'pending':
+                    return _REVIEW_GATE_PENDING
                 break  # Unavailable evidence or HEAD: use the usual fallback.
-    return folder if after is not None else folder or agent_folder(entry)
+    return folder if after is not None or not agent_fallback else folder or agent_folder(entry)
 
 
 REVIEW_SCOPES = {}  # pane id -> ((folder, work mark), monotonic time, scope)
@@ -447,7 +451,9 @@ def review_scope_of(entry, *, light=False):
     again on each monitor tick. The checklist run and the UI listing then repeat only when the work changed
     (review_scope.fingerprint: commit, base, status, tracked, staged and untracked files), or after REVIEW_SCOPE_AGE
     seconds. Idle close reads an uncached scope without the review request metadata."""
-    folder = review_folder(entry)
+    folder = _review_folder(entry)
+    if folder is _REVIEW_GATE_PENDING:
+        return None
     mark = review_scope.fingerprint(folder)
     if light:
         found = review_scope.scope(folder, light=True)
@@ -470,7 +476,8 @@ def review_scope_of(entry, *, light=False):
 
 
 def review_commit(entry):
-    return review_scope.head(review_folder(entry))
+    folder = _review_folder(entry)
+    return None if folder is _REVIEW_GATE_PENDING else review_scope.head(folder)
 
 
 def review_level(entry):
@@ -501,6 +508,8 @@ def review_parent(entry, entries):
 
 
 def review_work_mark(entry):
+    if _review_folder(entry, agent_fallback=False) is _REVIEW_GATE_PENDING:
+        return None
     cwd = entry.get('review_folder') or entry.get('cwd')
     if not cwd:
         return None

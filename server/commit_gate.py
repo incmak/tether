@@ -14,9 +14,10 @@ The person sets the mode in Settings. Nothing else changes it.
 
 The installed Git commit-msg hook checks the final message file for Claude, Codex and terminal commits.
 It logs one verdict and skips merges, replays that invoke the hook, and fixup, squash and amend! commits.
-The hook records the index tree, HEAD, the HEAD reflog position and the per-worktree Git directory before Git
-makes the commit. Review binding needs a commit-making reflog entry in that worktree with that old HEAD and
-tree. The new commit must be HEAD now or be the old HEAD of a later entry.
+The hook records the index tree, HEAD, the HEAD reflog position, the per-worktree Git directory and the Git
+process identity before Git makes the commit. Review binding needs a commit-making reflog entry in that worktree
+and a commit that matches the row's tree, parents, message HMAC and recorded dates. The new commit must be HEAD
+now or be the old HEAD of a later entry. A Git process still in flight can leave the decision pending.
 The hook checks ordinary amendments. Claude's PreToolUse check can defer to the hook.
 PostToolUse matches each hook row to one landed commit by worktree, tree, all parents, message HMAC and dates.
 A merge skip row can lack the author date. PostToolUse checks uncovered commits and skips new merges.
@@ -1204,16 +1205,29 @@ def worktree_head(folder, *, deadline):
 
 
 def record_landed(row, *, deadline=None):
-    """Check if a hook row landed, using an absolute monotonic deadline. None means the evidence is uncertain."""
+    """Return True for a confirmed landing, or 'pending' if Git was alive and no landing is confirmed.
+
+    False means the attempt did not land. None means the evidence is uncertain, including a row without
+    message digests (no key or unreadable message). The deadline is absolute and monotonic.
+    """
     if deadline is None:
         deadline = time.monotonic() + 1.0
-    folder, head, tree = (row.get(field) for field in ('folder', 'head', 'tree'))
+    # Sample before reading the reflog: Git can land and exit between the two reads.
+    alive = _hook_git_alive(row, deadline=deadline)
+    landed = _confirm_landing(row, deadline=deadline)
+    return 'pending' if alive and landed is not True else landed
+
+
+def _confirm_landing(row, *, deadline):
+    folder, tree = row.get('folder'), row.get('tree')
     identity = git_dir_key(row.get('git_dir'))
-    if (not isinstance(tree, str) or not GIT_OID.fullmatch(tree) or 'head' not in row
-            or (head is not None and (not isinstance(head, str) or not GIT_OID.fullmatch(head)))
-            or not isinstance(folder, str) or not os.path.isabs(folder) or identity is None
-            or time.monotonic() >= deadline):
+    if (not isinstance(tree, str) or not GIT_OID.fullmatch(tree) or not isinstance(folder, str)
+            or not os.path.isabs(folder) or identity is None or time.monotonic() >= deadline):
         return None
+    hook = _hook_commit(row)
+    if hook is None or (key := _message_key()) is None:
+        return None
+    head = hook.head
     git_dir = _git_path(folder, '--absolute-git-dir', deadline=deadline)
     if git_dir is None or git_dir_key(_git_dir_identity(git_dir)) != identity:
         return None
@@ -1223,34 +1237,38 @@ def record_landed(row, *, deadline=None):
         return None
     # Check non-commit moves in the same batch. A matching tree on one of those makes the result uncertain.
     candidates = dict.fromkeys(new for old, new, _ in entries if old == (head or '0' * len(old)))
-    if not candidates:
-        return False
-    found = _git(folder, 'cat-file', '--batch-check=%(objectname) %(objecttype)',
-                 input=''.join(f'{oid}^{{tree}}\n' for oid in candidates), deadline=deadline)
-    if found is None or found.returncode != 0 or found.stderr or time.monotonic() >= deadline:
-        return None
-    trees = found.stdout.splitlines()
-    if (len(trees) != len(candidates)
-            or any(not line.endswith(' tree') or not GIT_OID.fullmatch(line.removesuffix(' tree')) for line in trees)):
-        return None
-    matching = {oid for oid, candidate_tree in zip(candidates, trees) if candidate_tree == f'{tree} tree'}
-    if not matching:
+    if not candidates and head is None:
         return False
     current = worktree_head(folder, deadline=deadline)
     if current is None:
         return None
+    if not candidates and current != head:
+        return False
+    if head is not None:
+        candidates.setdefault(head)  # Compare the replaced commit's parents for an amend, in the same batch.
+    commits = _batch_commits(folder, candidates, deadline=deadline)
+    if commits is None:
+        return None
+    replaced = commits.get(head)
     uncertain = False
     later_heads = {current}
     for old, new, message in reversed(entries):
         if time.monotonic() >= deadline:
             return None
-        if new in matching and old == (head or '0' * len(old)):
+        commit = commits.get(new)
+        if commit is not None and commit.tree == tree and old == (head or '0' * len(old)):
             if not COMMIT_REFLOG_ACTION.match(message):
                 uncertain = True
             elif new in later_heads:
                 # Git can append the entry before the corresponding ref update succeeds.
-                return True
+                if _matches_hook_commit(commit, _commit_digest(key, commit), hook, lambda: (
+                        replaced is not None and replaced.parent_list == commit.parent_list)):
+                    return True
+                uncertain = True  # The repo's commit-msg hook may have rewritten the message after Tether read it.
         later_heads.add(old)
+    if head == current and replaced.tree == tree and _matches_hook_commit(
+            replaced, _commit_digest(key, replaced), hook, lambda: True):
+        return None  # A detached same-OID amend can succeed without writing a reflog entry.
     return None if uncertain else False
 
 
@@ -1278,15 +1296,75 @@ class _LandedCommit(NamedTuple):
     body: str | None
 
 
+COMMIT_LOG_FORMAT = '--format=%H%x00%T%x00%P%x00%ad%x00%cd%x00%B'
+
+
+class _HookCommit(NamedTuple):
+    head: str | None
+    messages: list
+    author_date: str | None
+    committer_date: str | None
+    merge_heads: tuple[str, ...]
+
+
+def _hook_commit(row, *, require_author=False):
+    head, messages = row.get('head'), row.get('messages')
+    if ('head' not in row or (head is not None and (not isinstance(head, str) or not GIT_OID.fullmatch(head)))
+            or not isinstance(messages, list) or not messages):
+        return None
+    merge = row.get('verdict') == 'skip' and row.get('reason') == 'merge'
+    heads = row.get('merge_heads') if merge else []
+    if merge and (not isinstance(heads, list) or not heads or not all(
+            isinstance(oid, str) and GIT_OID.fullmatch(oid) for oid in heads)):
+        return None
+    author, committer = row.get('author_date'), row.get('committer_date')
+    if (not isinstance(author, str) and ('author_date' in row or (require_author and not merge))
+            or not isinstance(committer, str) and 'committer_date' in row):
+        return None
+    return _HookCommit(head, messages, author, committer, tuple(heads))
+
+
+def _commit_digest(key, commit):
+    return None if commit.body is None else _message_digest(key, _normalize_message(commit.body.split('\n')))
+
+
+def _matches_hook_commit(commit, digest, hook, amend_matches):
+    """Compare a commit of the recorded tree. The caller supplies the amend's parent and reflog proof."""
+    if (digest is None or digest not in hook.messages
+            or (hook.author_date is not None and hook.author_date != commit.author_date)
+            or (hook.committer_date is not None and hook.committer_date != commit.committer_date)):
+        return False
+    if hook.head == commit.parent:
+        return commit.parent_list[1:] == hook.merge_heads
+    return not hook.merge_heads and amend_matches()
+
+
+def _batch_commits(folder, oids, *, deadline):
+    """Read candidate commits in one Git call, with the same parent view as PostToolUse."""
+    found = _git(folder, 'log', '--no-walk=unsorted', '--stdin', '--no-show-signature', '--no-notes',
+                 '-z', '--date=raw', '--encoding=UTF-8', COMMIT_LOG_FORMAT, text=False,
+                 input=''.join(f'{oid}\n' for oid in oids).encode('ascii'), deadline=deadline)
+    if (found is None or found.returncode != 0 or found.stderr or not found.stdout.endswith(b'\0')
+            or time.monotonic() >= deadline):
+        return None
+    try:
+        commits = {commit.oid: commit for commit in _parse_landed_commits(found.stdout)}
+    except ValueError:
+        return None
+    return commits if commits.keys() == oids.keys() and time.monotonic() < deadline else None
+
+
 def _landed(folder, head):
     """Commits made since `head`, newest first. [] when none landed, None when Git cannot tell."""
-    shown = _git(folder, 'log', '--first-parent', '-n', '20', '-z', '--date=raw',
-                 '--format=%H%x00%T%x00%P%x00%ad%x00%cd%x00%B',
+    shown = _git(folder, 'log', '--first-parent', '-n', '20', '-z', '--date=raw', COMMIT_LOG_FORMAT,
                  f'{head}..HEAD' if head else 'HEAD', text=False)
     if shown is None or shown.returncode != 0:
         return [] if head == '' else None
-    fields = shown.stdout.split(b'\0')[:-1]
-    commits = []
+    return list(_parse_landed_commits(shown.stdout))
+
+
+def _parse_landed_commits(output):
+    fields = output.split(b'\0')[:-1]
     for index in range(0, len(fields), 6):
         oid, tree, parents, author_date, raw_committer_date, raw = fields[index:index + 6]
         try:
@@ -1299,9 +1377,8 @@ def _landed(folder, head):
         parent = parent_list[0] if parent_list else None
         committer_date = raw_committer_date.decode('ascii')
         committed = int(committer_date.partition(' ')[0])
-        commits.append(_LandedCommit(oid.decode('ascii'), tree.decode('ascii'), parent, parent_list,
-                                     author_date.decode('ascii'), committed, committer_date, status, body))
-    return commits
+        yield _LandedCommit(oid.decode('ascii'), tree.decode('ascii'), parent, parent_list,
+                            author_date.decode('ascii'), committed, committer_date, status, body)
 
 
 # ---- the hook ----
@@ -1588,31 +1665,16 @@ def _claim_covering_rows(waiting, commits, worktree, rows, key, claims, amend_pa
         if (row.get('via') != 'commit-msg' or row.get('verdict') == 'block'
                 or type(at) not in (float, int) or not since <= at <= sys.float_info.max):
             continue
-        tree, folder, messages = row.get('tree'), row.get('folder'), row.get('messages')
+        tree, folder = row.get('tree'), row.get('folder')
         if not isinstance(tree, str) or tree not in trees or not isinstance(folder, str):
             continue
-        if not isinstance(messages, list) or not messages or 'head' not in row or os.path.realpath(folder) != worktree:
+        hook = _hook_commit(row, require_author=True)
+        if hook is None or os.path.realpath(folder) != worktree:
             continue
-        merge = row.get('verdict') == 'skip' and row.get('reason') == 'merge'
-        merge_heads = ()
-        if merge:
-            heads = row.get('merge_heads')
-            if not isinstance(heads, list) or not heads or not all(
-                    isinstance(oid, str) and GIT_OID.fullmatch(oid) for oid in heads):
-                continue
-            merge_heads = tuple(heads)
-        author_date = row.get('author_date')
-        if not isinstance(author_date, str) and ('author_date' in row or not merge):
-            continue
-        committer_date, started = row.get('committer_date'), row.get('started')
-        if 'committer_date' in row and not isinstance(committer_date, str):
-            continue
+        started = row.get('started')
         if 'committer_override' in row or type(started) is not int:
             started = None
-        head = row['head']
-        if head is None or (isinstance(head, str) and GIT_OID.fullmatch(head)):
-            rows_by_tree.setdefault(tree, []).append(
-                (at, f'{at}:{folder}', head, messages, author_date, committer_date, started, merge_heads))
+        rows_by_tree.setdefault(tree, []).append((at, f'{at}:{folder}', hook, started))
     for candidates in rows_by_tree.values():
         candidates.sort(key=lambda row: row[0])
 
@@ -1622,31 +1684,25 @@ def _claim_covering_rows(waiting, commits, worktree, rows, key, claims, amend_pa
         if not candidates or commit.body is None:
             uncovered.append(commit)
             continue
-        digest = _message_digest(key, _normalize_message(commit.body.split('\n')))
+        digest = _commit_digest(key, commit)
         match = None
-        for at, row_key, head, messages, author_date, committer_date, started, merge_heads in candidates:
-            if author_date is not None and author_date != commit.author_date:
-                continue
-            if committer_date is not None:
-                if committer_date != commit.committer_date:
-                    continue
-            elif (commit.committed > at + LOG_TIME_TOLERANCE
-                  or (started is not None and commit.committed < started)):
+        for at, row_key, hook, started in candidates:
+            if hook.committer_date is None and (commit.committed > at + LOG_TIME_TOLERANCE
+                                               or (started is not None and commit.committed < started)):
                 continue
             claimed = claims.get(row_key)
-            if claimed not in (None, commit.oid) or digest not in messages:
+            if claimed not in (None, commit.oid):
                 continue
             if match is not None and claimed is None:
                 continue  # Keep the oldest eligible row unless a covering claim already exists.
-            if head == commit.parent:
-                if commit.parent_list[1:] != merge_heads:
-                    continue
-            else:
-                if merge_heads or amend_parents(head) != commit.parent_list:
-                    continue
-                heads = reflog()  # Only the reflog proves an amend. Matching parents can also be a re-merge.
-                if heads is None or heads.get(commit.oid) != head:
-                    continue
+
+            def amend_matches():
+                # Only the reflog proves an amend. Matching parents can also be a re-merge.
+                return (amend_parents(hook.head) == commit.parent_list
+                        and (heads := reflog()) is not None and heads.get(commit.oid) == hook.head)
+
+            if not _matches_hook_commit(commit, digest, hook, amend_matches):
+                continue
             if claimed == commit.oid:
                 match = row_key  # Reuse the existing claim on overlapping PostToolUse calls.
                 break
@@ -1768,6 +1824,48 @@ def _ps_started(elapsed, now):
     return now - (days * 86400 + hours * 3600 + minutes * 60 + seconds)
 
 
+def _linux_process(pid, clock):
+    entry = Path(f'/proc/{pid}/stat').read_bytes()
+    start, end = entry.index(b'('), entry.rindex(b')')
+    comm = os.fsdecode(entry[start + 1:end])
+    fields = entry[end + 1:].split()
+    state, parent = fields[0], int(fields[1])
+    started = None
+    if clock is not None:
+        boot, ticks = clock
+        try:
+            started = boot + int(fields[19]) / ticks  # starttime is field 22.
+        except (ValueError, IndexError):
+            pass
+    return parent, comm, started, state
+
+
+def _ps_git_started(pid, *, timeout):
+    """Return a stable macOS ps start token rather than estimating it from elapsed time."""
+    if timeout <= 0:
+        return None
+    try:
+        shown = subprocess.run(['ps', '-o', 'stat=,lstart=', '-p', str(pid)], capture_output=True,
+                               text=True, check=True, timeout=timeout, env={**os.environ, 'LC_ALL': 'C', 'TZ': 'UTC0'})
+        state, started = shown.stdout.split(maxsplit=1)
+        return started.strip() if not state.startswith('Z') else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _hook_git_alive(row, *, deadline):
+    pid, expected = row.get('git_pid'), row.get('git_started')
+    if type(pid) is not int or pid <= 0 or expected is None or time.monotonic() >= deadline:
+        return False
+    if sys.platform.startswith('linux'):
+        try:
+            _, _, started, state = _linux_process(pid, _boot_clock())
+            return state not in (b'Z', b'X') and started == expected
+        except (OSError, ValueError, IndexError):
+            return False
+    return _ps_git_started(pid, timeout=min(0.05, deadline - time.monotonic())) == expected
+
+
 def _ancestors():
     """Nearest parents first. A vanished process or a slow ps ends the walk."""
     pid = os.getppid()
@@ -1778,20 +1876,9 @@ def _ancestors():
         remaining = deadline - time.monotonic()
         if pid < 1 or remaining <= 0:
             break
-        started = None
         try:
             if linux:
-                entry = Path(f'/proc/{pid}/stat').read_bytes()
-                start, end = entry.index(b'('), entry.rindex(b')')
-                comm = os.fsdecode(entry[start + 1:end])
-                fields = entry[end + 1:].split()
-                ppid = int(fields[1])
-                if clock is not None:
-                    boot, ticks = clock
-                    try:
-                        started = boot + int(fields[19]) / ticks  # starttime is field 22.
-                    except (ValueError, IndexError):
-                        pass
+                ppid, comm, started, _ = _linux_process(pid, clock)
             else:
                 shown = subprocess.run(['ps', '-o', 'ppid=,etime=,comm=', '-p', str(pid)], capture_output=True,
                                        text=True, check=True, timeout=remaining)
@@ -1964,8 +2051,13 @@ def commit_msg(path, env=os.environ, cwd=None, now=None):
         if author_date := re.fullmatch(r'@(\d+ [+-]\d{4})', env.get('GIT_AUTHOR_DATE', '')):
             record['author_date'] = author_date[1]
         git_process = next((ancestor for ancestor in ancestors if os.path.basename(ancestor.comm) == 'git'), None)
-        if git_process is not None and git_process.started is not None:
-            record['started'] = math.floor(git_process.started) - 1  # Allow for clock tick rounding.
+        if git_process is not None:
+            if git_process.started is not None:
+                record['started'] = math.floor(git_process.started) - 1  # Allow for clock tick rounding.
+            started = (git_process.started if sys.platform.startswith('linux')
+                       else _ps_git_started(git_process.pid, timeout=0.05))
+            if started is not None:
+                record.update(git_pid=git_process.pid, git_started=started)
         if env.get('GIT_COMMITTER_DATE'):
             ident = _git(cwd, 'var', 'GIT_COMMITTER_IDENT', env=env)
             date = (re.search(r' (\d+ [+-]\d{4})\Z', ident.stdout.rstrip('\n'))

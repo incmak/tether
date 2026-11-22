@@ -8296,7 +8296,7 @@ class ApprovalTurnWorktreeTests(ApprovalTurnFixture):
         self.reviewed = self.root / "reviewed worktree"
         self.gate_log = self.root / "gate.log"
         self.git("init", "-q", "-b", "main", str(self.start), cwd=self.root)
-        self.start_check = self.gate_fields(self.start, unborn=True)
+        self.start_check = self.gate_fields(self.start, "Start", unborn=True)
         self.git("commit", "-qm", "Start", "--allow-empty")
         self.git("worktree", "add", "-qb", "reviewed", str(self.reviewed))
         self.commit_in(self.reviewed, "Reviewed commit")
@@ -8322,13 +8322,15 @@ class ApprovalTurnWorktreeTests(ApprovalTurnFixture):
             text=True, timeout=10,
         ).stdout.strip()
 
-    def gate_fields(self, folder, *, unborn=False):
+    def gate_fields(self, folder, message="Blocked attempt", *, unborn=False):
         path = Path(self.git("rev-parse", "--absolute-git-dir", cwd=folder))
         info = path.stat()
+        key = commit_gate._message_key(create=True)
         return {
             "folder": str(folder), "head": None if unborn else self.git("rev-parse", "HEAD", cwd=folder),
             "tree": self.git("write-tree", cwd=folder), "reflog": commit_gate._head_reflog_position(folder),
             "git_dir": {"path": str(path), "dev": info.st_dev, "ino": info.st_ino},
+            "messages": [commit_gate._message_digest(key, message)],
         }
 
     def record_gate_check(self, **fields):
@@ -8340,7 +8342,7 @@ class ApprovalTurnWorktreeTests(ApprovalTurnFixture):
             log.write(json.dumps(record) + "\n")
 
     def commit_in(self, folder, message):
-        self.record_gate_check(**self.gate_fields(folder))
+        self.record_gate_check(**self.gate_fields(folder, message))
         self.git("commit", "-qm", message, "--allow-empty", cwd=folder)
         return self.git("rev-parse", "HEAD", cwd=folder)
 
