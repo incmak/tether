@@ -63,7 +63,7 @@
  "cases": [
   {
    "id": "log-ask-why-slow",
-   "group": "send_direct",
+   "group": "readback",
    "split": "dev",
    "source": "log",
    "history": [
@@ -78,10 +78,10 @@
    ],
    "user": "Okay, so I reckon you took too much uh But I'll can you ask the Frida test session, like why did Friday took too long to respond?",
    "expect": {
-    "tool": "send_to_chat",
-    "readback_ok": true,
+    "tool": null,
+    "readback_chat": "friday test",
     "args": {
-     "chat": "(?i)friday test"
+     "prompt": "(?i)slow|long to respond|latency|delay"
     }
    }
   },
@@ -256,9 +256,9 @@
     "Create and work on this log and then accordingly fine-tune this model so that it can understand intent."
    ],
    "expect": {
-    "tool": "send_to_chat",
+    "tool": null,
+    "readback_chat": "friday test",
     "args": {
-     "chat": "(?i)friday test",
      "prompt": "(?i)log"
     }
    }
@@ -304,15 +304,15 @@
   },
   {
    "id": "log-urgent-feature-ask",
-   "group": "send_direct",
+   "group": "readback",
    "split": "dev",
    "source": "log",
    "history": [],
    "user": "And kind of I was thinking if I am needed, um at times we should have a feature if I'm needed urgently, like very urgently, not urgent, like very urgently, and it's a critical blocker and no way out. And you can just call me through Friday and then I can answer it. Can we have that feature and can we ask the Friday test session to spin up a new tab? And like ask um to write a spec and use the skill grill me with dogs.",
    "expect": {
-    "tool": "send_to_chat",
+    "tool": null,
+    "readback_chat": "friday test",
     "args": {
-     "chat": "(?i)friday test",
      "prompt": "(?i)spec"
     }
    }
@@ -794,7 +794,7 @@
   },
   {
    "id": "log-answer-only-c",
-   "group": "send_direct",
+   "group": "readback",
    "split": "dev",
    "source": "log",
    "history": [
@@ -844,9 +844,9 @@
    ],
    "user": "tell it let's keep option C",
    "expect": {
-    "tool": "send_to_chat",
+    "tool": null,
+    "readback_chat": "Automation tether . Can we have\u2026",
     "args": {
-     "chat": "(?i)^Automation tether \\. Can we have\u2026$",
      "prompt": "(?i)^\\W*(?:(?:let'?s|let us|we(?:'ll| will)?|i(?:'ll| will)?|please|answer|reply|choose|pick|select|keep|go|with|use|stay|on|option|the|is|it|decision|choice|observe|mode)\\W+)*C\\W*(?:for now\\W*)?$"
     }
    },
@@ -866,7 +866,7 @@
   },
   {
    "id": "log-answer-only-q7",
-   "group": "send_direct",
+   "group": "readback",
    "split": "dev",
    "source": "log",
    "history": [
@@ -900,9 +900,9 @@
    ],
    "user": "tell it yes to Q7 only",
    "expect": {
-    "tool": "send_to_chat",
+    "tool": null,
+    "readback_chat": "Automation tether . Can we have\u2026",
     "args": {
-     "chat": "(?i)^Automation tether \\. Can we have\u2026$",
      "prompt": "(?i)\\bQ?7\\b"
     },
     "prompt_not": "(?i)yes to all"
@@ -983,45 +983,45 @@
   },
   {
    "id": "send-tell",
-   "group": "send_direct",
+   "group": "readback",
    "split": "dev",
    "source": "hand",
    "history": [],
    "user": "tell api server to add a health check endpoint",
    "expect": {
-    "tool": "send_to_chat",
+    "tool": null,
+    "readback_chat": "api-server",
     "args": {
-     "chat": "(?i)api.server",
      "prompt": "(?i)health"
     }
    }
   },
   {
    "id": "send-ask-misheard",
-   "group": "send_direct",
+   "group": "readback",
    "split": "dev",
    "source": "hand",
    "history": [],
    "user": "ask the docs sight chat to fix the broken links on the home page",
    "expect": {
-    "tool": "send_to_chat",
+    "tool": null,
+    "readback_chat": "docs-site",
     "args": {
-     "chat": "(?i)docs.site",
      "prompt": "(?i)link"
     }
    }
   },
   {
    "id": "send-have-it",
-   "group": "send_direct",
+   "group": "readback",
    "split": "dev",
    "source": "hand",
    "history": [],
    "user": "have login-fix run the tests again",
    "expect": {
-    "tool": "send_to_chat",
+    "tool": null,
+    "readback_chat": "login-fix",
     "args": {
-     "chat": "(?i)login.fix",
      "prompt": "(?i)test"
     }
    }
@@ -1520,16 +1520,17 @@
   },
   {
    "id": "backlog-send",
-   "group": "backlog_send",
+   "group": "readback",
    "split": "dev",
    "source": "hand",
    "history": [],
    "user": "send B 12 to api server",
    "expect": {
-    "tool": "backlog_send",
+    "tool": null,
+    "readback_chat": "api-server",
+    "readback_tool": "backlog_send",
     "args": {
-     "item": "(?i)b ?12",
-     "chat": "(?i)api.server"
+     "item": "(?i)^\\s*#?b\\s*12\\s*\\Z"
     }
    }
   },
@@ -1560,16 +1561,14 @@
   },
   {
    "id": "misheard-tell",
-   "group": "misheard",
+   "group": "readback",
    "split": "dev",
    "source": "hand",
    "history": [],
    "user": "tell friday chest to check the error logs",
    "expect": {
-    "tool": "send_to_chat",
-    "args": {
-     "chat": "(?i)friday test"
-    }
+    "tool": null,
+    "readback_chat": "friday test"
    }
   },
   {
@@ -1648,30 +1647,30 @@
   },
   {
    "id": "h-send-message",
-   "group": "send_direct",
+   "group": "readback",
    "split": "holdout",
    "source": "hand",
    "history": [],
    "user": "message the api server and say rebase on main and push",
    "expect": {
-    "tool": "send_to_chat",
+    "tool": null,
+    "readback_chat": "api-server",
     "args": {
-     "chat": "(?i)api.server",
      "prompt": "(?i)rebase"
     }
    }
   },
   {
    "id": "h-send-get-it",
-   "group": "send_direct",
+   "group": "readback",
    "split": "holdout",
    "source": "hand",
    "history": [],
    "user": "can you get login fix to add a test for the password reset",
    "expect": {
-    "tool": "send_to_chat",
+    "tool": null,
+    "readback_chat": "login-fix",
     "args": {
-     "chat": "(?i)login.fix",
      "prompt": "(?i)password"
     }
    }
@@ -1908,16 +1907,17 @@
   },
   {
    "id": "h-backlog-send",
-   "group": "backlog_send",
+   "group": "readback",
    "split": "holdout",
    "source": "hand",
    "history": [],
    "user": "send backlog item B seven to docs site",
    "expect": {
-    "tool": "backlog_send",
+    "tool": null,
+    "readback_chat": "docs-site",
+    "readback_tool": "backlog_send",
     "args": {
-     "item": "(?i)b ?7|seven",
-     "chat": "(?i)docs.site"
+     "item": "(?i)^\\s*#?b\\s*7\\s*\\Z"
     }
    }
   },
@@ -1966,16 +1966,14 @@
   },
   {
    "id": "h-misheard-theatre",
-   "group": "misheard",
+   "group": "readback",
    "split": "holdout",
    "source": "hand",
    "history": [],
    "user": "ask the automation theatre chat to restart the watcher",
    "expect": {
-    "tool": "send_to_chat",
-    "args": {
-     "chat": "(?i)automation"
-    }
+    "tool": null,
+    "readback_chat": "Automation tether"
    }
   },
   {
@@ -1991,7 +1989,7 @@
   },
   {
    "id": "h-split-tell",
-   "group": "split_turn",
+   "group": "readback",
    "split": "holdout",
    "source": "hand",
    "history": [],
@@ -2000,9 +1998,9 @@
     "add logging to the upload handler"
    ],
    "expect": {
-    "tool": "send_to_chat",
+    "tool": null,
+    "readback_chat": "api-server",
     "args": {
-     "chat": "(?i)api.server",
      "prompt": "(?i)log"
     }
    }
@@ -2155,23 +2153,22 @@
   },
   {
    "id": "log-send-friday-call-transcript",
-   "group": "send_direct",
+   "group": "readback",
    "split": "dev",
    "source": "log",
    "history": [],
    "user": "send this the whole log, voice log I had with you to the Friday test session",
    "expect": {
-    "tool": "send_to_chat",
-    "readback_ok": true,
+    "tool": null,
+    "readback_chat": "friday test",
     "args": {
-     "chat": "(?i)^friday test$",
      "attach_call": "^True$"
     }
    }
   },
   {
    "id": "log2-ask-other-session",
-   "group": "send_direct",
+   "group": "readback",
    "split": "dev",
    "source": "log",
    "history": [
@@ -2186,9 +2183,9 @@
    ],
    "user": "Okay ask Friday test uh session to read latest. Uh logs I had. the call with Friday.",
    "expect": {
-    "tool": "send_to_chat",
+    "tool": null,
+    "readback_chat": "friday test",
     "args": {
-     "chat": "(?i)friday test",
      "prompt": "(?i)log"
     }
    },
@@ -2235,16 +2232,14 @@
   },
   {
    "id": "h-ask-other-session",
-   "group": "send_direct",
+   "group": "readback",
    "split": "holdout",
    "source": "hand",
    "history": [],
    "user": "get the api server session to rebase on main",
    "expect": {
-    "tool": "send_to_chat",
-    "args": {
-     "chat": "(?i)api.server"
-    }
+    "tool": null,
+    "readback_chat": "api-server"
    },
    "state": {
     "busy": [
@@ -2281,9 +2276,9 @@
     "And it should be able to interact with teeth as well when I tell it to do so. And it toggles within the ID. If I enable that, then it should be able to interact with the environment. Can you ask Friday test what did you what did he do about it?"
    ],
    "expect": {
-    "tool": "send_to_chat",
+    "tool": null,
+    "readback_chat": "friday test",
     "args": {
-     "chat": "(?i)friday test",
      "prompt": "(?is)(?=.*\\b(toggle|setting|enabl\\w*|switch\\w*))(?=.*\\b(act\\w*|interact\\w*|control\\w*|agen(cy|tic)))"
     }
    },
@@ -2375,7 +2370,7 @@
   },
   {
    "id": "log-resend-long-text",
-   "group": "send_direct",
+   "group": "readback",
    "split": "dev",
    "source": "log",
    "history": [
@@ -2417,9 +2412,9 @@
    ],
    "user": "No see you sent the wrong text. You sent only the what do you do about it, but it was a long text. So Tell f uh tell uh the Friday test session that And why did it make that mistake?",
    "expect": {
-    "tool": "send_to_chat",
+    "tool": null,
+    "readback_chat": "friday test",
     "args": {
-     "chat": "(?i)friday test",
      "prompt": "(?is)(?=.*\\bfriday\\b)(?=.*\\b(toggle|setting|agen(cy|tic)|interact\\w*|act\\w*))"
     }
    }
@@ -2674,7 +2669,7 @@
   },
   {
    "id": "log-ask-friday-test-new-tab",
-   "group": "send_direct",
+   "group": "readback",
    "split": "dev",
    "source": "log",
    "history": [
@@ -2689,10 +2684,9 @@
    ],
    "user": "No, I think you should ask Friday test session that there is bug and I'm not able to check uh the responses and properly the chat sessions. I'm not able to are not able to read that. Friday is not able to read that. So investigation is n needed. In another tab.",
    "expect": {
-    "tool": "send_to_chat",
-    "readback_ok": true,
+    "tool": null,
+    "readback_chat": "friday test",
     "args": {
-     "chat": "(?i)friday test",
      "prompt": "(?i)read|reply|response|cut|trunc"
     }
    }
@@ -3161,7 +3155,7 @@
     },
     {
      "role": "assistant",
-     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Say yes to send it, or no."
     }
    ],
    "user": "read all of it",
@@ -3345,7 +3339,7 @@
     },
     {
      "role": "assistant",
-     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Say yes to send it, or no."
     }
    ],
    "user": "yes",
@@ -3453,7 +3447,7 @@
     },
     {
      "role": "assistant",
-     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Say yes to send it, or no."
     }
    ],
    "user": "yes, send it to docs-site",
@@ -3553,7 +3547,7 @@
     },
     {
      "role": "assistant",
-     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Say yes to send it, or no."
     },
     {
      "role": "user",
@@ -3807,7 +3801,7 @@
     },
     {
      "role": "assistant",
-     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Say yes to send it, or no."
     }
    ],
    "user": "let me hear the whole prompt",
@@ -3991,7 +3985,7 @@
     },
     {
      "role": "assistant",
-     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Say yes to send it, or no."
     }
    ],
    "user": "yes send it",
@@ -4099,7 +4093,7 @@
     },
     {
      "role": "assistant",
-     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Say yes to send it, or no."
     }
    ],
    "user": "yes, to docs-site",
@@ -4199,7 +4193,7 @@
     },
     {
      "role": "assistant",
-     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Say yes to send it, or no."
     },
     {
      "role": "user",

@@ -16,8 +16,8 @@ import friday_intent_eval as evaluation
 
 
 def case(tool=None, **fields):
-    return dict({'id': 'ask-friday', 'group': 'send_direct', 'split': 'dev',
-                 'source': 'hand', 'history': [], 'user': 'Ask friday test to fix it',
+    return dict({'id': 'ask-friday', 'group': 'readback', 'split': 'dev',
+                 'source': 'hand', 'history': [], 'user': 'Okay, send the logs note to friday test',
                  'expect': {'tool': tool}}, **fields)
 
 
@@ -139,7 +139,10 @@ class IntentEvalTests(unittest.TestCase):
                         self.assertEqual(blocked['blocked'], 'Use send_prompt for a drafted prompt.')
 
     def test_lookup_uses_case_result_and_scores_extra_action(self):
+        pending = {'name': 'send_to_chat', 'chat': 'Friday test', 'payload': 'Fix it'}
+        readback = friday.send_readback(friday.SendProposal(**pending, turn=0))
         example = case(expect={'tool': 'send_to_chat', 'args': {'chat': '(?i)friday test'}},
+                       user='Yes.', history=[assistant(readback)], pending=pending,
                        tool_results={'list_chats': {'chats': ['Friday test']}})
         data = fixture(example, tool_results={'list_chats': {'chats': ['Other chat']},
                                               'backlog_list': {'items': ['B12']}})
@@ -162,8 +165,10 @@ class IntentEvalTests(unittest.TestCase):
                          'content': json.dumps({'chats': ['Friday test']})})
 
     def test_duplicate_send_is_blocked_after_allowed_send(self):
+        pending = {'name': 'send_to_chat', 'chat': 'Friday test', 'payload': 'Fix it'}
+        readback = friday.send_readback(friday.SendProposal(**pending, turn=0))
         result, payloads = self.run_script(
-            case('send_to_chat'),
+            case('send_to_chat', user='Yes.', history=[assistant(readback)], pending=pending),
             assistant(tool_calls=[call('send_to_chat', chat='Friday test', prompt='Fix it'),
                                   call('send_to_chat', 'c2', chat='Other chat', prompt='Check it')]))
         self.assertEqual((result['passed'], len(payloads)), (0, 1))
@@ -189,15 +194,22 @@ class IntentEvalTests(unittest.TestCase):
                                                             'content': json.dumps(error)})
 
     def test_split_speech_joins_fragments_for_guard(self):
-        example = case('send_to_chat', user=["let's ask friday test to look at the logs", 'and fix it'])
-        result, payloads = self.run_script(
-            example, assistant(tool_calls=[call('send_to_chat', chat='friday test', prompt='Fix logs')]))
-        # Consent in the first fragment applies to the whole spoken turn.
+        pending = {'name': 'send_to_chat', 'chat': 'friday test', 'payload': 'Fix logs'}
+        readback = friday.send_readback(friday.SendProposal(**pending, turn=0))
+        example = case('send_to_chat', user=['yes', 'please do it'], history=[assistant(readback)], pending=pending)
+        send = assistant(tool_calls=[call('send_to_chat', chat='friday test', prompt='Fix logs')])
+        result, payloads = self.run_script(example, send)
+        # The fragments form one yes to the stored proposal.
         self.assertEqual((result['passed'], len(payloads)), (1, 1))
         trace, = result['samples']
         self.assertEqual(trace['action']['name'], 'send_to_chat')
-        self.assertEqual(payloads[0]['messages'][1]['content'], example['user'][0])
-        self.assertEqual(payloads[0]['messages'][-1]['content'], example['user'][1])
+        fragments = [message['content'] for message in payloads[0]['messages'] if friday.is_real_user(message)]
+        self.assertEqual(fragments, example['user'])
+
+        example['user'][1] += ' and fix it'
+        result, _ = self.run_script(example, send)
+        trace, = result['samples']
+        self.assertEqual((result['fails'], trace['actions']), ({'readback_instead': 1}, []))
 
     def test_friday_readback_scores_by_expectation_and_ends_the_run(self):
         proposal = {'name': 'send_to_chat', 'chat': ' Friday Test ', 'payload': 'Fix the login bug'}
@@ -272,6 +284,19 @@ class IntentEvalTests(unittest.TestCase):
         result, _ = self.run_script(example, response, data=data)
         self.assertEqual(result['passed'], 1, result['fails'])
 
+    def test_backlog_readback_fixtures_check_the_proposed_item(self):
+        data = evaluation.load_fixture(evaluation.DEFAULT_CASES)
+        for ident, chat, item in (('backlog-send', 'api-server', 'B12'),
+                                  ('h-backlog-send', 'docs-site', 'B7')):
+            example = next(case for case in data['cases'] if case['id'] == ident)
+            for proposed, fails in ((item, {}), (item + '0', {'wrong_args': 1}), ('B99', {'wrong_args': 1}),
+                                   ('seven', {'wrong_args': 1}), ('twelve', {'wrong_args': 1})):
+                with self.subTest(ident=ident, proposed=proposed):
+                    response = assistant(tool_calls=[call('backlog_send', chat=chat, item=proposed)])
+                    result, _ = self.run_script(example, response, data=data)
+                    self.assertEqual(result['fails'], fails)
+                    self.assertEqual(result['samples'][0]['actions'], [])
+
     def test_backlog_readback_requires_the_expected_tool(self):
         send = assistant(tool_calls=[call('backlog_send', chat='docs-site', item='B12')])
         expect = {'tool': None, 'readback_chat': 'docs-site'}
@@ -287,9 +312,10 @@ class IntentEvalTests(unittest.TestCase):
         data = evaluation.load_fixture(evaluation.DEFAULT_CASES)
         cases = {example['id']: example for example in data['cases']}
         chat = 'Automation tether . Can we have…'
-        for id_, answer, suggestion in (('log-answer-only-c', 'C', 'C, yes to all'),
-                                        ('log-answer-only-c', 'Keep Observe mode with option C.', 'C, yes to all'),
-                                        ('log-answer-only-q7', 'Yes to Q7 only', 'yes to all')):
+        for id_, answer, suggestion, failure in (
+                ('log-answer-only-c', 'C', 'C, yes to all', 'wrong_args'),
+                ('log-answer-only-c', 'Keep Observe mode with option C.', 'C, yes to all', 'wrong_args'),
+                ('log-answer-only-q7', 'Yes to Q7 only', 'Q7, yes to all', 'wrong_args')):
             with self.subTest(id=id_):
                 example = cases[id_]
                 correct = assistant(tool_calls=[call('send_to_chat', chat=chat, prompt=answer)])
@@ -297,7 +323,7 @@ class IntentEvalTests(unittest.TestCase):
                 result, _ = self.run_script(example, correct, data=data)
                 self.assertEqual(result['passed'], 1, result['fails'])
                 result, _ = self.run_script(example, copied, data=data)
-                self.assertEqual(result['fails'], {'readback_instead': 1})
+                self.assertEqual(result['fails'], {failure: 1})
         extra_answer = assistant(tool_calls=[call('send_to_chat', chat=chat, prompt='C. Also, yes to all.')])
         result, _ = self.run_script(cases['log-answer-only-c'], extra_answer, data=data)
         self.assertEqual(result['fails'], {'wrong_args': 1})
@@ -359,9 +385,10 @@ class IntentEvalTests(unittest.TestCase):
                     args['attach_call'] = True
                 result, _ = self.run_script(example, assistant(tool_calls=[call('send_to_chat', **args)]), data=data)
                 self.assertEqual(result['fails'], fails)
-                if attach:  # Without the attachment, the plain send goes direct and misses attach_call.
-                    self.assertTrue(result['samples'][0]['proposal']['attach'])
-                    self.assertIn("with this call's transcript", result['samples'][0]['reply'])
+                trace, = result['samples']
+                self.assertEqual(trace['actions'], [])
+                self.assertEqual(trace['proposal'].get('attach', False), attach)
+                self.assertEqual("with this call's transcript" in trace['reply'], attach)
 
     def test_pending_proposal_binds_yes_to_the_last_readback_and_chat(self):
         pending = {'name': 'send_to_chat', 'chat': 'friday test', 'payload': 'Fix the login bug'}
@@ -620,7 +647,7 @@ class IntentEvalTests(unittest.TestCase):
             with patch.object(evaluation, 'live_brain') as live, redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(evaluation.main(['--cases', str(cases_path)]), 0)
                 live.assert_not_called()
-            self.assertIn('send_direct', output.getvalue())
+            self.assertIn('readback', output.getvalue())
             self.assertIn('holdout', output.getvalue())
             complete = Mock(return_value=assistant('Okay.', _usage={'prompt_tokens': 50}))
             brain = SimpleNamespace(model='example', max_tokens=42, extra={})

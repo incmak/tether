@@ -41,9 +41,10 @@ CANT = "(?i)can(?:'t|not| ?not)|unable|don't have|no way|not able|isn't somethin
 NEEDS = say("Yeah, see which chat needs my attention. Let's start with the oldest.",
             "deploy-check needs your attention: it asks to allow the command npm test.")
 # ---- From the 19 Nov 2026 log (names replaced) ----
-case("log-ask-why-slow", "send_direct", "dev",
+# B404 allowlist: a speech restart and a question require a read-back.
+case("log-ask-why-slow", "readback", "dev",
      "Okay, so I reckon you took too much uh But I'll can you ask the Frida test session, like why did Friday took too long to respond?",
-     {"tool": "send_to_chat", "readback_ok": True, "args": {"chat": "(?i)friday test"}}, "log",
+     {"tool": None, "readback_chat": "friday test", "args": {"prompt": "(?i)slow|long to respond|latency|delay"}}, "log",
      history=say("Hi. Hi Friday are you listening?", "I am listening. What can I help you with today?"))
 case("log-catch-up-count", "backlog_list", "dev",
      "Okay, okay, that's great. And can you check like what's on my table, like what I have to catch up with? How many items?",
@@ -63,19 +64,21 @@ case("log-go-to-session", "show", "dev", "And can you go to that session?",
 case("log-you-havent", "no_tool", "dev", "No you haven't. I can I cannot see it. Like what are you talking about?",
      {"tool": None}, "log",
      history=NEEDS + say("And can you go to that session?", "I have opened the sidebar and switched to that chat for you."))
+# B404 allowlist: "let's ask" is not a request lead-in.
 case("log-split-ask", "split_turn", "dev",
      ["Uh it was already open. Okay, let's ask uh Friday test uh chat session to go through these logs and spin up a new tab so that it can kind of do you understand like it can then",
       "Create and work on this log and then accordingly fine-tune this model so that it can understand intent."],
-     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": "(?i)log"}}, "log")
+     {"tool": None, "readback_chat": "friday test", "args": {"prompt": "(?i)log"}}, "log")
 READBACK = "I will ask the friday test chat to go through the logs, spin up a new tab, and work on fine-tuning the model for intent. Shall I send that?"
 # Added words are new text: Friday reads the new send back first (readback_ok).
 case("log-confirm-plus-more", "confirm", "dev", ["Please do that.", "And also ask it to fix B three one eight."],
      {"tool": "send_to_chat", "readback_ok": True, "args": {"chat": "(?i)friday test", "prompt": "(?i)318|three one eight"}}, "log",
      history=say("Okay, let's ask Friday test to go through the logs and fine-tune the model to understand intent.", READBACK))
 case("log-praise", "no_tool", "dev", "Great, I love it. I love how you're uh responding well", {"tool": None}, "log")
-case("log-urgent-feature-ask", "send_direct", "dev",
+# B404 allowlist: "not urgent" appears earlier in the turn.
+case("log-urgent-feature-ask", "readback", "dev",
      "And kind of I was thinking if I am needed, um at times we should have a feature if I'm needed urgently, like very urgently, not urgent, like very urgently, and it's a critical blocker and no way out. And you can just call me through Friday and then I can answer it. Can we have that feature and can we ask the Friday test session to spin up a new tab? And like ask um to write a spec and use the skill grill me with dogs.",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": "(?i)spec"}}, "log")
+     {"tool": None, "readback_chat": "friday test", "args": {"prompt": "(?i)spec"}}, "log")
 # A yes to Friday's own words gets the fixed read-back first; only a yes to that read-back sends.
 case("log-confirm-yes-please", "confirm", "dev", "Yes, please.",
      {"tool": "send_to_chat", "readback_ok": True,
@@ -132,13 +135,13 @@ case("log-unknown-session", "misheard", "dev",
      tool_results={"list_chats": {"error": "No session called predicta. Sessions: Tether, Backend, Docs, Automation, Friday chats"}})
 
 # ---- From the 19 Nov 2026 13:51-13:52 call (user evidence) ----
-AUTO_CHAT = r"(?i)^Automation tether \. Can we have…$"
 # The prompt answers C and nothing else ("observe mode" is option C's own name). A list of allowed words, because a list of banned words
 # missed "Keep option C. Deploy immediately."
 ONLY_C = (r"(?i)^\W*(?:(?:let'?s|let us|we(?:'ll| will)?|i(?:'ll| will)?|please|answer|reply|choose|pick|select|"
           r"keep|go|with|use|stay|on|option|the|is|it|decision|choice|observe|mode)\W+)*C\W*(?:for now\W*)?$")
-case("log-answer-only-c", "send_direct", "dev", "tell it let's keep option C",
-     {"tool": "send_to_chat", "args": {"chat": AUTO_CHAT, "prompt": ONLY_C}}, "log", state=AUTO_STATE,
+# B404 frame rule
+case("log-answer-only-c", "readback", "dev", "tell it let's keep option C",
+     {"tool": None, "readback_chat": AUTO, "args": {"prompt": ONLY_C}}, "log", state=AUTO_STATE,
      history=turn("Uh so like what's happening in automation Ther? Like can you check it? Is there a dependency on me?",
                   "read_last_reply", {"chat": AUTO}, {"chat": AUTO, "text":
                       'B240 and B241 are still in progress in B232 Extension Zip. I am watching that tab.\n\n'
@@ -148,8 +151,9 @@ case("log-answer-only-c", "send_direct", "dev", "tell it let's keep option C",
                   "B240 and B241 are still in progress, and it is waiting for your answers on auto-merge and factory floor questions.", "h7")
      + say("So what is the auto-most question?", "It asks whether to keep Observe mode with option C.")
      + say("Do you think we should keep that?", "I cannot judge your design choices, but option C keeps Observe mode active."))
-case("log-answer-only-q7", "send_direct", "dev", "tell it yes to Q7 only",
-     {"tool": "send_to_chat", "args": {"chat": AUTO_CHAT, "prompt": r"(?i)\bQ?7\b"},
+# B404 allowlist: "only" requires a read-back even when it limits the message content.
+case("log-answer-only-q7", "readback", "dev", "tell it yes to Q7 only",
+     {"tool": None, "readback_chat": AUTO, "args": {"prompt": r"(?i)\bQ?7\b"},
       "prompt_not": "(?i)yes to all"}, "log", state=AUTO_STATE,
      history=turn("What did it say about the Factory floor?", "read_last_reply", {"chat": AUTO},
                   {"chat": AUTO, "text": 'Factory floor, round 2: questions Q6 to Q9.\n\n'
@@ -171,12 +175,15 @@ case("h-neg-not-tell", "no_tool", "holdout", "no, do not tell login-fix about th
 
 # ---- Hand-written: dev ----
 D, H = "dev", "holdout"
-case("send-tell", "send_direct", D, "tell api server to add a health check endpoint",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)api.server", "prompt": "(?i)health"}})
-case("send-ask-misheard", "send_direct", D, "ask the docs sight chat to fix the broken links on the home page",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)docs.site", "prompt": "(?i)link"}})
-case("send-have-it", "send_direct", D, "have login-fix run the tests again",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)login.fix", "prompt": "(?i)test"}})
+# B404 frame rule
+case("send-tell", "readback", D, "tell api server to add a health check endpoint",
+     {"tool": None, "readback_chat": "api-server", "args": {"prompt": "(?i)health"}})
+# B404 frame rule
+case("send-ask-misheard", "readback", D, "ask the docs sight chat to fix the broken links on the home page",
+     {"tool": None, "readback_chat": "docs-site", "args": {"prompt": "(?i)link"}})
+# B404 allowlist: "have" requires a read-back.
+case("send-have-it", "readback", D, "have login-fix run the tests again",
+     {"tool": None, "readback_chat": "login-fix", "args": {"prompt": "(?i)test"}})
 case("readback-should", "readback", D, "the api server should add rate limiting to the upload endpoint",
      {"tool": None, "readback_chat": "api-server"})
 case("readback-let", "readback", D, "let docs site update the changelog for the new release",
@@ -240,13 +247,15 @@ case("backlog-add", "backlog_add", D, "add to the backlog: dark mode for the log
      {"tool": "backlog_add", "args": {"text": "(?i)dark mode"}})
 case("backlog-remember", "reminder", D, "remember to rotate the staging API keys next week",
      {"tool": "reminder_add", "args": {"reminders": "(?i)rotate"}})
-case("backlog-send", "backlog_send", D, "send B 12 to api server",
-     {"tool": "backlog_send", "args": {"item": "(?i)b ?12", "chat": "(?i)api.server"}})
+# B404: every send gets a read-back
+case("backlog-send", "readback", D, "send B 12 to api server",
+     {"tool": None, "readback_chat": "api-server", "readback_tool": "backlog_send", "args": {"item": r"(?i)^\s*#?b\s*12\s*\Z"}})
 case("backlog-readback", "readback", D, "B 12 for api server I think",
      {"tool": None, "readback_chat": "api-server", "readback_tool": "backlog_send"})
 case("outside-github", "outside", D, "create a GitHub issue for the login bug", {"tool": None, "reply": CANT})
-case("misheard-tell", "misheard", D, "tell friday chest to check the error logs",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test"}})
+# B404 frame rule
+case("misheard-tell", "readback", D, "tell friday chest to check the error logs",
+     {"tool": None, "readback_chat": "friday test"})
 case("thanks", "no_tool", D, "thanks Friday, that's all for now", {"tool": None})
 case("what-can-you-do", "no_tool", D, "what can you do for me?", {"tool": None})
 case("did-you-send-blocked", "no_tool", D, "did you send it?", {"tool": None, "reply": "(?i)\\bno\\b|not|didn't|haven't"},
@@ -258,10 +267,12 @@ case("event-needs", "event", D, '{"chat":"deploy-check","kind":"needs","text":"A
      {"tool": None}, event=True)
 
 # ---- Hand-written: holdout (do not tune on these) ----
-case("h-send-message", "send_direct", H, "message the api server and say rebase on main and push",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)api.server", "prompt": "(?i)rebase"}})
-case("h-send-get-it", "send_direct", H, "can you get login fix to add a test for the password reset",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)login.fix", "prompt": "(?i)password"}})
+# B404 frame rule
+case("h-send-message", "readback", H, "message the api server and say rebase on main and push",
+     {"tool": None, "readback_chat": "api-server", "args": {"prompt": "(?i)rebase"}})
+# B404 frame rule: the prior classifier also required a read-back for "get".
+case("h-send-get-it", "readback", H, "can you get login fix to add a test for the password reset",
+     {"tool": None, "readback_chat": "login-fix", "args": {"prompt": "(?i)password"}})
 case("h-readback-want", "readback", H, "I want login fix to also cover the password reset page",
      {"tool": None, "readback_chat": "login-fix"})
 case("h-readback-idea", "readback", H, "docs site needs a page about the new settings screen",
@@ -290,19 +301,22 @@ case("h-new-chat", "new_chat", H, "open a new claude chat named release check",
 case("h-backlog-read", "backlog_list", H, "read me the top items on my backlog", {"tool": "backlog_list"})
 case("h-backlog-add", "backlog_add", H, "put fix the flaky upload test on my backlog",
      {"tool": "backlog_add", "args": {"text": "(?i)flaky"}})
-case("h-backlog-send", "backlog_send", H, "send backlog item B seven to docs site",
-     {"tool": "backlog_send", "args": {"item": "(?i)b ?7|seven", "chat": "(?i)docs.site"}})
+# B404: every send gets a read-back
+case("h-backlog-send", "readback", H, "send backlog item B seven to docs site",
+     {"tool": None, "readback_chat": "docs-site", "readback_tool": "backlog_send", "args": {"item": r"(?i)^\s*#?b\s*7\s*\Z"}})
 case("h-outside-email", "outside", H, "send an email to the team with the release notes", {"tool": None, "reply": CANT})
 case("h-show-chat", "show", H, "bring up the api server chat on my screen",
      {"tool": "show_chat", "args": {"chat": "(?i)api.server"}})
 case("h-show-off", "show", H, "show me the docs site chat",
      {"tool": "show_chat", "reply": "(?i)off|settings|can(?:'t|not)|did not|didn't"},
      tool_results={"show_chat": {"error": "Friday cannot change the screen: Friday can act in Tether is off in Settings."}})
-case("h-misheard-theatre", "misheard", H, "ask the automation theatre chat to restart the watcher",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)automation"}})
+# B404 frame rule
+case("h-misheard-theatre", "readback", H, "ask the automation theatre chat to restart the watcher",
+     {"tool": None, "readback_chat": "Automation tether"})
 case("h-no-tool-joke", "no_tool", H, "ha, that was quick", {"tool": None})
-case("h-split-tell", "split_turn", H, ["okay tell api server to", "add logging to the upload handler"],
-     {"tool": "send_to_chat", "args": {"chat": "(?i)api.server", "prompt": "(?i)log"}})
+# B404 frame rule
+case("h-split-tell", "readback", H, ["okay tell api server to", "add logging to the upload handler"],
+     {"tool": None, "readback_chat": "api-server", "args": {"prompt": "(?i)log"}})
 case("h-status-needs", "status", H, "does anything need me right now?", {"tool": None, "reply": "(?i)deploy"})
 
 # ---- From the 19 Nov 2026 08:23 call (B339; names replaced) ----
@@ -319,25 +333,29 @@ case("log2-already-asked", "read_reply", "dev",
                           "Shall I send the request to go question by question to release-notes?"))
 case("log2-read-the-questions", "read_reply", "dev", "Can you read the questions?",
      {"tool": "read_last_reply", "args": {"chat": "(?i)release.notes"}}, "log", history=QS_CTX, state=QS_STATE, tool_results=QS)
-case("log-send-friday-call-transcript", "send_direct", "dev",
+# B404: every send gets a read-back
+case("log-send-friday-call-transcript", "readback", "dev",
      "send this the whole log, voice log I had with you to the Friday test session",
-     {"tool": "send_to_chat", "readback_ok": True,
-      "args": {"chat": "(?i)^friday test$", "attach_call": "^True$"}}, "log")
-case("log2-ask-other-session", "send_direct", "dev",
+     {"tool": None, "readback_chat": "friday test", "args": {"attach_call": "^True$"}}, "log")
+# B404 frame rule
+case("log2-ask-other-session", "readback", "dev",
      "Okay ask Friday test uh session to read latest. Uh logs I had. the call with Friday.",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": "(?i)log"}}, "log", history=QS_CTX, state=QS_STATE)
+     {"tool": None, "readback_chat": "friday test", "args": {"prompt": "(?i)log"}},
+     "log", history=QS_CTX, state=QS_STATE)
 case("h-read-asked-me", "read_reply", "holdout", "what questions did docs site ask me? read them out",
      {"tool": "read_last_reply", "args": {"chat": "(?i)docs.site"}}, state=QS_STATE)
-case("h-ask-other-session", "send_direct", "holdout", "get the api server session to rebase on main",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)api.server"}}, state=QS_STATE)
+# B404 frame rule: the prior classifier also required a read-back for "get".
+case("h-ask-other-session", "readback", "holdout", "get the api server session to rebase on main",
+     {"tool": None, "readback_chat": "api-server"}, state=QS_STATE)
 
 # ---- Call audit 19 Nov 2026 (B339; fixes 1-3, 5-10 in tether-notes call-audit-2026-11-19.md) ----
 AGENCY = ["Why cannot you? Why why cannot you do that? You can let us that we should have full agency workflow and interactions.",
           "It should be like an environment where I talk to Friday.",
           "And it should be able to interact with teeth as well when I tell it to do so. And it toggles within the ID. If I enable that, then it should be able to interact with the environment. Can you ask Friday test what did you what did he do about it?"]
 AGENCY_PROMPT = r"(?is)(?=.*\b(toggle|setting|enabl\w*|switch\w*))(?=.*\b(act\w*|interact\w*|control\w*|agen(cy|tic)))"
+# B404 allowlist: "cannot" appears earlier in the turn.
 case("log-agency-ask-it", "split_turn", "dev", AGENCY,
-     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": AGENCY_PROMPT}},
+     {"tool": None, "readback_chat": "friday test", "args": {"prompt": AGENCY_PROMPT}},
      "log", history=say("Can you switch to that tab within Tither?",
                         "I cannot show or open a chat in the window, but I have switched your target to Automation tether."),
      state=AUTO_STATE)
@@ -350,10 +368,11 @@ C_CTX = (turn("Uh so like what's happening in automation Ther? Like can you chec
 case("log-keep-that-readback", "readback", "dev", "Okay, let's keep that.",
      {"tool": None, "readback_chat": AUTO, "args": {"prompt": ONLY_C}}, "log",
      history=C_CTX, state=AUTO_STATE)
-case("log-resend-long-text", "send_direct", "dev",
+# B404 allowlist: "No see you sent..." is not a filler-only lead clause.
+case("log-resend-long-text", "readback", "dev",
      "No see you sent the wrong text. You sent only the what do you do about it, but it was a long text. So Tell f uh tell uh the Friday test session that And why did it make that mistake?",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test",
-                                        "prompt": r"(?is)(?=.*\bfriday\b)(?=.*\b(toggle|setting|agen(cy|tic)|interact\w*|act\w*))"}},
+     {"tool": None, "readback_chat": "friday test",
+      "args": {"prompt": r"(?is)(?=.*\bfriday\b)(?=.*\b(toggle|setting|agen(cy|tic)|interact\w*|act\w*))"}},
      "log", history=[{"role": "user", "content": part} for part in AGENCY] + [
          {"role": "assistant", "content": None, "tool_calls": [call("r1", "send_to_chat",
              {"chat": "friday test", "prompt": "What did you do about it?"})]},
@@ -385,10 +404,10 @@ case("log-keep-option-c", "read_reply", "dev", "Do you think we should keep that
 case("log-answer-it-keep-c", "readback", "dev", "Well like answer it like let's keep option C",
      {"tool": None, "readback_chat": AUTO, "args": {"prompt": ONLY_C}}, "log",
      history=C_CTX + say("Okay, let's keep that.", "Should I send C to the automation tether chat?"), state=AUTO_STATE)
-case("log-ask-friday-test-new-tab", "send_direct", "dev",
+# B404 allowlist: the negated content requires a read-back.
+case("log-ask-friday-test-new-tab", "readback", "dev",
      "No, I think you should ask Friday test session that there is bug and I'm not able to check uh the responses and properly the chat sessions. I'm not able to are not able to read that. Friday is not able to read that. So investigation is n needed. In another tab.",
-     {"tool": "send_to_chat", "readback_ok": True,
-      "args": {"chat": "(?i)friday test", "prompt": "(?i)read|reply|response|cut|trunc"}}, "log",
+     {"tool": None, "readback_chat": "friday test", "args": {"prompt": "(?i)read|reply|response|cut|trunc"}}, "log",
      history=say("The chat already has the first question. Why are you not able to see it?",
                  "The last reply cut off, so I do not have the question in my view. Shall I ask it to show the question?"))
 
