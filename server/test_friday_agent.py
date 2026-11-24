@@ -14,6 +14,7 @@ import logging
 import math
 import os
 from pathlib import Path
+import re
 import sys
 from tempfile import TemporaryDirectory
 import threading
@@ -1410,9 +1411,11 @@ class FridayRulesTests(unittest.TestCase):
             self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', text, set()), refusal)
         for text in ('tell ci-audit to fix the flake', 'SEND this', 'ask it', 'prompt it',
                      'instruct it', 'message ci-audit', 'forward this', 'have it fix it',
-                     'have them fix it', 'have ci-audit fix it', 'get it to fix it',
-                     'get them to fix it', 'please prompt docs', 'Okay. Message ci-audit with the fix.'):
+                     'have them fix it', 'have ci-audit fix it',
+                     'please prompt docs', 'Okay. Message ci-audit with the fix.'):
             self.assertIsNone(friday.check_tool('send_to_chat', args, 'speech', text, set()))
+        for text in ('get it to fix it', 'get them to fix it'):
+            self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', text, set()), refusal)
         for text in ('sender', 'telling', 'messaged', 'forget it to', 'I have a fish',
                      'what was the answer', 'did it reply', "Don't answer it yet.",
                      'Should I reply to it now?', 'What should I reply with?', 'answer it',
@@ -1495,15 +1498,18 @@ class FridayRulesTests(unittest.TestCase):
 
     def test_attachment_refuses_nearby_exclusions(self):
         args = {'chat': 'docs', 'prompt': 'Review it.', 'attach_call': True}
-        for words in ('Send the build log to docs, without this call transcript',
-                      'Send the notes to docs, but keep our conversation private',
-                      'Send the notes to docs; leave this call out',
-                      'Send the notes about our conversation to docs, but don’t include the transcript'):
+        for words, direct_reason in (
+            ('Send the build log to docs, without this call transcript', None),
+            ('Send the notes to docs, but keep our conversation private', None),
+            ('Send the notes to docs; leave this call out', None),
+            ('Send the notes about our conversation to docs, but don’t include the transcript',
+             friday.READBACK_REQUIRED),
+        ):
             with self.subTest(words=words):
                 self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', words, set()),
                                  'The user did not ask to send the call.')
-                self.assertIsNone(friday.check_tool('send_to_chat', dict(args, attach_call=False),
-                                                    'speech', words, set()))
+                self.assertEqual(friday.check_tool('send_to_chat', dict(args, attach_call=False),
+                                                   'speech', words, set()), direct_reason)
         proposal = friday.SendProposal('send_to_chat', 'docs', 'Review it.', 1, heard=True, attach=True)
         self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', 'Yes, but no transcript.', set(),
                                          friday.send_readback(proposal), proposal, 2),
@@ -1784,6 +1790,109 @@ class FridayRulesTests(unittest.TestCase):
                      'Okay. Message ci-audit with the fix.',
                      "But I'll can you ask the Frida test session why it was slow"):
             with self.subTest(text):
+                self.assertTrue(friday.send_intent(text))
+
+    def test_send_intent_is_an_allowlist(self):
+        refused = (
+            'No see tell docs to rerun',
+            'Fix the flake and tell docs',
+            'I will check and then tell docs',
+            'What can you tell docs about it?',
+            'How much can you tell docs?',
+            'Why on earth would you tell docs about it?',
+            'I asked Sam can you tell docs to rerun?',
+            'Maybe tell docs',
+            'You could tell docs',
+            'Remember to tell docs',
+            'Try to ask docs',
+            'The note says: tell docs to rerun',
+            'If the tests pass, tell docs',
+            'Let the API team know to send the report',
+            'Have the QA team decide whether to send the report',
+            'Did you by any chance tell docs',
+            'Docs is done. Tell it to deploy',
+            'Do not ping the U.S. team or tell docs to rerun',
+            'Do not approve it. Send it.',
+            "Don't... send the report to docs",
+            'Never mind. Tell docs to rerun it.',
+            "That's not urgent. Ask docs to rerun it.",
+            'Tell docs to rerun. Actually, hold off',
+            "Tell docs to rerun. Wait, don't send it.",
+            'Tell docs to rerun actually hold off',
+            'Tell us when it is done',
+            'Can you tell me when the chat replies',
+            'Yes, and can you tell me when the chat replies?',
+            'Yes, please do not send it yet',
+            'Can you get live chat to work?',
+            'Get it to work.',
+            'can you get login fix to add a test for the password reset',
+            'Never mind. But Ill can you ask docs to rerun.',
+            'But Ill can you ask us about the deploy',
+            'Can you I want you to send the report',
+            'Message us when the chat replies',
+        )
+        swap_commas_periods = str.maketrans(',.', '.,')
+        for phrase in refused:
+            for text in (phrase, re.sub(r'[.,!?;:]', '', phrase), phrase.translate(swap_commas_periods)):
+                with self.subTest(phrase=phrase, text=text):
+                    self.assertFalse(friday.send_intent(text))
+
+        # The question mark changes how rule 1 treats message and prompt.
+        for text, allowed in (('Could you message ci-audit?', False), ('Could you message ci-audit', True)):
+            with self.subTest(text=text):
+                self.assertEqual(friday.send_intent(text), allowed)
+        for text in ('But I’ll can you just ask docs to rerun. Neither of them is ready.',
+                     'Tell docs to rerun, but we cannot deploy.', 'Tell docs to rerun. No.',
+                     '. Tell docs to rerun'):
+            with self.subTest(text=text):
+                self.assertFalse(friday.send_intent(text))
+
+        existing_requests = (
+            'tell ci-audit to fix the flake', 'SEND this', 'ask it', 'prompt it', 'instruct it',
+            'message ci-audit', 'forward this', 'have it fix it', 'have them fix it',
+            'have ci-audit fix it', 'please prompt docs', 'Okay. Message ci-audit with the fix.',
+            'Just message ci-audit with the fix', 'Can you tell docs to rerun it',
+            'I want you to tell docs to rerun it', 'Ask ci-audit to fix the flake. I will check later.',
+            "But I'll can you ask the Frida test session why it was slow",
+            'Yes, and tell docs to archive the draft too.', 'Tell docs to fix the header.',
+            'Tell it to fix the login bug', 'Send it', 'Send the build log to docs',
+            'Send the latest update to docs', 'Send the build log to docs, without this call transcript',
+            'Send the notes to docs, but keep our conversation private',
+            'Send the notes to docs; leave this call out', 'go ahead and send it',
+            'Send B12 to Build.', 'send B 12 to api', 'yes, tell it to fix login',
+        )
+        for phrase in existing_requests:
+            with self.subTest(phrase=phrase):
+                self.assertTrue(friday.send_intent(phrase))
+            for prefix in ('maybe', 'remember to', 'if it fails', 'I asked Sam'):
+                text = re.sub(r'\b(?:send|tell|ask|instruct|forward|prompt|message|have)\b',
+                              lambda verb: prefix + ' ' + verb.group(), phrase, count=1, flags=re.I)
+                with self.subTest(phrase=phrase, text=text):
+                    self.assertFalse(friday.send_intent(text))
+            for suffix in ('. Actually, hold off', ', wait, do not send it', ' actually hold off'):
+                text = phrase + suffix
+                with self.subTest(phrase=phrase, text=text):
+                    self.assertFalse(friday.send_intent(text))
+
+        for text in (
+            'Go ahead and tell docs to rerun',
+            'Ok tell docs not to deploy',
+            'Tell docs the build is not broken',
+            'No, I think you should ask Friday test session that there is a bug',
+            'No, tell docs to rerun it',
+            'Okay ask Friday test uh session to read the latest logs',
+            'um, uh, tell docs to rerun',
+            'Hey Friday, can you please tell docs to rerun',
+            'Would you just ask docs to rerun',
+            'Will you send it',
+            'I need you to tell docs to rerun',
+            "I'd like you to tell docs to rerun",
+            'I would like you to tell docs to rerun',
+            'You should tell docs to rerun',
+            'But I’ll can you just ask docs to rerun',
+            'But Ill can you ask docs to rerun',
+        ):
+            with self.subTest(text=text):
                 self.assertTrue(friday.send_intent(text))
 
     def test_review_round_9_holes_stay_closed(self):
@@ -3440,7 +3549,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         )
         for calls in cases:
             with self.subTest(calls=calls), patch('sys.stderr'):
-                text = 'Do not approve it. Send it.' if calls[0][0] == 'answer_approval' else 'Send it'
+                text = 'Send it and do not approve it.' if calls[0][0] == 'answer_approval' else 'Send it'
                 _, frames = await self.tool_flow(text, [('', 1.25, calls)])
                 results = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
                 self.assertEqual(len(results), len(calls))

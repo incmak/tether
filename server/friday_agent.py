@@ -147,12 +147,8 @@ FRIDAY_HOTWORDS = ('Tether', 'tether')
 HOTWORDS_SCORE = 1.5
 SEND_INTENT = re.compile(
     r'\b(?:send|tell|ask|instruct|forward)\b'
-    # Prompt and message are send words only as a verb that starts a clause: "message ci-audit" or
-    # "please prompt it", not "the prompt ci-audit got" or "did you message them".
-    r'|(?:^|[.,!;:]\s*|\b(?:please|just|and|then|now|so|(?:can|could|would) you)\s+)'
-    r'(?:prompt|message)\s+(?:it|them|\w+(?:-\w+)*)\b(?![^.!]*\?)'
-    r'|\bhave\s+(?:it|them|\w+(?:-\w+)+)\s+\w+'
-    r'|\bget\s+(?:it|them)\s+to\b', re.I)
+    r'|\b(?:prompt|message)\s+\w+(?:-\w+)*\b(?![^.!]*\?)'
+    r'|\bhave\s+(?:it|them|\w+(?:-\w+)+)\s+\w+\b', re.I)
 CALL_LOG_INTENT = re.compile(
     r'\b(?:voice logs?|call logs?|transcript|conversation|(?:this|the|our|whole) call|call with (?:you|friday)'
     r'|logs? (?:i had )?with you|(?:what|everything) (?:we|i) (?:said|discussed))\b', re.I)
@@ -972,25 +968,41 @@ def binds(payload, proposed):
     return bool(same_text(proposed)) and same_text(payload) == same_text(proposed)
 
 
-# "Should I ask docs myself" or "I'll message it": the user plans their own send. STT drops the "?".
-OWN_SEND = re.compile(r"\b(?:i|we)(?:['’](?:ll|d))?(?:\s+\w+){0,2}\s*$"
-                      r"|\b(?:did|have|has)\s+(?:you|it|they)\b"  # "Did you by any chance tell docs"
-                      r"|\b(?:not|never|don['’]?t)(?:\s+\w+)?\s*$", re.I)  # "do not send it yet"
+SEND_FILLER = r'(?:okay|ok|alright|right|so|and|then|now|also|just|please|um|uh|er|like|well|yes|yeah|no|hey|friday)'
+SEND_CLAUSE_END = r'[.,!?;:]'
+SEND_LEAD_IN = (r"(?:(?:can|could|would|will)\s+you|i\s+(?:want|need)\s+you\s+to"
+                r"|i(?:['’]d|\s+would)\s+like\s+you\s+to|(?:i\s+think\s+)?you\s+should|go\s+ahead\s+and)")
+# Every clause before the request may contain only fillers. A lead-in belongs to the request clause.
+ASKS_FRIDAY = re.compile(
+    rf'\s*(?:{SEND_FILLER}(?:\s*{SEND_CLAUSE_END}+\s*|\s+))*'
+    rf'(?:{SEND_LEAD_IN}\s+(?:{SEND_FILLER}\s+)*)?', re.I)
+# One STT restart can introduce a request after other content.
+SEND_RESTART = re.compile(r"\bi['’]?ll\s+can\s+you(?:\s+(?:please|just))?\s+\Z", re.I)
+SEND_NEGATION = re.compile(r"\b(?:not|never|nor|neither|cannot|dont|cant|wont)\b|n['’]t\b", re.I)
+SEND_CANCEL = re.compile(
+    r'\b(?:wait|hold\s+off|hold\s+on|actually|cancel|never\s+mind|scratch\s+that|forget\s+it|stop|no)\b', re.I)
 # "Tell me when it replies": the user is the one told.
 TOLD_USER = re.compile(r"\s+(?:me|us)\b", re.I)
 
-# "But I'll can you ask docs" (STT): "can you" asks Friday, whatever comes before it.
-ASKS_FRIDAY = re.compile(r'\b(?:can|could|would|will)\s+you\s+(?:please\s+|just\s+)?$', re.I)
-
 
 def send_intent(text):
-    """True when the user asks Friday to send, not when they ask about or plan their own send."""
+    """Allow a direct send only from a fresh request with no withdrawal."""
     for match in SEND_INTENT.finditer(text):
-        if TOLD_USER.match(text, match.end()):
+        before = text[:match.start()]
+        if SEND_NEGATION.search(before):
             continue
-        clause = re.split(r'[.,!;:?]', text[:match.start()])[-1]
-        if ASKS_FRIDAY.search(clause) or not OWN_SEND.search(clause):
-            return True
+        if not (ASKS_FRIDAY.fullmatch(before) or SEND_RESTART.search(before)):
+            continue
+        verb_end = match.start() + len(match[0].split(maxsplit=1)[0])
+        if TOLD_USER.match(text, verb_end) or TOLD_USER.match(text, match.end()):
+            continue
+        after = text[verb_end:]
+        if SEND_CANCEL.search(after):
+            continue
+        clauses = re.split(SEND_CLAUSE_END, after, maxsplit=1)
+        if len(clauses) > 1 and SEND_NEGATION.search(clauses[1]):
+            continue
+        return True
     return False
 
 

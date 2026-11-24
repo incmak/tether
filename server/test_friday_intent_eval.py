@@ -189,15 +189,20 @@ class IntentEvalTests(unittest.TestCase):
                                                             'content': json.dumps(error)})
 
     def test_split_speech_joins_fragments_for_guard(self):
-        example = case('send_to_chat', user=["let's ask friday test to look at the logs", 'and fix it'])
-        result, payloads = self.run_script(
-            example, assistant(tool_calls=[call('send_to_chat', chat='friday test', prompt='Fix logs')]))
+        example = case('send_to_chat', user=['okay, ask friday test to look at the logs', 'and fix it'])
+        send = assistant(tool_calls=[call('send_to_chat', chat='friday test', prompt='Fix logs')])
+        result, payloads = self.run_script(example, send)
         # Consent in the first fragment applies to the whole spoken turn.
         self.assertEqual((result['passed'], len(payloads)), (1, 1))
         trace, = result['samples']
         self.assertEqual(trace['action']['name'], 'send_to_chat')
         self.assertEqual(payloads[0]['messages'][1]['content'], example['user'][0])
         self.assertEqual(payloads[0]['messages'][-1]['content'], example['user'][1])
+
+        example['user'][0] = "let's ask friday test to look at the logs"
+        result, _ = self.run_script(example, send)
+        trace, = result['samples']
+        self.assertEqual((result['fails'], trace['actions']), ({'readback_instead': 1}, []))
 
     def test_friday_readback_scores_by_expectation_and_ends_the_run(self):
         proposal = {'name': 'send_to_chat', 'chat': ' Friday Test ', 'payload': 'Fix the login bug'}

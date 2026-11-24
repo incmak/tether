@@ -256,9 +256,9 @@
     "Create and work on this log and then accordingly fine-tune this model so that it can understand intent."
    ],
    "expect": {
-    "tool": "send_to_chat",
+    "tool": null,
+    "readback_chat": "friday test",
     "args": {
-     "chat": "(?i)friday test",
      "prompt": "(?i)log"
     }
    }
@@ -304,15 +304,15 @@
   },
   {
    "id": "log-urgent-feature-ask",
-   "group": "send_direct",
+   "group": "readback",
    "split": "dev",
    "source": "log",
    "history": [],
    "user": "And kind of I was thinking if I am needed, um at times we should have a feature if I'm needed urgently, like very urgently, not urgent, like very urgently, and it's a critical blocker and no way out. And you can just call me through Friday and then I can answer it. Can we have that feature and can we ask the Friday test session to spin up a new tab? And like ask um to write a spec and use the skill grill me with dogs.",
    "expect": {
-    "tool": "send_to_chat",
+    "tool": null,
+    "readback_chat": "friday test",
     "args": {
-     "chat": "(?i)friday test",
      "prompt": "(?i)spec"
     }
    }
@@ -2281,9 +2281,9 @@
     "And it should be able to interact with teeth as well when I tell it to do so. And it toggles within the ID. If I enable that, then it should be able to interact with the environment. Can you ask Friday test what did you what did he do about it?"
    ],
    "expect": {
-    "tool": "send_to_chat",
+    "tool": null,
+    "readback_chat": "friday test",
     "args": {
-     "chat": "(?i)friday test",
      "prompt": "(?is)(?=.*\\b(toggle|setting|enabl\\w*|switch\\w*))(?=.*\\b(act\\w*|interact\\w*|control\\w*|agen(cy|tic)))"
     }
    },
@@ -2375,7 +2375,7 @@
   },
   {
    "id": "log-resend-long-text",
-   "group": "send_direct",
+   "group": "readback",
    "split": "dev",
    "source": "log",
    "history": [
@@ -2417,9 +2417,9 @@
    ],
    "user": "No see you sent the wrong text. You sent only the what do you do about it, but it was a long text. So Tell f uh tell uh the Friday test session that And why did it make that mistake?",
    "expect": {
-    "tool": "send_to_chat",
+    "tool": null,
+    "readback_chat": "friday test",
     "args": {
-     "chat": "(?i)friday test",
      "prompt": "(?is)(?=.*\\bfriday\\b)(?=.*\\b(toggle|setting|agen(cy|tic)|interact\\w*|act\\w*))"
     }
    }
@@ -3161,7 +3161,7 @@
     },
     {
      "role": "assistant",
-     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Say yes to send it, or no."
     }
    ],
    "user": "read all of it",
@@ -3345,7 +3345,7 @@
     },
     {
      "role": "assistant",
-     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Say yes to send it, or no."
     }
    ],
    "user": "yes",
@@ -3453,7 +3453,7 @@
     },
     {
      "role": "assistant",
-     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Say yes to send it, or no."
     }
    ],
    "user": "yes, send it to docs-site",
@@ -3553,7 +3553,7 @@
     },
     {
      "role": "assistant",
-     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Say yes to send it, or no."
     },
     {
      "role": "user",
@@ -3807,7 +3807,7 @@
     },
     {
      "role": "assistant",
-     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Say yes to send it, or no."
     }
    ],
    "user": "let me hear the whole prompt",
@@ -3991,7 +3991,7 @@
     },
     {
      "role": "assistant",
-     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Say yes to send it, or no."
     }
    ],
    "user": "yes send it",
@@ -4099,7 +4099,7 @@
     },
     {
      "role": "assistant",
-     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Say yes to send it, or no."
     }
    ],
    "user": "yes, to docs-site",
@@ -4199,7 +4199,7 @@
     },
     {
      "role": "assistant",
-     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Say yes to send it, or no."
     },
     {
      "role": "user",

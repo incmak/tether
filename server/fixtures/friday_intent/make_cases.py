@@ -63,19 +63,21 @@ case("log-go-to-session", "show", "dev", "And can you go to that session?",
 case("log-you-havent", "no_tool", "dev", "No you haven't. I can I cannot see it. Like what are you talking about?",
      {"tool": None}, "log",
      history=NEEDS + say("And can you go to that session?", "I have opened the sidebar and switched to that chat for you."))
+# B404 allowlist: "let's ask" is not a request lead-in.
 case("log-split-ask", "split_turn", "dev",
      ["Uh it was already open. Okay, let's ask uh Friday test uh chat session to go through these logs and spin up a new tab so that it can kind of do you understand like it can then",
       "Create and work on this log and then accordingly fine-tune this model so that it can understand intent."],
-     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": "(?i)log"}}, "log")
+     {"tool": None, "readback_chat": "friday test", "args": {"prompt": "(?i)log"}}, "log")
 READBACK = "I will ask the friday test chat to go through the logs, spin up a new tab, and work on fine-tuning the model for intent. Shall I send that?"
 # Added words are new text: Friday reads the new send back first (readback_ok).
 case("log-confirm-plus-more", "confirm", "dev", ["Please do that.", "And also ask it to fix B three one eight."],
      {"tool": "send_to_chat", "readback_ok": True, "args": {"chat": "(?i)friday test", "prompt": "(?i)318|three one eight"}}, "log",
      history=say("Okay, let's ask Friday test to go through the logs and fine-tune the model to understand intent.", READBACK))
 case("log-praise", "no_tool", "dev", "Great, I love it. I love how you're uh responding well", {"tool": None}, "log")
-case("log-urgent-feature-ask", "send_direct", "dev",
+# B404 allowlist: "not urgent" appears earlier in the turn.
+case("log-urgent-feature-ask", "readback", "dev",
      "And kind of I was thinking if I am needed, um at times we should have a feature if I'm needed urgently, like very urgently, not urgent, like very urgently, and it's a critical blocker and no way out. And you can just call me through Friday and then I can answer it. Can we have that feature and can we ask the Friday test session to spin up a new tab? And like ask um to write a spec and use the skill grill me with dogs.",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": "(?i)spec"}}, "log")
+     {"tool": None, "readback_chat": "friday test", "args": {"prompt": "(?i)spec"}}, "log")
 # A yes to Friday's own words gets the fixed read-back first; only a yes to that read-back sends.
 case("log-confirm-yes-please", "confirm", "dev", "Yes, please.",
      {"tool": "send_to_chat", "readback_ok": True,
@@ -336,8 +338,9 @@ AGENCY = ["Why cannot you? Why why cannot you do that? You can let us that we sh
           "It should be like an environment where I talk to Friday.",
           "And it should be able to interact with teeth as well when I tell it to do so. And it toggles within the ID. If I enable that, then it should be able to interact with the environment. Can you ask Friday test what did you what did he do about it?"]
 AGENCY_PROMPT = r"(?is)(?=.*\b(toggle|setting|enabl\w*|switch\w*))(?=.*\b(act\w*|interact\w*|control\w*|agen(cy|tic)))"
+# B404 allowlist: "cannot" appears earlier in the turn.
 case("log-agency-ask-it", "split_turn", "dev", AGENCY,
-     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": AGENCY_PROMPT}},
+     {"tool": None, "readback_chat": "friday test", "args": {"prompt": AGENCY_PROMPT}},
      "log", history=say("Can you switch to that tab within Tither?",
                         "I cannot show or open a chat in the window, but I have switched your target to Automation tether."),
      state=AUTO_STATE)
@@ -350,10 +353,11 @@ C_CTX = (turn("Uh so like what's happening in automation Ther? Like can you chec
 case("log-keep-that-readback", "readback", "dev", "Okay, let's keep that.",
      {"tool": None, "readback_chat": AUTO, "args": {"prompt": ONLY_C}}, "log",
      history=C_CTX, state=AUTO_STATE)
-case("log-resend-long-text", "send_direct", "dev",
+# B404 allowlist: "No see you sent..." is not a filler-only lead clause.
+case("log-resend-long-text", "readback", "dev",
      "No see you sent the wrong text. You sent only the what do you do about it, but it was a long text. So Tell f uh tell uh the Friday test session that And why did it make that mistake?",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test",
-                                        "prompt": r"(?is)(?=.*\bfriday\b)(?=.*\b(toggle|setting|agen(cy|tic)|interact\w*|act\w*))"}},
+     {"tool": None, "readback_chat": "friday test",
+      "args": {"prompt": r"(?is)(?=.*\bfriday\b)(?=.*\b(toggle|setting|agen(cy|tic)|interact\w*|act\w*))"}},
      "log", history=[{"role": "user", "content": part} for part in AGENCY] + [
          {"role": "assistant", "content": None, "tool_calls": [call("r1", "send_to_chat",
              {"chat": "friday test", "prompt": "What did you do about it?"})]},
