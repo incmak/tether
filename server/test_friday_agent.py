@@ -1824,6 +1824,20 @@ class FridayRulesTests(unittest.TestCase):
                     self.assertEqual(friday.confirmed_args(tool, reworded, answer, previous, proposal, 1),
                                      args if allowed else reworded)
 
+    def test_unclear_yes_to_a_transcript_send_gets_a_fresh_readback(self):
+        args = {'chat': 'Docs', 'prompt': 'Rerun', 'attach_call': True}
+        proposal = replace(friday.SendProposal.from_args('send_to_chat', args, 0), heard=True)
+        previous = friday.send_readback(proposal)
+        for answer, expected in (('Yes, send it to Docs', friday.READBACK_REQUIRED),
+                                 ('Yes. Cancel.', friday.READBACK_REQUIRED),
+                                 ('yes', None)):
+            with self.subTest(answer=answer):
+                self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', answer, set(), previous, proposal, 1),
+                                 expected)
+        other = dict(args, chat='Build')
+        self.assertEqual(friday.check_tool('send_to_chat', other, 'speech', 'Yes, send it to Build', set(), previous,
+                                           proposal, 1), friday.CALL_NOT_REQUESTED)
+
     def test_former_direct_send_phrases_require_a_readback_for_both_tools(self):
         former_allowlist = (
             ('send it to api-server', 'api-server'),

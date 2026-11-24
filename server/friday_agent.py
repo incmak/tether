@@ -1135,7 +1135,8 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                             and attach == pending.attach and binds(payload, pending.payload))
         confirmed = proposal_matches and confirms(pending, last_user_text)
         if attach and not (CALL_LOG_INTENT.search(last_user_text) or confirmed):
-            return CALL_NOT_REQUESTED
+            # The heard proposal already carries the transcript; an unclear yes to it gets a fresh read-back.
+            return READBACK_REQUIRED if proposal_matches else CALL_NOT_REQUESTED
         if suggestions:
             normalized_payload = norm(payload)
             normalized_speech = norm(last_user_text)
