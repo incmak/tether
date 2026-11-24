@@ -1209,6 +1209,39 @@ def live_status(entry, run=subprocess.run):
 
 
 WORKING = detection_rules.pattern('common', 'WORKING')
+CLAUDE_SPINNER = detection_rules.pattern('claude', 'SPINNER')
+
+
+def claude_screen_working(plain_screen):
+    """Read Claude's status area. Return None when the input box is hidden."""
+    import footer  # footer imports this module
+
+    lines = plain_screen.splitlines()
+    anchor = footer.input_anchor(lines)
+    if anchor is None:
+        return None
+    bottom = next(index for index in range(anchor + 1, len(lines)) if footer.RULE.match(lines[index].strip()))
+    if any('esc to interrupt' in line.lower() for line in lines[bottom + 1:]):
+        return True
+    top = anchor - 1
+    for line in reversed(lines[max(0, top - 40):top]):
+        if line.startswith(('● ', '❯ ')):
+            break
+        if CLAUDE_SPINNER.match(line):
+            return True
+    return False
+
+
+def claude_registry(entry):
+    path = entry.get('registry')  # Claude has no registry before its first conversation.
+    if path:
+        try:
+            registry = json.loads(Path(path).read_text())
+            if isinstance(registry, dict):
+                return registry
+        except (OSError, ValueError):
+            pass
+    return {}
 
 
 def _live_status(entry, run, screen, login_screen=None, styled_screen=None):
@@ -1224,7 +1257,8 @@ def _live_status(entry, run, screen, login_screen=None, styled_screen=None):
         side = side_question.observe(entry, screen, styled_screen)
         if side:
             prompt_actions.ledger.forget(entry['id'])
-            return {'state': 'Working' if WORKING.search(screen) else 'Idle', 'approval': None, 'attention': side}
+            working = claude_registry(entry).get('status') == 'busy'
+            return {'state': 'Working' if working else 'Idle', 'approval': None, 'attention': side}
     pending = approval(screen)
     if pending:
         prompt_actions.ledger.forget(entry['id'])
@@ -1241,17 +1275,17 @@ def _live_status(entry, run, screen, login_screen=None, styled_screen=None):
         text = '\n\n'.join(part for part in ('Codex is waiting for your approval.', detail.get('tool'),
                           detail.get('text'), '\n'.join(screen.rstrip().splitlines()[-20:])) if part)
         return {'state': 'Approval', 'approval': {'id': None, 'text': text.strip(), 'actionable': False}}
-    working = live['busy'] and not live['waiting'] if live is not None else bool(WORKING.search(screen))
-    if entry['agent'] == 'codex' and live is None:
-        working = working or transcript_busy(entry.get('transcript'))
     registry = {}
-    if entry['agent'] == 'claude' and entry.get('registry'):  # a Claude with no conversation yet has no registry
-        try:
-            registry = json.loads(Path(entry['registry']).read_text())
-            working = working or registry.get('status') == 'busy'
-        except (OSError, ValueError):
-            pass
-    elif entry['agent'] == 'antigravity':
+    if entry['agent'] == 'claude':
+        registry = claude_registry(entry)
+        working = claude_screen_working(screen) is True or registry.get('status') == 'busy'
+    elif live is not None:
+        working = live['busy'] and not live['waiting']
+    else:
+        working = bool(WORKING.search(screen))
+        if entry['agent'] == 'codex':
+            working = working or transcript_busy(entry.get('transcript'))
+    if entry['agent'] == 'antigravity':
         try:
             metrics = json.loads((AGY_CACHE / (entry['thread'] + '.json')).read_text())
             working = working or metrics.get('agent_state') in ('thinking', 'working', 'tool_use', 'running')
@@ -1720,7 +1754,7 @@ def stop_turn(entry, run=subprocess.run, sleep=time.sleep):
         if draft:
             clear_draft(entry, run)
             return {'restored': '\n'.join(draft)}
-        if attempt >= 4 and not WORKING.search(capture(entry, run)):
+        if attempt >= 4 and claude_screen_working(capture(entry, run)) is False:
             break
     return {'restored': ''}
 
