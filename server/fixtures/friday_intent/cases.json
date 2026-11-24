@@ -1917,7 +1917,7 @@
     "readback_chat": "docs-site",
     "readback_tool": "backlog_send",
     "args": {
-     "item": "(?i)^\\s*(?:#?b\\s*7|seven)\\s*\\Z"
+     "item": "(?i)^\\s*#?b\\s*7\\s*\\Z"
     }
    }
   },

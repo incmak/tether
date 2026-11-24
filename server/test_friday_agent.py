@@ -1794,18 +1794,21 @@ class FridayRulesTests(unittest.TestCase):
                 with self.subTest(tool=tool, chat=chat):
                     self.assertEqual(friday.send_readback(proposal), 'Name the chat to send to.')
 
-    def test_send_confirmation_can_name_only_the_proposed_chat(self):
+    def test_send_confirmation_never_names_a_destination(self):
         for tool, key, payload in (('send_to_chat', 'prompt', 'Rerun'), ('backlog_send', 'item', 'B12')):
             for chat, answer, allowed in (
                     ('docs', 'Yes, send it to the All chat', False),
                     ('docs', 'Yes, send it to Good', False),
+                    ('docs', 'Yes, the Good chat please', False),
+                    ('docs', 'Yes, the Good please', False),
                     ('docs', 'yes but to docs-site', False),
                     ('docs', 'yes to api server', False),
                     ('docs', 'yes to docs and to Good', False),
-                    ('docs', 'Yes, send it to docs', True),
-                    ('docs', 'Yes, send it to the Docs chat', True),
-                    ('API Server', 'yes to api-server', True),
-                    ('Thank You', 'Yes, send it to Thank You', True),
+                    ('docs', 'Yes, send it to docs', False),
+                    ('docs', 'Yes, send it to the Docs chat', False),
+                    ('Hold Off', 'Yes to hold off', False),
+                    ('Docs Cancel', 'Yes, send it to Docs. Cancel.', False),
+                    ('docs', 'Yes. Cancel.', False),
                     ('docs', 'yes', True),
                     ('docs', 'yes please', True),
                     ('docs', 'yeah send it', True),

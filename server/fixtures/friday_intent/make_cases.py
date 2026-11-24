@@ -303,7 +303,7 @@ case("h-backlog-add", "backlog_add", H, "put fix the flaky upload test on my bac
      {"tool": "backlog_add", "args": {"text": "(?i)flaky"}})
 # B404: every send gets a read-back
 case("h-backlog-send", "readback", H, "send backlog item B seven to docs site",
-     {"tool": None, "readback_chat": "docs-site", "readback_tool": "backlog_send", "args": {"item": r"(?i)^\s*(?:#?b\s*7|seven)\s*\Z"}})
+     {"tool": None, "readback_chat": "docs-site", "readback_tool": "backlog_send", "args": {"item": r"(?i)^\s*#?b\s*7\s*\Z"}})
 case("h-outside-email", "outside", H, "send an email to the team with the release notes", {"tool": None, "reply": CANT})
 case("h-show-chat", "show", H, "bring up the api server chat on my screen",
      {"tool": "show_chat", "args": {"chat": "(?i)api.server"}})

@@ -788,20 +788,11 @@ class _QuestionMark:
 QUESTION_MARK = _QuestionMark()
 
 
-def plain_yes(text, affirmatives=YES_WORDS, *, chat=None):
+def plain_yes(text, affirmatives=YES_WORDS, allowed=YES_WORDS | YES_FILLER):
     if QUESTION_MARK.search(text):
         return False  # "That's correct?" asks; it does not consent.
     # "You sure" (STT drops the "?") asks too; "you" is a yes word only in "thank you".
     answer = norm(text)
-    if chat is not None:
-        prefix, to, destination = f' {answer} '.partition(' to ')
-        if to:
-            # Compare the destination before filtering filler. "All" and "Good" can be chat names.
-            title = re.escape(norm(chat))
-            if not title or not re.fullmatch(rf'(?:the )?{title}(?: (?:chat|pane|session|tab))?(?: please)?',
-                                            destination.strip()):
-                return False
-            answer = prefix.strip()
     words = f' {answer} '.replace(' thank you ', ' thanks ').split()
     # "Ahead" consents only after "go" ("Go ahead", "Go right ahead"). "Correct" consents as an answer
     # ("That's correct, go ahead"); with an object ("correct it", "correct the chat") it asks for a change.
@@ -810,13 +801,15 @@ def plain_yes(text, affirmatives=YES_WORDS, *, chat=None):
     # Read the raw text: "Correct, it sounds good" has a pause before "it" and still consents.
     if re.search(r"\bcorrect\s+(?:%s)\b" % '|'.join(sorted(CORRECTION_OBJECTS)), text, re.I):
         return False
-    allowed = YES_WORDS | YES_FILLER
     return any(word in affirmatives for word in words) and all(word in allowed for word in words)
 
 
 # A delete needs a short, closed yes. "to" is left out: "Correct yes to okay" corrects a word (B496).
 # "send" is left out: it never confirms a delete. "Yes, delete it" confirms; any other word gets a fresh read-back.
 DROP_YES_WORDS = YES_WORDS - {'send'}
+# A yes to a send never names a destination. A chat title is free text ("Hold Off", "Good", "All"), so
+# "Yes, send it to docs", "Yes to hold off" and "Yes, the Good chat" all get a fresh read-back (fail-safe).
+SEND_YES_ALLOWED = YES_WORDS | (YES_FILLER - {'to', 'the', 'chat', 'session', 'tab'})
 PROMPT_YES_WORDS = YES_WORDS - {'send'}
 DROP_YES_ALLOWED = DROP_YES_WORDS | (YES_FILLER - {'to', 'chat', 'session', 'tab'}) | frozenset(
     'delete drop remove clear them'.split())
@@ -889,7 +882,7 @@ def confirms(proposal, text):
     if proposal.name == 'send_prompt':
         return plain_yes(text, PROMPT_YES_WORDS)
     if proposal.name != 'answer_approval':
-        return plain_yes(text, chat=proposal.chat)
+        return plain_yes(text, allowed=SEND_YES_ALLOWED)
     if QUESTION_MARK.search(text) or APPROVAL_NEGATION.search(text) or proposal.payload not in APPROVAL_CONFIRM_WORDS:
         return False
     words = re.sub(r'\bgo ahead\b', 'yes', ' '.join(answer_words(text))).split()
