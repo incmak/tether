@@ -3368,7 +3368,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 ordinary = result('old-plain')
                 await llm.push_frame(ordinary)
                 self.assertEqual((late.run_llm, ordinary.run_llm), (False, None))
-                self.assertEqual((llm.tool_batches, llm.tool_batch_runs), ({}, {}))
+                self.assertFalse(llm.tool_batches)
         finally:
             await llm._client.close()
 
@@ -4468,6 +4468,395 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(requests), 2)
                 self.assertTrue(requests[1][-1]['content'].startswith(friday.EVENT_PREFIX))
                 self.assertIn({'role': 'assistant', 'content': ack}, requests[1])
+
+    async def browser_timeout_pipeline(self, tools, check, *, followup='Ready.', user_text='What did Docs say?',
+                                       mode='server'):
+        dispatched, armed, processed = asyncio.Queue(), asyncio.Queue(), asyncio.Queue()
+        first_end = asyncio.Event()
+        clocks = {ident: asyncio.Event() for ident in tools}
+        requests = []
+
+        def respond(number):
+            if number == 1:
+                return [self.chunk(tool_calls=[{'index': index, 'id': ident, 'type': 'function',
+                    'function': {'name': name, 'arguments': json.dumps(args)}}])
+                    for index, (ident, (name, args)) in enumerate(tools.items())]
+            is_event = requests[-1][-1]['content'].startswith(friday.EVENT_PREFIX)
+            return self.chunk(content='Ready.' if is_event else followup)
+
+        async def exercise(session):
+            @session.aggregators.assistant().event_handler('on_after_process_frame')
+            async def collect(processor, frame):
+                if isinstance(frame, self.rt.LLMFullResponseEndFrame):
+                    first_end.set()
+                processed.put_nowait(frame)
+
+            async def deadline(ident):
+                armed.put_nowait(ident)
+                await clocks[ident].wait()
+
+            async def receive(frame_type):
+                while not isinstance(frame := await processed.get(), frame_type):
+                    pass
+                return frame
+
+            session.models = SimpleNamespace(llm_health=AsyncMock(return_value=True))
+            session.rtvi.handle_function_call = AsyncMock(side_effect=dispatched.put)
+            session.llm.browser_deadline = deadline
+            for name, _ in tools.values():
+                session.llm.register_function(name, session.llm.handle_browser_tool, cancel_on_interruption=False)
+            user = session.aggregators.user()
+            session.worker.queue_frame = user.push_frame
+            session.context.add_message({'role': 'user', 'content': user_text})
+            await user.push_frame(self.rt.LLMContextFrame(session.context))
+            for _ in tools:
+                params = await dispatched.get()
+                self.assertEqual(params.function_name, tools[params.tool_call_id][0])
+            self.assertEqual({await armed.get() for _ in tools}, clocks.keys())
+            await first_end.wait()
+            await check(session, clocks, receive)
+
+        session, _, frames, synth = await self.voice_pipeline(mode, [exercise], llm_calls=requests, respond=respond)
+        return session, requests, frames, [entry.args[0] for entry in synth.call_args_list]
+
+    async def test_browser_read_timeout_releases_queued_event_after_speech(self):
+        tools = {'read': ('read_last_reply', {'chat': 'Docs'})}
+
+        async def check(session, clocks, receive):
+            self.assertTrue(session.waiting_for_read)
+            self.assertEqual(session.llm.tools_in_flight, {'read'})
+            gate_at_cancel = []
+
+            @session.aggregators.assistant().event_handler('on_after_process_frame')
+            async def record_gate(processor, frame):
+                if isinstance(frame, self.rt.FunctionCallCancelFrame):
+                    gate_at_cancel.append(session.llm.tools_in_flight.copy())
+
+            session.events.put('event', {'id': 'e1', 'chat': 'Docs', 'kind': 'done',
+                                         'priority': 'idle', 'text': 'Done.'})
+            pump_checked = asyncio.Event()
+            pop = session.events.pop
+
+            def check_pump(*args):
+                item = pop(*args)
+                pump_checked.set()
+                return item
+
+            session.events.pop = check_pump
+            pump = asyncio.create_task(session.pump())
+            try:
+                session.wake.set()
+                await pump_checked.wait()
+                self.assertEqual(len(session.events.items), 1)
+                clocks['read'].set()
+                cancel = await receive(self.rt.FunctionCallCancelFrame)
+                self.assertFalse(cancel.run_llm)
+                marker = await receive(self.rt.FridayToolSpeechCompleteFrame)
+                self.assertEqual(marker.tool_call_id, 'read')
+                self.assertEqual(gate_at_cancel, [{'read'}])
+                self.assertFalse(session.llm.tools_in_flight)
+                self.assertFalse(session.waiting_for_read)
+                await receive(self.rt.LLMFullResponseEndFrame)
+            finally:
+                pump.cancel()
+                await asyncio.gather(pump, return_exceptions=True)
+
+        _, requests, _, speech = await self.browser_timeout_pipeline(tools, check)
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(requests[1][-1]['content'].startswith(friday.EVENT_PREFIX))
+        self.assertIn({'role': 'assistant', 'content': friday.BROWSER_TIMEOUT_READ}, requests[1])
+        self.assert_browser_timeout_notice(requests[1], 'read', friday.BROWSER_TIMEOUT_READ)
+        self.assertEqual(speech, ['Reading it.', friday.BROWSER_TIMEOUT_READ, 'Ready.'])
+
+    def assert_browser_timeout_notice(self, messages, ident, line=None):
+        from pipecat.processors.aggregators import async_tool_messages
+
+        # The OpenAI adapter converts developer messages to user for Friday's provider.
+        payloads = [async_tool_messages.parse_message(
+            {**message, 'role': 'developer'} if message['role'] == 'user' else message)
+            for message in messages]
+        notices = [payload for payload in payloads if payload is not None
+                   and payload.tool_call_id == ident and payload.kind == 'final']
+        self.assertEqual(len(notices), 1, notices)
+        notice, = notices
+        self.assertEqual(notice.status, 'finished')
+        self.assertEqual(notice.result, 'TIMEOUT: the browser did not answer in time.')
+        expected = (f'The user was already told: {line} Do not repeat it. '
+                    'Do not say this call failed or succeeded; the outcome is unknown.' if line else
+                    'No result will arrive. If the user still needs it, say the browser did not answer; '
+                    'do not guess the result.')
+        self.assertEqual(notice.description, expected)
+
+    async def test_browser_action_timeout_speaks_once_even_if_sibling_triggers_inference(self):
+        tools = {'switch': ('switch_chat', {'chat': 'Docs'}),
+                 'read': ('read_last_reply', {'chat': 'Docs'})}
+        followup = "I couldn't switch to Docs. The last reply says Done."
+
+        async def check(session, clocks, receive):
+            clocks['switch'].set()
+            await receive(self.rt.FridayToolSpeechCompleteFrame)
+            self.assertEqual(session.llm.tools_in_flight, {'read'})
+            await session.llm.push_frame(self.rt.FunctionCallResultFrame(
+                'read_last_reply', 'read', {'chat': 'Docs'}, {'text': 'Done.'}))
+            await receive(self.rt.LLMFullResponseEndFrame)
+
+        with redirect_stderr(io.StringIO()) as stderr:
+            _, requests, _, speech = await self.browser_timeout_pipeline(
+                tools, check, followup=followup, user_text='Switch to Docs and read the last reply.')
+        self.assertIn('Friday browser tool timeout switch_chat switch\n', stderr.getvalue())
+        self.assertEqual(len(requests), 2)
+        self.assert_browser_timeout_notice(requests[1], 'switch', friday.BROWSER_TIMEOUT_ACTION)
+        self.assertEqual(speech, ['Reading it.', friday.BROWSER_TIMEOUT_ACTION,
+                                  "I couldn't switch to Docs.", 'The last reply says Done.'])
+
+    async def test_browser_timeout_preserves_false_success_correction_for_a_failed_sibling(self):
+        tools = {'switch': ('switch_chat', {'chat': 'Docs'}), 'open': ('open_panel', {'open': True})}
+
+        async def check(session, clocks, receive):
+            clocks['switch'].set()
+            await receive(self.rt.FridayToolSpeechCompleteFrame)
+            await session.llm.push_frame(self.rt.FunctionCallResultFrame(
+                'open_panel', 'open', {'open': True}, {'error': 'The panel is unavailable.'}))
+            await receive(self.rt.LLMFullResponseEndFrame)
+
+        _, requests, _, speech = await self.browser_timeout_pipeline(
+            tools, check, followup='Opened.', user_text='Switch to Docs and open the panel.')
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(speech, [friday.BROWSER_TIMEOUT_ACTION, 'That did not go through. The panel is unavailable.'])
+
+    async def test_last_browser_timeout_delivers_sibling_read_before_queued_event(self):
+        tools = {'switch': ('switch_chat', {'chat': 'Docs'}),
+                 'read': ('read_last_reply', {'chat': 'Docs'})}
+        followup = 'The last reply says Done.'
+
+        for delivery in ('settled', 'in_transit', 'while_speaking'):
+            with self.subTest(delivery=delivery):
+                async def check(session, clocks, receive):
+                    result_waiting, release_result = asyncio.Event(), asyncio.Event()
+                    reply_ending, release_reply = asyncio.Event(), asyncio.Event()
+                    pump_checked = asyncio.Event()
+
+                    @session.aggregators.assistant().event_handler('on_before_process_frame')
+                    async def hold_at_assistant(processor, frame):
+                        if frame is result and delivery == 'in_transit':
+                            result_waiting.set()
+                            await release_result.wait()
+                        elif isinstance(frame, self.rt.LLMFullResponseEndFrame) and not reply_ending.is_set():
+                            reply_ending.set()
+                            await release_reply.wait()
+
+                    session.events.put('event', {'id': 'e1', 'chat': 'Docs', 'kind': 'done',
+                                                 'priority': 'idle', 'text': 'Done.'})
+                    pop = session.events.pop
+
+                    def check_pump(*args):
+                        item = pop(*args)
+                        pump_checked.set()
+                        return item
+
+                    session.events.pop = check_pump
+                    result = self.rt.FunctionCallResultFrame('read_last_reply', 'read', {'chat': 'Docs'},
+                                                             {'text': 'Done.'})
+                    pump = asyncio.create_task(session.pump())
+                    try:
+                        await session.llm.push_frame(result)
+                        if delivery == 'in_transit':
+                            await result_waiting.wait()
+                        else:
+                            self.assertIs(await receive(self.rt.FunctionCallResultFrame), result)
+                        if delivery == 'while_speaking':
+                            await session.llm.push_frame(self.rt.BotStartedSpeakingFrame())
+                            await receive(self.rt.BotStartedSpeakingFrame)
+                        clocks['switch'].set()
+                        cancel = await receive(self.rt.FunctionCallCancelFrame)
+                        self.assertTrue(cancel.run_llm)
+                        release_result.set()
+                        if delivery == 'while_speaking':
+                            self.assertFalse(session.llm.tools_in_flight)
+                            self.assertIs(session.llm.tool_followup, cancel)
+                            self.assertEqual(len(session.events.items), 1)
+                            await session.llm.push_frame(self.rt.BotStoppedSpeakingFrame())
+                        await reply_ending.wait()
+                        pump_checked.clear()
+                        session.wake.set()
+                        await pump_checked.wait()
+                        self.assertTrue(session.llm.tool_work_pending)
+                        self.assertEqual(len(session.events.items), 1)
+                        release_reply.set()
+                        await receive(self.rt.LLMFullResponseEndFrame)
+                        await receive(self.rt.LLMFullResponseEndFrame)
+                    finally:
+                        release_result.set()
+                        release_reply.set()
+                        pump.cancel()
+                        await asyncio.gather(pump, return_exceptions=True)
+
+                _, requests, _, speech = await self.browser_timeout_pipeline(
+                    tools, check, followup=followup, user_text='Switch to Docs and read the last reply.')
+                self.assertEqual(len(requests), 3)
+                self.assert_browser_timeout_notice(requests[1], 'switch', friday.BROWSER_TIMEOUT_ACTION)
+                self.assertIn({'role': 'tool', 'tool_call_id': 'read', 'content': '{"text": "Done."}'}, requests[1])
+                self.assertTrue(requests[2][-1]['content'].startswith(friday.EVENT_PREFIX))
+                self.assertEqual(speech, ['Reading it.', friday.BROWSER_TIMEOUT_ACTION, followup, 'Ready.'])
+
+    async def test_browser_timeout_and_sibling_reply_share_one_device_voice_turn(self):
+        tools = {'switch': ('switch_chat', {'chat': 'Docs'}),
+                 'read': ('read_last_reply', {'chat': 'Docs'})}
+        followup = 'The last reply says Done.'
+
+        async def check(session, clocks, receive):
+            await session.llm.push_frame(self.rt.FunctionCallResultFrame(
+                'read_last_reply', 'read', {'chat': 'Docs'}, {'text': 'Done.'}))
+            await receive(self.rt.FunctionCallResultFrame)
+            clocks['switch'].set()
+            await receive(self.rt.LLMFullResponseEndFrame)
+
+        session, requests, _, synth = await self.browser_timeout_pipeline(tools, check, mode='client',
+            followup=followup, user_text='Switch to Docs and read the last reply.')
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(synth, [])
+        voice = [call.args[0] for call in session.rtvi.send_server_message.call_args_list
+                 if call.args[0]['t'] in ('say', 'say_end')]
+        turn = voice[-1]['d']['turn']
+        self.assertEqual(voice[-3:], [
+            {'t': 'say', 'd': {'turn': turn, 'seq': 0, 'text': friday.BROWSER_TIMEOUT_ACTION}},
+            {'t': 'say', 'd': {'turn': turn, 'seq': 1, 'text': followup}},
+            {'t': 'say_end', 'd': {'turn': turn, 'count': 2}},
+        ])
+
+    async def test_browser_timeout_settles_only_the_silent_call_in_a_batch(self):
+        tools = {'switch': ('switch_chat', {'chat': 'Docs'}),
+                 'read': ('read_last_reply', {'chat': 'Docs'})}
+
+        for result_first in (True, False):
+            with self.subTest(result_first=result_first):
+                async def check(session, clocks, receive):
+                    async def answer():
+                        result = self.rt.FunctionCallResultFrame(
+                            'switch_chat', 'switch', {'chat': 'Docs'}, {'ok': True, 'chat': 'Docs'})
+                        await session.llm.push_frame(result)
+                        self.assertIs(await receive(self.rt.FunctionCallResultFrame), result)
+                        self.assertTrue(session.llm.tool_run.succeeded_action)
+
+                    async def expire():
+                        clocks['read'].set()
+                        await receive(self.rt.FridayToolSpeechCompleteFrame)
+
+                    await (answer() if result_first else expire())
+                    remaining = 'read' if result_first else 'switch'
+                    self.assertEqual(session.llm.tools_in_flight, {remaining})
+                    self.assertEqual(session.llm.browser_deadlines.keys(), {remaining})
+                    await (expire() if result_first else answer())
+                    if not result_first:
+                        await receive(self.rt.LLMFullResponseEndFrame)
+                    self.assertFalse(session.llm.tool_work_pending)
+                    self.assertFalse(session.waiting_for_read)
+
+                ack, timeout = 'Switched to Docs.', friday.BROWSER_TIMEOUT_READ
+                _, requests, frames, speech = await self.browser_timeout_pipeline(
+                    tools, check, followup=ack, user_text='Switch to Docs and read the last reply.')
+                self.assertEqual(len(requests), 1 if result_first else 2)
+                self.assertEqual([f.tool_call_id for f in frames if isinstance(f, self.rt.FunctionCallCancelFrame)],
+                                 ['read'])
+                self.assertEqual(speech, ['Reading it.', *([ack, timeout] if result_first else [timeout, ack])])
+
+    async def test_browser_timeout_drops_late_success_before_it_can_ack_or_infer(self):
+        tools = {'switch': ('switch_chat', {'chat': 'Docs'})}
+
+        async def check(session, clocks, receive):
+            clocks['switch'].set()
+            await receive(self.rt.FridayToolSpeechCompleteFrame)
+            run = session.llm.tool_run
+            proposal = session.pending_proposal = object()
+            context = list(session.context.get_messages())
+            result = self.rt.FunctionCallResultFrame('switch_chat', 'switch', {'chat': 'Docs'},
+                                                     {'ok': True, 'chat': 'Docs'})
+            await session.llm.push_frame(result)
+            self.assertFalse(run.succeeded_action)
+            self.assertIs(session.pending_proposal, proposal)
+            self.assertEqual(session.context.get_messages(), context)
+
+        with redirect_stderr(io.StringIO()) as stderr:
+            _, requests, frames, speech = await self.browser_timeout_pipeline(
+                tools, check, user_text='Switch to Docs.')
+        self.assertIn('Friday dropped late browser tool result switch_chat switch\n', stderr.getvalue())
+        self.assertEqual(len(requests), 1)
+        self.assertFalse(any(isinstance(f, self.rt.FunctionCallResultFrame) for f in frames))
+        self.assertEqual(speech, [friday.BROWSER_TIMEOUT_ACTION])
+
+    async def test_browser_deadline_is_cancelled_by_final_result_or_cancel(self):
+        tools = {'switch': ('switch_chat', {'chat': 'Docs'})}
+        for cancelled in (False, True):
+            with self.subTest(cancelled=cancelled):
+                async def check(session, clocks, receive):
+                    task = session.llm.browser_deadlines['switch'].task
+                    frame = (self.rt.FunctionCallCancelFrame('switch_chat', 'switch') if cancelled else
+                             self.rt.FunctionCallResultFrame('switch_chat', 'switch', {'chat': 'Docs'},
+                                                             {'ok': True, 'chat': 'Docs'}))
+                    await session.llm.push_frame(frame)
+                    clocks['switch'].set()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                    await receive(type(frame) if cancelled else self.rt.FridayToolSpeechCompleteFrame)
+                    self.assertFalse(session.llm.browser_deadlines)
+                    self.assertFalse(session.llm.tool_work_pending)
+
+                _, requests, frames, speech = await self.browser_timeout_pipeline(
+                    tools, check, user_text='Switch to Docs.')
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(sum(isinstance(f, self.rt.FunctionCallCancelFrame) for f in frames), int(cancelled))
+                self.assertEqual(speech, [] if cancelled else ['Switched to Docs.'])
+
+    async def test_browser_deadline_stays_armed_after_nonfinal_result(self):
+        tools = {'read': ('list_chats', {})}
+
+        async def check(session, clocks, receive):
+            deadline = session.llm.browser_deadlines['read']
+            properties = self.rt.FunctionCallResultProperties(is_final=False, run_llm=False)
+            update = self.rt.FunctionCallResultFrame('list_chats', 'read', {}, {'count': 1}, properties=properties)
+            await session.llm.push_frame(update)
+            self.assertIs(await receive(self.rt.FunctionCallResultFrame), update)
+            self.assertIs(session.llm.browser_deadlines['read'], deadline)
+            self.assertEqual(session.llm.tools_in_flight, {'read'})
+            clocks['read'].set()
+            await receive(self.rt.FridayToolSpeechCompleteFrame)
+            self.assertFalse(session.waiting_for_read)
+            self.assertFalse(session.llm.tool_work_pending)
+
+        _, requests, _, speech = await self.browser_timeout_pipeline(tools, check, user_text='List the chats.')
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(speech, ['Checking the chats.', friday.BROWSER_TIMEOUT_READ])
+
+    async def test_browser_deadline_survives_interruption_and_cleanup_cancels_pending_tasks(self):
+        tools = {'read': ('read_last_reply', {'chat': 'Docs'}), 'switch': ('switch_chat', {'chat': 'Docs'}),
+                 'pending': ('list_chats', {})}
+        pending_tasks = []
+
+        async def check(session, clocks, receive):
+            pending_tasks.append(session.llm.browser_deadlines['pending'].task)
+            session.new_turn()
+            await session.llm.push_frame(self.rt.InterruptionFrame())
+            await receive(self.rt.InterruptionFrame)
+            self.assertFalse(session.llm.tools_in_flight)
+            self.assertEqual(session.llm.browser_deadlines.keys(), tools.keys())
+            clocks['read'].set()
+            cancel = await receive(self.rt.FunctionCallCancelFrame)
+            self.assertEqual(cancel.tool_call_id, 'read')
+            self.assert_browser_timeout_notice(session.context.get_messages(), 'read')
+            self.assertFalse(session.llm.tool_work_pending)
+            clocks['switch'].set()
+            marker = await receive(self.rt.FridayToolSpeechCompleteFrame)
+            self.assertEqual(marker.tool_call_id, 'switch')
+
+        session, requests, _, speech = await self.browser_timeout_pipeline(
+            tools, check, user_text='Switch to Docs and read the last reply.')
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(len(speech), 2)
+        self.assertIn(speech[0], ['Reading it.', 'Checking the chats.'])
+        self.assertEqual(speech[1], friday.BROWSER_TIMEOUT_ACTION)
+        self.assertTrue(pending_tasks[0].cancelled())
+        self.assertFalse(session.llm.browser_deadlines)
+        self.assertFalse(session.llm._browser_deadline_tasks)
 
     async def test_tool_gate_tracks_each_final_result_cancel_and_interruption(self):
         from pipecat.frames.frames import FunctionCallFromLLM, FunctionCallInProgressFrame
@@ -6635,7 +7024,8 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                                  {'role': 'user', 'content': 'Yes.'}]
                     service._active_run.set(service.prepare_run(messages))
                     reworded = 'Rewrite the header and deploy.' if name == 'send_to_chat' else 'B13'
-                    params = SimpleNamespace(function_name=name, arguments={'chat': chat, key: reworded},
+                    params = SimpleNamespace(function_name=name, tool_call_id='send',
+                                             arguments={'chat': chat, key: reworded},
                                              result_callback=AsyncMock())
                     with patch('sys.stderr'):
                         await service.handle_browser_tool(params)

@@ -15,6 +15,7 @@ from unittest import mock
 import factory
 import lesson_candidates
 import lessons
+import model_catalog
 import ops_agent
 import paths
 import prefs_sync
@@ -46,6 +47,9 @@ class Case(unittest.TestCase):
         self.repo.mkdir()
         self.git('init', '-q', '-b', 'main')
         factory._root_cache.clear()
+        # B405: run_day validates the tab through model_catalog, which probes the real `claude` binary in a daemon
+        # thread. That thread outlives the test and makes folders in paths.CACHE (it ran `claude -p` for real).
+        self.enterContext(mock.patch.object(model_catalog.shutil, 'which', return_value=None))
 
     def git(self, *args, when=None):
         env = dict(ENV)

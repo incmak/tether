@@ -681,6 +681,11 @@ class Http(Base):
 
 @unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
 class LevelApproval(PasskeyCase):
+    def setUp(self):
+        super().setUp()
+        # B405: autonomy.state reads model_catalog, which would probe the real `claude` binary in a daemon thread.
+        self.enterContext(mock.patch.object(model_catalog.shutil, 'which', return_value=None))
+
     def post(self, body):
         handler = PasskeyHandler(autonomy.PATH, body)
         autonomy.post(handler)
