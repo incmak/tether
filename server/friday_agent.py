@@ -95,11 +95,10 @@ SYSTEM_PROMPT = (
     'and use the prompt to say what the chat should do with it. Do not summarize the call in the prompt instead. '
     'Always write the chat name exactly as in state, for example api-server, even when speech-to-text '
     'misheard it ("docs sight" is docs-site): use the closest name in state. '
-    '1. If the user said send, tell, ask, prompt, instruct, message, forward, have it, or get it to, call the tool now. '
-    'Those words are the consent; do not read back. "Don\'t send" or "not yet" is never consent. '
-    '2. Otherwise call the tool anyway: it reads the task back and asks yes or no. '
+    '1. For every send, call the tool first so Friday reads back the destination and task and asks yes or no. '
     'Never ask "Shall I send" in your own words. '
-    '3. When the user says yes to that read-back, call the tool again with the same chat, task, and attach_call value. '
+    '2. When the user says yes to that read-back, call the tool again with the same chat, task, and attach_call value. '
+    '"Don\'t send" or "not yet" is never consent. '
     'Speech-to-text may hear "suggest to me" as "search to me"; that is not a send word. '
     'Never say you sent, switched, opened, or did anything unless its tool returned ok in this turn. '
     'After a tool error, say plainly that it did not happen. For show tools, give the reason. '
@@ -759,10 +758,6 @@ def norm(text):
     return re.sub(r'[\W_]+', ' ', text.casefold()).strip()
 
 
-def clean_chat(chat):
-    return re.sub(r'^the\s+|\s+(?:chat|session|tab)$', '', chat.strip(), flags=re.I)
-
-
 def same_text(text):
     """Text as compared for consent: case, spacing, quotes and the end mark do not count; all else does ("-10")."""
     text = ' '.join(text.split()).strip('"“”\'‘’ ')
@@ -964,46 +959,6 @@ def binds(payload, proposed):
     return bool(same_text(proposed)) and same_text(payload) == same_text(proposed)
 
 
-SEND_FILLER = r'(?:okay|ok|alright|right|so|and|then|now|also|just|please|um|uh|er|like|well|yes|yeah|no|hey|friday)'
-SEND_LEAD_IN = (r"(?:(?:can|could|would|will)\s+you|i\s+(?:want|need)\s+you\s+to"
-                r"|i(?:['’]d|\s+would)\s+like\s+you\s+to|(?:i\s+think\s+)?you\s+should|go\s+ahead\s+and)")
-SEND_MODIFIER = r"[^\W_]+(?:['-][^\W_]+)*"
-SEND_NAME_WORD = r'[a-z0-9]+(?:-[a-z0-9]+)*'
-SEND_FRAME = re.compile(
-    rf'(?:{SEND_FILLER} )*(?:{SEND_LEAD_IN} (?:{SEND_FILLER} )*)?'
-    r'(?:send|forward) (?:it|this|that|them'
-    rf'|(?:the|my|our|this|that) (?P<modifiers>(?:{SEND_MODIFIER} ){{0,2}})'
-    r'(?:prompt|draft|message|note|notes|report|reply|summary|text|plan|fix|item)'
-    r'|(?:backlog item |item )?b ?(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten))'
-    # Try the optional label and ending before treating those words as part of the name.
-    rf' to (?:the )?(?P<recipient>{SEND_NAME_WORD}(?: {SEND_NAME_WORD}){{0,2}}?)'
-    r'(?: (?:chat|session|tab))?(?: (?:now|please))?')
-SEND_BLOCKED_WORDS = frozenset(
-    'not never nor neither cannot dont cant wont if unless until once when after before upon only whether '
-    'provided but or except and then i me my we our us wait stop cancel actually hold scrap forget mind changed '
-    'change approval approve yes no to is was are be'.split())
-SEND_PUNCTUATION = str.maketrans({**dict.fromkeys('.,!?;:"…()“”–—'), '‘': "'", '’': "'"})
-
-
-def send_intent(text, chat=None):
-    """Allow a direct send only for a complete request to the named chat."""
-    if '?' in text:
-        return False
-    text = text.casefold().translate(SEND_PUNCTUATION)
-    text = ' '.join(re.sub(r'(?<!\w)-|-(?!\w)', '', text).split())
-    match = SEND_FRAME.fullmatch(text)
-    if not match:
-        return False
-    recipient = match['recipient']
-    # These two qualifiers can otherwise fit inside the three-word recipient slot.
-    if recipient.endswith((' stand down', ' for example')):
-        return False
-    words = (match['modifiers'] or '').split() + recipient.split()
-    if any(word in SEND_BLOCKED_WORDS or word.endswith("n't") for word in words):
-        return False
-    return chat is None or (isinstance(chat, str) and norm(clean_chat(chat)) == norm(recipient))
-
-
 def excludes_call(text):
     """Treat an exclusion close to any call mention as a veto."""
     mentions = list(CALL_LOG_INTENT.finditer(text))
@@ -1043,15 +998,6 @@ def hotword_text(names):
             if len(entries) == 30:
                 return '/'.join(entries)
     return '/'.join(entries)
-
-
-def answers_question(previous):
-    """True when Friday's last reply asks something: the next turn may answer it, so it never sends directly.
-
-    Filler ("Um, yes, send it") or a question with no send word ("Shall I do that?") cannot be told
-    apart from a fresh request by its words, so any question counts. A send then gets the fixed read-back.
-    """
-    return '?' in previous
 
 
 def check_tool(name, args, source, last_user_text, used, previous_assistant='', pending=None, user_turn=0,
@@ -1196,13 +1142,7 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                         continue
                     if words == normalized_payload or (' ' in words and f' {words} ' in f' {normalized_payload} '):
                         return READBACK_REQUIRED
-        # A transcript always requires a heard read-back. Other sends take the direct path
-        # only for a fresh, explicit request, never for an answer that includes a send word.
-        if (not attach and not (live_send or readback_debt or answers_question(previous_assistant))
-                and send_intent(last_user_text, str(args.get('chat') or ''))):
-            return None
-        # Only the server's own stored proposal binds a yes. A yes to Friday's free-form words gets
-        # the fixed read-back first, and the next yes sends the stored text once.
+        # Every send needs a heard read-back of the stored proposal and a yes to it.
         if not (yes and proposal_matches):
             return READBACK_REQUIRED
     return None

@@ -22,7 +22,7 @@ else:
 DEFAULT_CASES = Path(__file__).with_name('fixtures') / 'friday_intent' / 'cases.json'
 GROUPS = frozenset('approval backlog_add backlog_list backlog_send cant_do confirm deny event '
                    'list_chats misheard new_chat no_tool outside panel read_reply readback reminder '
-                   'send_direct show split_turn status switch topic_notes'.split())
+                   'show split_turn status switch topic_notes'.split())
 LOOKUPS = {'list_chats', 'backlog_list', 'read_last_reply'}
 CLAIM = re.compile(r"(?i)\bI(?:'ve| have)?\s+(?:just\s+)?"
                    r"(?:sent|switched|opened|created|started|approved|denied|added|moved|closed)\b")
@@ -57,6 +57,8 @@ def proposal_args(proposal):
         return {'chat': proposal['chat'], 'decision': proposal['payload']}
     if proposal['name'] == 'send_prompt':
         return {'topic': proposal['topic'], 'chat': proposal['chat'], 'read_all': proposal['read_all']}
+    if proposal['name'] == 'backlog_send':
+        return {'chat': proposal['chat'], 'item': proposal['payload']}
     args = {'chat': proposal['chat'], 'prompt': proposal['payload']}
     if proposal.get('attach'):
         args['attach_call'] = True

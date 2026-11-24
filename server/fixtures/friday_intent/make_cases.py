@@ -247,8 +247,9 @@ case("backlog-add", "backlog_add", D, "add to the backlog: dark mode for the log
      {"tool": "backlog_add", "args": {"text": "(?i)dark mode"}})
 case("backlog-remember", "reminder", D, "remember to rotate the staging API keys next week",
      {"tool": "reminder_add", "args": {"reminders": "(?i)rotate"}})
-case("backlog-send", "backlog_send", D, "send B 12 to api server",
-     {"tool": "backlog_send", "args": {"item": "(?i)b ?12", "chat": "(?i)api.server"}})
+# B404: every send gets a read-back
+case("backlog-send", "readback", D, "send B 12 to api server",
+     {"tool": None, "readback_chat": "api-server", "readback_tool": "backlog_send", "args": {"item": "(?i)b ?12"}})
 case("backlog-readback", "readback", D, "B 12 for api server I think",
      {"tool": None, "readback_chat": "api-server", "readback_tool": "backlog_send"})
 case("outside-github", "outside", D, "create a GitHub issue for the login bug", {"tool": None, "reply": CANT})
@@ -300,8 +301,9 @@ case("h-new-chat", "new_chat", H, "open a new claude chat named release check",
 case("h-backlog-read", "backlog_list", H, "read me the top items on my backlog", {"tool": "backlog_list"})
 case("h-backlog-add", "backlog_add", H, "put fix the flaky upload test on my backlog",
      {"tool": "backlog_add", "args": {"text": "(?i)flaky"}})
-case("h-backlog-send", "backlog_send", H, "send backlog item B seven to docs site",
-     {"tool": "backlog_send", "args": {"item": "(?i)b ?7|seven", "chat": "(?i)docs.site"}})
+# B404: every send gets a read-back
+case("h-backlog-send", "readback", H, "send backlog item B seven to docs site",
+     {"tool": None, "readback_chat": "docs-site", "readback_tool": "backlog_send", "args": {"item": "(?i)b ?7|seven"}})
 case("h-outside-email", "outside", H, "send an email to the team with the release notes", {"tool": None, "reply": CANT})
 case("h-show-chat", "show", H, "bring up the api server chat on my screen",
      {"tool": "show_chat", "args": {"chat": "(?i)api.server"}})
@@ -331,10 +333,10 @@ case("log2-already-asked", "read_reply", "dev",
                           "Shall I send the request to go question by question to release-notes?"))
 case("log2-read-the-questions", "read_reply", "dev", "Can you read the questions?",
      {"tool": "read_last_reply", "args": {"chat": "(?i)release.notes"}}, "log", history=QS_CTX, state=QS_STATE, tool_results=QS)
-case("log-send-friday-call-transcript", "send_direct", "dev",
+# B404: every send gets a read-back
+case("log-send-friday-call-transcript", "readback", "dev",
      "send this the whole log, voice log I had with you to the Friday test session",
-     {"tool": "send_to_chat", "readback_ok": True,
-      "args": {"chat": "(?i)^friday test$", "attach_call": "^True$"}}, "log")
+     {"tool": None, "readback_chat": "friday test", "args": {"attach_call": "^True$"}}, "log")
 # B404 frame rule
 case("log2-ask-other-session", "readback", "dev",
      "Okay ask Friday test uh session to read latest. Uh logs I had. the call with Friday.",

@@ -1520,16 +1520,17 @@
   },
   {
    "id": "backlog-send",
-   "group": "backlog_send",
+   "group": "readback",
    "split": "dev",
    "source": "hand",
    "history": [],
    "user": "send B 12 to api server",
    "expect": {
-    "tool": "backlog_send",
+    "tool": null,
+    "readback_chat": "api-server",
+    "readback_tool": "backlog_send",
     "args": {
-     "item": "(?i)b ?12",
-     "chat": "(?i)api.server"
+     "item": "(?i)b ?12"
     }
    }
   },
@@ -1906,16 +1907,17 @@
   },
   {
    "id": "h-backlog-send",
-   "group": "backlog_send",
+   "group": "readback",
    "split": "holdout",
    "source": "hand",
    "history": [],
    "user": "send backlog item B seven to docs site",
    "expect": {
-    "tool": "backlog_send",
+    "tool": null,
+    "readback_chat": "docs-site",
+    "readback_tool": "backlog_send",
     "args": {
-     "item": "(?i)b ?7|seven",
-     "chat": "(?i)docs.site"
+     "item": "(?i)b ?7|seven"
     }
    }
   },
@@ -2151,16 +2153,15 @@
   },
   {
    "id": "log-send-friday-call-transcript",
-   "group": "send_direct",
+   "group": "readback",
    "split": "dev",
    "source": "log",
    "history": [],
    "user": "send this the whole log, voice log I had with you to the Friday test session",
    "expect": {
-    "tool": "send_to_chat",
-    "readback_ok": true,
+    "tool": null,
+    "readback_chat": "friday test",
     "args": {
-     "chat": "(?i)^friday test$",
      "attach_call": "^True$"
     }
    }
