@@ -17,7 +17,7 @@ import friday_intent_eval as evaluation
 
 def case(tool=None, **fields):
     return dict({'id': 'ask-friday', 'group': 'send_direct', 'split': 'dev',
-                 'source': 'hand', 'history': [], 'user': 'Ask friday test to fix it',
+                 'source': 'hand', 'history': [], 'user': 'Okay, send the logs note to friday test',
                  'expect': {'tool': tool}}, **fields)
 
 
@@ -189,17 +189,17 @@ class IntentEvalTests(unittest.TestCase):
                                                             'content': json.dumps(error)})
 
     def test_split_speech_joins_fragments_for_guard(self):
-        example = case('send_to_chat', user=['okay, ask friday test to look at the logs', 'and fix it'])
+        example = case('send_to_chat', user=['okay, send the logs note', 'to friday test'])
         send = assistant(tool_calls=[call('send_to_chat', chat='friday test', prompt='Fix logs')])
         result, payloads = self.run_script(example, send)
-        # Consent in the first fragment applies to the whole spoken turn.
+        # Neither fragment is a complete request. The joined turn is.
         self.assertEqual((result['passed'], len(payloads)), (1, 1))
         trace, = result['samples']
         self.assertEqual(trace['action']['name'], 'send_to_chat')
         self.assertEqual(payloads[0]['messages'][1]['content'], example['user'][0])
         self.assertEqual(payloads[0]['messages'][-1]['content'], example['user'][1])
 
-        example['user'][0] = "let's ask friday test to look at the logs"
+        example['user'][1] += ' and fix it'
         result, _ = self.run_script(example, send)
         trace, = result['samples']
         self.assertEqual((result['fails'], trace['actions']), ({'readback_instead': 1}, []))
@@ -293,8 +293,8 @@ class IntentEvalTests(unittest.TestCase):
         cases = {example['id']: example for example in data['cases']}
         chat = 'Automation tether . Can we have…'
         for id_, answer, suggestion, failure in (
-                ('log-answer-only-c', 'C', 'C, yes to all', 'readback_instead'),
-                ('log-answer-only-c', 'Keep Observe mode with option C.', 'C, yes to all', 'readback_instead'),
+                ('log-answer-only-c', 'C', 'C, yes to all', 'wrong_args'),
+                ('log-answer-only-c', 'Keep Observe mode with option C.', 'C, yes to all', 'wrong_args'),
                 ('log-answer-only-q7', 'Yes to Q7 only', 'Q7, yes to all', 'wrong_args')):
             with self.subTest(id=id_):
                 example = cases[id_]

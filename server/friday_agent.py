@@ -145,9 +145,6 @@ MAX_REPLY_TOKENS = 120
 BARGE_IN_WORDS = 3
 FRIDAY_HOTWORDS = ('Tether', 'tether')
 HOTWORDS_SCORE = 1.5
-SEND_INTENT = re.compile(
-    r'\b(?:send|tell|ask|instruct|forward)\b'
-    r'|\b(?:prompt|message)\s+\w+(?:-\w+)*\b', re.I)
 CALL_LOG_INTENT = re.compile(
     r'\b(?:voice logs?|call logs?|transcript|conversation|(?:this|the|our|whole) call|call with (?:you|friday)'
     r'|logs? (?:i had )?with you|(?:what|everything) (?:we|i) (?:said|discussed))\b', re.I)
@@ -968,46 +965,43 @@ def binds(payload, proposed):
 
 
 SEND_FILLER = r'(?:okay|ok|alright|right|so|and|then|now|also|just|please|um|uh|er|like|well|yes|yeah|no|hey|friday)'
-SEND_CLAUSE_END = r'[.,!?;:]'
 SEND_LEAD_IN = (r"(?:(?:can|could|would|will)\s+you|i\s+(?:want|need)\s+you\s+to"
                 r"|i(?:['’]d|\s+would)\s+like\s+you\s+to|(?:i\s+think\s+)?you\s+should|go\s+ahead\s+and)")
-# Every clause before the request may contain only fillers. A lead-in belongs to the request clause.
-ASKS_FRIDAY = re.compile(
-    rf'\s*(?:{SEND_FILLER}(?:\s*{SEND_CLAUSE_END}+\s*|\s+))*'
-    rf'(?:{SEND_LEAD_IN}\s+(?:{SEND_FILLER}\s+)*)?', re.I)
-SEND_NEGATION = re.compile(r"\b(?:not|never|nor|neither|cannot|dont|cant|wont)\b|n['’]t\b", re.I)
-SEND_CANCEL = re.compile(
-    r'\b(?:wait|hold\s+(?:off|on|that)|actually|cancel|never\s+mind|scratch\s+that|forget\s+it|stop|no'
-    r'|on\s+second\s+thought|change\s+of\s+plan)\b', re.I)
-# Keep a negated instruction as message content unless it resembles a withdrawal.
-SEND_WITHDRAWAL = re.compile(
-    rf"(?:{SEND_NEGATION.pattern})(?:\W+\w+(?:['’]\w+)*){{0,3}}\W+"
-    r'(?:send|tell|ask|forward|message|prompt|instruct|yet|it|that|anything)\b', re.I)
-SEND_CONDITION = re.compile(
-    r'\b(?:if|unless|until|whether|provided|as\s+soon\s+as|only|(?:after|when|once|before)\s+(?:i|we))\b', re.I)
-# "Tell me when it replies": the user is the one told.
-TOLD_USER = re.compile(r'\s+(?:(?:uh|um|er|like)\s+)*(?:me|us)\b', re.I)
+SEND_MODIFIER = r"[^\W_]+(?:['-][^\W_]+)*"
+SEND_NAME_WORD = r'[a-z0-9]+(?:-[a-z0-9]+)*'
+SEND_FRAME = re.compile(
+    rf'(?:{SEND_FILLER} )*(?:{SEND_LEAD_IN} (?:{SEND_FILLER} )*)?'
+    r'(?:send|forward) (?:it|this|that|them'
+    rf'|(?:the|my|our|this|that) (?P<modifiers>(?:{SEND_MODIFIER} ){{0,2}})'
+    r'(?:prompt|draft|message|note|notes|report|reply|summary|text|plan|fix|item)'
+    r'|(?:backlog item |item )?b ?(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten))'
+    # Try the optional label and ending before treating those words as part of the name.
+    rf' to (?:the )?(?P<recipient>{SEND_NAME_WORD}(?: {SEND_NAME_WORD}){{0,2}}?)'
+    r'(?: (?:chat|session|tab))?(?: (?:now|please))?')
+SEND_BLOCKED_WORDS = frozenset(
+    'not never nor neither cannot dont cant wont if unless until once when after before upon only whether '
+    'provided but or except and then i me my we our us wait stop cancel actually hold scrap forget mind changed '
+    'change approval approve yes no to is was are be'.split())
+SEND_PUNCTUATION = str.maketrans({**dict.fromkeys('.,!?;:"…()“”–—'), '‘': "'", '’': "'"})
 
 
-def send_intent(text):
-    """Allow a direct send only from a fresh request with no withdrawal."""
-    for match in SEND_INTENT.finditer(text):
-        before = text[:match.start()]
-        if SEND_NEGATION.search(before):
-            continue
-        if not ASKS_FRIDAY.fullmatch(before):
-            continue
-        verb_end = match.start() + len(match[0].split(maxsplit=1)[0])
-        if TOLD_USER.match(text, verb_end) or TOLD_USER.match(text, match.end()):
-            continue
-        after = text[verb_end:]
-        if '?' in after or SEND_CANCEL.search(after) or SEND_WITHDRAWAL.search(after) or SEND_CONDITION.search(after):
-            continue
-        clauses = re.split(SEND_CLAUSE_END, after, maxsplit=1)
-        if len(clauses) > 1 and SEND_NEGATION.search(clauses[1]):
-            continue
-        return True
-    return False
+def send_intent(text, chat=None):
+    """Allow a direct send only for a complete request to the named chat."""
+    if '?' in text:
+        return False
+    text = text.casefold().translate(SEND_PUNCTUATION)
+    text = ' '.join(re.sub(r'(?<!\w)-|-(?!\w)', '', text).split())
+    match = SEND_FRAME.fullmatch(text)
+    if not match:
+        return False
+    recipient = match['recipient']
+    # These two qualifiers can otherwise fit inside the three-word recipient slot.
+    if recipient.endswith((' stand down', ' for example')):
+        return False
+    words = (match['modifiers'] or '').split() + recipient.split()
+    if any(word in SEND_BLOCKED_WORDS or word.endswith("n't") for word in words):
+        return False
+    return chat is None or (isinstance(chat, str) and norm(clean_chat(chat)) == norm(recipient))
 
 
 def excludes_call(text):
@@ -1205,7 +1199,7 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
         # A transcript always requires a heard read-back. Other sends take the direct path
         # only for a fresh, explicit request, never for an answer that includes a send word.
         if (not attach and not (live_send or readback_debt or answers_question(previous_assistant))
-                and send_intent(last_user_text)):
+                and send_intent(last_user_text, str(args.get('chat') or ''))):
             return None
         # Only the server's own stored proposal binds a yes. A yes to Friday's free-form words gets
         # the fixed read-back first, and the next yes sends the stored text once.

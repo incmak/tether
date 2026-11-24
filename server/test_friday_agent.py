@@ -619,7 +619,8 @@ class FridayRulesTests(unittest.TestCase):
                     self.assertEqual(friday.check_tool(tool, {'prompt': prompt}, 'speech', 'Send it', set(),
                                                       draft_topics=topics), 'Use send_prompt for a drafted prompt.')
             short = friday.norm(second)[:100]
-            self.assertIsNone(friday.check_tool(tool, {'prompt': short}, 'speech', 'Send it', set(),
+            self.assertIsNone(friday.check_tool(tool, {'chat': 'docs', 'prompt': short}, 'speech',
+                                               'Send it to docs', set(),
                                                draft_topics=topics))
             with patch.object(friday.friday_notes, 'listing', side_effect=OSError):
                 self.assertEqual(friday.check_tool(tool, {'prompt': short}, 'speech', 'Send it', set()),
@@ -646,7 +647,8 @@ class FridayRulesTests(unittest.TestCase):
                     self.assertEqual(friday.check_tool(tool, {'prompt': 'Do this: ' + copy}, 'speech', 'Send it', set(),
                                                        draft_topics=topics), 'Use send_prompt for a drafted prompt.')
             with self.subTest(tool=tool, size=100):
-                self.assertIsNone(friday.check_tool(tool, {'prompt': saved[30:130]}, 'speech', 'Send it', set(),
+                self.assertIsNone(friday.check_tool(tool, {'chat': 'docs', 'prompt': saved[30:130]}, 'speech',
+                                                    'Send it to docs', set(),
                                                     draft_topics=topics))
 
     def test_draft_bypass_guards_a_draft_shorter_than_one_window(self):
@@ -656,8 +658,8 @@ class FridayRulesTests(unittest.TestCase):
             with self.subTest(tool=tool):
                 self.assertEqual(friday.check_tool(tool, {'prompt': 'Please: ' + tiny}, 'speech', 'Send it', set(),
                                                    draft_topics=topics), 'Use send_prompt for a drafted prompt.')
-                self.assertIsNone(friday.check_tool(tool, {'prompt': 'Add a regression test.'}, 'speech', 'Send it',
-                                                    set(), draft_topics=topics))
+                self.assertIsNone(friday.check_tool(tool, {'chat': 'docs', 'prompt': 'Add a regression test.'},
+                                                    'speech', 'Send it to docs', set(), draft_topics=topics))
 
     def test_draft_actions_require_speech_and_run_once(self):
         for name, result, spoken in (
@@ -927,13 +929,14 @@ class FridayRulesTests(unittest.TestCase):
                 self.assertIsNone(friday.check_tool(name, args, 'speech', 'Show it', set()))
                 self.assertIsNone(friday.check_tool(name, args, 'speech', 'Show it', {name}))
 
-    def test_backlog_send_needs_a_send_word_or_a_confirmed_readback(self):
+    def test_backlog_send_needs_a_bound_request_or_a_confirmed_readback(self):
         args = {'item': 'B12', 'chat': 'api'}
         refusal = friday.READBACK_REQUIRED
         proposal = friday.SendProposal('backlog_send', 'api', 'B12', 4, heard=True)
         self.assertIsNone(friday.check_tool('backlog_send', args, 'speech', 'yes', set(),
                                             friday.send_readback(proposal), proposal, 5))
         self.assertIsNone(friday.check_tool('backlog_send', args, 'speech', 'send B 12 to api', set()))
+        self.assertEqual(friday.check_tool('backlog_send', args, 'speech', 'send B 12 to api server', set()), refusal)
         self.assertIsNotNone(friday.check_tool('backlog_send', args, 'speech', 'B12 for api', set()))
         # A yes to Friday's own words is not a yes to the stored proposal: it gets the fixed read-back.
         self.assertEqual(friday.check_tool('backlog_send', args, 'speech', 'yes', set(), 'Send B12 to api?'), refusal)
@@ -1080,7 +1083,7 @@ class FridayRulesTests(unittest.TestCase):
 
     def test_one_action_per_speech_turn(self):
         for name, args, utterance in [
-                ('send_to_chat', {'prompt': 'Fix the login bug'}, 'yes, tell it to fix login'),
+                ('send_to_chat', {'chat': 'docs', 'prompt': 'Fix the login bug'}, 'yes, send the fix to docs'),
                 ('answer_approval', {'chat': 'docs', 'decision': 'approve'}, 'yes')]:
             pending = friday.SendProposal(name, 'docs', 'approve', 0, heard=True) if name == 'answer_approval' else None
             previous = friday.send_readback(pending) if pending else ''
@@ -1401,19 +1404,20 @@ class FridayRulesTests(unittest.TestCase):
                        'What did the chat say?', 'Did it reply?', 'Did it finish?'):
             reason = friday.check_tool('send_to_chat', {'prompt': prompt}, 'speech', prompt, set())
             self.assertIn('read_last_reply', reason)
-        self.assertIsNone(friday.check_tool('send_to_chat', {'prompt': 'Fix the login bug'},
-            'speech', 'Tell it to fix the login bug', set()))
+        self.assertEqual(friday.check_tool('send_to_chat', {'chat': 'docs', 'prompt': 'Fix the login bug'},
+            'speech', 'Tell it to fix the login bug', set()), friday.READBACK_REQUIRED)
 
     def test_send_intent_and_readback_consent(self):
         args = {'chat': 'ci-audit', 'prompt': 'Fix the flake.'}
         refusal = 'Read the prompt back and ask the user to confirm before sending.'
         for text in ('Again with a fish.', 'yes', 'yesterday', 'Fix the flake.'):
             self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', text, set()), refusal)
+        for text in ('send this to ci-audit', 'Forward the flake note to the ci audit tab now'):
+            self.assertIsNone(friday.check_tool('send_to_chat', args, 'speech', text, set()))
         for text in ('tell ci-audit to fix the flake', 'SEND this', 'ask it', 'prompt it',
                      'instruct it', 'message ci-audit', 'forward this',
-                     'please prompt docs', 'Okay. Message ci-audit with the fix.'):
-            self.assertIsNone(friday.check_tool('send_to_chat', args, 'speech', text, set()))
-        for text in ('get it to fix it', 'get them to fix it', 'have it fix it',
+                     'please prompt docs', 'Okay. Message ci-audit with the fix.', 'send it to ci',
+                     'get it to fix it', 'get them to fix it', 'have it fix it',
                      'have them fix it', 'have ci-audit fix it'):
             self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', text, set()), refusal)
         for text in ('sender', 'telling', 'messaged', 'forget it to', 'I have a fish',
@@ -1489,27 +1493,28 @@ class FridayRulesTests(unittest.TestCase):
             with self.subTest(words=words):
                 self.assertIn(friday.check_tool('send_to_chat', args, 'speech', words, set()),
                               (friday.READBACK_REQUIRED, friday.CALL_NOT_REQUESTED))
-        for words in ('Send the build log to docs', 'Send the latest update to docs'):
-            with self.subTest(words=words):
-                self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', words, set()),
-                                 'The user did not ask to send the call.')
-                self.assertIsNone(friday.check_tool('send_to_chat', dict(args, attach_call=False),
-                                                    'speech', words, set()))
-
-    def test_attachment_refuses_nearby_exclusions(self):
-        args = {'chat': 'docs', 'prompt': 'Review it.', 'attach_call': True}
-        for words, direct_reason in (
-            ('Send the build log to docs, without this call transcript', None),
-            ('Send the notes to docs, but keep our conversation private', None),
-            ('Send the notes to docs; leave this call out', None),
-            ('Send the notes about our conversation to docs, but don’t include the transcript',
-             friday.READBACK_REQUIRED),
-        ):
+        for words, direct_reason in (('Send the build log to docs', friday.READBACK_REQUIRED),
+                                     ('Send the latest update to docs', friday.READBACK_REQUIRED),
+                                     ('Send the build note to docs', None)):
             with self.subTest(words=words):
                 self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', words, set()),
                                  'The user did not ask to send the call.')
                 self.assertEqual(friday.check_tool('send_to_chat', dict(args, attach_call=False),
                                                    'speech', words, set()), direct_reason)
+
+    def test_attachment_refuses_nearby_exclusions(self):
+        args = {'chat': 'docs', 'prompt': 'Review it.', 'attach_call': True}
+        for words in (
+            'Send the build log to docs, without this call transcript',
+            'Send the notes to docs, but keep our conversation private',
+            'Send the notes to docs; leave this call out',
+            'Send the notes about our conversation to docs, but don’t include the transcript',
+        ):
+            with self.subTest(words=words):
+                self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', words, set()),
+                                 'The user did not ask to send the call.')
+                self.assertEqual(friday.check_tool('send_to_chat', dict(args, attach_call=False),
+                                                   'speech', words, set()), friday.READBACK_REQUIRED)
         proposal = friday.SendProposal('send_to_chat', 'docs', 'Review it.', 1, heard=True, attach=True)
         self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', 'Yes, but no transcript.', set(),
                                          friday.send_readback(proposal), proposal, 2),
@@ -1561,9 +1566,9 @@ class FridayRulesTests(unittest.TestCase):
         self.assertEqual(budget.offer(proposal), 0)
 
     def test_readback_debt_blocks_the_fresh_path_for_any_send(self):
-        for tool, args in (('send_to_chat', {'chat': 'Docs', 'prompt': 'Check the header.'}),
+        for tool, args in (('send_to_chat', {'chat': 'Build', 'prompt': 'Check the header.'}),
                            ('backlog_send', {'chat': 'Build', 'item': 'B12'})):
-            for words in ('send it', 'go ahead and send it', 'Send B12 to Build.'):
+            for words in ('send it to Build', 'go ahead and send it to Build', 'Send B12 to Build.'):
                 with self.subTest(tool=tool, words=words):
                     self.assertIsNone(friday.check_tool(tool, args, 'speech', words, set(), 'Understood.'))
                     self.assertEqual(friday.check_tool(tool, args, 'speech', words, set(), 'Understood.',
@@ -1763,17 +1768,17 @@ class FridayRulesTests(unittest.TestCase):
                          'I can tell docs to fix the header. Want that?',
                          'Should I send this to docs: fix the header (or should I wait?)',
                          'Docs replied. Shall I pass anything on?'):
-            for answer in ('Yes, tell docs to fix the header.', 'Tell docs to fix the header.'):
+            for answer in ('Yes, send the fix to docs.', 'Send the fix to docs.'):
                 with self.subTest(previous=previous, answer=answer):
                     self.assertIsNotNone(friday.check_tool(
                         'send_to_chat', {'chat': 'docs', 'prompt': 'Fix the header.'}, 'speech', answer, set(),
                         previous))
         # With no question before it, a direct request still sends.
         self.assertIsNone(friday.check_tool('send_to_chat', {'chat': 'docs', 'prompt': 'Fix the header.'},
-                                            'speech', 'Tell docs to fix the header.', set(), 'Docs is done.'))
+                                            'speech', 'Send the fix to docs.', set(), 'Docs is done.'))
         # Any question counts, even one with no send word: the send gets the fixed read-back first.
         self.assertEqual(friday.check_tool('send_to_chat', {'chat': 'docs', 'prompt': 'Fix the header.'},
-                                           'speech', 'Tell docs to fix the header.', set(),
+                                           'speech', 'Send the fix to docs.', set(),
                                            'I am listening. What can I help you with today?'), friday.READBACK_REQUIRED)
 
     def test_a_question_about_the_users_own_send_is_not_a_request(self):
@@ -1785,11 +1790,16 @@ class FridayRulesTests(unittest.TestCase):
                      'Tell us when it is done', "But I'll can you ask the Frida test session why it was slow"):
             with self.subTest(text):
                 self.assertFalse(friday.send_intent(text))
-        for text in ('Just message ci-audit with the fix', 'Can you tell docs to rerun it',
-                     'I want you to tell docs to rerun it', 'Ask ci-audit to fix the flake. I will check later.',
-                     'Okay. Message ci-audit with the fix.'):
-            with self.subTest(text):
-                self.assertTrue(friday.send_intent(text))
+
+    def test_direct_send_needs_the_tool_chat(self):
+        # The spoken recipient binds only to a named chat; a missing or blank chat gets the read-back.
+        words = 'send it to docs'
+        self.assertIsNone(friday.check_tool('send_to_chat', {'chat': 'docs', 'prompt': 'Rerun'}, 'speech', words, set()))
+        for args in ({'prompt': 'Rerun'}, {'chat': '', 'prompt': 'Rerun'}, {'chat': None, 'prompt': 'Rerun'},
+                     {'chat': 'docs-site', 'prompt': 'Rerun'}):
+            with self.subTest(args=args):
+                self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', words, set()),
+                                 friday.READBACK_REQUIRED)
 
     def test_send_intent_is_an_allowlist(self):
         refused = (
@@ -1850,6 +1860,26 @@ class FridayRulesTests(unittest.TestCase):
             'Can you send a file to docs or do you only support text?',
             'Have it ready by noon',
             'have it fix it', 'have them fix it', 'have ci-audit fix it',
+            "Cancel that. I'll can you tell docs to deploy",
+            'Send the report to docs I changed my mind',
+            "Forward the report to docs but don't for any reason whatsoever send the report",
+            'Send the report to docs once you get my approval',
+            'Forward the report upon my approval',
+            'Can you send attachments to docs or is that feature unavailable',
+            'Tell docs to rerun is the example phrase',
+            'Can you tell, uh, me when the chat replies',
+            'Tell docs to rerun', 'Tell docs not to deploy', 'Ok tell docs to rerun',
+            'message the api server and say rebase on main and push',
+            'ask it', 'prompt it', 'instruct it', 'SEND this', 'yes send it', 'send it',
+            'Send the report to docs scrap the whole idea',
+            'Send the report to docs stand down now',
+            'Tell docs to rerun for example', 'send it to docs and then wait',
+            'send an email to the team with the release notes',
+            'send the not draft to docs',
+            'send it to docs only', 'forward the alpha beta gamma draft to ci-audit',
+            'send it to the north docs archive team tab',
+            'send the build log to docs', 'send the latest update to docs',
+            'send the notes to docs; leave this call out',
         )
         swap_commas_periods = str.maketrans(',.', '.,')
         for phrase in refused:
@@ -1857,57 +1887,58 @@ class FridayRulesTests(unittest.TestCase):
                 with self.subTest(phrase=phrase, text=text):
                     self.assertFalse(friday.send_intent(text))
 
-        for text in ('Could you message ci-audit?', 'But I’ll can you just ask docs to rerun. Neither of them is ready.',
+        for text in ('? Send it to docs', 'send the couldn’t draft to docs', 'send the couldn\'t draft to docs',
+                     'Could you message ci-audit?', 'But I’ll can you just ask docs to rerun. Neither of them is ready.',
                      'Tell docs to rerun, but we cannot deploy.', 'Tell docs to rerun. No.',
                      '. Tell docs to rerun'):
             with self.subTest(text=text):
                 self.assertFalse(friday.send_intent(text))
 
-        existing_requests = (
-            'tell ci-audit to fix the flake', 'SEND this', 'ask it', 'prompt it', 'instruct it',
-            'message ci-audit', 'forward this', 'please prompt docs', 'Okay. Message ci-audit with the fix.',
-            'Could you message ci-audit',
-            'Just message ci-audit with the fix', 'Can you tell docs to rerun it',
-            'I want you to tell docs to rerun it', 'Ask ci-audit to fix the flake. I will check later.',
-            'Yes, and tell docs to archive the draft too.', 'Tell docs to fix the header.',
-            'Tell it to fix the login bug', 'Send it', 'Send the build log to docs',
-            'Send the latest update to docs', 'Send the build log to docs, without this call transcript',
-            'Send the notes to docs, but keep our conversation private',
-            'Send the notes to docs; leave this call out', 'go ahead and send it',
-            'Send B12 to Build.', 'send B 12 to api', 'yes, tell it to fix login',
-            'Go ahead and tell docs to rerun',
-            'Ok tell docs not to deploy',
-            'Tell docs the build is not broken',
-            'No, I think you should ask Friday test session that there is a bug',
-            'No, tell docs to rerun it',
-            'Okay ask Friday test uh session to read the latest logs',
-            'um, uh, tell docs to rerun',
-            'Hey Friday, can you please tell docs to rerun',
-            'Would you just ask docs to rerun',
-            'Will you send it',
-            'I need you to tell docs to rerun',
-            "I'd like you to tell docs to rerun",
-            'I would like you to tell docs to rerun',
-            'You should tell docs to rerun',
+        allowed = (
+            'send it to api-server', 'Send the report to docs', 'send the auth prompt to api-server now',
+            'send my drafted auth prompt to api-server', 'send B 12 to api server',
+            'send backlog item B seven to docs site', 'Okay, can you please send the report to docs',
+            'Hey Friday, go ahead and send it to the docs chat', 'No, send it to docs please',
+            'forward that to ci-audit', 'Send B12 to Build.', 'forward item Bten to the north docs archive tab',
+            'I’d like you to forward them to “ci-audit”', 'Okay — (send the note) to docs…',
         )
         prefixes = ('Sam quoted ', 'What would happen if I said ', "I'll can you ")
         suffixes = (
             '. Actually, hold off', ', wait, do not send it', ' actually hold off',
             " but don't send it yet", ' on second thought do not send anything',
             ' only if I approve', ' after I say yes', ' if the tests pass', '?',
-            ' or do you only support text?',
+            ' or do you only support text?', ' only if I approve the send', ' after I say yes to sending it',
+            ' I changed my mind', ' once you get my approval', ' upon my approval',
+            " but don't for any reason whatsoever send the report", ' is the example phrase',
+            ' or is that feature unavailable', ' stand down', ' stand down now', ' for example',
+            ' scrap the whole idea', ' and then wait',
         )
-        for phrase in existing_requests:
-            with self.subTest(phrase=phrase):
-                self.assertTrue(friday.send_intent(phrase))
+        for phrase in allowed:
+            unpunctuated = re.sub(r"[^\w\s’'-]|(?<!\w)-|-(?!\w)", '', phrase)
+            for text in (phrase, unpunctuated, ', '.join(unpunctuated.split())):
+                with self.subTest(phrase=phrase, text=text):
+                    self.assertTrue(friday.send_intent(text))
             for prefix in ('maybe', 'remember to', 'if it fails', 'I asked Sam'):
-                text = re.sub(r'\b(?:send|tell|ask|instruct|forward|prompt|message)\b',
+                text = re.sub(r'\b(?:send|forward)\b',
                               lambda verb: prefix + ' ' + verb.group(), phrase, count=1, flags=re.I)
                 with self.subTest(phrase=phrase, text=text):
                     self.assertFalse(friday.send_intent(text))
             for text in [prefix + phrase for prefix in prefixes] + [phrase + suffix for suffix in suffixes]:
                 with self.subTest(phrase=phrase, text=text):
                     self.assertFalse(friday.send_intent(text))
+
+    def test_send_intent_binds_the_spoken_recipient(self):
+        for phrase, chat, expected in (
+            ('send it to the docs chat', 'docs', True),
+            ('send it to docs', 'docs-site', False),
+            ('send it to api server', 'api-server', True),
+            ('send the plan to api-server now', 'The API Server Tab', True),
+            ('forward that to the north docs archive session please', 'north docs archive', True),
+            ('send it to docs', '', False),
+            ('send it to docs', ['docs'], False),
+        ):
+            with self.subTest(phrase=phrase, chat=chat):
+                self.assertEqual(friday.send_intent(phrase, chat), expected)
 
     def test_review_round_9_holes_stay_closed(self):
         # 20 Nov review of e92a5f6: filler before yes, "approval" as a noun, a chat named like a refusal.
@@ -2023,15 +2054,15 @@ class FridayRulesTests(unittest.TestCase):
         cases = (
             ("Well like answer it like let's keep option C", 'C, yes to all', 'C, yes to all', True),
             ("tell it let's keep option C", 'C, yes to all', 'C, yes to all', True),
-            ("tell it let's keep option C", 'C, yes to all', None, False),
-            ("tell it let's keep option C", 'C', 'C, yes to all', False),
+            ("tell it let's keep option C", 'C, yes to all', None, True),
+            ("tell it let's keep option C", 'C', 'C, yes to all', True),
             ('tell it yes to Q7 only', 'Yes to Q7 only.', None, True),
             ('tell it yes to Q7', 'yes to all', 'yes to all', True),
-            ('tell it yes to all', 'yes to all', 'yes to all', False),
+            ('tell it yes to all', 'yes to all', 'yes to all', True),
             ('tell it yes to Q7', 'Please say YES—to_all.', 'yes to all', True),
-            ('tell it yes to Q7', 'Please say yes to alligators.', 'yes to all', False),
+            ('tell it yes to Q7', 'Please say yes to alligators.', 'yes to all', True),
             ('tell it yes to Q7', 'approve', 'approve', True),
-            ('tell it yes to Q7', 'Please approve Q7.', 'approve', False),
+            ('tell it yes to Q7', 'Please approve Q7.', 'approve', True),
         )
         for speech, payload, suggestion, blocked in cases:
             with self.subTest(speech=speech, payload=payload, suggestion=suggestion):
@@ -2040,6 +2071,11 @@ class FridayRulesTests(unittest.TestCase):
                 self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', speech, set(),
                                                   suggestions=suggestions),
                                  friday.READBACK_REQUIRED if blocked else None)
+        for speech, expected in (('send the plan to docs', friday.READBACK_REQUIRED),
+                                 ('send the option C plan to docs', None)):
+            with self.subTest(speech=speech):
+                self.assertEqual(friday.check_tool('send_to_chat', {'chat': 'docs', 'prompt': 'option C'},
+                                                   'speech', speech, set(), suggestions=('option C',)), expected)
 
     def test_copied_suggestions_require_confirmation_of_the_same_payload(self):
         proposal = friday.SendProposal('send_to_chat', 'Docs', 'C, yes to all', 1, heard=True)
@@ -3537,13 +3573,14 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
 
     async def test_single_successful_action_uses_one_spoken_ack(self):
         for name, args, result, text in (
-                ('send_to_chat', {'prompt': 'Check the docs'}, {'ok': True, 'chat': 'Docs'}, 'Sent to Docs.'),
+                ('send_to_chat', {'chat': 'Docs', 'prompt': 'Check the docs'},
+                 {'ok': True, 'chat': 'Docs'}, 'Sent to Docs.'),
                 ('show_chat', {'chat': 'Docs'}, {'ok': True, 'chat': 'Docs'}, 'Showing Docs.'),
                 ('show_session', {'session': 'Backend'},
                  {'ok': True, 'session': 'Backend', 'chat': 'API'}, 'Showing Backend.'),
                 ('open_panel', {'open': False}, {'ok': True}, 'Closed.')):
             with self.subTest(name=name):
-                session, frames = await self.tool_flow('Send the prompt or close the panel', [
+                session, frames = await self.tool_flow('Send the prompt to Docs', [
                     ('', 1.25, [(name, args, result)])])
                 results = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
                 speech = [f for f in frames if isinstance(f, self.rt.TTSSpeakFrame)]
@@ -3554,7 +3591,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((session.llm_ttft, session.llm_calls), (1.25, 1))
 
     async def test_action_errors_questions_and_multi_call_results_keep_llm_followup(self):
-        send = ('send_to_chat', {'prompt': 'Fix docs'}, {'ok': True, 'chat': 'Docs'})
+        send = ('send_to_chat', {'chat': 'Docs', 'prompt': 'Fix docs'}, {'ok': True, 'chat': 'Docs'})
         cases = (
             [('send_to_chat', send[1], {'error': 'No chat called Docs.'})],
             [('send_to_chat', send[1], {'error': 'Docs is a tmux session with 2 chats. Ask which one.'})],
@@ -3564,8 +3601,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         )
         for calls in cases:
             with self.subTest(calls=calls), patch('sys.stderr'):
-                text = 'Send it and do not approve the request.' if calls[0][0] == 'answer_approval' else 'Send it'
-                _, frames = await self.tool_flow(text, [('', 1.25, calls)])
+                _, frames = await self.tool_flow('Send it to Docs', [('', 1.25, calls)])
                 results = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
                 self.assertEqual(len(results), len(calls))
                 self.assertTrue(all(f.properties is None for f in results))
@@ -3953,7 +3989,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
     async def test_false_success_replaces_complete_reply_after_failed_or_blocked_action(self):
         failed_send = ('send_to_chat', {'chat': 'Docs', 'prompt': 'Fix docs'}, {'error': 'Missing chat'})
         cases = (
-            ('Send this', failed_send, 'That did not go through. Missing chat.'),
+            ('Send this to Docs', failed_send, 'That did not go through. Missing chat.'),
             ('What was the reply?', ('send_to_chat', {'chat': 'Docs', 'prompt': 'What was the reply?'}, {'ok': True}),
              'That did not go through.'),
         )
@@ -3964,7 +4000,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn('I have s', [f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)])
                 self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)], [correction])
                 self.assertIn('Friday corrected false success', ''.join(c.args[0] for c in stderr.write.call_args_list))
-        _, frames = await self.tool_flow('Send this', [
+        _, frames = await self.tool_flow('Send this to Docs', [
             ('', 1, [failed_send]), (['The prompt was sent', ' to neither chat, not even Docs.'], 1, [])])
         self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)],
                          ['The prompt was sent', ' to neither chat, not even Docs.'])
@@ -4094,7 +4130,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         send = ('send_to_chat', {'chat': 'Docs', 'prompt': 'Fix docs'}, {'error': 'Missing chat'})
         for chunks in (['東京', ' is idle.'], ['The idle chat is ', '서울', '.']):
             with self.subTest(chunks=chunks):
-                _, frames = await self.tool_flow('Send this', [('', 1, [send]), (chunks, 2, [])])
+                _, frames = await self.tool_flow('Send this to Docs', [('', 1, [send]), (chunks, 2, [])])
                 self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], chunks)
 
     async def test_stray_only_reply_logs_total_and_uses_fallback(self):
@@ -5966,7 +6002,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         unrelated_words = 'Blue wiring now.'
         pause_reply = 'Sure, take your time.'
         new_payload = 'Check the footer.' if key == 'prompt' else 'B13'
-        fresh_words = f'Tell {chat} to check the footer.' if key == 'prompt' else f'Send B13 to {chat}.'
+        fresh_words = f'Send the footer note to {chat}.' if key == 'prompt' else f'Send B13 to {chat}.'
         pause = False
 
         class Output(BaseOutputTransport):
@@ -6359,7 +6395,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                             # Two transcripts from successive barge-ins share the empty assistant tool row.
                             await worker.queue_frame(LLMMessagesAppendFrame(
                                 [{'role': 'user', 'content': 'Yes, please do.'}], run_llm=False))
-                        text = {'fresh': 'Go ahead and send the message.', 'joined-garble': 'Blue wiring now.',
+                        text = {'fresh': f'Go ahead and send it to {chat}.', 'joined-garble': 'Blue wiring now.',
                                 'joined-no': 'No, do not send it.'}[scenario]
                         await speak(text)
                         result = await results.get()
@@ -6618,7 +6654,8 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
     async def test_send_dispatch_uses_readback_from_originating_context(self):
         args = {'chat': 'ci-audit', 'prompt': 'Fix the flake.'}
         for text, readback, allowed in [('Again with a fish.', '', False),
-                ('tell ci-audit to fix the flake', '', True),
+                ('tell ci-audit to fix the flake', '', False),
+                ('send the flake fix to ci-audit', '', True),
                 ('yes', 'Should I send ci-audit: Fix the flake.?', False),
                 ('yes', '', False), ('yes but no', 'Send ci-audit: Fix the flake.?', False)]:
             with self.subTest(text=text, readback=readback):

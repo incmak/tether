@@ -135,13 +135,13 @@ case("log-unknown-session", "misheard", "dev",
      tool_results={"list_chats": {"error": "No session called predicta. Sessions: Tether, Backend, Docs, Automation, Friday chats"}})
 
 # ---- From the 19 Nov 2026 13:51-13:52 call (user evidence) ----
-AUTO_CHAT = r"(?i)^Automation tether \. Can we have…$"
 # The prompt answers C and nothing else ("observe mode" is option C's own name). A list of allowed words, because a list of banned words
 # missed "Keep option C. Deploy immediately."
 ONLY_C = (r"(?i)^\W*(?:(?:let'?s|let us|we(?:'ll| will)?|i(?:'ll| will)?|please|answer|reply|choose|pick|select|"
           r"keep|go|with|use|stay|on|option|the|is|it|decision|choice|observe|mode)\W+)*C\W*(?:for now\W*)?$")
-case("log-answer-only-c", "send_direct", "dev", "tell it let's keep option C",
-     {"tool": "send_to_chat", "args": {"chat": AUTO_CHAT, "prompt": ONLY_C}}, "log", state=AUTO_STATE,
+# B404 frame rule
+case("log-answer-only-c", "readback", "dev", "tell it let's keep option C",
+     {"tool": None, "readback_chat": AUTO, "args": {"prompt": ONLY_C}}, "log", state=AUTO_STATE,
      history=turn("Uh so like what's happening in automation Ther? Like can you check it? Is there a dependency on me?",
                   "read_last_reply", {"chat": AUTO}, {"chat": AUTO, "text":
                       'B240 and B241 are still in progress in B232 Extension Zip. I am watching that tab.\n\n'
@@ -175,10 +175,12 @@ case("h-neg-not-tell", "no_tool", "holdout", "no, do not tell login-fix about th
 
 # ---- Hand-written: dev ----
 D, H = "dev", "holdout"
-case("send-tell", "send_direct", D, "tell api server to add a health check endpoint",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)api.server", "prompt": "(?i)health"}})
-case("send-ask-misheard", "send_direct", D, "ask the docs sight chat to fix the broken links on the home page",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)docs.site", "prompt": "(?i)link"}})
+# B404 frame rule
+case("send-tell", "readback", D, "tell api server to add a health check endpoint",
+     {"tool": None, "readback_chat": "api-server", "args": {"prompt": "(?i)health"}})
+# B404 frame rule
+case("send-ask-misheard", "readback", D, "ask the docs sight chat to fix the broken links on the home page",
+     {"tool": None, "readback_chat": "docs-site", "args": {"prompt": "(?i)link"}})
 # B404 allowlist: "have" requires a read-back.
 case("send-have-it", "readback", D, "have login-fix run the tests again",
      {"tool": None, "readback_chat": "login-fix", "args": {"prompt": "(?i)test"}})
@@ -250,8 +252,9 @@ case("backlog-send", "backlog_send", D, "send B 12 to api server",
 case("backlog-readback", "readback", D, "B 12 for api server I think",
      {"tool": None, "readback_chat": "api-server", "readback_tool": "backlog_send"})
 case("outside-github", "outside", D, "create a GitHub issue for the login bug", {"tool": None, "reply": CANT})
-case("misheard-tell", "misheard", D, "tell friday chest to check the error logs",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test"}})
+# B404 frame rule
+case("misheard-tell", "readback", D, "tell friday chest to check the error logs",
+     {"tool": None, "readback_chat": "friday test"})
 case("thanks", "no_tool", D, "thanks Friday, that's all for now", {"tool": None})
 case("what-can-you-do", "no_tool", D, "what can you do for me?", {"tool": None})
 case("did-you-send-blocked", "no_tool", D, "did you send it?", {"tool": None, "reply": "(?i)\\bno\\b|not|didn't|haven't"},
@@ -263,10 +266,12 @@ case("event-needs", "event", D, '{"chat":"deploy-check","kind":"needs","text":"A
      {"tool": None}, event=True)
 
 # ---- Hand-written: holdout (do not tune on these) ----
-case("h-send-message", "send_direct", H, "message the api server and say rebase on main and push",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)api.server", "prompt": "(?i)rebase"}})
-case("h-send-get-it", "send_direct", H, "can you get login fix to add a test for the password reset",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)login.fix", "prompt": "(?i)password"}})
+# B404 frame rule
+case("h-send-message", "readback", H, "message the api server and say rebase on main and push",
+     {"tool": None, "readback_chat": "api-server", "args": {"prompt": "(?i)rebase"}})
+# B404 frame rule: the prior classifier also required a read-back for "get".
+case("h-send-get-it", "readback", H, "can you get login fix to add a test for the password reset",
+     {"tool": None, "readback_chat": "login-fix", "args": {"prompt": "(?i)password"}})
 case("h-readback-want", "readback", H, "I want login fix to also cover the password reset page",
      {"tool": None, "readback_chat": "login-fix"})
 case("h-readback-idea", "readback", H, "docs site needs a page about the new settings screen",
@@ -303,11 +308,13 @@ case("h-show-chat", "show", H, "bring up the api server chat on my screen",
 case("h-show-off", "show", H, "show me the docs site chat",
      {"tool": "show_chat", "reply": "(?i)off|settings|can(?:'t|not)|did not|didn't"},
      tool_results={"show_chat": {"error": "Friday cannot change the screen: Friday can act in Tether is off in Settings."}})
-case("h-misheard-theatre", "misheard", H, "ask the automation theatre chat to restart the watcher",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)automation"}})
+# B404 frame rule
+case("h-misheard-theatre", "readback", H, "ask the automation theatre chat to restart the watcher",
+     {"tool": None, "readback_chat": "Automation tether"})
 case("h-no-tool-joke", "no_tool", H, "ha, that was quick", {"tool": None})
-case("h-split-tell", "split_turn", H, ["okay tell api server to", "add logging to the upload handler"],
-     {"tool": "send_to_chat", "args": {"chat": "(?i)api.server", "prompt": "(?i)log"}})
+# B404 frame rule
+case("h-split-tell", "readback", H, ["okay tell api server to", "add logging to the upload handler"],
+     {"tool": None, "readback_chat": "api-server", "args": {"prompt": "(?i)log"}})
 case("h-status-needs", "status", H, "does anything need me right now?", {"tool": None, "reply": "(?i)deploy"})
 
 # ---- From the 19 Nov 2026 08:23 call (B339; names replaced) ----
@@ -328,13 +335,16 @@ case("log-send-friday-call-transcript", "send_direct", "dev",
      "send this the whole log, voice log I had with you to the Friday test session",
      {"tool": "send_to_chat", "readback_ok": True,
       "args": {"chat": "(?i)^friday test$", "attach_call": "^True$"}}, "log")
-case("log2-ask-other-session", "send_direct", "dev",
+# B404 frame rule
+case("log2-ask-other-session", "readback", "dev",
      "Okay ask Friday test uh session to read latest. Uh logs I had. the call with Friday.",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": "(?i)log"}}, "log", history=QS_CTX, state=QS_STATE)
+     {"tool": None, "readback_chat": "friday test", "args": {"prompt": "(?i)log"}},
+     "log", history=QS_CTX, state=QS_STATE)
 case("h-read-asked-me", "read_reply", "holdout", "what questions did docs site ask me? read them out",
      {"tool": "read_last_reply", "args": {"chat": "(?i)docs.site"}}, state=QS_STATE)
-case("h-ask-other-session", "send_direct", "holdout", "get the api server session to rebase on main",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)api.server"}}, state=QS_STATE)
+# B404 frame rule: the prior classifier also required a read-back for "get".
+case("h-ask-other-session", "readback", "holdout", "get the api server session to rebase on main",
+     {"tool": None, "readback_chat": "api-server"}, state=QS_STATE)
 
 # ---- Call audit 19 Nov 2026 (B339; fixes 1-3, 5-10 in tether-notes call-audit-2026-11-19.md) ----
 AGENCY = ["Why cannot you? Why why cannot you do that? You can let us that we should have full agency workflow and interactions.",
