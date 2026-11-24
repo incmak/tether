@@ -1530,7 +1530,7 @@
     "readback_chat": "api-server",
     "readback_tool": "backlog_send",
     "args": {
-     "item": "(?i)b ?12"
+     "item": "(?i)^\\s*#?b\\s*12\\s*\\Z"
     }
    }
   },
@@ -1917,7 +1917,7 @@
     "readback_chat": "docs-site",
     "readback_tool": "backlog_send",
     "args": {
-     "item": "(?i)b ?7|seven"
+     "item": "(?i)^\\s*(?:#?b\\s*7|seven)\\s*\\Z"
     }
    }
   },

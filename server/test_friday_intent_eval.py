@@ -289,7 +289,7 @@ class IntentEvalTests(unittest.TestCase):
         for ident, chat, item in (('backlog-send', 'api-server', 'B12'),
                                   ('h-backlog-send', 'docs-site', 'B7')):
             example = next(case for case in data['cases'] if case['id'] == ident)
-            for proposed, fails in ((item, {}), ('B99', {'wrong_args': 1})):
+            for proposed, fails in ((item, {}), (item + '0', {'wrong_args': 1}), ('B99', {'wrong_args': 1})):
                 with self.subTest(ident=ident, proposed=proposed):
                     response = assistant(tool_calls=[call('backlog_send', chat=chat, item=proposed)])
                     result, _ = self.run_script(example, response, data=data)

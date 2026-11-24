@@ -163,6 +163,7 @@ CONSENT_TOOLS = (*DELIVERY_TOOLS, 'drop_notes')
 ACTION_TOOLS = (*CONSENT_TOOLS, 'answer_approval', 'new_chat', 'switch_chat', 'show_chat', 'show_session',
                 'backlog_add', 'open_panel', 'reminder_add', 'hold_note', 'make_prompt', 'edit_prompt', 'close_draft')
 READBACK_REQUIRED = 'Read the prompt back and ask the user to confirm before sending.'
+SEND_CHAT_REQUIRED = 'Name the chat to send to.'
 APPROVAL_CONFIRM_REQUIRED = 'Ask the user to confirm this approval decision first.'
 APPROVAL_DECLINED = 'The user said no to the approval question. Nothing was decided; do not ask again.'
 APPROVAL_DECLINED_REPLY = 'Okay. I did not approve or deny it.'
@@ -619,6 +620,8 @@ def send_readback(proposal):
     if proposal.name == 'answer_approval':
         decision = proposal.payload
         return f'{APPROVAL_READBACK_START[decision]} Should I {decision} {chat}{SEND_READBACK_QUESTION_END}'
+    if not chat:
+        return SEND_CHAT_REQUIRED
     if proposal.attach:
         chat += " with this call's transcript"
     if proposal.name == 'backlog_send':
@@ -785,14 +788,21 @@ class _QuestionMark:
 QUESTION_MARK = _QuestionMark()
 
 
-def plain_yes(text, affirmatives=YES_WORDS):
+def plain_yes(text, affirmatives=YES_WORDS, *, chat=None):
     if QUESTION_MARK.search(text):
         return False  # "That's correct?" asks; it does not consent.
     # "You sure" (STT drops the "?") asks too; "you" is a yes word only in "thank you".
-    # A chat title is free text ("Hold Off", "Tomorrow"): it never stands in for words of a yes, so
-    # "Yes, send it to docs" gets a fresh "Yes or no?" (fail-safe).
-    words = f' {norm(text)} '.replace(' thank you ', ' thanks ')
-    words = words.split()
+    answer = norm(text)
+    if chat is not None:
+        prefix, to, destination = f' {answer} '.partition(' to ')
+        if to:
+            # Compare the destination before filtering filler. "All" and "Good" can be chat names.
+            title = re.escape(norm(chat))
+            if not title or not re.fullmatch(rf'(?:the )?{title}(?: (?:chat|pane|session|tab))?(?: please)?',
+                                            destination.strip()):
+                return False
+            answer = prefix.strip()
+    words = f' {answer} '.replace(' thank you ', ' thanks ').split()
     # "Ahead" consents only after "go" ("Go ahead", "Go right ahead"). "Correct" consents as an answer
     # ("That's correct, go ahead"); with an object ("correct it", "correct the chat") it asks for a change.
     if any(word == 'ahead' and 'go' not in words[max(0, i - 2):i] for i, word in enumerate(words)):
@@ -879,7 +889,7 @@ def confirms(proposal, text):
     if proposal.name == 'send_prompt':
         return plain_yes(text, PROMPT_YES_WORDS)
     if proposal.name != 'answer_approval':
-        return plain_yes(text)
+        return plain_yes(text, chat=proposal.chat)
     if QUESTION_MARK.search(text) or APPROVAL_NEGATION.search(text) or proposal.payload not in APPROVAL_CONFIRM_WORDS:
         return False
     words = re.sub(r'\bgo ahead\b', 'yes', ' '.join(answer_words(text))).split()
@@ -1008,6 +1018,8 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
         return 'Event runs only report news; do not take actions.'
     if source != 'speech' and guarded_action:
         return 'No spoken user turn authorizes this action.'
+    if name in SEND_TOOLS and not str(args.get('chat') or '').strip():
+        return SEND_CHAT_REQUIRED
     # The yes must answer the read-back the user heard last. Two turns keep a yes split over two runs
     # (the first run interrupted before it spoke).
     live = pending is not None and pending.live(user_turn)
@@ -1128,13 +1140,13 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
         # A yes confirms the one send Friday proposed: the same tool and chat, and the read-back text exactly.
         proposal_matches = (has_proposal and name == pending.name and chat == pending.chat.strip().casefold()
                             and attach == pending.attach and binds(payload, pending.payload))
-        yes = plain_yes(last_user_text)
-        if attach and not (CALL_LOG_INTENT.search(last_user_text) or (yes and proposal_matches)):
+        confirmed = proposal_matches and confirms(pending, last_user_text)
+        if attach and not (CALL_LOG_INTENT.search(last_user_text) or confirmed):
             return CALL_NOT_REQUESTED
         if suggestions:
             normalized_payload = norm(payload)
             normalized_speech = norm(last_user_text)
-            confirmed_payload = yes and proposal_matches and normalized_payload == norm(pending.payload)
+            confirmed_payload = confirmed and normalized_payload == norm(pending.payload)
             if not confirmed_payload:
                 for suggestion in suggestions:
                     words = norm(suggestion)
@@ -1143,7 +1155,7 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                     if words == normalized_payload or (' ' in words and f' {words} ' in f' {normalized_payload} '):
                         return READBACK_REQUIRED
         # Every send needs a heard read-back of the stored proposal and a yes to it.
-        if not (yes and proposal_matches):
+        if not confirmed:
             return READBACK_REQUIRED
     return None
 
@@ -1707,12 +1719,12 @@ def runtime_types():
     from pipecat.audio.vad.vad_analyzer import VADAnalyzer, VADParams
     from pipecat.audio.turn.smart_turn.base_smart_turn import BaseSmartTurn
     from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
-    from pipecat.frames.frames import (BotStartedSpeakingFrame, BotStoppedSpeakingFrame, DataFrame,
+    from pipecat.frames.frames import (BotStartedSpeakingFrame, BotStoppedSpeakingFrame, DataFrame, ErrorFrame,
         FunctionCallCancelFrame, FunctionCallResultFrame, FunctionCallResultProperties, FunctionCallsStartedFrame,
         InterruptionFrame, LLMContextFrame,
         LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
         LLMAssistantPushAggregationFrame, MetricsFrame,
-        TTSSpeakFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame, TranscriptionFrame,
+        TTSAudioRawFrame, TTSSpeakFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame, TranscriptionFrame,
         InterimTranscriptionFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame)
     from pipecat.metrics.metrics import TTFBMetricsData
     from pipecat.observers.base_observer import BaseObserver
@@ -1882,6 +1894,8 @@ def runtime_types():
             self._readback_speech = None
             self._readback_marker_id = None
             self._readback_output = None
+            self._readback_audio = None
+            self._readback_voice_count = 0
 
         def begin_voice_turn(self):
             self.voice_turn += 1
@@ -1907,10 +1921,11 @@ def runtime_types():
                     self.session.release_event()
                 return
             if isinstance(frame, FridayToolSpeechCompleteFrame) and self._readback_output:
-                marker_id, voice_turn, count = self._readback_output
+                marker_id, voice_turn, count, server_audio = self._readback_output
                 if marker_id == frame.tool_call_id:
                     frame.readback_ready = not self.voice_cancelled
                     frame.voice_turn, frame.voice_count = voice_turn, count
+                    frame.server_audio = server_audio
                     self._readback_output = None
             await super().process_frame(frame, direction)
 
@@ -1923,15 +1938,17 @@ def runtime_types():
             if not self.voice_open:
                 self.begin_voice_turn()
             if isinstance(frame, FridayReadbackSpeechFrame):
-                self._readback_speech = frame
                 self._readback_marker_id = frame.marker_id
+                if frame.marker_id and not standalone:
+                    # Pipecat can hold the model's last sentence until response end.
+                    # Drain it now so the fixed read-back is the final spoken text.
+                    remaining = await self._text_aggregator.flush()
+                    if remaining:
+                        await self._handle_aggregated_text(self._aggregated_text_frame(remaining))
+                self._readback_speech = frame
+                self._readback_audio = None
+                self._readback_voice_count = self.voice_count
                 try:
-                    if frame.marker_id and not standalone:
-                        # Pipecat can hold the model's last sentence until response end.
-                        # Drain it now so the fixed read-back is the final spoken text.
-                        remaining = await self._text_aggregator.flush()
-                        if remaining:
-                            await self._handle_aggregated_text(self._aggregated_text_frame(remaining))
                     await super()._handle_tts_speak(frame)
                 finally:
                     self._readback_speech = None
@@ -1985,8 +2002,10 @@ def runtime_types():
                 return
             if speech is not None:
                 if not self.voice_cancelled:
-                    voice_turn = self.voice_turn if self.voice_client else None
-                    self._readback_output = (speech.marker_id, voice_turn, self.voice_count)
+                    if self.voice_client and self.voice_count > self._readback_voice_count:
+                        self._readback_output = (speech.marker_id, self.voice_turn, self.voice_count, None)
+                    elif not self.voice_client and self._readback_audio:
+                        self._readback_output = (speech.marker_id, None, 0, self._readback_audio)
                 # Release the device end only after the assistant sees the marker.
                 self.voice_open = False
                 return
@@ -2047,11 +2066,19 @@ def runtime_types():
             preroll = AudioPreroll(float(os.environ.get('TETHER_FRIDAY_PREROLL', '0.15')),
                                    max_hold, max_wait)
             completed = False
+            readback = self._readback_speech is not None and self._readback_speech.marker_id is not None
+            failed = False
+            audio_bytes = 0
             made = worst = 0.0
             underruns = 0
             turn = self.session.turn
             try:
                 async for frame in super().run_tts(text, context_id):
+                    if readback:
+                        if isinstance(frame, ErrorFrame):
+                            failed = True
+                        elif isinstance(frame, TTSAudioRawFrame):
+                            audio_bytes += len(frame.audio)
                     duration = 0.0
                     if first and getattr(frame, 'audio', None):
                         first = False
@@ -2083,7 +2110,13 @@ def runtime_types():
                     preroll_ms = (playback_start - first_audio) * 1000
                 for held in frames:
                     yield held
-                completed = True
+                completed = not failed
+                if readback and completed and audio_bytes:
+                    self._readback_audio = context_id, audio_bytes
+            except Exception as exc:
+                if not readback:
+                    raise
+                yield ErrorFrame(error='Read-back synthesis failed.', exception=exc)
             finally:
                 preroll.close()
                 if made:
@@ -2112,6 +2145,7 @@ def runtime_types():
         readback_ready: bool = False
         voice_turn: int | None = None
         voice_count: int = 0
+        server_audio: tuple[str, int] | None = None
 
     @dataclass
     class FridayReadbackSpeechFrame(TTSSpeakFrame):
@@ -2336,6 +2370,7 @@ def runtime_types():
 
         def track_assistant(self, assistant, context):
             response = None
+            audio_context, audio_bytes = None, 0
             speech_snapshot = ()
             # Pipecat can process a system frame while a data frame is in progress.
             processing = ContextVar('friday_assistant_frame', default=(None, None))
@@ -2375,9 +2410,15 @@ def runtime_types():
 
             @assistant.event_handler('on_after_process_frame')
             async def after_process(processor, frame):
-                nonlocal response, speech_snapshot
+                nonlocal response, speech_snapshot, audio_context, audio_bytes
                 processing.set((None, None))
                 s = self.session
+                # The output transport forwards only the PCM chunks it successfully writes.
+                # Each TTS context flushes its final chunk before the completion marker.
+                if isinstance(frame, TTSStartedFrame):
+                    audio_context, audio_bytes = frame.context_id, 0
+                elif isinstance(frame, TTSAudioRawFrame):
+                    audio_bytes += len(frame.audio)
                 if (isinstance(frame, LLMFullResponseEndFrame) and response is not None
                         and self.tool_followup is response.context_frame):
                     self.tool_followup = None
@@ -2385,6 +2426,7 @@ def runtime_types():
                 if isinstance(frame, (LLMFullResponseEndFrame, InterruptionFrame, LLMAssistantPushAggregationFrame)):
                     response, speech_snapshot = None, ()
                 if isinstance(frame, InterruptionFrame):
+                    audio_context, audio_bytes = None, 0
                     self.tools_in_flight.clear()
                     self.tool_followup = None
                     s.wake.set()
@@ -2414,8 +2456,10 @@ def runtime_types():
                     proposal = getattr(s, 'pending_proposal', None)
                     if (proposal and proposal.marker_id == frame.tool_call_id and not readback_overlapped(s)
                             and self.tool_run and self.tool_run.source == 'speech'):
-                        if frame.voice_turn is None and s.voice_mode == 'server':
-                            self.mark_readback_heard(proposal)
+                        if s.voice_mode == 'server' and frame.server_audio:
+                            context_id, expected_bytes = frame.server_audio
+                            if audio_context == context_id and audio_bytes >= expected_bytes:
+                                self.mark_readback_heard(proposal)
                         elif (s.voice_mode == 'client' and frame.voice_turn == s.tts.voice_turn
                               and not s.tts.voice_cancelled):
                             s.pending_proposal = replace(proposal, voice_turn=frame.voice_turn)
