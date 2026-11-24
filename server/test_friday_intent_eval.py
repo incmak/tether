@@ -292,9 +292,10 @@ class IntentEvalTests(unittest.TestCase):
         data = evaluation.load_fixture(evaluation.DEFAULT_CASES)
         cases = {example['id']: example for example in data['cases']}
         chat = 'Automation tether . Can we have…'
-        for id_, answer, suggestion in (('log-answer-only-c', 'C', 'C, yes to all'),
-                                        ('log-answer-only-c', 'Keep Observe mode with option C.', 'C, yes to all'),
-                                        ('log-answer-only-q7', 'Yes to Q7 only', 'yes to all')):
+        for id_, answer, suggestion, failure in (
+                ('log-answer-only-c', 'C', 'C, yes to all', 'readback_instead'),
+                ('log-answer-only-c', 'Keep Observe mode with option C.', 'C, yes to all', 'readback_instead'),
+                ('log-answer-only-q7', 'Yes to Q7 only', 'Q7, yes to all', 'wrong_args')):
             with self.subTest(id=id_):
                 example = cases[id_]
                 correct = assistant(tool_calls=[call('send_to_chat', chat=chat, prompt=answer)])
@@ -302,7 +303,7 @@ class IntentEvalTests(unittest.TestCase):
                 result, _ = self.run_script(example, correct, data=data)
                 self.assertEqual(result['passed'], 1, result['fails'])
                 result, _ = self.run_script(example, copied, data=data)
-                self.assertEqual(result['fails'], {'readback_instead': 1})
+                self.assertEqual(result['fails'], {failure: 1})
         extra_answer = assistant(tool_calls=[call('send_to_chat', chat=chat, prompt='C. Also, yes to all.')])
         result, _ = self.run_script(cases['log-answer-only-c'], extra_answer, data=data)
         self.assertEqual(result['fails'], {'wrong_args': 1})

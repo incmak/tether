@@ -41,9 +41,10 @@ CANT = "(?i)can(?:'t|not| ?not)|unable|don't have|no way|not able|isn't somethin
 NEEDS = say("Yeah, see which chat needs my attention. Let's start with the oldest.",
             "deploy-check needs your attention: it asks to allow the command npm test.")
 # ---- From the 19 Nov 2026 log (names replaced) ----
-case("log-ask-why-slow", "send_direct", "dev",
+# B404 allowlist: a speech restart and a question require a read-back.
+case("log-ask-why-slow", "readback", "dev",
      "Okay, so I reckon you took too much uh But I'll can you ask the Frida test session, like why did Friday took too long to respond?",
-     {"tool": "send_to_chat", "readback_ok": True, "args": {"chat": "(?i)friday test"}}, "log",
+     {"tool": None, "readback_chat": "friday test", "args": {"prompt": "(?i)slow|long to respond|latency|delay"}}, "log",
      history=say("Hi. Hi Friday are you listening?", "I am listening. What can I help you with today?"))
 case("log-catch-up-count", "backlog_list", "dev",
      "Okay, okay, that's great. And can you check like what's on my table, like what I have to catch up with? How many items?",
@@ -150,8 +151,9 @@ case("log-answer-only-c", "send_direct", "dev", "tell it let's keep option C",
                   "B240 and B241 are still in progress, and it is waiting for your answers on auto-merge and factory floor questions.", "h7")
      + say("So what is the auto-most question?", "It asks whether to keep Observe mode with option C.")
      + say("Do you think we should keep that?", "I cannot judge your design choices, but option C keeps Observe mode active."))
-case("log-answer-only-q7", "send_direct", "dev", "tell it yes to Q7 only",
-     {"tool": "send_to_chat", "args": {"chat": AUTO_CHAT, "prompt": r"(?i)\bQ?7\b"},
+# B404 allowlist: "only" requires a read-back even when it limits the message content.
+case("log-answer-only-q7", "readback", "dev", "tell it yes to Q7 only",
+     {"tool": None, "readback_chat": AUTO, "args": {"prompt": r"(?i)\bQ?7\b"},
       "prompt_not": "(?i)yes to all"}, "log", state=AUTO_STATE,
      history=turn("What did it say about the Factory floor?", "read_last_reply", {"chat": AUTO},
                   {"chat": AUTO, "text": 'Factory floor, round 2: questions Q6 to Q9.\n\n'
@@ -177,8 +179,9 @@ case("send-tell", "send_direct", D, "tell api server to add a health check endpo
      {"tool": "send_to_chat", "args": {"chat": "(?i)api.server", "prompt": "(?i)health"}})
 case("send-ask-misheard", "send_direct", D, "ask the docs sight chat to fix the broken links on the home page",
      {"tool": "send_to_chat", "args": {"chat": "(?i)docs.site", "prompt": "(?i)link"}})
-case("send-have-it", "send_direct", D, "have login-fix run the tests again",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)login.fix", "prompt": "(?i)test"}})
+# B404 allowlist: "have" requires a read-back.
+case("send-have-it", "readback", D, "have login-fix run the tests again",
+     {"tool": None, "readback_chat": "login-fix", "args": {"prompt": "(?i)test"}})
 case("readback-should", "readback", D, "the api server should add rate limiting to the upload endpoint",
      {"tool": None, "readback_chat": "api-server"})
 case("readback-let", "readback", D, "let docs site update the changelog for the new release",
@@ -389,10 +392,10 @@ case("log-keep-option-c", "read_reply", "dev", "Do you think we should keep that
 case("log-answer-it-keep-c", "readback", "dev", "Well like answer it like let's keep option C",
      {"tool": None, "readback_chat": AUTO, "args": {"prompt": ONLY_C}}, "log",
      history=C_CTX + say("Okay, let's keep that.", "Should I send C to the automation tether chat?"), state=AUTO_STATE)
-case("log-ask-friday-test-new-tab", "send_direct", "dev",
+# B404 allowlist: the negated content requires a read-back.
+case("log-ask-friday-test-new-tab", "readback", "dev",
      "No, I think you should ask Friday test session that there is bug and I'm not able to check uh the responses and properly the chat sessions. I'm not able to are not able to read that. Friday is not able to read that. So investigation is n needed. In another tab.",
-     {"tool": "send_to_chat", "readback_ok": True,
-      "args": {"chat": "(?i)friday test", "prompt": "(?i)read|reply|response|cut|trunc"}}, "log",
+     {"tool": None, "readback_chat": "friday test", "args": {"prompt": "(?i)read|reply|response|cut|trunc"}}, "log",
      history=say("The chat already has the first question. Why are you not able to see it?",
                  "The last reply cut off, so I do not have the question in my view. Shall I ask it to show the question?"))
 

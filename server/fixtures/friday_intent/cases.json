@@ -63,7 +63,7 @@
  "cases": [
   {
    "id": "log-ask-why-slow",
-   "group": "send_direct",
+   "group": "readback",
    "split": "dev",
    "source": "log",
    "history": [
@@ -78,10 +78,10 @@
    ],
    "user": "Okay, so I reckon you took too much uh But I'll can you ask the Frida test session, like why did Friday took too long to respond?",
    "expect": {
-    "tool": "send_to_chat",
-    "readback_ok": true,
+    "tool": null,
+    "readback_chat": "friday test",
     "args": {
-     "chat": "(?i)friday test"
+     "prompt": "(?i)slow|long to respond|latency|delay"
     }
    }
   },
@@ -866,7 +866,7 @@
   },
   {
    "id": "log-answer-only-q7",
-   "group": "send_direct",
+   "group": "readback",
    "split": "dev",
    "source": "log",
    "history": [
@@ -900,9 +900,9 @@
    ],
    "user": "tell it yes to Q7 only",
    "expect": {
-    "tool": "send_to_chat",
+    "tool": null,
+    "readback_chat": "Automation tether . Can we have\u2026",
     "args": {
-     "chat": "(?i)^Automation tether \\. Can we have\u2026$",
      "prompt": "(?i)\\bQ?7\\b"
     },
     "prompt_not": "(?i)yes to all"
@@ -1013,15 +1013,15 @@
   },
   {
    "id": "send-have-it",
-   "group": "send_direct",
+   "group": "readback",
    "split": "dev",
    "source": "hand",
    "history": [],
    "user": "have login-fix run the tests again",
    "expect": {
-    "tool": "send_to_chat",
+    "tool": null,
+    "readback_chat": "login-fix",
     "args": {
-     "chat": "(?i)login.fix",
      "prompt": "(?i)test"
     }
    }
@@ -2674,7 +2674,7 @@
   },
   {
    "id": "log-ask-friday-test-new-tab",
-   "group": "send_direct",
+   "group": "readback",
    "split": "dev",
    "source": "log",
    "history": [
@@ -2689,10 +2689,9 @@
    ],
    "user": "No, I think you should ask Friday test session that there is bug and I'm not able to check uh the responses and properly the chat sessions. I'm not able to are not able to read that. Friday is not able to read that. So investigation is n needed. In another tab.",
    "expect": {
-    "tool": "send_to_chat",
-    "readback_ok": true,
+    "tool": null,
+    "readback_chat": "friday test",
     "args": {
-     "chat": "(?i)friday test",
      "prompt": "(?i)read|reply|response|cut|trunc"
     }
    }

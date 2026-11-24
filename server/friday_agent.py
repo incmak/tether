@@ -147,8 +147,7 @@ FRIDAY_HOTWORDS = ('Tether', 'tether')
 HOTWORDS_SCORE = 1.5
 SEND_INTENT = re.compile(
     r'\b(?:send|tell|ask|instruct|forward)\b'
-    r'|\b(?:prompt|message)\s+\w+(?:-\w+)*\b(?![^.!]*\?)'
-    r'|\bhave\s+(?:it|them|\w+(?:-\w+)+)\s+\w+\b', re.I)
+    r'|\b(?:prompt|message)\s+\w+(?:-\w+)*\b', re.I)
 CALL_LOG_INTENT = re.compile(
     r'\b(?:voice logs?|call logs?|transcript|conversation|(?:this|the|our|whole) call|call with (?:you|friday)'
     r'|logs? (?:i had )?with you|(?:what|everything) (?:we|i) (?:said|discussed))\b', re.I)
@@ -976,13 +975,18 @@ SEND_LEAD_IN = (r"(?:(?:can|could|would|will)\s+you|i\s+(?:want|need)\s+you\s+to
 ASKS_FRIDAY = re.compile(
     rf'\s*(?:{SEND_FILLER}(?:\s*{SEND_CLAUSE_END}+\s*|\s+))*'
     rf'(?:{SEND_LEAD_IN}\s+(?:{SEND_FILLER}\s+)*)?', re.I)
-# One STT restart can introduce a request after other content.
-SEND_RESTART = re.compile(r"\bi['’]?ll\s+can\s+you(?:\s+(?:please|just))?\s+\Z", re.I)
 SEND_NEGATION = re.compile(r"\b(?:not|never|nor|neither|cannot|dont|cant|wont)\b|n['’]t\b", re.I)
 SEND_CANCEL = re.compile(
-    r'\b(?:wait|hold\s+off|hold\s+on|actually|cancel|never\s+mind|scratch\s+that|forget\s+it|stop|no)\b', re.I)
+    r'\b(?:wait|hold\s+(?:off|on|that)|actually|cancel|never\s+mind|scratch\s+that|forget\s+it|stop|no'
+    r'|on\s+second\s+thought|change\s+of\s+plan)\b', re.I)
+# Keep a negated instruction as message content unless it resembles a withdrawal.
+SEND_WITHDRAWAL = re.compile(
+    rf"(?:{SEND_NEGATION.pattern})(?:\W+\w+(?:['’]\w+)*){{0,3}}\W+"
+    r'(?:send|tell|ask|forward|message|prompt|instruct|yet|it|that|anything)\b', re.I)
+SEND_CONDITION = re.compile(
+    r'\b(?:if|unless|until|whether|provided|as\s+soon\s+as|only|(?:after|when|once|before)\s+(?:i|we))\b', re.I)
 # "Tell me when it replies": the user is the one told.
-TOLD_USER = re.compile(r"\s+(?:me|us)\b", re.I)
+TOLD_USER = re.compile(r'\s+(?:(?:uh|um|er|like)\s+)*(?:me|us)\b', re.I)
 
 
 def send_intent(text):
@@ -991,13 +995,13 @@ def send_intent(text):
         before = text[:match.start()]
         if SEND_NEGATION.search(before):
             continue
-        if not (ASKS_FRIDAY.fullmatch(before) or SEND_RESTART.search(before)):
+        if not ASKS_FRIDAY.fullmatch(before):
             continue
         verb_end = match.start() + len(match[0].split(maxsplit=1)[0])
         if TOLD_USER.match(text, verb_end) or TOLD_USER.match(text, match.end()):
             continue
         after = text[verb_end:]
-        if SEND_CANCEL.search(after):
+        if '?' in after or SEND_CANCEL.search(after) or SEND_WITHDRAWAL.search(after) or SEND_CONDITION.search(after):
             continue
         clauses = re.split(SEND_CLAUSE_END, after, maxsplit=1)
         if len(clauses) > 1 and SEND_NEGATION.search(clauses[1]):
