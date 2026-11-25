@@ -5,6 +5,7 @@ appended since, instead of re-parsing hundreds of megabytes on every update.
 """
 import json
 import os
+import stat
 import threading
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -59,6 +60,10 @@ def records(stream, start, end=None):
         offset += len(line)
 
 
+class TranscriptChanged(OSError):
+    """The path names another file than the stat the caller checked."""
+
+
 class ConsumeError(Exception):
     """A parser rejected a record while resuming a checkpoint."""
 
@@ -75,7 +80,11 @@ def advance(path, cached, fresh, consume, trim, *, info=None, with_offset=False,
     if cached is None:
         cached = {'inode': info.st_ino, 'offset': 0, 'index': 0, 'state': fresh()}
     if info.st_size > cached['offset']:
-        with open(path, 'rb') as stream:
+        # Check the opened file, not the path: a FIFO swapped in after the stat must not block the reader.
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK), 'rb') as stream:
+            opened = os.fstat(stream.fileno())
+            if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                raise TranscriptChanged('The transcript changed while it was opened.')
             stream.seek(cached['offset'])
             if cached.pop('unterminated', False):
                 # Skip the newline that finished a record we already consumed.

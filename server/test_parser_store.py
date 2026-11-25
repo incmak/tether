@@ -127,14 +127,15 @@ class ParserCheckpoints(unittest.TestCase):
                     self.path.write_bytes(new + (lines(CLAUDE_END) if change.endswith('append') else b''))
                 restart = parser_store.ParserStore(store.name, 2 if change == 'version' else 1)
                 self.assertEqual(set(restart.records), set() if change == 'version' else {'%1', '%2'})
-                open_fd = os.open
+                digest = parser_store._digest
 
-                def read(path, flags, *args):
-                    if change == 'read error' and path == str(self.path):
-                        raise PermissionError('closed transcript')
-                    return open_fd(path, flags, *args)
+                def read(key, *args, **kwargs):
+                    # The anchor read fails; the transcript itself stays readable for the cold parse.
+                    if change == 'read error' and key[1] == str(self.path):
+                        return None
+                    return digest(key, *args, **kwargs)
 
-                with patch.object(parser_store.os, 'open', side_effect=read), \
+                with patch.object(parser_store, '_digest', side_effect=read), \
                         patch.object(coordinator, '_claude_turn', wraps=coordinator._claude_turn) as consume:
                     state = self.advance(restart, consume=consume)['state']
                     self.assertEqual(consume.call_args_list[0].args[1], 0)
@@ -268,6 +269,60 @@ class ParserCheckpoints(unittest.TestCase):
                             self.assertEqual(reply(), 'New reply')
                     self.assertEqual(self.path.stat().st_ino, inode)
                     self.assertEqual(offsets, [len(original), 0])
+
+    def test_atomic_replacement_after_anchor_check_reparses_feed_and_review_from_zero(self):
+        transcripts = {
+            'claude': lines(claude('user', REQUEST), claude('assistant', 'Old reply', stop_reason='end_turn'),
+                            CLAUDE_END),
+            'codex': lines(event('task_started'), codex('user', REQUEST),
+                           codex('assistant', 'Old reply', phase='final_answer'), event('task_complete')),
+        }
+        extra = lines({'type': 'unrelated'})
+        replacement = self.path.with_suffix('.new')
+        digest = parser_store._digest
+        for agent, original in transcripts.items():
+            for reader in ('feed', 'review'):
+                with self.subTest(agent=agent, reader=reader):
+                    feed = coordinator.Feed()
+                    review = parser_store.ParserStore('review', 1, pending=review_links.REPLY_PENDING)
+                    entry = {'id': '%1', 'agent': agent, 'transcript': self.path}
+
+                    def reply():
+                        if reader == 'feed':
+                            return feed.latest_outcome(entry)['text']
+                        return server.review_reply(entry, REQUEST_ID)
+
+                    self.path.write_bytes(original)
+                    with patch.object(server, 'REVIEW_PARSERS', review):
+                        self.assertEqual(reply(), 'Old reply')
+                        with self.path.open('ab') as stream:
+                            stream.write(extra)
+                        swapped = []
+
+                        def replace_after_check(key, offset, *args, **kwargs):
+                            # The first digest is the anchor check of the resumed state.
+                            result = digest(key, offset, *args, **kwargs)
+                            if not swapped:
+                                swapped.append(offset)
+                                replacement.write_bytes(original.replace(b'Old reply', b'New reply') + extra)
+                                os.replace(replacement, self.path)
+                            return result
+
+                        # A new saved store forces the anchor check before the resumed read.
+                        store = feed.parser_store if reader == 'feed' else review
+                        store.save(force=True)
+                        restarted = parser_store.ParserStore(store.name, store.version, pending=store.pending)
+                        if reader == 'feed':
+                            feed.parser_store, feed.outcomes = restarted, {}
+                        else:
+                            review = restarted
+                        with patch.object(server, 'REVIEW_PARSERS', review), \
+                                patch.object(parser_store, '_digest', side_effect=replace_after_check):
+                            self.assertEqual(reply(), 'New reply')
+                        self.assertEqual(swapped, [len(original)])
+                        record = (feed.parser_store if reader == 'feed' else review).records['%1'][1]
+                        self.assertEqual(record['inode'], self.path.stat().st_ino)
+                        self.assertEqual(record['offset'], self.path.stat().st_size)
 
     def test_feed_checks_a_same_size_rewrite_with_unchanged_mtime(self):
         original = lines(claude('assistant', 'Old reply'))
@@ -438,6 +493,56 @@ class ParserCheckpoints(unittest.TestCase):
                         stream.write(append)
                     record = self.advance(restart)
                 self.assert_same_record(record, expected)
+
+    def run_briefly(self, action):
+        results = []
+
+        def target():
+            try:
+                results.append(action())
+            except OSError as error:
+                results.append(error)
+
+        thread = threading.Thread(target=target, daemon=True)
+        thread.start()
+        thread.join(timeout=2)
+        self.assertFalse(thread.is_alive(), 'The parser blocked on the FIFO')
+        return results[0]
+
+    def test_resume_does_not_block_on_a_fifo_swapped_in_after_the_anchor_check(self):
+        self.path.write_bytes(lines(claude('assistant', 'Old reply.')))
+        store = parser_store.ParserStore('fifo-resume', 1)
+        self.advance(store)
+        store.save(force=True)
+        with self.path.open('ab') as stream:
+            stream.write(lines(claude('assistant', 'New reply.')))
+        restart = parser_store.ParserStore('fifo-resume', 1)
+        digest = parser_store._digest
+        fifo = self.path.with_suffix('.fifo')
+
+        def swap_after_check(*args, **kwargs):
+            result = digest(*args, **kwargs)
+            if stat.S_ISREG(self.path.stat().st_mode):
+                os.mkfifo(fifo)
+                fifo.replace(self.path)
+            return result
+
+        with patch.object(parser_store, '_digest', side_effect=swap_after_check) as checked:
+            result = self.run_briefly(lambda: self.advance(restart))
+        checked.assert_called()
+        self.assertIsInstance(result, OSError)
+        self.assertNotIn('%1', restart.records)
+
+    def test_history_advance_checks_the_opened_file_not_the_path(self):
+        self.path.write_bytes(lines(claude('assistant', 'Done.')))
+        info = self.path.stat()
+        fifo = self.path.with_suffix('.fifo')
+        os.mkfifo(fifo)
+        fifo.replace(self.path)
+        result = self.run_briefly(lambda: history.advance(
+            str(self.path), None, lambda: {'kind': None, 'text': '', 'identity': ''},
+            coordinator._claude_turn, trim=False, info=info))
+        self.assertIsInstance(result, OSError)
 
     def test_load_and_prune_do_not_open_a_transcript_replaced_with_a_fifo(self):
         self.path.write_bytes(lines(claude('assistant', 'Done.')))

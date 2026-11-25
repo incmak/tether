@@ -165,7 +165,8 @@ class ParserStore:
         try:
             record = history.advance(key[1], cached, fresh, consume, trim=False, info=info,
                                      strict_consume=cached is not None)
-        except history.ConsumeError:
+        except (history.ConsumeError, history.TranscriptChanged):
+            # A replacement after the checks: parse the new file once from byte zero below.
             record = None
         except OSError:
             if cached is not None:
@@ -177,7 +178,8 @@ class ParserStore:
             if checked is None or checked != digest:
                 record = None
         if record is None:
-            self._discard(pane)
+            if pane in self.records:
+                self._discard(pane)
             info = os.stat(key[1])
             if not stat.S_ISREG(info.st_mode):
                 raise OSError('The transcript is not a regular file.')
