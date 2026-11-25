@@ -628,8 +628,8 @@ class Upstream(BaseHTTPRequestHandler):
 
 
 @unittest.skipUnless(sys.platform.startswith('linux'), 'reads the real listener table from /proc')
-class ProxyTests(unittest.TestCase):
-    """The proxy between a real client socket and a real dev server."""
+class ProxyCase(unittest.TestCase):
+    """A real client socket, the proxy and a real dev server. No tests here: each subclass picks its own limits (B450)."""
 
     def setUp(self):
         Upstream.seen = []
@@ -708,6 +708,10 @@ class ProxyTests(unittest.TestCase):
     def last(self):
         entry = Upstream.seen[-1]
         return entry, dict(entry['headers'])
+
+
+class ProxyTests(ProxyCase):
+    """The proxy between a real client socket and a real dev server, with the default limits."""
 
     def test_start_reports_the_pool_and_the_serve_command(self):
         self.assertEqual(self.previews.ports, [self.port])
@@ -1214,8 +1218,9 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 'denied')
 
 
-class LimitTests(ProxyTests):
-    """Review finding 4: stalled clients and dev servers do not hold workers. Small limits make the tests fast."""
+class LimitTests(ProxyCase):
+    """Review finding 4: stalled clients and dev servers do not hold workers. Small limits make the tests fast.
+    B450: not a subclass of ProxyTests. Under load a normal answer can take longer than these limits (502)."""
 
     def make_guard(self):
         return Guard(connections=3, sockets=1, accept=0.3, head=0.6, write=0.5, upstream_head=0.8, lease_check=0.2)
