@@ -1237,36 +1237,67 @@ def claude_screen_working(plain_screen):
     return False
 
 
+# Codex 0.170.0 status row (tui/src/status_indicator_widget.rs): "<bullet> <header> (<elapsed> • esc to interrupt)",
+# then optional " · <message>", cut with "…" to the pane width. Detail rows ("  └ ", wrapped with four spaces) hang
+# directly under it. The interrupt hint shows for every running task (bottom_pane/mod.rs set_task_running).
+CODEX_STATUS_ROW = re.compile(r'^[•◦] \S')
+CODEX_ELAPSED = re.compile(r' \((?:\d+h \d{2}m \d{2}s|\d+m \d{2}s|\d+s)')
+CODEX_INTERRUPT = ' • esc to interrupt)'
+# The hint row while a draft is typed mid-turn, and the Plan mode label Codex adds to any hint row (footer.rs).
+CODEX_QUEUE_HINT = re.compile(r'^  tab to queue message(?=\s{2,}⚠|$)')
+CODEX_PLAN_MODE = re.compile(r'^  Plan mode(?: \([^)]*to cycle\))?(?=\s{2,}⚠|$)| · Plan mode(?: \([^)]*to cycle\))?(?=\s{2,}⚠|$)')
+
+
+def codex_status_row(row):
+    """True only for Codex's own live status row: the elapsed counter, then the interrupt hint, whole or cut by …."""
+    if not CODEX_STATUS_ROW.match(row):
+        return False
+    row = row.rstrip()
+    for match in CODEX_ELAPSED.finditer(row):
+        rest = row[match.end():]
+        if rest == CODEX_INTERRUPT or rest.startswith(CODEX_INTERRUPT + ' · '):
+            return True
+        if rest.endswith('…') and (CODEX_INTERRUPT.startswith(rest[:-1]) or rest.startswith(CODEX_INTERRUPT + ' · ')):
+            return True
+    return False
+
+
 def codex_screen_working(plain_screen):
     """Read the area above Codex's composer. Return None if the composer cannot be verified."""
     lines = plain_screen.splitlines()
     start = next((i for i in range(len(lines) - 1, -1, -1) if lines[i].startswith('›')), None)
-    if start is None or re.match(r'^›\s*\d+[.)]\s', lines[start]):
+    if start is None:
         return None
     end = next((i for i in range(start + 1, len(lines)) if not lines[i].strip()), len(lines))
     last = next((i for i in range(len(lines) - 1, end, -1) if lines[i].strip()), None)
-    if last is not None and lines[last].rstrip() == '  tab to queue message':
-        # This hint replaces the usual hint for a draft typed mid-turn. Check the rest of the footer as usual.
-        lines[last] = '  ← for agents'
+    if last is not None:
+        # Map the queue hint and the Plan mode label to the usual hint, then check the footer as usual.
+        # A menu ("› 1. Yes") has its own footer, so it still refuses here.
+        hint = CODEX_PLAN_MODE.sub(lambda m: '  ← for agents' if m.group().startswith('  ') else '', lines[last])
+        lines[last] = CODEX_QUEUE_HINT.sub('  ← for agents', hint)
     if not codex_input_box(lines, end):
         return None
 
+    def above_blanks(i):
+        while i >= 0 and not lines[i].strip():
+            i -= 1
+        return i
+
+    i = above_blanks(start - 1)
     queued_row = re.compile(r'^(?:  ↳ |    \S)')
-    i = start - 1
-    while i >= 0:
-        row = lines[i]
-        if not row.strip() or row.startswith('  └ '):
+    if i >= 0 and queued_row.match(lines[i]):
+        while i >= 0 and queued_row.match(lines[i]):
             i -= 1
-            continue
-        if queued_row.match(row):
-            while i >= 0 and queued_row.match(lines[i]):
-                i -= 1
-            if i < 0 or lines[i].rstrip() != '• Queued follow-up inputs':
-                return False
-            i -= 1
-            continue
-        return bool(re.match(r'^[•◦] \S.*?\((?:\d+h )?(?:\d+m )?\d+s(?: •|\)|…)', row))
-    return False
+        if i < 0 or lines[i].rstrip() != '• Queued follow-up inputs':
+            return False
+        i = above_blanks(i - 1)
+    top = i
+    while top >= 0 and re.match(r'^(?:  └ |    \S)', lines[top]):
+        top -= 1
+    if top != i and not lines[top + 1].startswith('  └ '):
+        return False
+    # Detail rows count only when they hang directly under the status row; a blank between ends the walk.
+    return top >= 0 and codex_status_row(lines[top])
 
 
 def claude_registry(entry):
