@@ -119,7 +119,7 @@ REFUSED = {
         'browser/ask/dismiss', 'browser/close', 'browser/device', 'browser/extension/pair',
         'browser/extension/revoke', 'browser/history', 'browser/input', 'browser/navigate',
         'browser/new', 'browser/show', 'browser/signed/allow', 'browser/signed/deny',
-        'browser/signed/dismiss', 'browser/signed/end', 'browser/window-view',
+        'browser/signed/dismiss', 'browser/signed/end', 'browser/signed/policy', 'browser/window-view',
         'dev-preview', 'dev-preview/release', 'dev-preview/stop', 'live/offer', 'login/cancel',
         'login/code', 'login/start', 'preview', 'push/level', 'push/settings', 'push/subscribe',
         'push/test', 'push/unsubscribe', 'transcribe', 'tts', 'update', 'upkeep/ops', 'upkeep/prune',

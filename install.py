@@ -225,7 +225,7 @@ def unit_text(description, command, environment, *, oneshot=False, priority=Fals
     env = ''.join(f'Environment={quote(key + "=" + str(value))}\n' for key, value in sorted(environment.items()))
     service = 'Type=oneshot\n' if oneshot else ''
     restart = '' if oneshot else 'Restart=always\nRestartSec=3\n'
-    # priority: 10 times the default CPU share, so agent builds and tests do not slow the voice worker (load 40 seen).
+    # 10 times the default share, so agent builds and tests (load 40-100 seen) do not slow the server or voice worker.
     restart += 'CPUWeight=1000\n' if priority else ''
     return (f'[Unit]\nDescription={description}\nAfter=network.target\n\n[Service]\n{service}'
             f'ExecStart={" ".join(quote(word, executable=True) for word in command)}\n{env}'
@@ -580,7 +580,8 @@ def make_plan(args, repo=ROOT, home=None):
                     [vpython, service_repo / 'server/transcribe_worker.py'], voice_env, priority=True)
         if build:
             commands.extend([['npm', 'ci'], ['npm', 'run', 'build']])
-        files[UNIT_NAMES[0]] = service_file(UNIT_NAMES[0], 'Tether chat', [server_python, service_repo / 'server/server.py'], env)
+        files[UNIT_NAMES[0]] = service_file(UNIT_NAMES[0], 'Tether chat',
+            [server_python, service_repo / 'server/server.py'], env, priority=True)
         if options['terminal']:
             files[UNIT_NAMES[1]] = service_file(UNIT_NAMES[1], 'Tether terminal',
                 [shutil.which('ttyd') or 'ttyd', '-W', '-i', '127.0.0.1', '-p', str(options['terminal_port']),

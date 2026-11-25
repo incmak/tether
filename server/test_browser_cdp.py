@@ -504,6 +504,35 @@ class ProxyTests(unittest.TestCase):
         self.browser.set_device(tab.target, 'agent')
         self.assertEqual(self.fake.sent('Emulation.setDeviceMetricsOverride')[-1]['params'], params)
 
+    def test_live_agent_screenshots_keep_the_css_pixel_default_and_explicit_density(self):
+        tab, session = self.adopted()
+        with patch.object(self.browser, 'container', object()):
+            self.assertNotIn('error', self.request('Page.captureScreenshot', session=session))
+            default = {'width': 0, 'height': 0, 'deviceScaleFactor': 1, 'mobile': False}
+            metrics = self.fake.sent('Emulation.setDeviceMetricsOverride')[-1]
+            self.assertEqual((metrics['sessionId'], metrics['params']), (session, default))
+            self.assertLess(metrics['id'], self.fake.sent('Page.captureScreenshot')[-1]['id'])
+
+            clip = {'x': 13, 'y': 19, 'width': 125, 'height': 80, 'scale': 0.75}
+            self.assertNotIn('error', self.request('Page.captureScreenshot', {'clip': clip}, session))
+            self.assertEqual(self.fake.sent('Page.captureScreenshot')[-1]['params'], {'clip': clip})
+            self.assertEqual(self.fake.sent('Emulation.setDeviceMetricsOverride')[-1], metrics)
+
+            custom = {'width': 430, 'height': 350, 'deviceScaleFactor': 2, 'mobile': False}
+            self.assertNotIn('error', self.request('Emulation.setDeviceMetricsOverride', custom, session))
+            self.assertEqual(self.fake.sent('Emulation.setDeviceMetricsOverride')[-1]['params'], custom)
+            self.assertNotIn('error', self.request('Emulation.clearDeviceMetricsOverride', session=session))
+            restored = self.fake.sent('Emulation.setDeviceMetricsOverride')[-1]
+            clear = self.fake.sent('Emulation.clearDeviceMetricsOverride')[-1]
+            self.assertEqual((clear['sessionId'], restored['params']), (session, default))
+            self.assertLess(clear['id'], restored['id'])
+
+            self.browser.set_device(tab.target, 'phone')
+            self.browser.set_device(tab.target, 'desktop')
+            self.assertEqual(self.fake.sent('Emulation.setDeviceMetricsOverride')[-1]['params'], default)
+            self.browser.set_device(tab.target, 'agent')
+            self.assertEqual(self.fake.sent('Emulation.setDeviceMetricsOverride')[-1]['params'], default)
+
     def test_agent_tabs_do_not_use_user_tab_limit(self):
         self.request('Target.createTarget')
         with patch.object(browser, 'MAX_TABS', 2):
@@ -709,6 +738,30 @@ class HTTPTests(unittest.TestCase):
             handler.rfile = io.BytesIO(body)
             handler.do_POST()
             proxy.ask.assert_called_once_with('Click sign in.', expected)
+
+    def test_signed_ask_verifies_only_the_socket_pane(self):
+        access = Mock()
+        access.ask.return_value = {'ok': True}
+        proxy = SimpleNamespace(config={'port': 47123, 'token': 'secret'}, pane_finder=Mock(), signed_access=access)
+        for found in ('%12', None):
+            with self.subTest(found=found):
+                proxy.pane_finder.return_value = found
+                handler = self.handler('/ask-signed/secret', proxy=proxy)
+                handler.connection = Mock()
+                handler.client_address = ('127.0.0.1', 55001)
+                body = json.dumps({'text': 'Read the account', 'pane': '%13', 'verified': True,
+                                   'browser': 'server'}).encode()
+                handler.headers['Content-Length'] = str(len(body))
+                handler.rfile = io.BytesIO(body)
+                handler.do_POST()
+                access.ask.assert_called_with('Read the account', found or '%13', 15, None,
+                                              browser='server', verified=bool(found))
+                handler.respond.assert_called_once_with(200, {'ok': True})
+
+    def test_signed_policy_is_not_an_agent_proxy_route(self):
+        handler = self.handler('/signed/secret/policy')
+        handler.do_POST()
+        handler.respond.assert_called_once_with(404, {})
 
 
 class PeerTests(unittest.TestCase):

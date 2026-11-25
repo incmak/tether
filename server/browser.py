@@ -65,6 +65,16 @@ AGENT_DEFAULTS = {
     'ua': ('Emulation.setUserAgentOverride', {'userAgent': ''}),
     'scrollbars': ('Emulation.setScrollbarsHidden', {'hidden': False}),
 }
+# The Test browser's live output may be HiDPI. Keep the historical 1x default on agent pages so
+# screenshots, including client-specified clips, use the same pixel dimensions as before.
+LIVE_AGENT_METRICS = ('Emulation.setDeviceMetricsOverride',
+                      {'width': 0, 'height': 0, 'deviceScaleFactor': 1, 'mobile': False})
+
+
+def reset_live_agent_metrics(conn, session, timeout=CALL_TIMEOUT):
+    # Zero dimensions leave a previous viewport size in place. Clear it before setting the default DPR.
+    conn.call('Emulation.clearDeviceMetricsOverride', session=session, timeout=timeout)
+    return conn.call(*LIVE_AGENT_METRICS, session=session, timeout=timeout)
 
 
 class BrowserError(RuntimeError):
@@ -335,6 +345,8 @@ class Tab:
         self.url, self.title = 'about:blank', ''
         self.preset = 'desktop'
         self.size = DESKTOP
+        self.fullscreen_viewport = None  # CDP override for a live window larger than its output
+        self.live_fit_epoch = 0
         self.frame = None  # (seq, metadata, base64 jpeg)
         self.seq = 0
         self.acked = 0
@@ -342,6 +354,7 @@ class Tab:
         self.casting = None  # (max width, max height) while a screencast runs
         self.viewer_sizes = []
         self.last_input = 0.0
+        self.watched = 0.0  # last time Mak's panel showed this tab; the live view never registers viewers
         self.changed = threading.Condition()
         self.healed = 0.0  # when the emulation was last applied again (see Browser.heal)
         self.parked = False  # the tab's window is minimized because nobody watches it
@@ -567,7 +580,7 @@ class Browser:
                 if not enabled:
                     self.conn.call('Target.activateTarget', {'targetId': tab.target})
                 self._set_window_bounds(tab, enabled)
-                if tab.preset != 'desktop':
+                if tab.preset != 'desktop' or tab.fullscreen_viewport is not None:
                     self._apply_preset(tab, tab.preset, window_view=enabled)
             except BrowserError:
                 try:
@@ -588,12 +601,16 @@ class Browser:
             tab = self.tab(target)
             if self.signed and self.container is not None:
                 self._set_window_bounds(tab, self.window_view)
-                if tab.preset != 'desktop':
+                if tab.preset != 'desktop' or (self.window_view and tab.fullscreen_viewport is not None):
                     self._apply_preset(tab, tab.preset)
             self.conn.call('Target.activateTarget', {'targetId': tab.target})
             self.conn.call('Page.bringToFront', session=tab.session)
-            tab.last_input = self.clock()
+            tab.last_input = tab.watched = self.clock()
         return {'ok': True}
+
+    def mark_watched(self, tab):
+        """Mak's panel shows this tab now (the live view polls it every 2 s while it is open)."""
+        tab.watched = self.clock()
 
     def tab(self, target):
         tab = self.tabs.get(target)
@@ -691,7 +708,7 @@ class Browser:
             self.conn.call('Page.navigateToHistoryEntry', {'entryId': entries[index]['id']}, tab.session)
         return tab.row()
 
-    def refresh(self, tab):
+    def refresh(self, tab, *, live_size=None):
         """Read the tab's title and URL again. After a navigation that swaps the renderer (about:blank to a site),
         Chromium 147 sends no targetInfoChanged for later title changes, so the stream asks about once a second."""
         try:
@@ -701,6 +718,60 @@ class Browser:
         if info.get('targetId') == tab.target and tab.target in self.tabs and (tab.url, tab.title) != (info.get('url') or tab.url, info.get('title') or ''):
             tab.url, tab.title = info.get('url') or tab.url, info.get('title') or ''
             self._bump()
+        if self.container is not None:
+            # Wait for Chromium's display to catch up, or reread after a concurrent fit.
+            deadline = time.monotonic() + 1
+            while self._fit_live_desktop(tab, live_size) is False:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
+
+    def _fit_live_desktop(self, tab, live_size=None):
+        """Fit Chromium's minimum fullscreen window. Return False if geometry needs another read."""
+        with self.lock:
+            if (self.conn is None or self.tabs.get(tab.target) is not tab or self.window_view
+                    or tab.controller != 'user' or tab.preset != 'desktop'):
+                return
+            conn, version, fit_epoch = self.conn, self.version, tab.live_fit_epoch
+        try:
+            outputs = conn.call('Emulation.getScreenInfos', session=tab.session, timeout=5).get('screenInfos', [])
+            screen = next((output for output in outputs if output.get('isPrimary')), None)
+            if not screen or not screen.get('width') or not screen.get('height'):
+                return
+            width, height = screen['width'], screen['height']
+            scale = screen.get('devicePixelRatio') or 1
+            # CDP reports CSS pixels, with rounding at fractional output scales.
+            if live_size and any(abs(css * scale - pixels) > max(2, scale)
+                                 for css, pixels in zip((width, height), live_size)):
+                return False
+            bounds = conn.call('Browser.getWindowForTarget', {'targetId': tab.target}, timeout=5).get('bounds', {})
+            if bounds.get('windowState') != 'fullscreen':
+                return
+            viewport = (width, height) if bounds.get('width', 0) > width or bounds.get('height', 0) > height else None
+            # The poll reads geometry without blocking control changes. Serialize the occasional write with
+            # preset, window mode and control changes, and discard results from before any such change.
+            with self.lock:
+                if (self.conn is not conn or self.version != version
+                        or self.tabs.get(tab.target) is not tab or self.window_view
+                        or tab.controller != 'user' or tab.preset != 'desktop'):
+                    return
+                # A concurrent fit can have newer geometry even if it did not need to write metrics.
+                # Request order can differ from CDP read order, so take a fresh sample on overlap.
+                if tab.live_fit_epoch != fit_epoch:
+                    return False
+                tab.live_fit_epoch += 1
+                if viewport == tab.fullscreen_viewport:
+                    return
+                if viewport:
+                    scale = LIVE_AGENT_METRICS[1]['deviceScaleFactor'] if self._uses_live_agent_metrics(tab) else 0
+                    conn.call('Emulation.setDeviceMetricsOverride',
+                              {'width': width, 'height': height, 'deviceScaleFactor': scale, 'mobile': False},
+                              tab.session, timeout=5)
+                else:
+                    self._clear_live_desktop_metrics(tab, timeout=5)
+                tab.fullscreen_viewport = viewport
+        except BrowserError:
+            pass  # the window can close while the live view refreshes
 
     def nav_state(self, target):
         tab = self.tab(target)
@@ -724,8 +795,12 @@ class Browser:
                     saved = tab.agent_client.emulation.get(target, {}) if tab.agent_client else {}
                     for slot, default in AGENT_DEFAULTS.items():
                         method, params = saved.get(slot, default)
-                        self.conn.call(method, params, tab.session)
+                        if method == 'Emulation.clearDeviceMetricsOverride' and self._uses_live_agent_metrics(tab):
+                            reset_live_agent_metrics(self.conn, tab.session)
+                        else:
+                            self.conn.call(method, params, tab.session)
                     tab.controller, tab.preset = 'agent', 'desktop'
+                    tab.fullscreen_viewport = None
                     self._agent_size(tab)
             else:
                 tab.controller = 'user'
@@ -735,6 +810,15 @@ class Browser:
             self._restart_cast(tab)
             self._bump()
             return tab.row()
+
+    def _uses_live_agent_metrics(self, tab):
+        return self.container is not None and not self.signed and tab.mode == 'agent'
+
+    def _clear_live_desktop_metrics(self, tab, timeout=CALL_TIMEOUT):
+        if self._uses_live_agent_metrics(tab):
+            reset_live_agent_metrics(self.conn, tab.session, timeout=timeout)
+        else:
+            self.conn.call('Emulation.clearDeviceMetricsOverride', session=tab.session, timeout=timeout)
 
     def _apply_preset(self, tab, preset, width=None, height=None, *, window_view=None):
         if tab.controller == 'agent':
@@ -751,7 +835,7 @@ class Browser:
             tab.size = (width, height)
         if desktop_view:
             if self.container is not None:  # the page fills its fullscreen window; Selkies sizes the screen to the panel
-                self.conn.call('Emulation.clearDeviceMetricsOverride', session=session)
+                self._clear_live_desktop_metrics(tab)
             else:
                 self.conn.call('Emulation.setDeviceMetricsOverride',
                                {'width': width, 'height': height, 'deviceScaleFactor': spec['scale'], 'mobile': False}, session)
@@ -772,6 +856,7 @@ class Browser:
             agent = mobile_android_ua(self.user_agent) if spec['ua'] == 'android' else spec['ua']
             self.conn.call('Emulation.setUserAgentOverride', {'userAgent': agent}, session)
         tab.preset = preset
+        tab.fullscreen_viewport = None
 
     # input -----------------------------------------------------------------------------------------------------
     def input(self, target, events):

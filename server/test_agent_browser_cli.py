@@ -19,8 +19,10 @@ class NoteTests(unittest.TestCase):
         text = agent_browser_cli.note()
         self.assertIn('signed CDP URL returns 410', text)
         self.assertIn('socket closes with "Access ended"', text)
-        self.assertIn('tell Mak the reason in chat', text)
-        self.assertIn('Ask again only if the task still needs access.', text)
+        self.assertIn('when the time ran out, ask again if the task still needs it.', text)
+        self.assertIn('When Mak ended it, tell Mak and do not ask again unless Mak says so.', text)
+        self.assertIn('When Mak allows agents in Settings, it answers at once', text)
+        self.assertIn('Before a risky or destructive step, stop and ask Mak in chat, then wait for a yes', text)
 
     def test_note_contains_absolute_ask_command(self):
         text = agent_browser_cli.note()
@@ -174,6 +176,20 @@ class CliTests(unittest.TestCase):
             self.assertEqual(json.loads(run.stdout), {'ok': False, 'reason': 'request failed'})
             self.assertNotIn('test-token', run.stdout)
         self.assertEqual(len(self.requests), before)
+
+    def test_signed_busy_and_failed_are_json_errors(self):
+        for result in ({'ok': False, 'reason': 'busy', 'error': 'End a grant first (the limit is 2).'},
+                       {'ok': False, 'reason': 'failed', 'error': 'Chrome refused the tab.'},
+                       {'ok': False, 'reason': 'failed'}):
+            with self.subTest(result=result):
+                self.result = result
+                run = self.run_cli('ask-signed', 'Task')
+                self.assertEqual((run.returncode, run.stderr), (1, ''))
+                self.assertEqual(json.loads(run.stdout), result)
+        self.result = {'ok': False, 'reason': 'failed', 'error': {'token': 'do not print'}}
+        run = self.run_cli('ask-signed', 'Task')
+        self.assertEqual(run.returncode, 1)
+        self.assertEqual(json.loads(run.stdout), {'ok': False, 'reason': 'request failed'})
 
 
 if __name__ == '__main__':

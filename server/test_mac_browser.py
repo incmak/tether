@@ -450,6 +450,67 @@ class RealContextTests(GrantHarness, unittest.TestCase):
 
 
 class GrantTests(GrantHarness, unittest.TestCase):
+    def standing_access(self, notifier=None):
+        identity = lambda pane: ('codex', int(pane[1:]), 'start', 'thread')
+        server = signed.Access(browser.Browser(signed=True), notifier=notifier or Mock(),
+                               auto=lambda: True, identity_finder=identity, request_seconds=3)
+        self.access.auto = server.auto
+        self.access.identity_finder = identity
+        self.access.notifier = server.notifier
+        self.addCleanup(server.stop)
+        return mac.RoutedAccess(server, self.access)
+
+    def test_verified_auto_grants_chrome_and_enforces_chrome_limit(self):
+        routed = self.standing_access()
+        result = routed.ask('Read the requested account', '%12', verified=True)
+        self.assertTrue(result['ok'])
+        self.assertEqual((result['browser'], result['tab']), ('chrome', 'T7'))
+        grant, = routed.state()['grants']
+        self.assertTrue(grant['auto'])
+        self.assertEqual(routed.ask('Same task', '%12', browser='server', verified=True), result)
+        self.assertEqual(routed.ask('Another task', '%13', verified=True),
+                         {'ok': False, 'reason': 'busy', 'error': 'End the active Chrome grant first.'})
+        self.assertEqual([message['type'] for message in self.transport.sent].count('grant'), 1)
+        self.assertFalse(self.access.pending)
+        self.access.notifier.assert_not_called()
+
+    def test_chrome_refusal_and_disconnect_fail_without_phone_requests(self):
+        routed = self.standing_access()
+        with patch.object(self.device, 'request', side_effect=browser.BrowserError('Chrome refused the tab.')):
+            self.assertEqual(routed.ask('Read the requested account', '%12', verified=True),
+                             {'ok': False, 'reason': 'failed', 'error': 'Chrome refused the tab.'})
+        self.device.close()
+        self.assertEqual(routed.ask('Read the requested account', '%12', browser='chrome', verified=True),
+                         {'ok': False, 'reason': 'failed', 'error': 'Your Chrome is disconnected. Ask again.'})
+        self.assertFalse(self.access.pending)
+        self.access.notifier.assert_not_called()
+
+    def test_extension_user_stop_holds_the_same_process_on_both_browsers(self):
+        notified = threading.Event()
+        notifier = Mock(side_effect=lambda *args, **kwargs: notified.set())
+        routed = self.standing_access(notifier)
+        for reason in ('action_stop', 'local_stop', 'debugger_canceled'):
+            with self.subTest(reason=reason):
+                self.assertTrue(routed.ask('Task', '%12', verified=True)['ok'])
+                grant, = self.access.grants.values()
+                self.access.extension_end(self.device, grant.row['id'], reason)
+                wait_for(lambda: not self.access.browser.tabs)
+                for browser_id in ('server', 'chrome'):
+                    notified.clear()
+                    results = []
+                    thread = threading.Thread(target=lambda: results.append(
+                        routed.ask('Task', '%12', browser=browser_id, verified=True)))
+                    self.waiters.append(thread)
+                    thread.start()
+                    self.assertTrue(notified.wait(2))
+                    self.assertTrue(notifier.call_args.kwargs['urgent'])
+                    row, = routed.state()['requests']
+                    (routed.deny if browser_id == 'server' else routed.allow)(row['id'])
+                    thread.join(timeout=3)
+                    self.assertFalse(thread.is_alive())
+                    self.assertEqual(results[0]['ok'], browser_id == 'chrome')
+                self.access.end(routed.state()['grants'][0]['id'], 'expired')
+
     def test_panel_alias_query_body_and_stream_emit_chrome(self):
         panel_browser = Mock()
         panel_browser.list_tabs.return_value = {'tabs': []}

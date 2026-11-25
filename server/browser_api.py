@@ -12,6 +12,7 @@ import browser_live
 import agent_browser_setup
 import extension_zip
 import mac_browser
+import signed_access
 
 PREFIX = '/mobile/api/browser/'
 FRAME_INTERVAL = 1 / 30  # at most 30 frames a second per viewer
@@ -68,7 +69,7 @@ def ack(sid, seq):
         flow.ack(seq)
     return {'ok': True}
 POST_NAMES = {'ack', 'new', 'close', 'show', 'navigate', 'history', 'input', 'device', 'agents', 'agents/setup', 'ask/dismiss',
-              'signed/allow', 'signed/deny', 'signed/end', 'signed/dismiss', 'window-view'}
+              'signed/allow', 'signed/policy', 'signed/deny', 'signed/end', 'signed/dismiss', 'window-view'}
 
 
 def handles(path):
@@ -101,7 +102,13 @@ def get(handler, the_browser=None, the_proxy=None, the_setup=None, signed_browse
             state = the_browser.list_tabs()
             target = query.get('tab', [''])[0]
             if target and target in the_browser.tabs:  # the live view has no stream, so its poll asks for these
-                the_browser.refresh(the_browser.tabs[target])
+                tab = the_browser.tabs[target]
+                the_browser.mark_watched(tab)
+                size = re.fullmatch(r'([1-9][0-9]{0,3})x([1-9][0-9]{0,3})', query.get('live_size', [''])[0])
+                if size and browser_id != 'chrome':
+                    the_browser.refresh(tab, live_size=(int(size[1]), int(size[2])))
+                else:
+                    the_browser.refresh(tab)
                 state = the_browser.state()
                 try:
                     state['nav'] = the_browser.nav_state(target)
@@ -162,6 +169,16 @@ def post(handler, the_browser=None, the_proxy=None, the_setup=None, signed_brows
             access = proxy.signed_access if proxy else _signed_access(the_browser, the_proxy)
             if name == 'signed/allow':
                 result = access.allow(body.get('id'), body.get('minutes'))
+            elif name == 'signed/policy':
+                auto = body.get('auto')
+                if type(auto) is not bool:
+                    raise ValueError('Choose on or off for signed-in browser access.')
+                try:
+                    signed_access.set_agents_allowed(auto)
+                except OSError:
+                    raise browser.BrowserError('Could not save signed-in browser access settings.') from None
+                the_browser._bump()
+                result = access.state()
             elif name == 'signed/deny':
                 result = access.deny(body.get('id'))
             elif name == 'signed/dismiss':

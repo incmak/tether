@@ -2,11 +2,11 @@ import { RetryButton } from './Retry'
 import { Spinner } from './Skeleton'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
-import { AppWindow, ArrowLeft, ArrowRight, Bot, Check, ChevronDown, Crosshair, FlaskConical, HatGlasses, Keyboard, KeyRound, Monitor, PenLine, PictureInPicture2, Plus, RotateCw, Send, Smartphone, Square, Tablet, Trash2, Type, UserRound, X } from 'lucide-react'
+import { AppWindow, ArrowLeft, ArrowRight, Bot, Check, ChevronDown, Crosshair, FlaskConical, Gauge, HatGlasses, Image, Keyboard, KeyRound, Monitor, PenLine, PictureInPicture2, Plus, RotateCw, Send, Smartphone, Square, Tablet, Trash2, Type, UserRound, X } from 'lucide-react'
 import { errorText } from './api'
 import { useBackStep } from './backNav'
 import type { Api, BrowserAvailability, BrowserId, Pane } from './api'
-import { usePaneLabel, WATCH_EVENT } from './AgentBrowser'
+import { usePaneLabel, useSignedAuto, WATCH_EVENT } from './AgentBrowser'
 import { useHost } from './host'
 import { MacPairing } from './MacPairing'
 import { openLive } from './liveStream'
@@ -67,8 +67,41 @@ function DeviceIcon({ preset }: { preset: string }) {
   return preset === 'desktop' ? <Monitor size={17} /> : preset === 'tablet' ? <Tablet size={17} /> : <Smartphone size={17} />
 }
 
-// Close a menu on Escape or on a click outside it.
-function useMenu() {
+const PICTURE_KEY = 'tether-browser-picture'
+const PICTURES = [
+  { id: 'sharp', label: 'Sharp text', hint: 'Full color. Best for reading', icon: Type },
+  { id: 'standard', label: 'Standard', hint: 'Less work for this device', icon: Image },
+  { id: 'light', label: 'Low data', hint: '30 fps, lower bitrate. For slow links', icon: Gauge },
+] as const
+type Picture = typeof PICTURES[number]['id']
+
+function savedPicture() {
+  try {
+    const id = localStorage.getItem(PICTURE_KEY)
+    return PICTURES.find(item => item.id === id)?.id ?? null
+  } catch { return null }
+}
+
+async function supportsSharpPicture() {
+  if (typeof VideoDecoder === 'undefined') return false
+  const config = { codec: 'avc1.F4001E', codedWidth: 1280, codedHeight: 720 }
+  // Match Selkies' decoder preference order. Some browsers support this profile in software only.
+  for (const attempt of [config, { ...config, hardwareAcceleration: 'prefer-software' } as const]) {
+    let timer: number | undefined
+    try {
+      const result = await Promise.race([
+        VideoDecoder.isConfigSupported(attempt),
+        new Promise<null>(resolve => { timer = window.setTimeout(() => resolve(null), 10000) }),
+      ])
+      if (result === null) return false
+      if (result.supported) return true
+    } catch { /* Try the next decoder preference. */ } finally { window.clearTimeout(timer) }
+  }
+  return false
+}
+
+// Close a menu on Escape or on a click outside it. Arrow keys move between items in DOM order.
+function useMenu({ arrowKeys = false, maxHeight = 360 } = {}) {
   const [open, setOpen] = useState(false)
   useBackStep(open, () => setOpen(false))
   const ref = useRef<HTMLDivElement>(null)
@@ -82,14 +115,29 @@ function useMenu() {
     if (!open) return
     const fit = () => {
       const menu = ref.current?.querySelector<HTMLElement>('.browser-menu')
-      if (menu) menu.style.maxHeight = `${Math.max(24, Math.min(360, innerHeight - menu.getBoundingClientRect().top - 8))}px`
+      if (menu) menu.style.maxHeight = `${Math.max(24, Math.min(maxHeight, innerHeight - menu.getBoundingClientRect().top - 8))}px`
     }
     fit()
     window.addEventListener('resize', fit)
     return () => window.removeEventListener('resize', fit)
-  }, [open])
-  const onKeyDown = (event: ReactKeyboardEvent) => { if (event.key === 'Escape' && open) { event.preventDefault(); event.stopPropagation(); setOpen(false); ref.current?.querySelector<HTMLButtonElement>('button')?.focus() } }
-  return { open, setOpen, ref, onKeyDown }
+  }, [open, maxHeight])
+  const close = () => { setOpen(false); ref.current?.querySelector<HTMLButtonElement>('button')?.focus() }
+  const onKeyDown = (event: ReactKeyboardEvent) => {
+    if (!open) return
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); return }
+    if (!arrowKeys) return
+    if (event.key === 'Tab' && event.target instanceof HTMLElement && event.target.closest('[role="menu"]')) { close(); return }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+    const items = [...(ref.current?.querySelectorAll<HTMLButtonElement>('button[role^="menuitem"]:not(:disabled)') ?? [])]
+    if (!items.length) return
+    event.preventDefault()
+    const index = items.findIndex(item => item === document.activeElement)
+    const last = items.length - 1
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? last
+      : event.key === 'ArrowDown' ? (index + 1) % items.length : index <= 0 ? last : index - 1
+    items[next].focus()
+  }
+  return { open, setOpen, ref, close, onKeyDown }
 }
 
 function usePageVisible() {
@@ -106,15 +154,17 @@ function usePageVisible() {
 // A phone: tabs it opens or takes over start at phone width.
 const onPhone = () => typeof matchMedia === 'function' && matchMedia('(pointer: coarse) and (max-width: 820px)').matches
 const savedNote = (host: string) => `Saved logins · readable by agents on ${host}`
-const signedNote = (host: string) => `Your sign-ins · agents cannot drive this browser, but can read its files on ${host}`
+const signedNote = (host: string, auto: boolean) => auto
+  ? `Your sign-ins · agents can use it and ask before risky steps · files on ${host}`
+  : `Your sign-ins · agents ask you before they use it · files on ${host}`
 const WHICH_KEY = 'tether-browser-which'
 const tabKey = (which: BrowserId) => which === 'test' ? 'tether-browser-tab' : `tether-browser-tab-${which}`
 // 'mac' is the old id for 'chrome', still saved in some browsers' localStorage.
 const asBrowser = (value: unknown): BrowserId => value === 'mac' || value === 'chrome' ? 'chrome' : value === 'signed' ? 'signed' : 'test'
 const BROWSERS: { id: BrowserId; label: string; note: string; icon: typeof UserRound }[] = [
   { id: 'test', label: 'Test', note: 'Agents can use it. No sign-ins.', icon: FlaskConical },
-  { id: 'signed', label: 'Signed in', note: 'Chromium with your sign-ins. Agents need your permission.', icon: UserRound },
-  { id: 'chrome', label: 'Your Chrome', note: 'Your own Chrome, through the Tether extension. Agents use a tab only after you allow it.', icon: AppWindow },
+  { id: 'signed', label: 'Signed in', note: 'Chromium with your sign-ins. Settings › Shared browser sets agent access.', icon: UserRound },
+  { id: 'chrome', label: 'Your Chrome', note: 'Your own Chrome, through the Tether extension. Settings › Shared browser sets agent access.', icon: AppWindow },
 ]
 
 /** The Test and Signed-in server browsers and the extension view for Your Chrome.
@@ -122,6 +172,21 @@ const BROWSERS: { id: BrowserId; label: string; note: string; icon: typeof UserR
 export function BrowserPanel(props: BrowserPanelProps) {
   const [which, setWhich] = useState<BrowserId>(() => { try { return asBrowser(localStorage.getItem(WHICH_KEY)) } catch { return 'test' } })
   const change = (id: BrowserId) => { setWhich(id); try { localStorage.setItem(WHICH_KEY, id) } catch { /* private mode */ } }
+  const [pictureChoice, setPictureChoice] = useState(savedPicture)
+  const [sharpSupported, setSharpSupported] = useState<boolean | null>(null)
+  const hasPicture = which !== 'chrome'
+  const { active } = props
+  useEffect(() => {
+    if (!hasPicture || !active || sharpSupported !== null) return
+    let cancelled = false
+    void supportsSharpPicture().then(supported => { if (!cancelled) setSharpSupported(supported) })
+    return () => { cancelled = true }
+  }, [hasPicture, active, sharpSupported])
+  const picture = pictureChoice === 'light' || pictureChoice === 'standard' ? pictureChoice : sharpSupported ? 'sharp' : 'standard'
+  function changePicture(id: Picture) {
+    setPictureChoice(id)
+    try { localStorage.setItem(PICTURE_KEY, id) } catch { /* private mode */ }
+  }
   // "Watch" opens an agent tab: in the test browser, or in the signed-in browser when Mak allowed it (detail.browser).
   useEffect(() => {
     const onWatch = (event: Event) => {
@@ -134,17 +199,21 @@ export function BrowserPanel(props: BrowserPanelProps) {
     window.addEventListener(WATCH_EVENT, onWatch)
     return () => window.removeEventListener(WATCH_EVENT, onWatch)
   }, [which])
-  return <BrowserView key={which} {...props} which={which} onSwitch={change} />
+  return <BrowserView key={which} {...props} which={which} onSwitch={change} picture={picture} sharpSupported={sharpSupported} onPicture={changePicture} />
 }
 
-function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, onSwitch }: BrowserPanelProps & { which: BrowserId; onSwitch: (id: BrowserId) => void }) {
+function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, onSwitch, picture: localPicture, sharpSupported, onPicture }: BrowserPanelProps & {
+  which: BrowserId; onSwitch: (id: BrowserId) => void; picture: Picture; sharpSupported: boolean | null; onPicture: (id: Picture) => void
+}) {
   const host = useHost()
+  const auto = useSignedAuto(baseApi) ?? true
   // Every request names the browser. The signed container can take longer than 10 s to start.
   const api: Api = which === 'test' ? baseApi : (path, body, signal, method, timeout, priority) => baseApi(
     body === undefined ? `${path}${path.includes('?') ? '&' : '?'}browser=${which}` : path,
     body === undefined ? undefined : { ...(body as object), browser: which }, signal, method, timeout ?? 30000, priority)
   const [browsers, setBrowsers] = useState<BrowserAvailability[]>([])
   const switchMenu = useMenu()
+  const hasPicture = which !== 'chrome'
   const [tabs, setTabs] = useState<BrowserTab[]>([])
   const [presets, setPresets] = useState<Preset[]>([])
   const [nav, setNav] = useState({ back: false, forward: false })
@@ -156,6 +225,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
   // The browser runs in a Selkies container and shows its real window as video (state.live is the path).
   // The video page has its own origin (state.live_port), so a page from the container cannot reach Tether.
   const [liveBase, setLiveBase] = useState<{ path: string; port: number; run: string } | null>(null)
+  const [pictureState, setPictureState] = useState<{ liveBase: typeof liveBase; preset: Picture | null } | null>(null)
   const [liveReady, setLiveReady] = useState(false)
   const [liveReach, setLiveReach] = useState<'checking' | 'ok' | 'down'>('checking')
   const [liveAttempt, setLiveAttempt] = useState(0)
@@ -173,7 +243,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
   const [label, setLabel] = useState<{ x: number; y: number; left: number; top: number; text: string } | null>(null)
   const visible = usePageVisible()
   const tabMenu = useMenu()
-  const deviceMenu = useMenu()
+  const deviceMenu = useMenu(hasPicture ? { arrowKeys: true, maxHeight: Infinity } : undefined)
   const tab = tabs.find(item => item.id === current) ?? tabs[0] ?? null
   const tabId = tab?.id ?? null
   // Agent tabs are watch-only until the person takes over: no clicks, keys or navigation reach the page.
@@ -184,23 +254,40 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
   useLayoutEffect(() => { watchingRef.current = watching }, [watching])
   // While an agent controls the tab, the live view takes no keys either: inert keeps Tab out, and focus already in it leaves.
   const liveFrameRef = useRef<HTMLIFrameElement>(null)
+  const pendingPicture = useRef<Picture | null>(null)
   useLayoutEffect(() => { if (watching && document.activeElement === liveFrameRef.current) liveFrameRef.current?.blur() }, [watching])
   const owner = usePaneLabel(tab?.owner?.pane)
   const liveMode = !!liveBase && !!tab
   const liveView = liveMode && !noting
   const liveOffline = liveView && liveReach === 'down'
   const liveSrc = liveBase ? `${location.protocol}//${location.hostname}:${liveBase.port}${liveBase.path}` : ''
+  const picture = pictureState && pictureState.liveBase === liveBase ? pictureState.preset : localPicture
+  useLayoutEffect(() => {
+    if (!liveSrc) return
+    const origin = new URL(liveSrc).origin
+    const onMessage = (event: MessageEvent) => {
+      const frame = liveFrameRef.current
+      if (!frame || event.source !== frame.contentWindow || event.origin !== origin || event.data?.tether !== 'picture-state') return
+      const preset: unknown = event.data.preset
+      if (preset !== null && preset !== 'sharp' && preset !== 'standard' && preset !== 'light') return
+      setPictureState(previous => previous?.liveBase === liveBase && previous.preset === preset ? previous : { liveBase, preset })
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [liveBase, liveSrc])
   // Selkies sizes the remote display from the iframe's viewport. Scale the iframe without changing that viewport.
-  const livePreset = tab && tab.preset !== 'desktop' && !windowView ? tab : null
-  const liveScale = livePreset ? Math.min(1, stage.width / livePreset.width, stage.height / livePreset.height) : 1
+  // Native Wayland Chromium needs 500 CSS px to show the full window, even on a narrower panel.
+  const liveViewport = windowView
+    ? stage.width > 0 && stage.width < 500 && stage.height > 0 ? { width: 500, height: stage.height } : null
+    : tab && tab.preset !== 'desktop' ? tab : null
+  const liveScale = liveViewport ? Math.min(1, stage.width / liveViewport.width, stage.height / liveViewport.height) : 1
   // Selkies draws its canvas with pixelated sampling. Scaled down, that drops whole pixel columns from thin glyph
-  // strokes, so a scaled preset asks the live page for smooth sampling (tether-wheel.js).
+  // strokes, so a scaled frame asks the live page for smooth sampling (tether-wheel.js).
   const liveSmooth = liveScale < 1
   const syncLiveInput = useCallback(() => {
     if (liveSrc) liveFrameRef.current?.contentWindow?.postMessage({ tether: 'wheel-mode', relay: !windowView, smooth: liveSmooth }, new URL(liveSrc).origin)
   }, [liveSrc, windowView, liveSmooth])
   useEffect(syncLiveInput, [syncLiveInput])
-
   const stageRef = useRef<HTMLDivElement | null>(null)
   // The stage mounts late in Your Chrome (after the pairing card), so observe the element itself, not the load.
   const [stageBox, setStageBox] = useState<HTMLDivElement | null>(null)
@@ -454,17 +541,36 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
     showing.current = showing.current.then(() => {
       if (!stopped) return api('browser/show', { tab: tabId })
     }).catch(error => { if (!stopped) setStatus(errorText(error)) })
-    const poll = () => {
-      if (viewChange.current.pending) return
+    let polling = false
+    let refreshAfterPoll: [number, number] | undefined
+    const poll = (liveSize?: [number, number]) => {
+      if (stopped || viewChange.current.pending) return
+      if (polling) { refreshAfterPoll = liveSize ?? refreshAfterPoll; return }
+      polling = true
       const version = viewChange.current.version
-      void api<BrowserState>(`browser/tabs?tab=${encodeURIComponent(tabId)}`).then(state => {
+      const sizeQuery = liveSize ? `&live_size=${liveSize.join('x')}` : ''
+      void api<BrowserState>(`browser/tabs?tab=${encodeURIComponent(tabId)}${sizeQuery}`).then(state => {
         if (!stopped && version === viewChange.current.version) { apply(state); setFailure('') }
-      }, () => undefined)
+      }, () => undefined).finally(() => {
+        polling = false
+        const next = refreshAfterPoll
+        refreshAfterPoll = undefined
+        if (next) poll(next)
+      })
     }
-    const timer = window.setInterval(() => void poll(), 2000)
+    const origin = new URL(liveSrc).origin
+    const onResize = (event: MessageEvent) => {
+      const frame = liveFrameRef.current, data = event.data
+      if (frame && event.source === frame.contentWindow && event.origin === origin && data?.tether === 'live-resize'
+          && Number.isInteger(data.width) && Number.isInteger(data.height)
+          && tabRef.current?.preset === 'desktop' && !watchingRef.current) poll([data.width, data.height])
+    }
+    // Refresh the fullscreen viewport after Selkies changes its output, before the next status poll.
+    window.addEventListener('message', onResize)
+    const timer = window.setInterval(() => poll(), 2000)
     void poll()
-    return () => { stopped = true; clearInterval(timer) }
-  }, [active, visible, liveMode, tabId]) // eslint-disable-line react-hooks/exhaustive-deps
+    return () => { stopped = true; clearInterval(timer); window.removeEventListener('message', onResize) }
+  }, [active, visible, liveMode, liveSrc, tabId]) // eslint-disable-line react-hooks/exhaustive-deps
   // eslint-disable-next-line react-hooks/set-state-in-effect -- A new container run loads a new page.
   useEffect(() => setLiveReady(false), [liveBase?.run])
   // Check that the live port answers before showing the frame. A cross-origin iframe cannot report a failed load.
@@ -721,7 +827,8 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
     } finally { viewChange.current.pending = false }
   }
   async function setDevice(preset: string) {
-    deviceMenu.setOpen(false)
+    if (hasPicture) deviceMenu.close()
+    else deviceMenu.setOpen(false)
     if (!tab) return
     await sendDevice(preset === 'desktop' ? { tab: tab.id, preset, width: Math.max(320, stage.width), height: Math.max(240, stage.height) } : { tab: tab.id, preset })
   }
@@ -851,6 +958,25 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
   const scale = size && stage.width && stage.height ? Math.min(stage.width / size.width, stage.height / size.height) : 0
   const view = size && scale ? { width: Math.floor(size.width * scale), height: Math.floor(size.height * scale) } : { width: 0, height: 0 }
   const presetLabel = presets.find(item => item.id === tab?.preset)?.label ?? 'Desktop'
+  const pictureLabel = PICTURES.find(item => item.id === picture)?.label ?? 'Custom picture'
+  const displayLabel = hasPicture ? `Display: ${presetLabel} · ${pictureLabel}` : `Device: ${presetLabel}`
+  const focusPicture = hasPicture && (watching || windowView || !presets.length)
+  const firstPicture = !picture || (picture === 'sharp' && !sharpSupported) ? (sharpSupported ? 'sharp' : 'standard') : picture
+  function sendPendingPicture() {
+    const preset = pendingPicture.current
+    const frame = liveFrameRef.current?.contentWindow
+    if (!preset || !liveSrc || !frame) return
+    pendingPicture.current = null
+    frame.postMessage({ tether: 'picture', preset }, new URL(liveSrc).origin)
+  }
+  function setPicture(id: Picture) {
+    if (id === 'sharp' && !sharpSupported) return
+    deviceMenu.close()
+    onPicture(id)
+    setPictureState({ liveBase, preset: id })
+    pendingPicture.current = id
+    if (liveReady) sendPendingPicture()
+  }
   async function changeWindowView(enabled: boolean) {
     if (!tab || grabbing || viewChange.current.pending) return
     viewChange.current.pending = true
@@ -898,7 +1024,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
       {switcher}
       <div className="browser-tab-strip">{tabs.map(item => {
         const name = tabName(item)
-        return <div key={item.id} className={item.id === tab?.id ? 'browser-tab active' : 'browser-tab'} title={item.mode === 'saved' ? `${name} · ${which === 'signed' ? signedNote(host) : savedNote(host)}` : item.mode === 'agent' ? `${name} · Agent` : `${name} · Private`}>
+        return <div key={item.id} className={item.id === tab?.id ? 'browser-tab active' : 'browser-tab'} title={item.mode === 'saved' ? `${name} · ${which === 'signed' ? signedNote(host, auto) : savedNote(host)}` : item.mode === 'agent' ? `${name} · Agent` : `${name} · Private`}>
           <button type="button" role="tab" aria-selected={item.id === tab?.id} className="browser-tab-main" onClick={() => choose(item.id)}>
             {item.mode === 'saved' ? <KeyRound size={14} aria-label="Saved" /> : item.mode === 'agent' ? <Bot size={14} aria-label="Agent" /> : <HatGlasses size={14} aria-label="Private" />}
             <span>{name}</span>
@@ -931,11 +1057,22 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
         value={draft ?? shown(tab?.url ?? '')} onFocus={event => { setDraft(shown(tab?.url ?? '')); event.currentTarget.select() }} onBlur={() => setDraft(null)} onChange={event => setDraft(event.target.value)}
         onKeyDown={event => { if (event.key === 'Escape') { setDraft(null); event.currentTarget.blur() } }} />
       <div className="browser-menu-anchor" ref={deviceMenu.ref} onKeyDown={deviceMenu.onKeyDown}>
-        <button type="button" className="browser-icon" aria-label={`Device: ${presetLabel}`} title={`Device: ${presetLabel}`} aria-haspopup="menu" aria-expanded={deviceMenu.open} disabled={!tab || watching || windowView} onClick={() => deviceMenu.setOpen(!deviceMenu.open)}><DeviceIcon preset={tab?.preset ?? 'desktop'} /></button>
+        <button type="button" className="browser-icon" aria-label={displayLabel} title={displayLabel} aria-haspopup="menu" aria-expanded={deviceMenu.open} disabled={!tab || (!hasPicture && (watching || windowView))} onClick={() => deviceMenu.setOpen(!deviceMenu.open)}><DeviceIcon preset={tab?.preset ?? 'desktop'} /></button>
         {deviceMenu.open && <div className="browser-menu end" role="menu">
-          {presets.map(item => <button key={item.id} type="button" role="menuitemradio" aria-checked={item.id === tab?.preset} autoFocus={item.id === tab?.preset} onClick={() => void setDevice(item.id)}>
+          {presets.map((item, index) => <button key={item.id} type="button" role="menuitemradio" aria-checked={item.id === tab?.preset} aria-disabled={watching || windowView || undefined}
+            autoFocus={hasPicture ? !focusPicture && index === 0 : item.id === tab?.preset} tabIndex={hasPicture ? -1 : undefined} onClick={() => { if (!watching && !windowView) void setDevice(item.id) }}>
             <DeviceIcon preset={item.id} /><span>{item.label}<small>{item.id === 'desktop' ? 'Fits the panel' : `${item.width} × ${item.height}`}</small></span>{item.id === tab?.preset && <Check size={16} />}
           </button>)}
+          {hasPicture && <>
+            <hr className="browser-menu-separator" role="separator" />
+            <div role="group" aria-label="Picture">
+              <div className="browser-menu-heading" aria-hidden="true">Picture</div>
+              {PICTURES.map(item => <button key={item.id} type="button" role="menuitemradio" aria-checked={item.id === picture}
+                aria-disabled={item.id === 'sharp' && !sharpSupported ? true : undefined} autoFocus={focusPicture && item.id === firstPicture} tabIndex={-1} onClick={() => setPicture(item.id)}>
+                <item.icon size={17} /><span>{item.label}<small>{item.id === 'sharp' && sharpSupported === false ? 'This device cannot decode it' : item.hint}</small></span>{item.id === picture && <Check size={16} />}
+              </button>)}
+            </div>
+          </>}
         </div>}
       </div>
       {!windowView && <button type="button" className="browser-icon browser-touch-only" aria-label="Type into the page" disabled={watching || liveOffline} onClick={() => keysRef.current?.focus()}><Keyboard size={17} /></button>}
@@ -944,7 +1081,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
     </form>}
 
     {(windowView || tab?.mode === 'saved') && <p className="browser-saved">{which === 'signed' ? <><UserRound size={13} aria-hidden="true" />
-      <span>{windowView ? "Whole Chrome window · use Chrome's own toolbar and dialogs" : signedNote(host)}</span>
+      <span>{windowView ? "Whole Chrome window · use Chrome's own toolbar and dialogs" : signedNote(host, auto)}</span>
       {!windowView && <button type="button" className="browser-window-link" aria-disabled={changingWindow} onClick={() => void changeWindowView(true)}>Dialog not showing? Show the whole window</button>}
     </> : <><KeyRound size={13} />{savedNote(host)}</>}</p>}
     {tab?.mode === 'agent' && <div className="browser-agent" role="note">
@@ -963,10 +1100,10 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
           onChange={event => setLabel({ ...label, text: event.target.value })} onBlur={commitLabel}
           onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); commitLabel() } else if (event.key === 'Escape') { event.stopPropagation(); setLabel(null) } }} />}
       </div>
-      {liveMode && liveReach === 'ok' && <iframe key={liveBase?.run} ref={liveFrameRef} className={livePreset ? 'browser-live browser-live-preset' : 'browser-live'} src={liveSrc} hidden={noting} inert={watching}
-        style={livePreset ? { width: livePreset.width, height: livePreset.height, transform: `translate(-50%, -50%) scale(${liveScale})` } : undefined}
+      {liveMode && liveReach === 'ok' && <iframe key={liveBase?.run} ref={liveFrameRef} className={liveViewport ? 'browser-live browser-live-preset' : 'browser-live'} src={liveSrc} hidden={noting} inert={watching}
+        style={liveViewport ? { width: liveViewport.width, height: liveViewport.height, transform: `translate(-50%, -50%) scale(${liveScale})` } : undefined}
         title={`Page: ${tab?.title || tab?.url || 'New tab'}`} sandbox="allow-scripts allow-same-origin" allow="clipboard-read; clipboard-write"
-        referrerPolicy="no-referrer" onLoad={() => { setLiveReady(true); syncLiveInput() }} />}
+        referrerPolicy="no-referrer" onLoad={() => { setLiveReady(true); syncLiveInput(); sendPendingPicture() }} />}
       {liveView && liveReach === 'ok' && watching && <div className="browser-live-block" aria-hidden="true" />}
       {liveOffline && <div className="browser-empty browser-live-error">
         <p role="alert">Could not connect to live video on port {liveBase?.port}.</p>

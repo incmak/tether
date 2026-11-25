@@ -15,6 +15,8 @@ import textwrap
 import unittest
 from unittest.mock import Mock, patch
 
+import agents
+import antigravity
 import choice_state
 import terminal_input as terminal
 from own_time import own_time
@@ -271,14 +273,77 @@ class ChoiceStateTests(unittest.TestCase):
     def test_antigravity_unmatched_confirmation_stays_read_only(self):
         for width in (23, 40, 80):
             with self.subTest(width=width), tempfile.TemporaryDirectory() as folder:
-                Path(folder, 'thread.json').write_text(json.dumps({'tool_confirmation_pending': True}))
-                entry = {'id': '%agy', 'agent': 'antigravity', 'thread': 'thread'}
+                Path(folder, 'thread.json').write_text(json.dumps({
+                    'conversation_id': 'thread', 'reported_at': 125, 'tool_confirmation_pending': True,
+                }))
+                entry = {'id': '%agy', 'agent': 'antigravity', 'thread': 'thread', 'process_start': '1234'}
                 screen = frame(width, [styled('> Alpha'), '  Beta'])
-                with patch.object(terminal, 'AGY_CACHE', Path(folder)), patch.object(terminal, 'capture_notices'):
+                with patch.object(antigravity, 'CACHE', Path(folder)), \
+                        patch.object(antigravity.procinfo, 'start_ms', return_value=125_000):
                     result = terminal._live_status(entry, None, terminal.ANSI_SGR.sub('', screen), styled_screen=screen)
                 self.assertEqual(result['state'], 'Approval')
                 self.assertEqual(result['approval']['actionable'], False)
                 self.assertNotIn('attention', result)
+
+
+class AntigravityWorkingStatusTests(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        cache = Path(folder.name)
+        self.report = cache / 'thread.json'
+        self.entry = {'id': '%agy-working', 'agent': 'antigravity', 'thread': 'thread',
+                      'process_start': '1234', 'transcript': 'unused', 'writable': True}
+        self.run_for_status = Mock(side_effect=AssertionError('status must not touch tmux'))
+        for context in (patch.object(antigravity, 'CACHE', cache),
+                        patch.object(antigravity.procinfo, 'start_ms', return_value=125_000)):
+            context.start()
+            self.addCleanup(context.stop)
+
+    def assert_status(self, state):
+        screen = 'The reply quotes Working (12s) and esc to interrupt.\n\n> Ask a question\n'
+        status = terminal._live_status(self.entry, self.run_for_status, screen)
+        self.assertEqual(status['state'], state)
+        self.assertIsNone(status['approval'])
+        snapshot = antigravity.snapshot(self.entry, lambda text: text, lambda _: (), agents.usage)
+        self.assertIs(snapshot['busy'], state == 'Working')
+        return snapshot
+
+    def write_report(self, **overrides):
+        self.report.write_text(json.dumps({
+            'conversation_id': 'thread', 'reported_at': 125, 'agent_state': 'working', **overrides,
+        }))
+
+    def test_no_report_or_invalid_report_is_idle(self):
+        self.assert_status('Idle')
+        for contents in ('{', '[]'):
+            with self.subTest(contents=contents):
+                self.report.write_text(contents)
+                self.assert_status('Idle')
+
+    def test_current_busy_states(self):
+        for state in ('thinking', 'working', 'tool_use', 'running'):
+            with self.subTest(state=state):
+                self.write_report(agent_state=state)
+                self.assert_status('Working')
+
+    def test_report_before_process_start_cannot_set_busy_or_approval(self):
+        self.write_report(reported_at=124, tool_confirmation_pending=True,
+                          context_window={'used_percentage': 10}, model={'display_name': 'Gemini'},
+                          quota={'gemini-weekly': {'remaining_fraction': 0.75}})
+        usage = self.assert_status('Idle')['usage']
+        self.assertEqual(usage['context']['percent'], 10)
+        self.assertEqual(usage['weekly']['percent'], 25)
+        self.assertEqual(usage['model'], 'Gemini')
+
+    def test_report_from_another_conversation_cannot_set_busy_or_approval(self):
+        self.write_report(conversation_id='another-thread', tool_confirmation_pending=True)
+        self.assert_status('Idle')
+
+    def test_unreadable_process_start_cannot_set_busy_or_approval(self):
+        self.write_report(tool_confirmation_pending=True)
+        with patch.object(antigravity.procinfo, 'start_ms', side_effect=OSError):
+            self.assert_status('Idle')
 
 
 if __name__ == '__main__':

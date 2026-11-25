@@ -424,22 +424,35 @@ class AgentClient:
                     self.proxy.log_denied(method)
                     self.error(message, 'Not allowed through Tether.', -32601)
                     return
-        if session and method in browser.AGENT_EMULATION:
+        target = self.sessions.get(session)
+        slot = browser.AGENT_EMULATION.get(method) if session else None
+        live_page = session and self.proxy.browser.container is not None and self.targets.get(target, {}).get('type') == 'page'
+        if slot or (live_page and 'metrics' not in self.emulation.get(target, {})):
             # Serialize these commands with panel handoffs. Never wait with self.lock held: the reader uses it.
             with self.proxy.browser.lock:
-                target = self.sessions.get(session)
                 tab = self.proxy.browser.tabs.get(target)
-                if tab is not None and tab.controller == 'user':
+                user_controls_viewport = tab is not None and tab.controller == 'user'
+                if slot and user_controls_viewport:
                     self.error(message, "The user controls this tab's viewport. Return control to the agent first.")
                     return
                 try:
-                    result = self.conn.call(method, params, session)
+                    saved = self.emulation.get(target, {})
+                    if live_page and not user_controls_viewport and slot != 'metrics' and 'metrics' not in saved:
+                        # Initialize before the agent can inspect the page or take its first screenshot.
+                        self.conn.call(*browser.LIVE_AGENT_METRICS, session=session)
+                        self.emulation.setdefault(target, {})['metrics'] = browser.AGENT_DEFAULTS['metrics']
+                    if slot:
+                        if live_page and method == 'Emulation.clearDeviceMetricsOverride':
+                            result = browser.reset_live_agent_metrics(self.conn, session)
+                        else:
+                            result = self.conn.call(method, params, session)
+                        self.emulation.setdefault(target, {})[slot] = (method, params)
+                        self.transport.message({'id': message['id'], 'sessionId': session, 'result': result})
                 except browser.BrowserError as exc:
                     self.error(message, str(exc))
                     return
-                self.emulation.setdefault(target, {})[browser.AGENT_EMULATION[method]] = (method, params)
-                self.transport.message({'id': message['id'], 'sessionId': session, 'result': result})
-            return
+            if slot:
+                return
         outgoing = dict(message, params=params, sessionId=session or self.root)
         completed = threading.Event() if root and method == 'Target.createTarget' else None
         def answered(reply):
@@ -888,12 +901,14 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('Invalid request.')
             # The pane that owns the socket wins over the pane the agent names, so an agent cannot ask as another tab.
             # The named pane is used only when the lookup finds nothing (for example on another host).
-            pane = self.server.proxy.pane_finder(self.client_address[1], self.server.proxy.config['port']) or body.get('pane')
+            verified_pane = self.server.proxy.pane_finder(self.client_address[1], self.server.proxy.config['port'])
+            pane = verified_pane or body.get('pane')
             if route == '/ask-signed':
                 access = self.server.proxy.signed_access
                 if access is None:
                     raise ValueError('Signed browser access is unavailable.')
                 self.respond(200, access.ask(body.get('text'), pane, body.get('minutes', 15), body.get('url'),
+                                            verified=bool(verified_pane),
                                             **({'browser': body['browser']} if 'browser' in body else {})))
             else:
                 self.respond(200, self.server.proxy.ask(body.get('text'), pane))
@@ -909,7 +924,8 @@ def start(notifier, agent_finder=lambda pane: 'agent', identity_finder=lambda pa
     import signed_access
     import mac_browser
     PROXY = Proxy(notifier=notifier).start(shutdown_hooks=True)
+    options = dict(notifier=notifier, agent_finder=agent_finder, identity_finder=identity_finder,
+                   auto=signed_access.agents_allowed)
     PROXY.signed_access = mac_browser.RoutedAccess(
-        signed_access.Access(notifier=notifier, agent_finder=agent_finder, identity_finder=identity_finder),
-        mac_browser.MacAccess(mac_browser.BROKER, notifier=notifier, agent_finder=agent_finder, identity_finder=identity_finder))
+        signed_access.Access(**options), mac_browser.MacAccess(mac_browser.BROKER, **options))
     return PROXY

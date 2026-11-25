@@ -426,6 +426,30 @@ class RouteTests(unittest.TestCase):
     def tearDown(self):
         self.fake.close()
 
+    def test_live_size_requires_two_positive_dimensions_and_a_server_browser(self):
+        self.browser.list_tabs()
+        target = self.browser.order[0]
+        tab = self.browser.tabs[target]
+        cases = (
+            ('test', '940x2520', {'live_size': (940, 2520)}),
+            ('signed', '1x9999', {'live_size': (1, 9999)}),
+            ('test', '0x2520', {}),
+            ('test', '940x0252', {}),
+            ('test', '940x10000', {}),
+            ('test', '940X2520', {}),
+            ('test', '940x2520extra', {}),
+            ('chrome', '940x2520', {}),
+        )
+        for which, size, kwargs in cases:
+            with self.subTest(browser=which, size=size):
+                handler = FakeHandler(f'/mobile/api/browser/tabs?browser={which}&tab={target}&live_size={size}')
+                with patch.object(self.browser, 'refresh') as refresh, \
+                        patch.object(browser_api.mac_browser, 'BROKER') as broker:
+                    broker.browser = self.browser
+                    browser_api.get(handler, self.browser, signed_browser=self.browser)
+                self.assertEqual(handler.replies[0][0], 200)
+                refresh.assert_called_once_with(tab, **kwargs)
+
     def test_routes(self):
         handler = FakeHandler('/mobile/api/browser/tabs')
         browser_api.get(handler, self.browser)
