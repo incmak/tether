@@ -145,6 +145,10 @@ def _stop_tmux_child(child):
         child.wait()
 
 
+# Errors that show a process is gone. Any other error reaches the watcher, which then keeps the folder.
+_GONE = (FileNotFoundError, ProcessLookupError)
+
+
 def _descendants(parents, root):
     children = defaultdict(list)
     for pid, ppid in parents.items():
@@ -160,14 +164,15 @@ def _descendants(parents, root):
 def _snapshot_descendants(parent_pid):
     """(pid, start time) of every process under parent_pid."""
     if procinfo.DARWIN:
-        # ps gives the parent and sysctl the start time, in two reads; the table is fresh, since the cached one can
-        # miss a new pane. A pid reused between the reads only makes the wait time out loudly; no pane is missed.
-        parents = {pid: ppid for pid, (ppid, _) in procinfo.table(fresh=True).items()}
+        # ps gives the parent and sysctl the start time, in two reads. A fresh table: the cached one can miss a new
+        # pane. Raw ps rows: table() drops a row whose name lookup fails, which would cut the chain to a live worker.
+        # A pid reused between the reads only makes the wait time out loudly; no pane is missed.
+        parents = {pid: row['ppid'] for pid, row in procinfo._darwin_snapshot(fresh=True).items()}
         found = []
         for pid in _descendants(parents, parent_pid):
             try:
                 found.append((pid, procinfo.start_ticks(pid)))
-            except OSError:
+            except _GONE:
                 pass
         return found
     # One stat read per process gives its parent and start time together. No ps: it can time out under load.
@@ -175,7 +180,7 @@ def _snapshot_descendants(parent_pid):
     for pid in procinfo.pids():
         try:
             fields = procinfo.stat_fields(pid)
-        except OSError:
+        except _GONE:
             continue
         stats[pid] = int(fields[1]), fields[19]
     return [(pid, stats[pid][1]) for pid in _descendants({pid: ppid for pid, (ppid, _) in stats.items()}, parent_pid)]
@@ -552,8 +557,8 @@ while True:
                 mock.patch.object(procinfo, 'stat_fields', side_effect=fields):
             self.assertEqual(sorted(_snapshot_descendants(10)), [(11, 't11'), (12, 't12')])
 
-    def test_darwin_snapshot_uses_a_fresh_table_and_skips_a_vanished_process(self):
-        table = {10: (1, 'tmux'), 11: (10, 'sh'), 12: (11, 'python3'), 13: (10, 'gone'), 20: (1, 'other')}
+    def test_darwin_snapshot_follows_raw_parent_links_and_skips_only_a_gone_process(self):
+        rows = {pid: {'ppid': ppid} for pid, ppid in ((10, 1), (11, 10), (12, 11), (13, 10), (20, 1))}
 
         def ticks(pid):
             if pid == 13:
@@ -561,10 +566,15 @@ while True:
             return f't{pid}'
 
         with mock.patch.object(procinfo, 'DARWIN', True), \
-                mock.patch.object(procinfo, 'table', return_value=table) as read, \
+                mock.patch.object(procinfo, '_darwin_snapshot', return_value=rows) as read, \
                 mock.patch.object(procinfo, 'start_ticks', side_effect=ticks):
             self.assertEqual(sorted(_snapshot_descendants(10)), [(11, 't11'), (12, 't12')])
         read.assert_called_once_with(fresh=True)
+        with mock.patch.object(procinfo, 'DARWIN', True), \
+                mock.patch.object(procinfo, '_darwin_snapshot', return_value=rows), \
+                mock.patch.object(procinfo, 'start_ticks', side_effect=PermissionError(1, 'denied')), \
+                self.assertRaises(PermissionError):
+            _snapshot_descendants(10)
 
     @unittest.skipUnless(shutil.which(paths.TMUX), 'tmux is not installed')
     def test_a_failed_snapshot_reaps_the_server_and_keeps_the_folder(self):
