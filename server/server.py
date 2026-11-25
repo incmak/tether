@@ -1157,7 +1157,7 @@ def codex_consume(state, index, entry, *, offset=None):
                 state['credits'] = rates.get('credits')
         if kind == 'task_started':
             state['busy'] = True
-            state['busy_since'] = settings_time(entry.get('timestamp'))
+            state['busy_since'] = transcript_time(entry.get('timestamp'))
         elif kind in ('task_complete', 'turn_aborted'):
             state['busy'] = False
             state['busy_since'] = None
