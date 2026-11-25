@@ -40,8 +40,11 @@ const report = {
 async function main() {
   let browser, page, server, failed = 0
   const posts = [], pageErrors = []
-  // Each answered ui-usage POST wakes the waiters, so a test can wait until every POST the page sent is recorded.
-  let usageAnswered = 0, usageWaiters = []
+  // Answered ui-usage POSTs per page document (X-Usage-Doc, set by the init script). Each answer wakes the waiters, so
+  // a test can wait until every POST the current document sent is recorded. A late POST from an earlier document
+  // (the pagehide flush on navigation) counts for that document only.
+  const usageAnswered = new Map()
+  let usageWaiters = []
   const nextUsageAnswer = () => new Promise(resolve => usageWaiters.push(resolve))
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
   try {
@@ -74,14 +77,14 @@ async function main() {
       if (url.pathname.includes('/api/')) {
         const endpoint = url.pathname.split('/api/')[1]
         if (request.method() !== 'GET') {
-          const body = request.postDataJSON(); posts.push({ endpoint, body })
+          const body = request.postDataJSON(), doc = request.headers()['x-usage-doc']; posts.push({ endpoint, body, doc })
           if (endpoint === 'prefs') {
             prefs = { ...prefs, ...body.changes }; version++
             return route.fulfill({ json: { prefs, version } })
           }
           if (endpoint === 'ui-usage') {
             await route.fulfill({ json: { kept: body.events.length, enabled: true, gen: '1' } })
-            usageAnswered++
+            usageAnswered.set(doc, (usageAnswered.get(doc) ?? 0) + 1)
             for (const wake of usageWaiters.splice(0)) wake()
             return
           }
@@ -106,9 +109,13 @@ async function main() {
     await page.addInitScript(() => {
       if ('serviceWorker' in navigator) navigator.serviceWorker.register = () => Promise.reject(new Error('off'))
       window.usagePosts = 0
+      window.usageDoc = Math.random().toString(36).slice(2)
       const fetchPage = window.fetch
       window.fetch = (input, init) => {
-        if (input === '/mobile/api/ui-usage' && init?.method === 'POST') window.usagePosts++
+        if (input === '/mobile/api/ui-usage' && init?.method === 'POST') {
+          window.usagePosts++
+          init = { ...init, headers: { ...init.headers, 'X-Usage-Doc': window.usageDoc } }
+        }
         return fetchPage(input, init)
       }
       localStorage.clear()
@@ -123,28 +130,38 @@ async function main() {
         && match(request.postDataJSON())
     })
     const flush = () => page.evaluate(() => window.dispatchEvent(new Event('pagehide')))
-    // Wait until an event matches and every ui-usage POST the page has sent so far is answered and recorded. The
-    // page counts POSTs when it calls fetch, so a held or slow POST keeps this waiting.
-    const recorded = async matches => {
+    // Wait until the current document has sent an event that matches and every ui-usage POST it has sent so far is
+    // answered and recorded. The page counts POSTs when it calls fetch, so a held or slow POST keeps this waiting.
+    // Same 10 s deadline as the page's other waits; the error says what was missing.
+    const recorded = async (matches, what) => {
+      const deadline = Date.now() + 10_000
+      let state = ''
       for (;;) {
         const answered = nextUsageAnswer()
-        const sent = await page.evaluate(() => window.usagePosts)
-        if (usageAnswered >= sent && usage().some(matches)) return
-        await answered
+        const { doc, sent } = await page.evaluate(() => ({ doc: window.usageDoc, sent: window.usagePosts }))
+        const done = usageAnswered.get(doc) ?? 0
+        const found = posts.some(post => post.endpoint === 'ui-usage' && post.doc === doc && post.body.events.some(matches))
+        if (done >= sent && found) return
+        state = `${found ? 'found' : 'no'} ${what}; ${done} of ${sent} ui-usage POSTs answered`
+        const left = deadline - Date.now()
+        if (left <= 0) throw new Error(`Timed out waiting for the usage log: ${state}`)
+        let timer
+        await Promise.race([answered, new Promise(resolve => { timer = setTimeout(resolve, left) })])
+        clearTimeout(timer)
       }
     }
     // Force a scan of what is on screen now, then wait for its events. One scan logs every control on screen in one
     // pass, and the flush sends them all at once, so `marker` (a control there in every build) marks the whole scan.
-    const scan = async marker => {
+    const scan = async (marker, what) => {
       await page.keyboard.press('Shift')
       await page.clock.runFor(1800) // 800 ms input debounce and the 1000 ms idle deadline, in virtual time.
       await flush()
-      await recorded(marker)
+      await recorded(marker, what)
     }
     const scanVisible = async (control, label) => {
       const matches = event => event.k === 'seen' && event.r === 'Settings' && event.l === label
       await control.scrollIntoViewIfNeeded()
-      if (!usage().some(matches)) await scan(matches)
+      if (!usage().some(matches)) await scan(matches, `seen ${label}`)
     }
     for (const [width, height] of sizes) {
       const at = `${width}px`
@@ -157,7 +174,7 @@ async function main() {
       const chat = page.locator('.chat-panel[data-pane="%1"]').first()
       await chat.waitFor()
       const mainSeen = event => event.k === 'seen' && event.d === 0
-      await scan(event => mainSeen(event) && event.c === 'tab')
+      await scan(event => mainSeen(event) && event.c === 'tab', 'seen tab on the main screen')
       const strip = chat.locator('.pane-tabs')
       const stripVisible = await strip.isVisible()
       const mainEvents = usage().filter(mainSeen)
@@ -176,7 +193,7 @@ async function main() {
         await drawer.locator('.row-close').first().waitFor()
         const drawerSeen = event => event.k === 'seen' && event.d === 1 && event.r === 'Sessions'
         // A task row of the Sessions view: Catch up has none, and every build logs it.
-        await scan(event => drawerSeen(event) && event.c === 'button' && /, Task, idle$/.test(event.l))
+        await scan(event => drawerSeen(event) && event.c === 'button' && /, Task, idle$/.test(event.l), 'seen task row in the Sessions drawer')
         const seen = usage().filter(drawerSeen)
         check(`${at} logs redacted sidebar close and tab rows`, seen.some(event => event.l === 'Close …') && seen.some(event => event.l === '…, Task, idle'))
         const leaks = nameLeaks(seen)
