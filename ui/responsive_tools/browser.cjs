@@ -162,6 +162,8 @@ async function main() {
       await shot(`${width}-signed`)
     }
     await open(1440,900)
+    // A touch device at desktop width uses the in-page float. Keep testing its keyboard controls.
+    await page.evaluate(() => Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: 1 }))
     await page.getByRole('button',{name:'Open the browser in its own window',exact:true}).click()
     await page.locator('.browser-window').waitFor()
     await bounds('floating window','.browser-window')

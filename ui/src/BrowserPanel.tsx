@@ -1,7 +1,7 @@
 import { RetryButton } from './Retry'
 import { Spinner } from './Skeleton'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
+import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { AppWindow, ArrowLeft, ArrowRight, Bot, Check, ChevronDown, Crosshair, FlaskConical, HatGlasses, Keyboard, KeyRound, Monitor, PenLine, PictureInPicture2, Plus, RotateCw, Send, Smartphone, Square, Tablet, Trash2, Type, UserRound, X } from 'lucide-react'
 import { errorText } from './api'
 import { useBackStep } from './backNav'
@@ -16,7 +16,14 @@ import { wheelSideways } from './wheelSideways'
 
 // Same shape as PanelProps in src/panels.ts (frame lane); kept here until the lanes merge.
 // onPopOut: show a button that moves the panel into its own window (BrowserWindow.tsx).
-export interface BrowserPanelProps { api: Api; pane: Pane; folder: string | null; active: boolean; onPopOut?: () => void }
+export interface BrowserPanelProps {
+  api: Api
+  pane: Pick<Pane, 'id'>
+  folder: string | null
+  active: boolean
+  onPopOut?: (event: ReactMouseEvent<HTMLButtonElement>) => void
+  onAttach?: (file: File) => Promise<string | null>
+}
 
 type Mode = 'private' | 'saved'
 // 'agent': a tab an agent opened over CDP (server/browser_cdp.py). The agent owns its size until a person takes over
@@ -31,6 +38,7 @@ type Shape = { kind: 'point'; x: number; y: number } | { kind: 'pen'; points: nu
 
 // The composer of the pane with this id takes the files and uploads them (see Composer.tsx). It cancels the event when it does.
 const ATTACH_EVENT = 'tether-attach'
+export const ATTACH_REFUSED = 'This pane does not take files. Choose a Claude or Codex pane, then send again.'
 const MARK = '#e5372b'
 const KEYS = new Set(['Enter', 'Backspace', 'Tab', 'Escape', 'Delete', 'ArrowLeft', 'ArrowUp', 'ArrowRight', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'])
 const COMMANDS: Record<string, string> = { a: 'selectAll', c: 'copy', x: 'cut', z: 'undo', y: 'redo' }
@@ -129,7 +137,7 @@ export function BrowserPanel(props: BrowserPanelProps) {
   return <BrowserView key={which} {...props} which={which} onSwitch={change} />
 }
 
-function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: BrowserPanelProps & { which: BrowserId; onSwitch: (id: BrowserId) => void }) {
+function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, onSwitch }: BrowserPanelProps & { which: BrowserId; onSwitch: (id: BrowserId) => void }) {
   const host = useHost()
   // Every request names the browser. The signed container can take longer than 10 s to start.
   const api: Api = which === 'test' ? baseApi : (path, body, signal, method, timeout, priority) => baseApi(
@@ -830,8 +838,10 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
     let host = 'page'
     try { host = new URL(tab?.url ?? '').host.replace(/[^\w.-]+/g, '-') || 'page' } catch { /* about:blank */ }
     const file = new File([blob], `browser-${host}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.png`, { type: 'image/png' })
-    const taken = !window.dispatchEvent(new CustomEvent(ATTACH_EVENT, { cancelable: true, detail: { pane: pane.id, files: [file] } }))
-    if (!taken) { setStatus('This pane does not take files. Choose a Claude or Codex pane, then send again.'); return }
+    const error = onAttach ? await onAttach(file) : window.dispatchEvent(
+      new CustomEvent(ATTACH_EVENT, { cancelable: true, detail: { pane: pane.id, files: [file] } }),
+    ) ? ATTACH_REFUSED : null
+    if (error) { setStatus(error); return }
     stopNotes()
     setStatus('Image added to the message box.')
   }
