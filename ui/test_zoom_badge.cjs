@@ -46,13 +46,14 @@ async function open(browser, viewport, theme) {
 }
 
 // The badge box in visual viewport CSS px (what the user sees), from its layout box and the zoom.
-const placement = page => page.evaluate(() => {
+const PLACEMENT = () => {
   const el = document.querySelector('.zoom-badge'), view = visualViewport
   const r = el.getBoundingClientRect()
   const toView = (x, y) => [(x - view.offsetLeft) * view.scale, (y - view.offsetTop) * view.scale]
   const [left, top] = toView(r.left, r.top), [right, bottom] = toView(r.right, r.bottom)
   return { left, top, right, bottom, viewWidth: view.width * view.scale, viewHeight: view.height * view.scale, open: el.matches(':popover-open') }
-})
+}
+const placement = page => page.evaluate(PLACEMENT)
 
 async function zoom(run, scale) {
   await run.cdp.send('Emulation.setPageScaleFactor', { pageScaleFactor: scale })
@@ -80,7 +81,10 @@ async function main() {
         try {
           await zoom(run, 1.5)
           const badge = run.page.getByRole('button', { name: 'Zoomed to 150%. Reset to 100%.' })
-          await badge.waitFor({ timeout: 5000 })
+          // Wait on the badge state in the page, not on a polled role locator: under load each locator retry costs
+          // seconds, so a timed locator fails while the badge is already right. The default timeout only catches a hang.
+          await run.page.waitForFunction(() => { const el = document.querySelector('.zoom-badge'); return el.matches(':popover-open') && el.getAttribute('aria-label') === 'Zoomed to 150%. Reset to 100%.' })
+          assert.equal(await badge.count(), 1, 'the badge has the 150% name')
           assert.equal((await badge.textContent()).trim(), '150%')
           const box = await placement(run.page)
           assert.ok(box.open, 'badge is in the top layer')
@@ -91,7 +95,10 @@ async function main() {
           // The keyboard or browser bars change the viewport height at the same zoom: the badge moves with the edge.
           await run.page.setViewportSize({ width: viewport.width, height: viewport.height - 200 })
           await run.page.waitForFunction(h => Math.abs(visualViewport.height * visualViewport.scale - h) < 2, viewport.height - 200)
-          await run.page.waitForTimeout(100)
+          // The badge moves in the animation frame after the viewport resize event, which a loaded host can delay
+          // past any fixed wait: wait for the move itself, with the default timeout as a hang guard. On timeout the
+          // assertion below reports where the badge stopped.
+          await run.page.waitForFunction(`(p => Math.abs(p.viewHeight - p.bottom - 68) < 2)((${PLACEMENT})())`).catch(() => {})
           const moved = await placement(run.page)
           assert.ok(Math.abs(moved.viewHeight - moved.bottom - 68) < 2, `stays 68px from the new bottom edge (${moved.viewHeight - moved.bottom})`)
           await run.page.setViewportSize(viewport)
@@ -106,12 +113,21 @@ async function main() {
           // A double tap must not save the temporary clamp as the original meta.
           await run.page.locator('.zoom-badge').tap()
           await run.page.locator('.zoom-badge').tap().catch(() => {})
-          await run.page.waitForTimeout(600)
-          const scale = await run.page.evaluate(() => visualViewport.scale)
-          if (scale < 1.01) assert.equal(await run.page.locator('.zoom-badge').isVisible(), false, 'badge hides at 100%')
-          else await run.page.getByRole('button', { name: 'Zoomed to 130%. Pinch out to return to 100%.' }).waitFor({ timeout: 2000 })
-          results.push(`   ${label}: reset ${scale < 1.01 ? 'returned to 100%' : `kept ${scale}, badge says Pinch out`}`)
-          assert.equal(await run.page.evaluate(() => document.querySelector('meta[name="viewport"]').content.includes('maximum-scale')), false, 'meta restored')
+          // The reset ends when the meta is back and the badge shows the result: hidden at 100%, or Pinch out.
+          // Frames and the reset timer can run late on a loaded host, so wait for that state, not for a fixed time.
+          await run.page.waitForFunction(() => {
+            const el = document.querySelector('.zoom-badge')
+            return !document.querySelector('meta[name="viewport"]').content.includes('maximum-scale')
+              && (!el.matches(':popover-open') || el.getAttribute('aria-label').includes('Pinch out'))
+          }).catch(() => {})
+          const end = await run.page.evaluate(() => {
+            const el = document.querySelector('.zoom-badge')
+            return { scale: visualViewport.scale, shown: el.matches(':popover-open'), label: el.getAttribute('aria-label'), meta: document.querySelector('meta[name="viewport"]').content }
+          })
+          if (end.scale < 1.01) assert.equal(end.shown, false, 'badge hides at 100%')
+          else assert.deepEqual([end.shown, end.label], [true, 'Zoomed to 130%. Pinch out to return to 100%.'], 'badge says Pinch out')
+          results.push(`   ${label}: reset ${end.scale < 1.01 ? 'returned to 100%' : `kept ${end.scale}, badge says Pinch out`}`)
+          assert.equal(end.meta.includes('maximum-scale'), false, 'meta restored')
         } finally { await run.context.close() }
       })
     }
