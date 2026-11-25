@@ -195,6 +195,9 @@ class Grant:
         self.emulation = {}  # Shared across reconnects and concurrent sockets; used by the p12 handoff.
 
 
+WATCH_GRACE_SECONDS = 10  # five live-view polls: a panel open at the end still counts as watching
+
+
 class Access:
     browser_id = 'server'
     page_allowed = PAGE_ALLOWED
@@ -406,14 +409,16 @@ class Access:
         return self.state()
 
     def _reusable_tab(self, slot):
-        # Only the tab this agent process had, untouched since its grant ended: nobody watches it,
-        # nobody typed in it, and it still shows the same page. Else Mak may be using it.
+        # Only the tab this agent process had, untouched since its grant ended: Mak's panel has not
+        # shown it since shortly before the end, nobody typed in it, and it still shows the same page.
+        # The live view sends keys straight to the display, so its 2 s poll (watched) is the only sign.
         last = self.last_tab.get(slot['row']['pane'])
         if not last or last['key'] is None or last['key'] != process_key(slot['row']['pane'], slot['identity']):
             return None
         tab = self.browser.tabs.get(last['tab'])
         if (not tab or tab.mode != 'saved' or tab.grant is not None or tab.agent_client is not None
-                or tab.viewers > 0 or tab.last_input > last['at'] or tab.url != last['url']):
+                or tab.viewers > 0 or tab.last_input > last['at'] or tab.url != last['url']
+                or tab.watched > last['at'] - WATCH_GRACE_SECONDS):
             return None
         return tab
 

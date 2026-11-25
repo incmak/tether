@@ -700,6 +700,63 @@ class AutomaticAccessTests(unittest.TestCase):
                 for target in [row for row in list(self.real.tabs) if row != result['tab']]:
                     self.real.tabs.pop(target)
 
+    def test_live_view_poll_or_show_after_the_end_keeps_the_tab_from_reuse(self):
+        # The production path: a signed browser in a container, where the live view never registers
+        # viewers or input. Only the panel's poll (browser/tabs?tab=ID) and show() say Mak is there.
+        from test_browser import FakeHandler
+        from test_browser_container import FakeContainer
+        self.real.stop()
+        self.real = browser.Browser(signed=True, container=FakeContainer(self.fake))
+        self.addCleanup(self.real.stop)
+        self.server.browser = self.real
+        now = [1000.0]
+        self.real.clock = lambda: now[0]
+
+        def show(tab):
+            now[0] += 30
+            with patch.object(self.real, '_set_window_bounds'):  # the fake has no window; sizing is not tested here
+                self.real.show(tab.target)
+
+        def poll(tab):
+            handler = FakeHandler(f'/mobile/api/browser/tabs?browser=signed&tab={tab.target}')
+            with patch.object(self.real, 'refresh'):
+                browser_api.get(handler, self.real, signed_browser=self.real)
+            self.assertEqual(handler.replies[0][0], 200)
+
+        def end(result):
+            now[0] += 60
+            self.server.end(self.routed.state()['grants'][0]['id'], 'expired')
+            return self.real.tab(result['tab'])
+
+        cases = {'poll after the end': lambda tab: (now.__setitem__(0, now[0] + 30), poll(tab)),
+                 'show after the end': show,
+                 'poll just before the end': None, 'nobody watched': False}
+        for name, after in cases.items():
+            with self.subTest(name):
+                original = self.ask(verified=True)
+                tab = self.real.tab(original['tab'])
+                if after is None:
+                    now[0] += 55
+                    poll(tab)
+                    now[0] -= 55  # end() adds 60: the poll lands 5 s before the end, while the panel is still open
+                tab = end(original)
+                self.assertEqual(tab.viewers, 0)
+                if after:
+                    after(tab)
+                now[0] += 120
+                result = self.ask(verified=True)
+                self.assertTrue(result['ok'])
+                if after is False:
+                    self.assertEqual(result['tab'], original['tab'])
+                else:
+                    self.assertNotEqual(result['tab'], original['tab'])
+                    self.assertEqual((tab.mode, tab.grant), ('saved', None))
+                self.server.end(self.routed.state()['grants'][0]['id'], 'expired')
+                for target in [row for row in list(self.real.tabs) if row != result['tab']]:
+                    self.real.tabs.pop(target)
+                self.server.last_tab.clear()
+                self.real.tabs.clear()
+
     def test_auto_failure_removes_slot_and_hides_capability_urls_and_paths(self):
         for message, error in [
             ('Chrome refused the tab.', 'Chrome refused the tab.'),
