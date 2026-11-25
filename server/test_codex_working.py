@@ -1,15 +1,22 @@
 """Regression coverage for Codex rollout status and approval dismissal."""
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
+from contextlib import nullcontext
+from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
+import claude_hooks as hooks
+from own_time import own_time
+import paths
 import terminal_input as terminal
 
 
 FIXTURES = Path(__file__).parent / 'fixtures/codex_0.170.0_working'
+REAL_HOOK = object()
 
 
 def capture(name):
@@ -58,15 +65,30 @@ class CodexComposerTests(unittest.TestCase):
 
 class CodexWorkingStatusTests(unittest.TestCase):
     def setUp(self):
-        self.rollout = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'rollout.jsonl'
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.rollout = self.root / 'rollout.jsonl'
+        self.thread = 'codex-working'
+        self.enterContext(patch.object(paths, 'CACHE', self.root))
 
-    def status(self, screen, live):
-        entry = {'id': '%codex-working', 'agent': 'codex', 'transcript': self.rollout}
+    def entry(self):
+        return {'id': '%codex-working', 'agent': 'codex', 'thread': self.thread, 'transcript': self.rollout}
+
+    def status(self, screen, live=REAL_HOOK):
         run = Mock(side_effect=AssertionError('status must not touch tmux'))
+        hook = nullcontext() if live is REAL_HOOK else patch.object(hooks, 'codex_live', return_value=live)
         with patch.object(terminal, 'capture_quota_notices'), patch.object(terminal, 'attention', return_value=None), \
-                patch.object(terminal.prompt_actions, 'panel', return_value=None), \
-                patch.object(terminal.claude_hooks, 'codex_live', return_value=live):
-            return terminal._live_status(entry, run, screen)
+                patch.object(terminal.prompt_actions, 'panel', return_value=None), hook:
+            return terminal._live_status(self.entry(), run, screen)
+
+    def waiting_hook(self):
+        reported = 100
+        self.enterContext(own_time(hooks, time=Mock(return_value=110)))
+        folder = self.root / 'hooks'
+        folder.mkdir()
+        (folder / (self.thread + '.json')).write_text(json.dumps({
+            'session_id': self.thread, 'agent': 'codex', 'waiting': True, 'busy': True, 'reported_at': reported,
+        }))
+        return reported
 
     def test_without_hooks_uses_rollout_even_when_reply_looks_live(self):
         write_rollout(self.rollout, lifecycle('task_complete'))
@@ -89,9 +111,22 @@ class CodexWorkingStatusTests(unittest.TestCase):
             with self.subTest(frame=frame):
                 self.assertEqual(self.status(capture(frame), live)['state'], 'Working')
 
+    def test_waiting_hook_clears_after_recorded_turn_end(self):
+        reported = self.waiting_hook()
+        stamp = datetime.fromtimestamp(reported + 0.5, timezone.utc).isoformat()
+        for kind in ('turn_aborted', 'task_complete'):
+            with self.subTest(kind=kind):
+                self.rollout = self.root / (kind + '.jsonl')
+                write_rollout(self.rollout, lifecycle('task_started'), dict(lifecycle(kind), timestamp=stamp))
+                self.assertIs(hooks.codex_live(self.entry())['waiting'], True)
+                self.assertEqual(self.status(capture('idle_interrupted')), {'state': 'Idle', 'approval': None})
+
     def test_waiting_hook_keeps_visible_approval(self):
-        write_rollout(self.rollout, lifecycle('task_started'))
-        result = self.status(capture('approval_reply_quotes_status'), {'waiting': True, 'busy': False})
+        reported = self.waiting_hook()
+        stamp = datetime.fromtimestamp(reported - 1, timezone.utc).isoformat()
+        write_rollout(self.rollout, dict(lifecycle('task_started'), timestamp=stamp))
+        self.assertIs(hooks.codex_live(self.entry())['waiting'], True)
+        result = self.status(capture('approval_reply_quotes_status'))
         self.assertEqual(result['state'], 'Approval')
         self.assertTrue(result['approval']['options'])
 
@@ -105,6 +140,24 @@ class CodexWorkingStatusTests(unittest.TestCase):
 class CodexRolloutBusyTests(unittest.TestCase):
     def setUp(self):
         self.rollout = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'rollout.jsonl'
+
+    def append(self, data):
+        with self.rollout.open('ab') as stream:
+            stream.write(data)
+
+    def poll(self, expected):
+        read = terminal._rollout_read
+        bytes_read = 0
+
+        def count(stream, size):
+            nonlocal bytes_read
+            data = read(stream, size)
+            bytes_read += len(data)
+            return data
+
+        with patch.object(terminal, '_rollout_read', side_effect=count):
+            self.assertIs(terminal.transcript_busy(self.rollout), expected)
+        return bytes_read
 
     def test_ignores_lifecycle_text_in_messages_and_tool_outputs(self):
         quoted = '{"type":"task_started"}'
@@ -125,12 +178,71 @@ class CodexRolloutBusyTests(unittest.TestCase):
         output = {'type': 'response_item', 'payload': {'type': 'function_call_output', 'output': 'x' * 1024}}
         for kind, expected in (('task_started', True), ('task_complete', False)):
             with self.subTest(kind=kind):
+                self.rollout = self.rollout.with_name(kind + '.jsonl')
                 write_rollout(self.rollout, lifecycle('task_started'), lifecycle(kind), *([output] * 301))
                 self.assertGreater(self.rollout.stat().st_size, 300 * 1024)
                 self.assertIs(terminal.transcript_busy(self.rollout), expected)
 
     def test_ignores_partial_utf8_at_window_edge(self):
-        write_rollout(self.rollout, {'type': 'response_item', 'payload': {'text': '€'}}, lifecycle('task_started'))
+        write_rollout(self.rollout, {'type': 'event_msg', 'payload': {'type': 'task_started', 'text': '€'}})
         data = self.rollout.read_bytes()
         start = data.index('€'.encode('utf-8')) + 1
         self.assertTrue(terminal.transcript_busy(self.rollout, window=len(data) - start))
+
+    def test_second_poll_reads_only_appended_bytes(self):
+        write_rollout(self.rollout, lifecycle('task_started'))
+        self.assertTrue(terminal.transcript_busy(self.rollout))
+        data = b'\n'.join(json.dumps(lifecycle(kind)).encode() for kind in ('task_complete', 'task_started')) + b'\n'
+        self.append(data)
+        self.assertEqual(self.poll(True), len(data))
+        self.assertEqual(self.poll(True), 0)
+
+    def test_large_rollout_reads_each_byte_at_most_once(self):
+        write_rollout(self.rollout, lifecycle('task_started'))
+        line = json.dumps({'type': 'response_item', 'payload': {'output': 'x' * 1024}}).encode() + b'\n'
+        self.append(line * 8192)
+        size = self.rollout.stat().st_size
+        self.assertGreater(size, 8 * 1024 * 1024)
+        self.assertLessEqual(self.poll(True), size)
+        self.append(line * 10)
+        self.assertEqual(self.poll(True), len(line) * 10)
+        complete = json.dumps(lifecycle('task_complete')).encode() + b'\n'
+        self.append(complete)
+        self.assertEqual(self.poll(False), len(complete))
+
+    def test_incomplete_lifecycle_is_counted_only_after_newline(self):
+        write_rollout(self.rollout, lifecycle('task_started'))
+        complete = json.dumps(lifecycle('task_complete')).encode()
+        start = json.dumps(lifecycle('task_started')).encode()
+        self.append(complete[:len(complete) // 2])
+        self.poll(True)
+        self.assertEqual(self.poll(True), 0)
+        rest = complete[len(complete) // 2:]
+        self.append(rest)
+        self.assertEqual(self.poll(True), len(rest))
+        self.append(b'\n')
+        self.assertEqual(self.poll(False), 1)
+        self.append(start[:len(start) // 2])
+        self.assertEqual(self.poll(False), len(start) // 2)
+        rest = start[len(start) // 2:] + b'\n'
+        self.append(rest)
+        self.assertEqual(self.poll(True), len(rest))
+
+    def test_inode_change_resets_rollout(self):
+        write_rollout(self.rollout, lifecycle('task_complete'))
+        self.poll(False)
+        replacement = self.rollout.with_name('replacement.jsonl')
+        write_rollout(replacement, lifecycle('task_started'), lifecycle('token_count'))
+        self.assertGreater(replacement.stat().st_size, self.rollout.stat().st_size)
+        os.replace(replacement, self.rollout)
+        self.assertEqual(self.poll(True), self.rollout.stat().st_size)
+
+    def test_truncation_resets_rollout(self):
+        write_rollout(self.rollout, lifecycle('task_started'), lifecycle('token_count'))
+        self.poll(True)
+        initial = self.rollout.stat()
+        write_rollout(self.rollout, lifecycle('task_complete'))
+        truncated = self.rollout.stat()
+        self.assertEqual(truncated.st_ino, initial.st_ino)
+        self.assertLess(truncated.st_size, initial.st_size)
+        self.assertEqual(self.poll(False), truncated.st_size)

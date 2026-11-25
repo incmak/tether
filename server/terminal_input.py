@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 import shlex
 import sqlite3
 import subprocess
+import threading
 import time
 import unicodedata
 import uuid
@@ -1123,49 +1124,80 @@ def attention(entry, screen, working, now=None, login_screen=None, styled_screen
     return found
 
 
-_busy = {}  # transcript path -> ((size, mtime), result)
+_busy = {}  # transcript path -> inode, offset, last, partial
+_busy_lock = threading.Lock()
+
+
+def _rollout_read(stream, size):
+    data = stream.read(size)
+    if len(data) != size:
+        raise OSError('Codex rollout shrank during the read')
+    return data
+
+
+def _rollout_lines_backward(stream, size, window):
+    """Yield the unterminated tail (possibly empty), then complete lines in reverse order."""
+    fragments = []
+    while size:
+        start = max(0, size - window)
+        stream.seek(start)
+        lines = _rollout_read(stream, size - start).split(b'\n')
+        if len(lines) > 1:
+            yield b''.join([lines[-1], *reversed(fragments)])
+            fragments.clear()
+            yield from reversed(lines[1:-1])
+        fragments.append(lines[0])
+        size = start
+    yield b''.join(reversed(fragments))
+
+
+def _rollout_lifecycle(line):
+    try:
+        record = json.loads(line)
+    except (ValueError, RecursionError):
+        return None
+    if isinstance(record, dict) and record.get('type') == 'event_msg':
+        payload = record.get('payload')
+        if isinstance(payload, dict) and payload.get('type') in ('task_started', 'task_complete', 'turn_aborted'):
+            return payload['type']
+    return None
 
 
 def transcript_busy(path, window=262144):
     """True when the last lifecycle event in a Codex rollout file is a started turn."""
-    last = None
     try:
-        info = os.stat(path)
-        signature = (info.st_size, info.st_mtime_ns)
-        cached = _busy.get(path)
-        if cached is not None and cached[0] == signature:
-            return cached[1]
-        window = max(1, window)
-        with open(path, 'rb') as stream:
-            while True:
-                start = max(0, info.st_size - window)
-                # Read the preceding byte so a record on the window boundary is kept whole.
-                offset = max(0, start - 1)
+        with _busy_lock:
+            cached = _busy.get(path)
+        with open(path, 'rb', buffering=0) as stream:
+            info = os.fstat(stream.fileno())
+            # The cached offset ends at the last newline. The saved tail has already been read.
+            offset = cached['offset'] + len(cached['partial']) if cached else 0
+            if cached and info.st_ino == cached['inode'] and info.st_size >= offset:
+                last = cached['last']
+                if info.st_size == offset:
+                    return last == 'task_started'
                 stream.seek(offset)
-                tail = stream.read(info.st_size - offset)
-                if start:
-                    tail = tail.partition(b'\n')[2]
-                for line in reversed(tail.split(b'\n')):
-                    try:
-                        record = json.loads(line)
-                    except (ValueError, RecursionError):
-                        continue
-                    if not isinstance(record, dict) or record.get('type') != 'event_msg':
-                        continue
-                    payload = record.get('payload')
-                    if isinstance(payload, dict) and payload.get('type') in ('task_started', 'task_complete', 'turn_aborted'):
-                        last = payload['type']
+                lines = (cached['partial'] + _rollout_read(stream, info.st_size - offset)).split(b'\n')
+                partial = lines.pop()
+                for line in lines:
+                    if (kind := _rollout_lifecycle(line)) is not None:
+                        last = kind
+            else:
+                backward = _rollout_lines_backward(stream, info.st_size, max(1, window))
+                partial = next(backward)
+                last = None
+                for line in backward:
+                    if (last := _rollout_lifecycle(line)) is not None:
                         break
-                if last is not None or start == 0:
-                    break
-                window *= 2
     except (OSError, TypeError):
         return False
-    if len(_busy) > 64:
-        _busy.clear()
-    busy = last == 'task_started'
-    _busy[path] = (signature, busy)
-    return busy
+    with _busy_lock:
+        # Another poll may have updated this path while the file was being read.
+        if _busy.get(path) is cached:
+            if cached is None and len(_busy) >= 64:
+                _busy.pop(next(iter(_busy)))
+            _busy[path] = dict(inode=info.st_ino, offset=info.st_size - len(partial), last=last, partial=partial)
+    return last == 'task_started'
 
 
 def reflow_prompt(text):
@@ -1312,10 +1344,10 @@ def _live_status(entry, run, screen, login_screen=None, styled_screen=None):
             pending['text'] = reflow_prompt(pending['text'])
         return {'state': 'Approval', 'approval': {k: v for k, v in pending.items() if not k.startswith('_')}}
     live = claude_hooks.codex_live(entry) if entry['agent'] == 'codex' else None
-    # No hook or rollout record reports an answered approval. The composer replaces the approval card,
-    # so a verified composer means the approval is answered. This check never reads reply text (B559).
     if live is not None and live['waiting'] and codex_composer_ready(screen):
-        live = dict(live, waiting=False, busy=True)
+        # The composer replaces the approval card, so the card is closed. Busy only while the rollout still
+        # has an open turn: a recorded abort or completion wins over a stale hook report (B559).
+        live = dict(live, waiting=False, busy=transcript_busy(entry.get('transcript')))
     if live is not None and live['waiting']:
         prompt_actions.ledger.forget(entry['id'])
         detail = live.get('approval') or {}

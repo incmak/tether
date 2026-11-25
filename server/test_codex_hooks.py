@@ -170,8 +170,11 @@ class CodexHooksTests(unittest.TestCase):
     def test_working_screen_after_approval_overrides_waiting(self):
         self.tool()
         self.permission()
+        screen = (WORKING_FIXTURES / 'working_after_approval.ansi').read_text()
         with own_time(hooks, time=Mock(return_value=110)):
-            screen = (WORKING_FIXTURES / 'working_after_approval.ansi').read_text()
+            # A verified composer closes the card; the rollout decides busy (B559).
+            self.assertEqual(self.status(screen)['state'], 'Idle')
+            self.transcript.write_text(self.rollout('task_started', 99))
             self.assertEqual(self.status(screen)['state'], 'Working')
 
     def test_claude_mode_ignores_interrupt(self):
