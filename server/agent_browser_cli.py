@@ -19,9 +19,11 @@ Tether runs one shared browser that the user can watch from desktop or phone.
 - Playwright MCP already uses it. Do not pass --isolated or launch another browser.
 - In scripts, connect instead of launching: Node `chromium.connectOverCDP(process.env.TETHER_CDP_URL)`, Python `p.chromium.connect_over_cdp(os.environ["TETHER_CDP_URL"])`. Use `browser.contexts[0]`. You get a private context; the user's logins are not in it.
 - Limit: 3 tabs. Close tabs you no longer need.
-- ask-signed uses Mak's own Chrome (through the Tether extension) when connected, after Mak allows access; otherwise it uses the server signed browser.
-- Ask for signed-in access only for a task Mak asked for.
-- If the signed CDP URL returns 410 or its socket closes with "Access ended", tell Mak the reason in chat. Ask again only if the task still needs access.
+- ask-signed "<why>" [--minutes N] [--url URL] gives you one tab with Mak's sign-ins: Mak's own Chrome when it is connected, else the server signed-in browser. It prints JSON with a CDP URL. When Mak allows agents in Settings, it answers at once; otherwise Mak approves on the phone.
+- Use signed-in access only for a task Mak asked for.
+- Before a risky or destructive step, stop and ask Mak in chat, then wait for a yes: send, post or reply as Mak; pay or buy; delete; change account, security or sharing settings; accept terms. You decide what else is risky. When unsure, ask.
+- "reason":"busy" means other chats hold all signed-in tabs. Tell Mak, or ask again later.
+- If the signed CDP URL returns 410 or its socket closes with "Access ended": when the time ran out, ask again if the task still needs it. When Mak ended it, tell Mak and do not ask again unless Mak says so.
 - If you need the user in the browser (2FA code, captcha, a password you must not see), run `{command}`, then wait for the user to reply in chat.
 - Sign-ins: the test browser is headless. Ask for signed-in access when the task needs Mak's account; Mak signs in through the panel.'''
 
@@ -124,7 +126,8 @@ def ask_signed(args):
             if (not isinstance(result.get('cdp'), str) or not isinstance(result.get('tab'), str)
                     or type(result.get('expires')) not in (int, float)):
                 raise ValueError('Invalid signed browser grant.')
-        elif result.get('reason') not in ('denied', 'timeout'):
+        elif (result.get('reason') not in ('denied', 'timeout', 'busy', 'failed')
+              or 'error' in result and not isinstance(result['error'], str)):
             raise ValueError('Invalid signed browser response.')
         print(json.dumps(result, separators=(',', ':')))
         return 0 if result['ok'] else 1

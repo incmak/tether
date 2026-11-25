@@ -901,12 +901,14 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('Invalid request.')
             # The pane that owns the socket wins over the pane the agent names, so an agent cannot ask as another tab.
             # The named pane is used only when the lookup finds nothing (for example on another host).
-            pane = self.server.proxy.pane_finder(self.client_address[1], self.server.proxy.config['port']) or body.get('pane')
+            verified_pane = self.server.proxy.pane_finder(self.client_address[1], self.server.proxy.config['port'])
+            pane = verified_pane or body.get('pane')
             if route == '/ask-signed':
                 access = self.server.proxy.signed_access
                 if access is None:
                     raise ValueError('Signed browser access is unavailable.')
                 self.respond(200, access.ask(body.get('text'), pane, body.get('minutes', 15), body.get('url'),
+                                            verified=bool(verified_pane),
                                             **({'browser': body['browser']} if 'browser' in body else {})))
             else:
                 self.respond(200, self.server.proxy.ask(body.get('text'), pane))
@@ -922,7 +924,8 @@ def start(notifier, agent_finder=lambda pane: 'agent', identity_finder=lambda pa
     import signed_access
     import mac_browser
     PROXY = Proxy(notifier=notifier).start(shutdown_hooks=True)
+    options = dict(notifier=notifier, agent_finder=agent_finder, identity_finder=identity_finder,
+                   auto=signed_access.agents_allowed)
     PROXY.signed_access = mac_browser.RoutedAccess(
-        signed_access.Access(notifier=notifier, agent_finder=agent_finder, identity_finder=identity_finder),
-        mac_browser.MacAccess(mac_browser.BROKER, notifier=notifier, agent_finder=agent_finder, identity_finder=identity_finder))
+        signed_access.Access(**options), mac_browser.MacAccess(mac_browser.BROKER, **options))
     return PROXY

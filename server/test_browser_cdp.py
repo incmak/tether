@@ -739,6 +739,30 @@ class HTTPTests(unittest.TestCase):
             handler.do_POST()
             proxy.ask.assert_called_once_with('Click sign in.', expected)
 
+    def test_signed_ask_verifies_only_the_socket_pane(self):
+        access = Mock()
+        access.ask.return_value = {'ok': True}
+        proxy = SimpleNamespace(config={'port': 47123, 'token': 'secret'}, pane_finder=Mock(), signed_access=access)
+        for found in ('%12', None):
+            with self.subTest(found=found):
+                proxy.pane_finder.return_value = found
+                handler = self.handler('/ask-signed/secret', proxy=proxy)
+                handler.connection = Mock()
+                handler.client_address = ('127.0.0.1', 55001)
+                body = json.dumps({'text': 'Read the account', 'pane': '%13', 'verified': True,
+                                   'browser': 'server'}).encode()
+                handler.headers['Content-Length'] = str(len(body))
+                handler.rfile = io.BytesIO(body)
+                handler.do_POST()
+                access.ask.assert_called_with('Read the account', found or '%13', 15, None,
+                                              browser='server', verified=bool(found))
+                handler.respond.assert_called_once_with(200, {'ok': True})
+
+    def test_signed_policy_is_not_an_agent_proxy_route(self):
+        handler = self.handler('/signed/secret/policy')
+        handler.do_POST()
+        handler.respond.assert_called_once_with(404, {})
+
 
 class PeerTests(unittest.TestCase):
     def fixture(self, tcp6=False):

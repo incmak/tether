@@ -257,7 +257,8 @@ COMPUTED_ROUTES = {
     # Action names come from the caller's finite set of choices.
     ('AccountLogin.tsx', 'POST', 'api', '`login/${action}`'): ('login/start', 'login/code', 'login/cancel'),
     ('AgentBrowser.tsx', 'POST', 'api', '`browser/signed/${path}`'): (
-        'browser/signed/allow', 'browser/signed/deny', 'browser/signed/end', 'browser/signed/dismiss'),
+        'browser/signed/allow', 'browser/signed/deny', 'browser/signed/end', 'browser/signed/dismiss',
+        'browser/signed/policy'),
     ('AgentBrowser.tsx', 'POST', 'api', 'path'): ('browser/agents', 'browser/ask/dismiss', 'browser/agents/setup'),
     ('ExplorerPhone.tsx', 'POST', 'write', '`files/${mode}`'): ('files/copy', 'files/move'),
     ('Project.tsx', 'POST', 'api', '`projects/${path}`'): (

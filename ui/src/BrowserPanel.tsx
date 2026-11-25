@@ -6,7 +6,7 @@ import { AppWindow, ArrowLeft, ArrowRight, Bot, Check, ChevronDown, Crosshair, F
 import { errorText } from './api'
 import { useBackStep } from './backNav'
 import type { Api, BrowserAvailability, BrowserId, Pane } from './api'
-import { usePaneLabel, WATCH_EVENT } from './AgentBrowser'
+import { usePaneLabel, useSignedAuto, WATCH_EVENT } from './AgentBrowser'
 import { useHost } from './host'
 import { MacPairing } from './MacPairing'
 import { openLive } from './liveStream'
@@ -154,15 +154,17 @@ function usePageVisible() {
 // A phone: tabs it opens or takes over start at phone width.
 const onPhone = () => typeof matchMedia === 'function' && matchMedia('(pointer: coarse) and (max-width: 820px)').matches
 const savedNote = (host: string) => `Saved logins · readable by agents on ${host}`
-const signedNote = (host: string) => `Your sign-ins · agents cannot drive this browser, but can read its files on ${host}`
+const signedNote = (host: string, auto: boolean) => auto
+  ? `Your sign-ins · agents can use it and ask before risky steps · files on ${host}`
+  : `Your sign-ins · agents ask you before they use it · files on ${host}`
 const WHICH_KEY = 'tether-browser-which'
 const tabKey = (which: BrowserId) => which === 'test' ? 'tether-browser-tab' : `tether-browser-tab-${which}`
 // 'mac' is the old id for 'chrome', still saved in some browsers' localStorage.
 const asBrowser = (value: unknown): BrowserId => value === 'mac' || value === 'chrome' ? 'chrome' : value === 'signed' ? 'signed' : 'test'
 const BROWSERS: { id: BrowserId; label: string; note: string; icon: typeof UserRound }[] = [
   { id: 'test', label: 'Test', note: 'Agents can use it. No sign-ins.', icon: FlaskConical },
-  { id: 'signed', label: 'Signed in', note: 'Chromium with your sign-ins. Agents need your permission.', icon: UserRound },
-  { id: 'chrome', label: 'Your Chrome', note: 'Your own Chrome, through the Tether extension. Agents use a tab only after you allow it.', icon: AppWindow },
+  { id: 'signed', label: 'Signed in', note: 'Chromium with your sign-ins. Settings › Shared browser sets agent access.', icon: UserRound },
+  { id: 'chrome', label: 'Your Chrome', note: 'Your own Chrome, through the Tether extension. Settings › Shared browser sets agent access.', icon: AppWindow },
 ]
 
 /** The Test and Signed-in server browsers and the extension view for Your Chrome.
@@ -204,6 +206,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
   which: BrowserId; onSwitch: (id: BrowserId) => void; picture: Picture; sharpSupported: boolean | null; onPicture: (id: Picture) => void
 }) {
   const host = useHost()
+  const auto = useSignedAuto(baseApi) ?? true
   // Every request names the browser. The signed container can take longer than 10 s to start.
   const api: Api = which === 'test' ? baseApi : (path, body, signal, method, timeout, priority) => baseApi(
     body === undefined ? `${path}${path.includes('?') ? '&' : '?'}browser=${which}` : path,
@@ -1021,7 +1024,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
       {switcher}
       <div className="browser-tab-strip">{tabs.map(item => {
         const name = tabName(item)
-        return <div key={item.id} className={item.id === tab?.id ? 'browser-tab active' : 'browser-tab'} title={item.mode === 'saved' ? `${name} · ${which === 'signed' ? signedNote(host) : savedNote(host)}` : item.mode === 'agent' ? `${name} · Agent` : `${name} · Private`}>
+        return <div key={item.id} className={item.id === tab?.id ? 'browser-tab active' : 'browser-tab'} title={item.mode === 'saved' ? `${name} · ${which === 'signed' ? signedNote(host, auto) : savedNote(host)}` : item.mode === 'agent' ? `${name} · Agent` : `${name} · Private`}>
           <button type="button" role="tab" aria-selected={item.id === tab?.id} className="browser-tab-main" onClick={() => choose(item.id)}>
             {item.mode === 'saved' ? <KeyRound size={14} aria-label="Saved" /> : item.mode === 'agent' ? <Bot size={14} aria-label="Agent" /> : <HatGlasses size={14} aria-label="Private" />}
             <span>{name}</span>
@@ -1078,7 +1081,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
     </form>}
 
     {(windowView || tab?.mode === 'saved') && <p className="browser-saved">{which === 'signed' ? <><UserRound size={13} aria-hidden="true" />
-      <span>{windowView ? "Whole Chrome window · use Chrome's own toolbar and dialogs" : signedNote(host)}</span>
+      <span>{windowView ? "Whole Chrome window · use Chrome's own toolbar and dialogs" : signedNote(host, auto)}</span>
       {!windowView && <button type="button" className="browser-window-link" aria-disabled={changingWindow} onClick={() => void changeWindowView(true)}>Dialog not showing? Show the whole window</button>}
     </> : <><KeyRound size={13} />{savedNote(host)}</>}</p>}
     {tab?.mode === 'agent' && <div className="browser-agent" role="note">

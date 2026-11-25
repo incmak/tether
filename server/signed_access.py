@@ -1,4 +1,4 @@
-"""In-memory, phone-approved capabilities for tabs in the signed-in default context.
+"""In-memory capabilities for tabs in the signed-in default context.
 
 The private-context proxy cannot isolate a default context. This proxy instead owns
 an explicit target set and synthesizes discovery/auto-attach for that set only.
@@ -7,6 +7,7 @@ No browser-wide auto-attach or discovery command from an agent reaches Chrome.
 import hashlib
 import hmac
 from http.server import ThreadingHTTPServer
+import os
 import re
 import secrets
 import threading
@@ -15,6 +16,7 @@ from urllib.parse import quote, urlsplit
 
 import browser
 import browser_cdp as cdp
+import paths
 
 
 # Exact command allowlist. Unknown commands fail closed, including on child sessions.
@@ -72,6 +74,31 @@ END_MESSAGES = {
 }
 IDENTITY_SECONDS = 3  # How often a grant checks that its pane still runs the chat that asked.
 IDENTITY_MISSES = 2  # Discovery can miss a pane once; end only after this many checks in a row disagree.
+USER_END_REASONS = {'tether_end', 'action_stop', 'local_stop', 'debugger_canceled'}
+
+
+def agents_allowed():
+    try:
+        return (paths.CONFIG / 'signed-browser-agents').read_text(encoding='utf-8', errors='replace').strip() != 'off'
+    except FileNotFoundError:
+        return True
+
+
+def set_agents_allowed(value: bool):
+    path = paths.CONFIG / 'signed-browser-agents'
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temp = path.with_name(f'.{path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
+    try:
+        temp.write_text('on\n' if value else 'off\n', encoding='utf-8')
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def process_key(pane, identity):
+    if isinstance(identity, tuple) and len(identity) == 4:
+        return pane, identity[:3]
+    return None
 
 
 def same_chat(old, new):
@@ -91,11 +118,12 @@ def end_message(reason):
 
 
 class EndedGrants:
-    """Shared panel history and hashed capability tombstones, held only in memory."""
+    """Shared panel history, hashed capability tombstones and holds, all in memory."""
     def __init__(self, clock):
         self.clock = clock
         self.lock = threading.RLock()
         self.rows, self.tokens = [], {}
+        self.holds = set()
 
     def _prune(self):
         now = self.clock()
@@ -110,6 +138,17 @@ class EndedGrants:
             self.tokens[hashlib.sha256(grant.token.encode()).digest()] = row
             if reason != 'tether_end':
                 self.rows = (self.rows + [row])[-20:]
+            key = process_key(row['pane'], grant.identity)
+            if key is not None and reason in USER_END_REASONS:
+                self.holds.add(key)
+
+    def is_held(self, key):
+        with self.lock:
+            return key in self.holds
+
+    def clear_hold(self, pane, identity):
+        with self.lock:
+            self.holds.discard(process_key(pane, identity))
 
     def state(self):
         with self.lock:
@@ -136,10 +175,14 @@ def minutes(value):
     return value
 
 
+class GrantLimit(ValueError):
+    pass
+
+
 class Grant:
-    def __init__(self, request, target, duration, now):
+    def __init__(self, request, target, duration, now, *, auto=False):
         self.row = {key: request[key] for key in ('id', 'pane', 'agent', 'reason')}
-        self.row.update(tab=target, expires=now + duration * 60)
+        self.row.update(tab=target, expires=now + duration * 60, auto=auto)
         self.token = secrets.token_urlsafe(32)
         self.targets = {target}
         self.extra = 0
@@ -157,7 +200,7 @@ class Access:
     page_allowed = PAGE_ALLOWED
     def __init__(self, the_browser=None, notifier=lambda *a, **k: None, agent_finder=lambda pane: 'agent',
                  clock=time.time, request_seconds=REQUEST_SECONDS, identity_finder=lambda pane: None,
-                 identity_seconds=IDENTITY_SECONDS):
+                 identity_seconds=IDENTITY_SECONDS, auto=lambda: False):
         self.browser = the_browser or browser.SIGNED_BROWSER
         if not self.browser.signed:
             raise ValueError('Signed access requires the signed-in browser.')
@@ -166,9 +209,11 @@ class Access:
         # A grant belongs to the chat that asked: it ends when the pane's chat changes (/clear, a new agent) or ends.
         self.identity_finder, self.identity_seconds = identity_finder, identity_seconds
         self.request_seconds = request_seconds
+        self.auto = auto
         self.lock = threading.RLock()
         self.request_lock, self.request_peers = self.lock, [self]
         self.pending, self.grants, self.reserved = {}, {}, set()
+        self.last_tab = {}
         self.clients = set()
         self.history = EndedGrants(clock)
         self.config = {'port': 0}
@@ -191,9 +236,9 @@ class Access:
 
     def state(self):
         with self.lock:
-            return {'requests': [dict(slot['row']) for slot in self.pending.values()],
+            return {'requests': [dict(slot['row']) for slot in self.pending.values() if not slot['auto']],
                     'grants': [dict(grant.row) for grant in self.grants.values() if self.valid(grant)],
-                    'ended': self.history.state()}
+                    'ended': self.history.state(), 'auto': bool(self.auto())}
 
     def dismiss(self, ident):
         self.history.dismiss(ident)
@@ -213,7 +258,7 @@ class Access:
     def request_binding(self):
         return None
 
-    def ask(self, reason, pane, duration=15, url=None):
+    def _request_slot(self, reason, pane, duration, url, *, auto=False, identity=None):
         if not isinstance(reason, str) or not reason.strip() or len(reason) > 300:
             raise ValueError('Ask text must contain 1 to 300 characters.')
         if not isinstance(pane, str) or not re.fullmatch(r'%[0-9]+', pane):
@@ -225,19 +270,30 @@ class Access:
             url = browser.normalize_url(url)
         row = dict(id=secrets.token_urlsafe(16), pane=pane, agent=self.agent_finder(pane), reason=reason.strip(),
                    minutes=duration, url=url, created=self.clock(), browser=self.browser_id)
-        slot = {'row': row, 'event': threading.Event(), 'result': {'ok': False, 'reason': 'denied'},
-                'deadline': time.monotonic() + self.request_seconds, 'identity': self._identity(pane)}
+        return {'row': row, 'event': threading.Event(), 'result': {'ok': False, 'reason': 'denied'},
+                'deadline': time.monotonic() + self.request_seconds, 'auto': auto,
+                'identity': identity if auto else self._identity(pane)}
+
+    def _queue_request(self, slot):
+        row = slot['row']
         with self.request_lock, self.lock:
             if self.stopped:
-                return slot['result']
+                return False
             slot['binding'] = self.request_binding()
             for peer in self.request_peers:
                 with peer.lock:
                     for old in list(peer.pending.values()):
-                        if old['row']['pane'] == pane:
+                        if old['row']['pane'] == row['pane']:
                             peer._answer(old, {'ok': False, 'reason': 'denied'})
             self.pending[row['id']] = slot
             self.browser._bump()
+        return True
+
+    def ask(self, reason, pane, duration=15, url=None):
+        slot = self._request_slot(reason, pane, duration, url)
+        if not self._queue_request(slot):
+            return slot['result']
+        row = slot['row']
         payload = {'title': 'Agent wants signed-in browser access',
                    'body': f"{row['agent']} wants to use your signed-in browser: {row['reason']}",
                    'tag': 'browser-ask-' + pane, 'session': pane, 'priority': 'urgent',
@@ -321,28 +377,49 @@ class Access:
                 if duration > requested:
                     raise ValueError('Allow may shorten the requested time only.')
                 if len(self.grants) + len(self.reserved) >= 2:
-                    raise ValueError('End a grant first (the limit is 2).')
+                    raise GrantLimit('End a grant first (the limit is 2).')
                 self.reserved.add(ident)
             try:
                 self._listen()
-                row = self.browser.new_tab(slot['row']['url'] or 'about:blank', 'saved')
-                grant = Grant(slot['row'], row['id'], duration, self.clock())
-                with self.lock:
+                pane, url = slot['row']['pane'], slot['row']['url']
+                tab = self.browser.tabs.get(self.last_tab.get(pane)) if slot['auto'] else None
+                if tab and tab.mode == 'saved' and tab.grant is None and tab.agent_client is None:
+                    if url is not None:
+                        self.browser.navigate(tab.target, url)
+                else:
+                    row = self.browser.new_tab(url or 'about:blank', 'saved')
+                    tab = self.browser.tab(row['id'])
+                grant = Grant(slot['row'], tab.target, duration, self.clock(), auto=slot['auto'])
+                with self.lock, self.history.lock:
                     if slot['event'].is_set() or time.monotonic() >= slot['deadline'] or self.stopped:
                         raise ValueError('That request is no longer pending.')
+                    self._check_hold(slot)
                     self.grants[ident] = grant
-                    self._mark(grant, self.browser.tab(row['id']))
+                    self._mark(grant, tab)
                     grant.timer = threading.Timer(max(0, grant.row['expires'] - self.clock()), self.end, args=(ident, 'expired'))
                     grant.timer.daemon = True
                     grant.timer.start()
-                    self._watch(grant, slot['identity'])
-                    grant.row['browser'] = self.browser_id
-                    self._answer(slot, {'ok': True, 'browser': self.browser_id, 'cdp': self.url(grant),
-                                        'tab': row['id'], 'expires': grant.row['expires']})
+                    self._grant_answer(slot, grant)
             finally:
                 with self.lock:
                     self.reserved.discard(ident)
         return self.state()
+
+    def _check_hold(self, slot):
+        # Recheck under the history lock at grant creation: End can run while the browser opens a tab.
+        if slot['auto'] and self.history.is_held(process_key(slot['row']['pane'], slot['identity'])):
+            raise ValueError('This chat needs phone approval.')
+
+    def _grant_answer(self, slot, grant):
+        self._watch(grant, slot['identity'])
+        grant.row['browser'] = self.browser_id
+        if not slot['auto']:
+            self.history.clear_hold(grant.row['pane'], grant.identity)
+        self._answer(slot, self.grant_result(grant))
+
+    def grant_result(self, grant):
+        return {'ok': True, 'browser': self.browser_id, 'cdp': self.url(grant),
+                'tab': grant.row['tab'], 'expires': grant.row['expires']}
 
     def url(self, grant):
         return f"ws://127.0.0.1:{self.config['port']}/cdp-signed/{grant.token}"
@@ -370,6 +447,7 @@ class Access:
             client.revoke()
         with self.browser.lock:
             if grant:
+                self.last_tab[grant.row['pane']] = grant.row['tab']
                 for target in list(grant.targets):
                     tab = self.browser.tabs.get(target)
                     if tab:

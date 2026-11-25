@@ -22,6 +22,8 @@ from urllib.request import Request, urlopen
 import browser
 import browser_api
 import browser_cdp
+import mac_browser
+import paths
 import signed_access as signed
 from test_browser import FakeHandler
 from test_browser_cdp import Chrome, Capture
@@ -82,7 +84,6 @@ class EndedHistoryTests(unittest.TestCase):
         now = [1000]
         server = signed.Access(browser.Browser(signed=True), clock=lambda: now[0])
         # Mac and server share one cap, including dismiss and retention.
-        import mac_browser
         mac = mac_browser.MacAccess(mac_browser.Broker(), clock=lambda: now[0])
         routed = mac_browser.RoutedAccess(server, mac)
         for index in range(25):
@@ -225,7 +226,7 @@ class AccessTests(Requests, unittest.TestCase):
         self.assertEqual(next_result, [{'ok': False, 'reason': 'denied'}])
         self.access.request_seconds = .05
         self.assertEqual(self.access.ask('Timeout', '%1'), {'ok': False, 'reason': 'timeout'})
-        self.assertEqual(self.access.state(), {'requests': [], 'grants': [], 'ended': []})
+        self.assertEqual(self.access.state(), {'requests': [], 'grants': [], 'ended': [], 'auto': False})
 
     def test_grant_ends_when_the_pane_runs_another_chat(self):
         chat = {'%12': ('claude', 41, '100', None)}
@@ -393,7 +394,7 @@ class AccessTests(Requests, unittest.TestCase):
         self.assertNotIn(grant.token, repr(self.access.history.__dict__))
         handler = FakeHandler(browser_api.PREFIX + 'signed/dismiss', {'id': row['id']})
         browser_api.post(handler, signed_browser=self.real)
-        self.assertEqual(handler.replies, [(200, dict(browser='signed', requests=[], grants=[], ended=[]))])
+        self.assertEqual(handler.replies, [(200, dict(browser='signed', requests=[], grants=[], ended=[], auto=False))])
         assert_ended_http(self, result['cdp'], 'expired', message)  # Dismiss does not restore access.
         now[0] += 3599
         assert_ended_http(self, result['cdp'], 'expired', message)
@@ -542,7 +543,7 @@ class AccessTests(Requests, unittest.TestCase):
         # Start only a private bridge. No real tmux environment update or socket lookup occurs.
         with tempfile.TemporaryDirectory() as folder:
             proxy = browser_cdp.Proxy(config_path=Path(folder) / 'config.json', env_runner=Mock(), pane_finder=lambda *a: '%12')
-            proxy.signed_access = self.access
+            proxy.signed_access = mac_browser.RoutedAccess(self.access, mac_browser.MacAccess(mac_browser.Broker()))
             proxy.start()
             self.addCleanup(proxy.stop)
             url = proxy.url.replace('ws:', 'http:').replace('/cdp/', '/ask-signed/')
@@ -565,6 +566,168 @@ class AccessTests(Requests, unittest.TestCase):
                 urlopen(Request(endpoint, headers=headers), timeout=2)
             self.assertEqual(error.exception.code, 403)
         self.assertEqual(self.access.httpd.server_address[0], '127.0.0.1')
+
+
+class AutomaticAccessTests(unittest.TestCase):
+    def setUp(self):
+        self.fake = SignedChrome()
+        self.real = browser.Browser(signed=True, profile=Path('/nonexistent/signed-auto-test'),
+                                    chrome_finder=lambda: '/fake/chrome', launcher=self.fake.launcher)
+        self.notified = threading.Event()
+        self.notifier = Mock(side_effect=lambda *args, **kwargs: self.notified.set())
+        self.auto = True
+        self.identity = ('codex', 123, 'start', 'thread')
+        self.server = signed.Access(self.real, self.notifier, auto=lambda: self.auto,
+                                    identity_finder=lambda pane: self.identity, request_seconds=3)
+        self.server._listen = Mock()
+        self.routed = mac_browser.RoutedAccess(self.server, mac_browser.MacAccess(mac_browser.Broker()))
+        self.addCleanup(self.fake.close)
+        self.addCleanup(self.real.stop)
+        self.addCleanup(self.routed.stop)
+
+    def ask(self, pane='%12', **kwargs):
+        return self.routed.ask('Read the requested account', pane, browser='server', **kwargs)
+
+    def phone(self, verified=True, allow=False):
+        self.notified.clear()
+        results = []
+        waiter = threading.Thread(target=lambda: results.append(self.ask(verified=verified)))
+        waiter.start()
+        try:
+            self.assertTrue(self.notified.wait(2))
+            self.assertTrue(self.notifier.call_args.kwargs['urgent'])
+            row, = self.routed.state()['requests']
+            (self.routed.allow if allow else self.routed.deny)(row['id'])
+        finally:
+            waiter.join(timeout=4)
+            self.assertFalse(waiter.is_alive())
+        return results[0]
+
+    def test_verified_auto_reuses_an_active_grant_and_enforces_total_limit(self):
+        result = self.ask(verified=True)
+        self.assertTrue(result['ok'])
+        tabs = set(self.real.tabs)
+        grant, = self.routed.state()['grants']
+        self.assertTrue(grant['auto'])
+        self.assertTrue(self.routed.state()['auto'])
+        self.assertEqual(self.routed.ask('Same task', '%12', browser='chrome', verified=True), result)
+        self.assertEqual(set(self.real.tabs), tabs)
+        self.assertTrue(self.ask('%13', verified=True)['ok'])
+        self.assertEqual(self.ask('%14', verified=True), {
+            'ok': False, 'reason': 'busy', 'error': 'End a grant first (the limit is 2).'})
+        self.assertEqual(len(self.routed.state()['grants']), 2)
+        self.assertFalse(self.server.pending)
+        self.notifier.assert_not_called()
+
+    def test_unverified_or_missing_identity_or_disabled_policy_uses_phone(self):
+        cases = [(False, True, self.identity), (True, False, self.identity), (True, True, None),
+                 (True, True, ('gone',)), (True, True, ('codex', 123, 'start'))]
+        for auto, verified, identity in cases:
+            with self.subTest(auto=auto, verified=verified, identity=identity):
+                self.auto, self.identity = auto, identity
+                self.assertEqual(self.phone(verified), {'ok': False, 'reason': 'denied'})
+        self.assertFalse(self.server.grants)
+
+    def test_manual_end_holds_process_until_phone_allow(self):
+        original = self.ask(verified=True)
+        grant, = self.routed.state()['grants']
+        self.routed.end(grant['id'])
+        self.identity = (*self.identity[:3], 'another-thread')
+        self.assertEqual(self.phone(), {'ok': False, 'reason': 'denied'})
+        allowed = self.phone(allow=True)
+        self.assertTrue(allowed['ok'])
+        self.assertNotEqual(allowed['tab'], original['tab'])
+        grant, = self.routed.state()['grants']
+        self.assertFalse(grant['auto'])
+        self.server.end(grant['id'], 'expired')
+        self.assertTrue(self.ask(verified=True)['ok'])
+        self.assertTrue(self.routed.state()['grants'][0]['auto'])
+
+    def test_expiry_reuses_saved_tab_with_a_new_token_and_navigates(self):
+        original = self.ask(verified=True)
+        tabs = set(self.real.tabs)
+        grant, = self.routed.state()['grants']
+        self.server.end(grant['id'], 'expired')
+        result = self.ask(url='https://example.test/next', verified=True)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['tab'], original['tab'])
+        self.assertNotEqual(result['cdp'], original['cdp'])
+        self.assertEqual(self.real.tab(result['tab']).url, 'https://example.test/next')
+        self.assertEqual(set(self.real.tabs), tabs)
+        self.notifier.assert_not_called()
+
+    def test_user_end_during_tab_creation_prevents_an_automatic_grant(self):
+        self.assertTrue(self.ask(verified=True)['ok'])
+        grant, = self.routed.state()['grants']
+        self.identity = (*self.identity[:3], 'another-thread')
+        new_tab = self.real.new_tab
+
+        def end_before_open(*args):
+            self.routed.end(grant['id'])
+            return new_tab(*args)
+
+        with patch.object(self.real, 'new_tab', side_effect=end_before_open):
+            self.assertEqual(self.ask(verified=True),
+                             {'ok': False, 'reason': 'failed', 'error': 'This chat needs phone approval.'})
+        self.assertFalse(self.routed.state()['grants'])
+        self.assertFalse(self.server.pending)
+        self.assertEqual(self.phone(), {'ok': False, 'reason': 'denied'})
+
+    def test_auto_does_not_reuse_a_tab_that_is_gone_or_controlled(self):
+        for remove in (False, True):
+            with self.subTest(remove=remove):
+                original = self.ask(verified=True)
+                grant, = self.routed.state()['grants']
+                self.server.end(grant['id'], 'expired')
+                tab = self.real.tab(original['tab'])
+                if remove:
+                    self.real.tabs.pop(tab.target)
+                else:
+                    tab.agent_client = object()
+                result = self.ask(verified=True)
+                self.assertTrue(result['ok'])
+                self.assertNotEqual(result['tab'], original['tab'])
+                self.server.end(self.routed.state()['grants'][0]['id'], 'expired')
+
+    def test_auto_failure_removes_slot_and_hides_capability_urls_and_paths(self):
+        for message, error in [
+            ('Chrome refused the tab.', 'Chrome refused the tab.'),
+            ('Failed to open /private/profile', 'The signed-in browser could not open a tab.'),
+            ('Failed at ws://localhost:1/cdp-signed/secret', 'The signed-in browser could not open a tab.'),
+        ]:
+            with self.subTest(message=message), patch.object(self.real, 'new_tab', side_effect=browser.BrowserError(message)):
+                self.assertEqual(self.ask(verified=True), {'ok': False, 'reason': 'failed', 'error': error})
+                self.assertFalse(self.server.pending)
+        self.notifier.assert_not_called()
+        self.assertTrue(self.ask(verified=True)['ok'])
+
+    def test_policy_route_persists_strict_booleans_without_ending_live_grants(self):
+        proxy = Mock(signed_access=self.routed)
+        with patch.object(paths, 'CONFIG', paths.CONFIG / signed.secrets.token_hex(8)):
+            self.server.auto = signed.agents_allowed
+            file = paths.CONFIG / 'signed-browser-agents'
+            self.assertTrue(signed.agents_allowed())
+            result = self.ask(verified=True)
+            for value in ({}, {'auto': 0}, {'auto': 'off'}, {'auto': None}):
+                handler = FakeHandler(browser_api.PREFIX + 'signed/policy', value)
+                browser_api.post(handler, the_proxy=proxy, signed_browser=self.real)
+                self.assertEqual(handler.replies[0][0], 400)
+                self.assertFalse(file.exists())
+            for auto in (False, True):
+                version = self.real.version
+                handler = FakeHandler(browser_api.PREFIX + 'signed/policy', {'auto': auto})
+                browser_api.post(handler, the_proxy=proxy, signed_browser=self.real)
+                status, state = handler.replies[0]
+                self.assertEqual((status, state['browser'], state['auto']), (200, 'signed', auto))
+                self.assertEqual(state['grants'][0]['tab'], result['tab'])
+                self.assertGreater(self.real.version, version)
+                self.assertEqual(file.read_text().strip(), 'on' if auto else 'off')
+                self.assertIs(signed.agents_allowed(), auto)
+                if not auto:
+                    self.assertEqual(self.phone(), {'ok': False, 'reason': 'denied'})
+            self.assertEqual(file.parent.stat().st_mode & 0o777, 0o700)
+            file.write_text('other')
+            self.assertTrue(signed.agents_allowed())
 
 
 REAL_CLIENT = r'''

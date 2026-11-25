@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react'
 import { Bot, ChevronDown, CircleSlash, Globe, Hand, KeyRound, X } from 'lucide-react'
 import { errorText } from './api'
 import type { Api, Pane, SignedBrowserAccess } from './api'
@@ -24,10 +24,10 @@ export interface AgentBrowserStatus extends Omit<AgentBrowserWire, 'agents'> {
   agents: { pane: string | null; tabs: AgentTab[]; since: number }[]
   // Signed-in browser: agents' requests waiting for Mak, the grants running now, and grants that ended
   // without Mak's End (server/signed_access.py).
-  signed: Pick<SignedBrowserAccess, 'requests' | 'grants' | 'ended'>
+  signed: Pick<SignedBrowserAccess, 'requests' | 'grants' | 'ended' | 'auto'>
 }
 const NO_SIGNED = { requests: [], grants: [], ended: [] }
-const pickSigned = (access: SignedBrowserAccess) => ({ requests: access.requests ?? [], grants: access.grants ?? [], ended: access.ended ?? [] })
+const pickSigned = (access: SignedBrowserAccess) => ({ requests: access.requests ?? [], grants: access.grants ?? [], ended: access.ended ?? [], auto: access.auto })
 
 export const WATCH_EVENT = 'tether-browser-watch'
 export const TAB_KEY = 'tether-browser-tab'
@@ -60,7 +60,13 @@ async function poll(api: Api) {
   let wire: AgentBrowserWire | null = null
   try { wire = await api<AgentBrowserWire>('browser/agents', undefined, undefined, undefined, undefined, 'low') } catch { /* off or old server */ }
   // Does not start Chrome. Older servers answer 404: no requests.
-  try { const access = await api<SignedBrowserAccess>('browser/signed/access', undefined, undefined, undefined, undefined, 'low'); signed = pickSigned(access) } catch { signed = NO_SIGNED }
+  const previous = signed
+  try {
+    const access = await api<SignedBrowserAccess>('browser/signed/access', undefined, undefined, undefined, undefined, 'low')
+    if (signed === previous) signed = pickSigned(access)
+  } catch {
+    if (signed === previous) signed = { ...NO_SIGNED, auto: previous.auto }
+  }
   await accept(api, wire, 'low')
 }
 // The next poll starts POLL_MS after this one ends, so slow answers never stack up.
@@ -86,10 +92,21 @@ export function useAgentBrowser(api: Api) {
   if (!sub) { sub = subscribe(api); subscribers.set(api, sub) }
   return useSyncExternalStore(sub, () => status)
 }
+/** Signed-in browser policy (Settings › Shared browser): true = agents need no phone Allow. Undefined until the server answers.
+ * Read apart from the agent status, which is null when the shared test browser is off. */
+export function useSignedAuto(api: Api) {
+  let sub = subscribers.get(api)
+  if (!sub) { sub = subscribe(api); subscribers.set(api, sub) }
+  return useSyncExternalStore(sub, () => signed.auto)
+}
 async function answerSigned(api: Api, path: 'allow' | 'deny' | 'end' | 'dismiss', id: string) {
-  const access = await api<SignedBrowserAccess>(`browser/signed/${path}`, { id })
+  await changeSigned(api, path, { id })
+}
+async function changeSigned(api: Api, path: 'allow' | 'deny' | 'end' | 'dismiss' | 'policy', body: { id: string } | { auto: boolean }) {
+  const access = await api<SignedBrowserAccess>(`browser/signed/${path}`, body)
   signed = pickSigned(access)
-  if (status) { status = { ...status, signed }; emit() }
+  if (status) status = { ...status, signed }
+  emit()
 }
 export async function changeAgentBrowser(api: Api, path: 'browser/agents' | 'browser/ask/dismiss' | 'browser/agents/setup', body: unknown) {
   await accept(api, await api<AgentBrowserWire>(path, body))
@@ -258,12 +275,14 @@ export function BrowserSheet({ api, pane, onClose }: { api: Api; pane: Pane; onC
   </>
 }
 
-/** Settings › Shared browser: the switch and why it is off. */
+/** Settings › Shared browser. */
 export function AgentBrowserSettings({ api }: { api: Api }) {
   const state = useAgentBrowser(api)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const policyId = useId()
   if (!state) return null
+  const auto = state.signed.auto ?? true
   const connected = state.agents.length
   const setup = async (agent: 'claude' | 'codex') => {
     setBusy(true); setError('')
@@ -278,6 +297,14 @@ export function AgentBrowserSettings({ api }: { api: Api }) {
       <input type="checkbox" role="switch" checked={state.enabled} disabled={busy} onChange={event => {
         setBusy(true); setError('')
         void changeAgentBrowser(api, 'browser/agents', { enabled: event.target.checked }).catch(failure => setError(errorText(failure))).finally(() => setBusy(false))
+      }} /></label>
+    <label className="switch-row"><span><strong id={policyId}>Agents may use my signed-in browsers</strong>
+      <small id={`${policyId}-note`}>{auto
+        ? 'On · Agents use the Signed-in browser and Your Chrome without asking you first. They ask in chat before a risky step, such as a payment, a send or a delete.'
+        : 'Off · Each agent asks you first, and you allow 1 to 60 minutes.'}</small></span>
+      <input type="checkbox" role="switch" aria-labelledby={policyId} aria-describedby={`${policyId}-note`} checked={auto} disabled={busy} onChange={event => {
+        setBusy(true); setError('')
+        void changeSigned(api, 'policy', { auto: event.target.checked }).catch(failure => setError(errorText(failure))).finally(() => setBusy(false))
       }} /></label>
     {state.enabled && state.setup && (['claude', 'codex'] as const).filter(agent => state.setup![agent] !== 'none').map(agent => {
       const name = agent === 'claude' ? 'Claude Code' : 'Codex'

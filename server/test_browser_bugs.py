@@ -246,7 +246,7 @@ class ChromeGrantRegressions(unittest.TestCase):
         row = {'id': 'grant', 'pane': '%12', 'agent': 'codex', 'reason': 'Isolated test',
                'minutes': 1, 'url': url, 'created': access.clock(), 'browser': 'chrome'}
         access.pending['grant'] = {'row': row, 'event': threading.Event(), 'result': {},
-                                    'deadline': time.monotonic() + 10, 'binding': device, 'identity': None}
+                                    'deadline': time.monotonic() + 10, 'binding': device, 'identity': None, 'auto': False}
         # worker.js navigates to the requested URL before its granted reply.
         # Mock the reply and timer, without a real extension, listener, or worker.
         with patch.object(access, '_listen'), patch.object(signed_access.threading, 'Timer'):
@@ -280,7 +280,7 @@ class ChromeGrantRegressions(unittest.TestCase):
         row = {'id': 'grant', 'pane': '%12', 'agent': 'codex', 'reason': 'Isolated test',
                'minutes': 1, 'url': requested, 'created': access.clock(), 'browser': 'chrome'}
         access.pending['grant'] = {'row': row, 'event': threading.Event(), 'result': {},
-                                   'deadline': time.monotonic() + 10, 'binding': device, 'identity': None}
+                                   'deadline': time.monotonic() + 10, 'binding': device, 'identity': None, 'auto': False}
         with patch.object(access, '_listen'), patch.object(signed_access.threading, 'Timer'):
             access.allow('grant')
         tab = broker.browser.tab('T7')
