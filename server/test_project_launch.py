@@ -24,6 +24,7 @@ from test_tmux_isolation import private_tmux
 HERE = Path(__file__).resolve().parent
 PID = 'a1b2c3d4e5f6'
 SUBAGENT_INSTRUCTIONS = 'features.multi_agent_v2.subagent_developer_instructions'
+SESSION_ID = '019ab123-4567-7abc-9def-0123456789ab'
 
 
 class UnitTests(unittest.TestCase):
@@ -492,6 +493,144 @@ class UnitTests(unittest.TestCase):
         heading = text + '\n\n' if text is not None else ''
         override = 'developer_instructions=' + project_launch.toml_string(heading + self.block(None))
         self.assertEqual(project_launch.codex_args(None, list(args), cwd=cwd), ['-c', override, *args])
+
+    def rollout(self, session_id, *records, archive=False, home=None):
+        folder = (home or paths.CODEX) / ('archived_sessions' if archive else 'sessions/2026/11/25')
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f'rollout-2026-11-25T00-00-00-{session_id}.jsonl'
+        path.write_text(''.join((record if isinstance(record, str) else json.dumps(record)) + '\n'
+                                for record in records))
+        return path
+
+    def resume_repos(self):
+        launch, session = (self.instruction_repo(name) for name in ('launch', 'session'))
+        for folder in (launch, session):
+            self.instruction_layer(folder, f'developer_instructions = "{folder.name}"')
+        return launch, session, self.project_trust(launch) + self.project_trust(session)
+
+    def test_codex_resume_and_fork_use_session_instructions(self):
+        launch, session, trust = self.resume_repos()
+        self.config('[tui]\nresume_cwd = "session"\n' + trust)
+        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'cwd': str(session)}})
+        for cwd, command in ((launch, 'resume'), (session, 'resume'), (launch, 'fork')):
+            with self.subTest(cwd=cwd, command=command):
+                self.assert_codex_text(cwd, 'session', [command, SESSION_ID])
+
+    def test_codex_resume_without_session_mode_uses_launch_folder(self):
+        launch, session, trust = self.resume_repos()
+        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'cwd': str(session)}})
+        args = ['resume', SESSION_ID]
+        for settings in ('', '[tui]\nresume_cwd = "current"\n', '[tui]\nresume_cwd = "other"\n', 'tui = false\n'):
+            with self.subTest(settings=settings):
+                self.config(settings + trust)
+                self.assert_codex_text(launch, 'launch', args)
+                self.assert_codex_text(session, 'session', args)
+        self.config('[tui]\nresume_cwd = "session"\n' + trust)
+        for cd in (['-C', str(launch)], ['--cd=' + str(launch)]):
+            self.assert_codex_text(session, 'launch', [*args, *cd])
+
+    def test_codex_resume_without_trusted_session_layers_uses_home(self):
+        launch, session, trust = self.resume_repos()
+        home = 'developer_instructions = "home"\n[tui]\nresume_cwd = "session"\n'
+        args = ['resume', SESSION_ID]
+        self.config(home + self.project_trust(launch) + self.project_trust(session, 'untrusted'))
+        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'cwd': str(session)}})
+        self.assert_codex_text(launch, 'home', args)
+        self.config(home + trust)
+        missing = session / 'deleted'
+        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'cwd': str(missing)}})
+        self.assert_codex_text(launch, 'home', args)
+
+    def test_codex_resume_rollout_metadata_order_and_archived_lookup(self):
+        launch, session, trust = self.resume_repos()
+        later = self.instruction_repo('later')
+        self.instruction_layer(later, 'developer_instructions = "later"')
+        self.config('[tui]\nresume_cwd = "session"\n' + trust + self.project_trust(later))
+        meta = {'type': 'session_meta', 'payload': {'cwd': str(session)}}
+        context = {'type': 'turn_context', 'payload': {'cwd': str(later)}}
+        settings = {'type': 'event_msg', 'payload': {'type': 'thread_settings_applied',
+                                                      'thread_settings': {'cwd': str(later)}}}
+        args = ['resume', SESSION_ID]
+        for records, expected in (((context,), 'later'), ((context, meta, context), 'session'),
+                                  ((meta, settings, context, 'invalid thread_settings_applied'), 'later'),
+                                  ((meta, settings, meta), 'session')):
+            with self.subTest(records=records):
+                self.rollout(SESSION_ID.upper(), *records, archive=True)
+                self.assert_codex_text(launch, expected, args)
+
+    def test_codex_resume_resolves_relative_cwd_without_canonicalizing(self):
+        launch, session, trust = self.resume_repos()
+        nested = session / 'src'
+        self.instruction_layer(nested, 'developer_instructions = "nested"')
+        alias = self.temp / 'alias'
+        alias.symlink_to(nested)
+        home = self.temp / 'custom-home'
+        home.mkdir()
+        (home / 'config.toml').write_text('[tui]\nresume_cwd = "session"\n' + trust)
+        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'cwd': '../alias/./child/..'}}, home=home)
+        with mock.patch.dict(os.environ, CODEX_HOME=str(home)):
+            self.assert_codex_text(launch, None, ['resume', SESSION_ID.upper()])
+
+    def test_codex_resume_unknown_or_failed_lookup_uses_launch_instructions(self):
+        launch, session, trust = self.resume_repos()
+        self.config('[tui]\nresume_cwd = "session"\n' + trust)
+        args = ['resume', SESSION_ID]
+        self.assert_codex_text(launch, 'launch', args)
+        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'cwd': ''}})
+        self.assert_codex_text(launch, 'launch', args)
+        meta = {'type': 'session_meta', 'payload': {'cwd': str(session)}}
+        path = self.rollout(SESSION_ID, meta)
+        path.with_name(f'rollout-{SESSION_ID}.jsonl').write_text(json.dumps(meta) + '\n')
+        self.assert_codex_text(launch, 'session', args)
+        open_file = Path.open
+
+        def deny_rollout(file, *args, **kwargs):
+            if file == path:
+                raise PermissionError(file)
+            return open_file(file, *args, **kwargs)
+
+        with mock.patch.object(Path, 'open', deny_rollout):
+            self.assert_codex_text(launch, 'launch', args)
+        for invalid in ('invalid [toml', 'developer_instructions = 1'):
+            self.instruction_layer(session, invalid)
+            self.assert_codex_text(launch, 'launch', args)
+        self.rollout(SESSION_ID.upper(), meta, archive=True)
+        self.assert_codex_text(launch, 'launch', args)
+
+    def test_codex_resume_mode_uses_startup_layer_precedence(self):
+        launch, session, trust = self.resume_repos()
+        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'cwd': str(session)}})
+        resume = ['resume', SESSION_ID]
+        self.config(trust)
+        self.assert_codex_text(launch, 'session', ['-c', 'tui.resume_cwd="session"', *resume])
+        self.assert_codex_text(launch, 'session', ['resume', '--config=tui={resume_cwd="session"}', SESSION_ID])
+        self.assert_codex_text(launch, 'launch', ['-c', 'tui.resume_cwd="session"', *resume, '-c', 'tui={}'])
+        self.config('[tui]\nresume_cwd = "session"\n' + trust)
+        self.assert_codex_text(launch, 'launch', [*resume, '-c', 'tui={resume_cwd="current"}'])
+        self.config('[tui]\nresume_cwd = "current"\n' + trust)
+        project_launch.SYSTEM_CONFIG.write_text('[tui]\nresume_cwd = "session"\n')
+        self.assert_codex_text(launch, 'launch', resume)
+        (paths.CODEX / 'work.config.toml').write_text('[tui]\nresume_cwd = "session"\n')
+        self.assert_codex_text(launch, 'session', ['-p', 'work', *resume])
+        self.instruction_layer(launch, 'developer_instructions = "launch"\n[tui]\nresume_cwd = "session"\n')
+        self.assert_codex_text(launch, 'session', resume)
+        self.assert_codex_text(launch, 'launch', [*resume, '-c', 'tui={resume_cwd="current"}'])
+        project_launch.MANAGED_CONFIG.write_text('[tui]\nresume_cwd = "current"\n')
+        self.assert_codex_text(launch, 'launch', ['-c', 'tui.resume_cwd="session"', *resume])
+
+    def test_codex_resume_only_switches_for_explicit_local_session_commands(self):
+        launch, session, trust = self.resume_repos()
+        self.config('[tui]\nresume_cwd = "session"\n' + trust)
+        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'cwd': str(session)}})
+        for args in ([], ['resume'], ['resume', '--last'], ['resume', '--last', SESSION_ID],
+                     ['resume', 'thread-name', SESSION_ID], ['resume', '-m', SESSION_ID],
+                     ['-m', 'resume', SESSION_ID], ['--remote=unix://', 'resume', SESSION_ID]):
+            with self.subTest(args=args):
+                self.assert_codex_text(launch, 'launch', args)
+        for args in (['exec', 'resume', SESSION_ID], ['e', 'resume', SESSION_ID]):
+            self.assertEqual(project_launch.codex_args(None, args, cwd=launch), args)
+        self.assert_codex_text(launch, None, ['fork', '--worktree', SESSION_ID])
+        self.assert_codex_text(launch, 'session', ['resume', '--', SESSION_ID])
 
     def test_codex_trusted_instructions_replace_home_text(self):
         repo = self.instruction_repo()

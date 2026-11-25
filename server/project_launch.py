@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from uuid import UUID
 
 from agent_browser_setup import has_browser_env, playwright_server
 
@@ -459,7 +460,7 @@ def codex_folders(args=()):
 
 
 def _cli_discovery_layer(options):
-    """Build the discovery fields of the CLI layer as config/src/overrides.rs apply_toml_override does."""
+    """Build the discovery and TUI fields as config/src/overrides.rs apply_toml_override does."""
     layer = {}
     for arg in _option(options, '-c', '--config'):
         key, sep, value = arg.partition('=')
@@ -468,7 +469,7 @@ def _cli_discovery_layer(options):
             continue
         if parts == ['profile']:
             return None
-        if parts[0] not in ('projects', 'project_root_markers'):
+        if parts[0] not in ('projects', 'project_root_markers', 'tui'):
             continue
         table = layer
         for part in parts[:-1]:
@@ -545,7 +546,102 @@ def _instruction_cwd(options, cwd):
     return Path(real)
 
 
-def _instruction_config(options, cwd):
+CODEX_SESSION_VALUE_FLAGS = {'-a', '-c', '-i', '-m', '-p', '-s', '--add-dir', '--ask-for-approval', '--config',
+                             '--disable', '--enable', '--image', '--local-provider', '--model', '--profile',
+                             '--remote-auth-token-env', '--sandbox'}
+
+
+def _explicit_session_id(args):
+    """Find the first session positional in cli/src/main.rs ResumeCommand or ForkCommand."""
+    command = session = None
+    positional = images = False
+    tokens = iter(args)
+    for arg in tokens:
+        if not positional and arg.startswith('-') and arg != '-':
+            if arg == '--':
+                if command is None:
+                    return None
+                positional = True
+                images = False
+                continue
+            flag = arg.partition('=')[0] if arg.startswith('--') else arg[:2]
+            if flag in ('-C', '--cd', '--last', '--remote', '--worktree'):
+                return None
+            if arg == flag and flag in CODEX_SESSION_VALUE_FLAGS:
+                next(tokens, None)
+            images = flag in ('-i', '--image')  # SharedCliOptions takes one or more image paths.
+        elif not images:
+            if command is None:
+                if arg not in ('resume', 'fork'):
+                    return None
+                command = arg
+            elif session is None:
+                session = arg
+    if session is not None:
+        try:
+            parsed = UUID(session)
+        except ValueError:
+            return None
+        if session.lower() in (str(parsed), parsed.hex, '{' + str(parsed) + '}', parsed.urn):
+            return str(parsed)
+    return None
+
+
+def _raise_walk_error(error):
+    raise error
+
+
+def _rollout_cwd(home, session_id):
+    """Find one rollout and apply the cwd fields in state/src/extract.rs in record order."""
+    prefix = 'rollout-'
+    suffix = f'-{session_id}.jsonl'
+    path = None
+    for directory in (home / 'sessions', home / 'archived_sessions'):
+        if not directory.exists():
+            continue
+        for folder, _, filenames in os.walk(directory, onerror=_raise_walk_error):
+            for name in filenames:
+                if name.startswith(prefix) and name[len(prefix):].lower().endswith(suffix):
+                    if path is not None:
+                        return None
+                    path = Path(folder) / name
+    if path is None or not path.is_file():
+        return None
+    cwd = None
+    with path.open('rb') as stream:
+        for line in stream:
+            if not any(kind in line for kind in (b'session_meta', b'thread_settings_applied', b'turn_context')):
+                continue
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            payload = item.get('payload') if isinstance(item, dict) else None
+            if not isinstance(payload, dict):
+                continue
+            kind = item.get('type')
+            if kind == 'event_msg' and payload.get('type') == 'thread_settings_applied':
+                settings = payload.get('thread_settings')
+                if isinstance(settings, dict) and isinstance(settings.get('cwd'), str):
+                    cwd = settings['cwd']
+            elif kind == 'session_meta' or (kind == 'turn_context' and not cwd):
+                value = payload.get('cwd')
+                if isinstance(value, str) and value:
+                    cwd = value
+    return cwd or None
+
+
+def _project_instruction_config(base, start, home, markers, trust):
+    config = base
+    for path in list(_trusted_project_configs(start, home, markers, trust)):
+        layer = _toml(path)
+        if layer is None:
+            return None
+        config = _merge_tables(config, {k: layer[k] for k in ('developer_instructions', 'tui') if k in layer})
+    return config
+
+
+def _instruction_config(options, cwd, args):
     """Select local instructions using config/src/loader/mod.rs load_config_layers_state.
     Enterprise cloud config bundles are not readable locally and are not modelled."""
     import paths
@@ -577,21 +673,41 @@ def _instruction_config(options, cwd):
     if not isinstance(markers, list) or not all(isinstance(marker, str) for marker in markers):
         return None
 
-    config = {**system, **user, **profile}
+    base = {}
+    for layer in (system, user, profile):
+        base = _merge_tables(base, {k: layer[k] for k in ('developer_instructions', 'tui') if k in layer})
     if _unmodelled_managed_config() or '--worktree' in options:
-        return config  # The final checkout of --worktree is chosen by Codex after startup.
+        return base  # The final checkout of --worktree is chosen by Codex after startup.
     trust = _project_trust(discovery)
     if trust is None:
         return None  # project_trust_context cannot deserialize the projects table.
     start = _instruction_cwd(options, cwd)
     if start is None:
-        return config
-    for path in list(_trusted_project_configs(start, home, markers, trust)):
-        layer = _toml(path)
-        if layer is None:
-            return None
-        if 'developer_instructions' in layer:
-            config['developer_instructions'] = layer['developer_instructions']
+        return base
+    config = _project_instruction_config(base, start, home, markers, trust)
+    if config is None:
+        return None
+    try:
+        startup = config
+        for layer in (cli, managed):
+            if 'tui' in layer:
+                startup = _merge_tables(startup, {'tui': layer['tui']})
+        tui = startup.get('tui')
+        # With no mode, tui/src/session_resume.rs may prompt after exec. Keep the launch config.
+        if isinstance(tui, dict) and tui.get('resume_cwd') == 'session':
+            session_id = _explicit_session_id(args)
+            saved_cwd = _rollout_cwd(home, session_id) if session_id else None
+            # core/src/config/mod.rs uses an absolute fallback_cwd without canonicalizing it.
+            folder = _join(start, saved_cwd) if saved_cwd else None
+            if folder and Path(folder) != start:
+                session = Path(folder)
+                if not session.is_dir():
+                    return base
+                resolved = _project_instruction_config(base, session, home, markers, trust)
+                if resolved is not None and isinstance(resolved.get('developer_instructions', ''), str):
+                    return resolved
+    except Exception:
+        pass  # A failed session lookup must preserve the launch instructions and Tether's rules.
     return config
 
 
@@ -616,7 +732,7 @@ def codex_args(pid, args, group=None, cwd=None):
             cli_instruction = i, prefix
             break
     else:
-        config = _instruction_config(options, cwd)
+        config = _instruction_config(options, cwd, args)
         if config is None:
             return [*folder_args, *args]
         user = config.get('developer_instructions')
