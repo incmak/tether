@@ -17,10 +17,10 @@ import signed_access as signed
 
 PREFIX = '/mobile/api/browser/extension/'
 ORIGIN = re.compile(r'chrome-extension://[a-p]{32}')
-CHUNK_CHARS = 1_000_000
+CHUNK_BYTES = 1_000_000
 MAX_REPLY = 64 * 1024 * 1024
-# A chunk may give up its last UTF-16 code unit to keep a surrogate pair together.
-MAX_CHUNKS = (MAX_REPLY + CHUNK_CHARS - 2) // (CHUNK_CHARS - 1)
+# A chunk can end up to three bytes early to keep a UTF-8 character whole.
+MAX_CHUNKS = (MAX_REPLY + CHUNK_BYTES - 4) // (CHUNK_BYTES - 3)
 MAX_ASSEMBLY = MAX_REPLY + 1024 * 1024
 PAGE_ALLOWED = (signed.PAGE_ALLOWED - {'Network.getCookies', 'DOM.setFileInputFiles'}) | {
     'Page.startScreencast', 'Page.stopScreencast', 'Page.screencastFrameAck'}
@@ -224,14 +224,16 @@ class Device:
             return None
         seq, total, data = message.get('seq'), message.get('total'), message.get('data')
         if (type(seq) is not int or type(total) is not int or not 1 < total <= MAX_CHUNKS
-                or not isinstance(data, str) or len(data) > CHUNK_CHARS):
+                or not isinstance(data, str)):
+            raise ValueError('Invalid reply chunk.')
+        size = len(data.encode('utf-8'))
+        if size > CHUNK_BYTES:
             raise ValueError('Invalid reply chunk.')
         assembly = self.assemblies.get(ident)
         if assembly is None:
             assembly = {'total': total, 'parts': [], 'bytes': 0}
         if total != assembly['total'] or seq != len(assembly['parts']):
             raise ValueError('Out-of-order reply chunk.')
-        size = len(data.encode('utf-8'))
         if self.assembly_bytes + size > MAX_ASSEMBLY:
             raise ValueError('Reply assembly exceeds the byte limit.')
         self.assemblies[ident] = assembly

@@ -110,8 +110,13 @@ class ChunkReplyTests(unittest.TestCase):
 
     def round_trip(self, method, result):
         expected = self.result(result)
-        data = json.dumps(expected, ensure_ascii=False)
-        parts = [data[start:start + 1_000_000] for start in range(0, len(data), 1_000_000)]
+        data = json.dumps(expected, ensure_ascii=False).encode()
+        end, parts = 0, []
+        while end < len(data):
+            start, end = end, min(end + 1_000_000, len(data))
+            while end < len(data) and data[end] & 0xc0 == 0x80:
+                end -= 1
+            parts.append(data[start:end].decode())
 
         def respond(message):
             self.assertEqual(message['method'], method)
@@ -140,6 +145,25 @@ class ChunkReplyTests(unittest.TestCase):
 
     def test_large_unicode_evaluate(self):
         self.round_trip('Runtime.evaluate', {'result': {'type': 'string', 'value': 'é😀' * 600_000}})
+
+    @unittest.skipUnless(shutil.which('node'), 'Node is required')
+    def test_worker_paces_and_round_trips_devanagari_reply(self):
+        root = Path(__file__).resolve().parents[1]
+        run = subprocess.run(['node', 'server/fixtures/extension_large_reply.mjs', 'unicode-paced'],
+                             cwd=root, capture_output=True, timeout=10, stdin=subprocess.DEVNULL)
+        self.assertEqual(run.returncode, 0, run.stderr.decode())
+        messages = json.loads(run.stdout)
+        self.device.epoch = messages[0]['epoch']
+
+        def respond(_message):
+            for message in messages:
+                self.device.handle(message)
+
+        with patch.object(self.transport, 'message', side_effect=respond):
+            reply = self.device.request(dict(type='command', id='reply', method='Runtime.evaluate'))
+        self.assertEqual(reply, dict(type='result', epoch=self.device.epoch, id='reply',
+                                     result={'result': {'type': 'string', 'value': 'अ' * 1_000_000}}))
+        self.assertFalse(self.device.closed)
 
     def clocked_request(self, arrivals, timeout):
         elapsed = 0
@@ -195,6 +219,59 @@ class ChunkReplyTests(unittest.TestCase):
         self.device.handle(chunk(self.device, 'command', 1, 2, '}'))
         self.assertFalse(self.device.closed)
         self.assertEqual(self.request()['result'], {})
+
+    def test_out_of_order_chunks_are_rejected(self):
+        text = json.dumps(self.result({'value': 42}))
+        for seq, data in ((2, text[1:]), (0, ' ')):
+            with self.subTest(seq=seq):
+                def respond(message):
+                    ident = message['id']
+                    self.device.handle(chunk(self.device, ident, 0, 3, text[:1]))
+                    self.device.handle(chunk(self.device, ident, seq, 3, data))
+                    if seq == 0:
+                        self.device.handle(chunk(self.device, ident, 1, 3, text[1:2]))
+                        self.device.handle(chunk(self.device, ident, 2, 3, text[2:]))
+
+                with patch.object(self.transport, 'message', side_effect=respond):
+                    with self.assertRaisesRegex(ValueError, 'Out-of-order reply chunk'):
+                        self.request()
+
+    def test_chunk_after_end_is_dropped_before_waiter_cleanup(self):
+        text = json.dumps(self.result({'value': 42}))
+
+        def respond(message):
+            ident = message['id']
+            self.device.handle(chunk(self.device, ident, 0, 2, text[:1]))
+            self.device.cancel_grant(ident)
+            # Device.request only removes the waiter after this callback returns.
+            self.device.handle(chunk(self.device, ident, 1, 2, text[1:]))
+
+        with patch.object(self.transport, 'message', side_effect=respond):
+            with self.assertRaisesRegex(browser.BrowserError, 'grant ended'):
+                self.request()
+        self.assertFalse(self.device.closed)
+        self.transport.device = self.device
+        self.assertEqual(self.device.request(dict(type='command', id='next'))['result'], {})
+
+    def test_devanagari_reply_over_assembly_cap_is_rejected(self):
+        value = 'अ' * 23_000_000
+        result = self.result({'result': {'type': 'string', 'value': value}})
+        prefix, _, suffix = json.dumps(result, ensure_ascii=False).partition(value)
+        chars_per_chunk = (1_000_000 - len(prefix)) // 3
+        parts = [value[start:start + chars_per_chunk]
+                 for start in range(0, len(value), chars_per_chunk)]
+        parts[0] = prefix + parts[0]
+        parts[-1] += suffix
+
+        def respond(message):
+            for seq, part in enumerate(parts):
+                self.device.handle(chunk(self.device, message['id'], seq, len(parts), part))
+
+        # Allow the extra chunks here so the independent assembly cap decides.
+        with (patch.object(mac, 'MAX_CHUNKS', len(parts)),
+              patch.object(self.transport, 'message', side_effect=respond)):
+            with self.assertRaisesRegex(ValueError, 'Reply assembly exceeds the byte limit'):
+                self.request()
 
     def test_partial_assembly_byte_cap_applies_across_waiters(self):
         def respond(message):
@@ -1084,7 +1161,8 @@ console.log(JSON.stringify([...ALLOWED].sort()));'''
 
     def test_extension_large_reply(self):
         root = Path(__file__).resolve().parents[1]
-        for case in ('paced', 'event', 'draining', 'stuck', 'too-large', 'legacy', 'surrogate', 'ended'):
+        for case in ('paced', 'event', 'draining', 'stuck', 'too-large', 'too-large-devanagari',
+                     'too-large-emoji', 'legacy', 'surrogate', 'single-unicode', 'ended'):
             with self.subTest(case=case):
                 run = subprocess.run(['node', 'server/fixtures/extension_large_reply.mjs', case], cwd=root,
                                      capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
@@ -1174,7 +1252,8 @@ class WebSocketAuthTests(unittest.TestCase):
     def test_malformed_chunks_close_websocket(self):
         from test_browser_cdp import masked
 
-        for case in ('sequence', 'size', 'total', 'changed-total', 'boolean', 'final-id', 'final-epoch', 'final-type'):
+        for case in ('sequence', 'size', 'utf8-size', 'total', 'changed-total', 'boolean',
+                     'final-id', 'final-epoch', 'final-type'):
             with self.subTest(case=case):
                 _, ready, sock = self.websocket(self.pair['token'])
                 device = self.broker.connected()
@@ -1199,6 +1278,7 @@ class WebSocketAuthTests(unittest.TestCase):
                         self.assertTrue(sent.wait(1))
                         first = chunk(device, 'command', 0, 2, '{')
                         changes = {'sequence': {'seq': 1}, 'size': {'data': 'A' * 1_000_001},
+                                   'utf8-size': {'data': 'अ' * 333_334},
                                    'total': {'total': 69}, 'boolean': {'seq': False}}
                         if case in changes:
                             messages = [dict(first, **changes[case])]
@@ -1210,7 +1290,8 @@ class WebSocketAuthTests(unittest.TestCase):
                             inner[field] = 'unexpected'
                             messages = [first, chunk(device, 'command', 1, 2, json.dumps(inner)[1:])]
                         try:
-                            sock.sendall(b''.join(masked(1, json.dumps(message).encode()) for message in messages))
+                            sock.sendall(b''.join(masked(1, json.dumps(message, ensure_ascii=False).encode())
+                                                  for message in messages))
                             while sock.recv(4096):
                                 pass
                         except ConnectionResetError:

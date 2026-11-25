@@ -1,6 +1,7 @@
 import {command, request, refuse, object} from './policy.mjs';
 import {searchTarget} from './search.mjs';
 
+// These limits apply to the UTF-8 bytes of the reply text.
 const CHUNK = 1_000_000;
 const MAX_REPLY = 64 * 1024 * 1024;
 let socket = null, epoch = null, pending = null, grant = null;
@@ -21,23 +22,50 @@ async function reply(id, result) {
     connected && epoch === replyEpoch && grant === g && Date.now() < g.expires;
   if (!active()) return;
   const text = JSON.stringify({type: 'result', id, epoch: replyEpoch, result});
-  if (!chunks || text.length <= CHUNK) {
+  if (!chunks) {
     ws.send(text);
-    return;
-  }
-  if (text.length > MAX_REPLY) {
-    const size = Math.ceil(text.length / (1024 * 1024));
-    error(id, {code: 'TOO_LARGE', message: `Reply is ${size} MB; the limit is 64 MB. Capture a smaller area (clip) or use JPEG.`});
     return;
   }
 
   const boundaries = [0];
-  while (boundaries.at(-1) < text.length) {
-    let end = Math.min(boundaries.at(-1) + CHUNK, text.length);
-    const last = text.charCodeAt(end - 1);
-    if (last >= 0xd800 && last <= 0xdbff) end--;
-    boundaries.push(end);
+  let bytes = text.length;
+  if (!/[^\x00-\x7f]/.test(text)) {
+    for (let end = CHUNK; end < text.length; end += CHUNK) boundaries.push(end);
+  } else {
+    bytes = 0;
+    let chunkBytes = 0;
+    for (let i = 0; i < text.length;) {
+      const code = text.charCodeAt(i);
+      let width = 1, units = 1;
+      if (code >= 0x800) {
+        width = 3;
+        if (code >= 0xd800 && code <= 0xdbff) {
+          const next = text.charCodeAt(i + 1);
+          if (next >= 0xdc00 && next <= 0xdfff) { width = 4; units = 2; }
+        }
+      } else if (code >= 0x80) {
+        width = 2;
+      }
+      if (chunkBytes + width > CHUNK) {
+        boundaries.push(i);
+        chunkBytes = 0;
+      }
+      chunkBytes += width;
+      bytes += width;
+      i += units;
+    }
   }
+  if (bytes <= CHUNK) {
+    ws.send(text);
+    return;
+  }
+  if (bytes > MAX_REPLY) {
+    const size = Math.ceil(bytes / (1024 * 1024));
+    error(id, {code: 'TOO_LARGE', message: `Reply is ${size} MB; the limit is 64 MB. Capture a smaller area (clip) or use JPEG.`});
+    return;
+  }
+
+  boundaries.push(text.length);
   const total = boundaries.length - 1;
   for (let seq = 0; seq < total; seq++) {
     while (active() && ws.bufferedAmount >= CHUNK)
