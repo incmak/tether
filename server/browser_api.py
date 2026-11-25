@@ -7,11 +7,13 @@ import time
 from urllib.parse import parse_qs, urlsplit
 
 import browser
+import browser_bookmarks
 import browser_cdp
 import browser_live
 import agent_browser_setup
 import extension_zip
 import mac_browser
+import signed_access
 
 PREFIX = '/mobile/api/browser/'
 FRAME_INTERVAL = 1 / 30  # at most 30 frames a second per viewer
@@ -68,7 +70,8 @@ def ack(sid, seq):
         flow.ack(seq)
     return {'ok': True}
 POST_NAMES = {'ack', 'new', 'close', 'show', 'navigate', 'history', 'input', 'device', 'agents', 'agents/setup', 'ask/dismiss',
-              'signed/allow', 'signed/deny', 'signed/end', 'signed/dismiss', 'window-view'}
+              'signed/allow', 'signed/policy', 'signed/deny', 'signed/end', 'signed/dismiss', 'window-view',
+              'bookmarks/add', 'bookmarks/remove'}
 
 
 def handles(path):
@@ -77,8 +80,8 @@ def handles(path):
 
 def get(handler, the_browser=None, the_proxy=None, the_setup=None, signed_browser=None):
     parts = urlsplit(handler.path)
-    query = parse_qs(parts.query)
     name = parts.path[len(PREFIX):]
+    query = parse_qs(parts.query, keep_blank_values=name == 'bookmarks')
     browser_id = _canonical(query.get('browser', ['test'])[0])
     if name == 'extension/devices':
         handler.respond(200, mac_browser.BROKER.rows())
@@ -89,6 +92,9 @@ def get(handler, the_browser=None, the_proxy=None, the_setup=None, signed_browse
     if name == 'signed/access':
         browser_id = 'signed'
     try:
+        if name == 'bookmarks':
+            handler.respond(200, _tag({'bookmarks': browser_bookmarks.list(browser_id)}, browser_id))
+            return
         the_browser = _select(browser_id, the_browser, signed_browser)
         _user_only(browser_id, name)
         if name == 'signed/access':
@@ -102,6 +108,7 @@ def get(handler, the_browser=None, the_proxy=None, the_setup=None, signed_browse
             target = query.get('tab', [''])[0]
             if target and target in the_browser.tabs:  # the live view has no stream, so its poll asks for these
                 tab = the_browser.tabs[target]
+                the_browser.mark_watched(tab)
                 size = re.fullmatch(r'([1-9][0-9]{0,3})x([1-9][0-9]{0,3})', query.get('live_size', [''])[0])
                 if size and browser_id != 'chrome':
                     the_browser.refresh(tab, live_size=(int(size[1]), int(size[2])))
@@ -137,7 +144,8 @@ def get(handler, the_browser=None, the_proxy=None, the_setup=None, signed_browse
 def post(handler, the_browser=None, the_proxy=None, the_setup=None, signed_browser=None):
     the_setup = the_setup or agent_browser_setup
     name = handler.path.split('?', 1)[0][len(PREFIX):]
-    browser_id = _canonical(parse_qs(urlsplit(handler.path).query).get('browser', ['test'])[0])
+    query = parse_qs(urlsplit(handler.path).query, keep_blank_values=name in ('bookmarks/add', 'bookmarks/remove'))
+    browser_id = _canonical(query.get('browser', ['test'])[0])
     if name not in POST_NAMES and name not in ('extension/pair', 'extension/revoke'):
         handler.respond(404, _tag({'error': 'Not found'}, browser_id))
         return
@@ -156,6 +164,14 @@ def post(handler, the_browser=None, the_proxy=None, the_setup=None, signed_brows
             return
         if name.startswith('signed/'):
             browser_id = 'signed'
+        if name == 'bookmarks/add':
+            rows = browser_bookmarks.add(browser_id, body.get('url'), body.get('title'))
+            handler.respond(200, _tag({'bookmarks': rows}, browser_id))
+            return
+        if name == 'bookmarks/remove':
+            rows = browser_bookmarks.remove(browser_id, body.get('id'))
+            handler.respond(200, _tag({'bookmarks': rows}, browser_id))
+            return
         the_browser = _select(browser_id, the_browser, signed_browser)
         _user_only(browser_id, name)
         tab = body.get('tab')
@@ -167,6 +183,16 @@ def post(handler, the_browser=None, the_proxy=None, the_setup=None, signed_brows
             access = proxy.signed_access if proxy else _signed_access(the_browser, the_proxy)
             if name == 'signed/allow':
                 result = access.allow(body.get('id'), body.get('minutes'))
+            elif name == 'signed/policy':
+                auto = body.get('auto')
+                if type(auto) is not bool:
+                    raise ValueError('Choose on or off for signed-in browser access.')
+                try:
+                    signed_access.set_agents_allowed(auto)
+                except OSError:
+                    raise browser.BrowserError('Could not save signed-in browser access settings.') from None
+                the_browser._bump()
+                result = access.state()
             elif name == 'signed/deny':
                 result = access.deny(body.get('id'))
             elif name == 'signed/dismiss':

@@ -523,7 +523,7 @@ class MacAccess(signed.Access):
                 if duration > slot['row']['minutes']:
                     raise ValueError('Allow may shorten the requested time only.')
                 if self.grants or self.reserved:
-                    raise ValueError('End the active Chrome grant first.')
+                    raise signed.GrantLimit('End the active Chrome grant first.')
                 device = slot['binding']
                 if device.closed:
                     raise browser.BrowserError('Your Chrome disconnected. Ask again.')
@@ -536,14 +536,14 @@ class MacAccess(signed.Access):
                         or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', reply['target'])):
                     raise browser.BrowserError('Invalid Chrome tab.')
                 target = reply['target']  # Playwright requires root target id == the main frame id.
-                grant = signed.Grant(slot['row'], target, duration, self.clock())
-                grant.row['browser'] = 'chrome'
+                grant = signed.Grant(slot['row'], target, duration, self.clock(), auto=slot['auto'])
                 grant.row['expires'] = min(grant.row['expires'], reply.get('expires', 0) / 1000)
                 grant.device, grant.tab_id = device, reply['tab']
-                with self.lock:
+                with self.lock, self.history.lock:
                     if (slot['event'].is_set() or time.monotonic() >= slot['deadline'] or self.stopped or device.closed
                             or ident in device.ended or grant.row['expires'] <= self.clock()):
                         raise browser.BrowserError('That Chrome request has ended.')
+                    self._check_hold(slot)
                     session = secrets.token_urlsafe(12)
                     tab = browser.Tab(target, session, mode='agent')
                     tab.url = slot['row']['url'] or tab.url
@@ -556,15 +556,13 @@ class MacAccess(signed.Access):
                     grant.timer = threading.Timer(max(0, grant.row['expires'] - self.clock()), self.end, args=(ident, 'expired'))
                     grant.timer.daemon = True
                     grant.timer.start()
-                    self._watch(grant, slot['identity'])
-                    self._answer(slot, {'ok': True, 'browser': 'chrome', 'cdp': self.url(grant), 'tab': target,
-                                        'expires': grant.row['expires']})
+                    self._grant_answer(slot, grant)
                 self.browser.refresh(tab)  # a CDP round trip: never under the access lock
             except Exception:
                 if not device.closed:
                     device.send({'type': 'end', 'id': ident})
                 with self.lock:
-                    if not slot['event'].is_set():
+                    if not slot['auto'] and not slot['event'].is_set():
                         self._answer(slot, {'ok': False, 'reason': 'denied'})
                 raise
             finally:
@@ -634,17 +632,46 @@ class RoutedAccess:
             access.request_lock, access.request_peers = request_lock, [server, mac]
         mac.history = server.history
 
-    def ask(self, reason, pane, duration=15, url=None, browser='auto'):
+    def ask(self, reason, pane, duration=15, url=None, browser='auto', verified=False):
         browser = 'chrome' if browser == 'mac' else browser
         if browser not in ('auto', 'chrome', 'server'):
             raise ValueError('Choose auto, chrome, or server.')
         access = self.mac if browser == 'chrome' or browser == 'auto' and self.mac.broker.connected() else self.server
+        if verified and self.server.auto():
+            with self.allow_lock:
+                identity = self.server._identity(pane)
+                key = signed.process_key(pane, identity)
+                if key is not None and not self.server.history.is_held(key):
+                    # Serialize lookup and creation so simultaneous asks from one chat share the grant.
+                    for owner in (self.server, self.mac):
+                        with owner.lock:
+                            for grant in owner.grants.values():
+                                if (grant.row['pane'] == pane and owner.valid(grant) and grant.identity is not None
+                                        and signed.same_chat(grant.identity, identity)):
+                                    return owner.grant_result(grant)
+                    slot = access._request_slot(reason, pane, duration, url, auto=True, identity=identity)
+                    return self._allow_automatically(access, slot)
         return access.ask(reason, pane, duration, url)
+
+    def _allow_automatically(self, access, slot):
+        try:
+            if not access._queue_request(slot):
+                raise browser.BrowserError('Signed access stopped.')
+            self.allow(slot['row']['id'])
+        except Exception as exc:
+            message = ' '.join(str(exc).split())
+            # Browser and OS errors can contain local paths or capability URLs.
+            if not message or re.search(r'[/\\]|[A-Za-z0-9_-]{22,}', message):
+                message = 'The signed-in browser could not open a tab.'
+            reason = 'busy' if isinstance(exc, signed.GrantLimit) else 'failed'
+            with access.lock:
+                access._answer(slot, {'ok': False, 'reason': reason, 'error': message[:180]})
+        return slot['result']
 
     def state(self):
         states = [self.server.state(), self.mac.state()]
         return {**{key: [row for state in states for row in state[key]] for key in ('requests', 'grants')},
-                'ended': self.server.history.state()}
+                'ended': self.server.history.state(), 'auto': states[0]['auto']}
 
     def dismiss(self, ident):
         self.mac.dismiss(ident)  # MacBrowser._bump also wakes the server panel stream.
@@ -659,7 +686,7 @@ class RoutedAccess:
     def allow(self, ident, duration=None):
         with self.allow_lock:
             if len(self.server.grants) + len(self.mac.grants) >= 2:
-                raise ValueError('End a grant first (the limit is 2).')
+                raise signed.GrantLimit('End a grant first (the limit is 2).')
             self._owner(ident).allow(ident, duration)
         return self.state()
 

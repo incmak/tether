@@ -1,6 +1,8 @@
 """Private tmux servers and checks for their test lifecycle."""
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import ast
+import contextlib
+from collections import defaultdict
 from io import StringIO
 import json
 import os
@@ -50,6 +52,12 @@ class PrivateTmux:
     def tmux(self, *args):
         return self.run([paths.TMUX, *args], capture_output=True, text=True, timeout=5, stdin=subprocess.DEVNULL)
 
+    def kill_server(self):
+        processes = _snapshot_descendants(self.pid)
+        result = self.tmux('kill-server')
+        _wait_for_processes(processes)
+        return result
+
 
 def private_tmux(case, prefix, env=None):
     # Short paths fit in a Unix socket address.
@@ -71,6 +79,7 @@ DETACH = ("import subprocess, sys\n"
           "subprocess.Popen(sys.argv[1:], start_new_session=True)\n")
 START_TIMEOUT = 10
 TERM_TIMEOUT = 5
+PROCESS_EXIT_TIMEOUT = 5
 
 
 def _close_watch_in_child():
@@ -136,10 +145,86 @@ def _stop_tmux_child(child):
         child.wait()
 
 
+# Errors that show a process is gone. Any other error reaches the watcher, which then keeps the folder.
+_GONE = (FileNotFoundError, ProcessLookupError)
+
+
+def _descendants(parents, root):
+    children = defaultdict(list)
+    for pid, ppid in parents.items():
+        children[ppid].append(pid)
+    pending, found = list(children[root]), []
+    while pending:
+        pid = pending.pop()
+        found.append(pid)
+        pending.extend(children[pid])
+    return found
+
+
+def _snapshot_descendants(parent_pid):
+    """(pid, start time) of every process under parent_pid."""
+    if procinfo.DARWIN:
+        # ps gives the parent and sysctl the start time, in two reads. A fresh table: the cached one can miss a new
+        # pane. Raw ps rows: table() drops a row whose name lookup fails, which would cut the chain to a live worker.
+        # A pid reused between the reads only makes the wait time out loudly; no pane is missed.
+        parents = {pid: row['ppid'] for pid, row in procinfo._darwin_snapshot(fresh=True).items()}
+        found = []
+        for pid in _descendants(parents, parent_pid):
+            try:
+                found.append((pid, procinfo.start_ticks(pid)))
+            except _GONE:
+                pass
+        return found
+    # One stat read per process gives its parent and start time together. No ps: it can time out under load.
+    stats = {}
+    for pid in procinfo.pids():
+        try:
+            fields = procinfo.stat_fields(pid)
+        except _GONE:
+            continue
+        stats[pid] = int(fields[1]), fields[19]
+    return [(pid, stats[pid][1]) for pid in _descendants({pid: ppid for pid, (ppid, _) in stats.items()}, parent_pid)]
+
+
+def _process_is_alive(pid, ticks):
+    try:
+        return (procinfo.stat_exists(pid) and procinfo.stat_fields(pid)[0] != 'Z'
+                and procinfo.start_ticks(pid) == ticks)
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+
+
+def _wait_for_processes(processes):
+    deadline = time.monotonic() + PROCESS_EXIT_TIMEOUT
+    while alive := [(pid, ticks) for pid, ticks in processes if _process_is_alive(pid, ticks)]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            pids = ', '.join(str(pid) for pid, _ in sorted(alive))
+            raise RuntimeError(f'tmux descendants still alive after server exit: {pids}')
+        processes = alive
+        time.sleep(min(.02, remaining))
+
+
 def watch(requests, replies):
     folders = {}
     children = {}
-    errors = (OSError, RuntimeError, ValueError, TypeError, KeyError)
+    descendants = {}
+    errors = (OSError, RuntimeError, ValueError, TypeError, KeyError, subprocess.SubprocessError)
+
+    def snapshot(folder):
+        # Take it while the server lives: its panes reparent when it exits.
+        if folder in children:
+            try:
+                descendants[folder] = _snapshot_descendants(children[folder].pid)
+            except Exception:
+                descendants[folder] = None  # unknown processes: keep the folder
+                raise
+
+    def wait(folder):
+        processes = descendants.get(folder, ())
+        if processes is None:
+            raise RuntimeError(f'could not list the tmux processes, kept {folder}')
+        _wait_for_processes(processes)
 
     def reap(folder):
         if folder in children:
@@ -156,6 +241,7 @@ def watch(requests, replies):
                 raise RuntimeError(f'folder was replaced: {folder}')
             shutil.rmtree(folder)
         del folders[folder]
+        descendants.pop(folder, None)
 
     try:
         for line in requests:
@@ -165,7 +251,11 @@ def watch(requests, replies):
                 if op == 'stop':
                     if folder not in folders:
                         raise RuntimeError('folder is not owned')
-                    reap(folder)
+                    try:
+                        snapshot(folder)
+                    finally:
+                        reap(folder)
+                    wait(folder)
                     remove(folder)
                     reply = {'ok': True}
                 elif op in ('own', 'start'):
@@ -206,12 +296,17 @@ def watch(requests, replies):
     finally:
         for folder in list(children):
             try:
+                snapshot(folder)
+            except Exception as exc:
+                print(f'Private tmux watcher could not list the processes in {folder}: {exc}', file=sys.stderr)
+            try:
                 reap(folder)
             except Exception as exc:
                 print(f'Private tmux watcher could not stop the child in {folder}: {exc}', file=sys.stderr)
         for folder in list(folders):
             if folder not in children:
                 try:
+                    wait(folder)
                     remove(folder)
                 except Exception as exc:
                     print(f'Private tmux watcher could not remove {folder}: {exc}', file=sys.stderr)
@@ -333,6 +428,182 @@ class IsolationTests(unittest.TestCase):
         self.assertTrue(case.doCleanups())
         self.assert_stopped([(target.folder, target.pid)])
 
+    def start_test_pane(self, private, ignore_shutdown=False):
+        """A pane that, on SIGHUP or SIGTERM, waits for a release file, writes 'late' and exits."""
+        home = Path(private.env['HOME'])
+        code = """\
+import signal, sys, time
+from pathlib import Path
+
+def finish(*_):
+    while not Path('release').exists():
+        time.sleep(.01)
+    Path('late').write_text('done')
+    sys.exit(0)
+
+handler = signal.SIG_IGN if sys.argv[1] == 'ignore' else finish
+signal.signal(signal.SIGHUP, handler)
+signal.signal(signal.SIGTERM, handler)
+Path('ready').touch()
+while True:
+    signal.pause()
+"""
+        private.tmux('new-session', '-d', '-s', 'cleanup', '-c', str(home), sys.executable, '-c',
+                     code, 'ignore' if ignore_shutdown else 'finish').check_returncode()
+        result = private.tmux('display-message', '-p', '-t', 'cleanup', '#{pane_pid}')
+        result.check_returncode()
+        pid = int(result.stdout)
+        ticks = procinfo.start_ticks(pid)
+        self.addCleanup(self.kill_test_pane, pid, ticks)
+        deadline = time.monotonic() + 5
+        while not (home / 'ready').is_file():
+            self.assertLess(time.monotonic(), deadline, 'The pane did not install its signal handlers.')
+            time.sleep(.02)
+        return pid, ticks
+
+    def kill_test_pane(self, pid, ticks):
+        try:
+            if procinfo.start_ticks(pid) == ticks:
+                os.kill(pid, signal.SIGKILL)
+        except (FileNotFoundError, ProcessLookupError):
+            pass
+
+    def assert_pane_exited(self, pid, ticks):
+        self.assertFalse(_process_is_alive(pid, ticks), f'Pane {pid} is still alive.')
+
+    def gated_wait(self, pane, home, folder=None):
+        """Wrap the wait: the gated pane must be in the snapshot and alive, and the folder kept, until the release."""
+        calls = []
+        real_wait = _wait_for_processes
+
+        def wait(processes):
+            if pane and pane[0] in processes:
+                calls.append(processes)
+                self.assertTrue(_process_is_alive(*pane[0]), 'The pane exited before its release.')
+                if folder is not None:
+                    self.assertTrue(os.path.isdir(folder), 'The folder was removed before the pane exited.')
+                (home / 'release').touch()
+            real_wait(processes)
+
+        self.enterContext(mock.patch(f'{__name__}._wait_for_processes', side_effect=wait))
+        return calls
+
+    def run_watch_with_gated_pane(self, stop):
+        home, folder = self.folder(), self.folder()
+        private = PrivateTmux(folder, {'HOME': str(home)})
+        pane = []
+        calls = self.gated_wait(pane, home, folder)
+
+        def requests():
+            yield json.dumps({'op': 'start', 'folder': private.folder, 'env': private.env}) + '\n'
+            pane.append(self.start_test_pane(private))
+            if stop:
+                yield json.dumps({'op': 'stop', 'folder': private.folder}) + '\n'
+
+        replies = StringIO()
+        watch(requests(), replies)
+        self.assertTrue(all(json.loads(line)['ok'] for line in replies.getvalue().splitlines()), replies.getvalue())
+        self.assertEqual(len(calls), 1, 'The watcher must wait for the pane before it removes the folder.')
+        self.assert_pane_exited(*pane[0])
+        self.assertEqual((home / 'late').read_text(), 'done')
+        self.assertFalse(folder.exists())
+
+    @unittest.skipUnless(shutil.which(paths.TMUX), 'tmux is not installed')
+    def test_stop_waits_for_pane_exit_before_removing_the_folder(self):
+        self.run_watch_with_gated_pane(stop=True)
+
+    @unittest.skipUnless(shutil.which(paths.TMUX), 'tmux is not installed')
+    def test_runner_exit_waits_for_pane_exit_before_removing_the_folder(self):
+        self.run_watch_with_gated_pane(stop=False)
+
+    @unittest.skipUnless(shutil.which(paths.TMUX), 'tmux is not installed')
+    def test_stop_reports_a_pane_that_refuses_to_exit(self):
+        home = self.folder()
+        # The normal watcher is detached, so start a separate watcher with a short deadline.
+        self.enterContext(mock.patch(f'{__name__}._watch', None))
+        self.enterContext(mock.patch(f'{__name__}.WATCH', IMPORT_WATCH +
+                                     'w.PROCESS_EXIT_TIMEOUT = .3\nw.watch(sys.stdin, sys.stdout)\n'))
+        case = unittest.TestCase()
+        private = private_tmux(case, 'ttz', {'HOME': str(home)})
+        self.addCleanup(_close_watch_in_child)
+        self.addCleanup(self.stop_if_left, private)
+        pid, _ = self.start_test_pane(private, ignore_shutdown=True)
+        for _ in range(2):
+            with self.assertRaisesRegex(RuntimeError, rf'\b{pid}\b'):
+                watch_request('stop', private.folder)
+            self.assertTrue(Path(private.folder).is_dir())
+
+    @unittest.skipUnless(shutil.which(paths.TMUX), 'tmux is not installed')
+    def test_kill_server_waits_for_pane_exit(self):
+        home = self.folder()
+        private = private_tmux(self, 'ttz', {'HOME': str(home)})
+        pane = [self.start_test_pane(private)]
+        calls = self.gated_wait(pane, home)
+        private.kill_server().check_returncode()
+        self.assertEqual(len(calls), 1, 'kill_server must wait for the pane.')
+        self.assert_pane_exited(*pane[0])
+        self.assertEqual((home / 'late').read_text(), 'done')
+
+    def test_snapshot_follows_parent_links_and_skips_a_vanished_process(self):
+        stat = {10: ['S', '1'], 11: ['S', '10'], 12: ['S', '11'], 13: ['S', '10'], 20: ['S', '1']}
+        stat = {pid: fields + ['0'] * 17 + [f't{pid}'] for pid, fields in stat.items()}
+
+        def fields(pid):
+            if pid == 13:
+                raise FileNotFoundError(pid)  # exited between the pid list and its stat read
+            return stat[pid]
+
+        with mock.patch.object(procinfo, 'DARWIN', False), mock.patch.object(procinfo, 'pids', return_value=[*stat]), \
+                mock.patch.object(procinfo, 'stat_fields', side_effect=fields):
+            self.assertEqual(sorted(_snapshot_descendants(10)), [(11, 't11'), (12, 't12')])
+
+    def test_darwin_snapshot_follows_raw_parent_links_and_skips_only_a_gone_process(self):
+        rows = {pid: {'ppid': ppid} for pid, ppid in ((10, 1), (11, 10), (12, 11), (13, 10), (20, 1))}
+
+        def ticks(pid):
+            if pid == 13:
+                raise ProcessLookupError(pid)
+            return f't{pid}'
+
+        with mock.patch.object(procinfo, 'DARWIN', True), \
+                mock.patch.object(procinfo, '_darwin_snapshot', return_value=rows) as read, \
+                mock.patch.object(procinfo, 'start_ticks', side_effect=ticks):
+            self.assertEqual(sorted(_snapshot_descendants(10)), [(11, 't11'), (12, 't12')])
+        read.assert_called_once_with(fresh=True)
+        with mock.patch.object(procinfo, 'DARWIN', True), \
+                mock.patch.object(procinfo, '_darwin_snapshot', return_value=rows), \
+                mock.patch.object(procinfo, 'start_ticks', side_effect=PermissionError(1, 'denied')), \
+                self.assertRaises(PermissionError):
+            _snapshot_descendants(10)
+
+    @unittest.skipUnless(shutil.which(paths.TMUX), 'tmux is not installed')
+    def test_a_failed_snapshot_reaps_the_server_and_keeps_the_folder(self):
+        for stop in (True, False):
+            with self.subTest(stop=stop):
+                folder = self.folder()
+                private = PrivateTmux(folder)
+                requests = [json.dumps({'op': 'start', 'folder': private.folder, 'env': private.env})]
+                if stop:
+                    requests.append(json.dumps({'op': 'stop', 'folder': private.folder}))
+                replies, log = StringIO(), StringIO()
+                with mock.patch(f'{__name__}._snapshot_descendants', side_effect=OSError('no process table')), \
+                        contextlib.redirect_stderr(log):
+                    watch((line + '\n' for line in requests), replies)
+                started, *stopped = [json.loads(line) for line in replies.getvalue().splitlines()]
+                self.assertEqual(stopped, [{'ok': False, 'error': 'no process table'}] if stop else [])
+                self.assertFalse(procinfo.stat_exists(started['pid']), 'The watcher must reap its server.')
+                self.assertTrue(folder.is_dir(), 'The folder must stay while its processes are unknown.')
+                self.assertIn(f'could not list the tmux processes, kept {folder}', log.getvalue())
+
+    def test_wait_treats_a_reused_pid_or_zombie_as_gone(self):
+        for state, ticks in (('S', '200'), ('Z', '100')):
+            with self.subTest(state=state, ticks=ticks), \
+                    mock.patch.object(procinfo, 'stat_exists', return_value=True), \
+                    mock.patch.object(procinfo, 'stat_fields', return_value=[state] + ['0'] * 18 + [ticks]), \
+                    mock.patch.object(procinfo, 'start_ticks', return_value=ticks), \
+                    mock.patch.object(time, 'sleep', side_effect=AssertionError('Process is gone.')):
+                _wait_for_processes([(123, '100')])
+
     def test_stop_escalates_when_sigterm_is_ignored(self):
         child = subprocess.Popen([sys.executable, '-c',
                                   'import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); '
@@ -347,7 +618,8 @@ class IsolationTests(unittest.TestCase):
                                     for op in ('start', 'stop')))
         replies = StringIO()
         with mock.patch(f'{__name__}.subprocess.Popen', return_value=child), \
-                mock.patch(f'{__name__}._wait_for_server'), mock.patch(f'{__name__}.TERM_TIMEOUT', .05):
+                mock.patch(f'{__name__}._wait_for_server'), mock.patch(f'{__name__}.TERM_TIMEOUT', .05), \
+                mock.patch.object(procinfo, 'pids', return_value=[]):
             watch(requests, replies)
         self.assertEqual(child.returncode, -signal.SIGKILL)
         self.assertEqual([json.loads(line) for line in replies.getvalue().splitlines()],

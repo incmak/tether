@@ -19,13 +19,15 @@ export interface SignedBrowserRequest {
 export interface SignedBrowserGrant {
   browser: SignedBrowserSource
   id: string; pane: string; agent: string; tab: string; expires: number; reason: string
+  auto?: boolean
 }
 export interface SignedBrowserEnded {
   id: string; pane: string; agent: string; browser: SignedBrowserSource; reason: string; message: string; at: number
 }
-/** GET signed/access and POST signed/allow, signed/deny, signed/end, signed/dismiss. No CDP token is exposed to the panel. */
+/** Signed-in browser panel state. No CDP token is exposed to the panel. */
 export interface SignedBrowserAccess {
   browser: 'signed'; requests: SignedBrowserRequest[]; grants: SignedBrowserGrant[]; ended: SignedBrowserEnded[]
+  auto?: boolean
 }
 /** POST signed/dismiss {id} removes an ended row and returns SignedBrowserAccess. */
 export interface SignedBrowserDismiss { id: string }

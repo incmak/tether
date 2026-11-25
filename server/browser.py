@@ -354,6 +354,7 @@ class Tab:
         self.casting = None  # (max width, max height) while a screencast runs
         self.viewer_sizes = []
         self.last_input = 0.0
+        self.watched = 0.0  # last time Mak's panel showed this tab; the live view never registers viewers
         self.changed = threading.Condition()
         self.healed = 0.0  # when the emulation was last applied again (see Browser.heal)
         self.parked = False  # the tab's window is minimized because nobody watches it
@@ -604,8 +605,12 @@ class Browser:
                     self._apply_preset(tab, tab.preset)
             self.conn.call('Target.activateTarget', {'targetId': tab.target})
             self.conn.call('Page.bringToFront', session=tab.session)
-            tab.last_input = self.clock()
+            tab.last_input = tab.watched = self.clock()
         return {'ok': True}
+
+    def mark_watched(self, tab):
+        """Mak's panel shows this tab now (the live view polls it every 2 s while it is open)."""
+        tab.watched = self.clock()
 
     def tab(self, target):
         tab = self.tabs.get(target)

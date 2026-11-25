@@ -590,6 +590,7 @@ class TmuxMergeRecoveryTests(unittest.TestCase):
 @unittest.skipUnless(shutil.which(paths.TMUX) or os.path.exists(paths.TMUX), 'tmux is not installed')
 class TmuxMergeTests(unittest.TestCase):
     def setUp(self):
+        self.project_home = self.enterContext(tempfile.TemporaryDirectory(prefix='tmgp'))
         self.private = private_tmux(self, 'tmg')
         self.run_tmux = self.private.run
         self.tmux = self.private.tmux
@@ -623,9 +624,7 @@ class TmuxMergeTests(unittest.TestCase):
         self.assertEqual(sorted(layout), ['1', '1', '2'])
 
     def with_projects(self):
-        home = tempfile.mkdtemp(prefix='tmgp')
-        self.addCleanup(shutil.rmtree, home, True)
-        patch = mock.patch.object(paths, 'TETHER', Path(home) / 'tether')
+        patch = mock.patch.object(paths, 'TETHER', Path(self.project_home) / 'tether')
         patch.start()
         self.addCleanup(patch.stop)
         ids = {}

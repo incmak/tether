@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { AppWindow, Copy, Download } from 'lucide-react'
 import { ApiError, errorText, reach } from './api'
 import type { Api, BrowserExtensionDevice, BrowserExtensionDevices, BrowserExtensionPair } from './api'
+import { useSignedAuto } from './AgentBrowser'
 
 function ago(seconds: number, now: number) {
   const minutes = Math.round((now / 1000 - seconds) / 60)
@@ -47,7 +48,7 @@ async function saveExtension() {
 }
 
 /** Your Chrome with no open tab: pair the Tether extension (server/mac_browser.py) and manage paired browsers.
- * Tabs appear here only after Mak taps Allow on an agent's request. */
+ * Agent tabs appear here when an agent gets access (at once, or after Mak taps Allow: Settings › Shared browser). */
 export function MacPairing({ api, connected }: { api: Api; connected: boolean }) {
   const [devices, setDevices] = useState<BrowserExtensionDevice[] | null>(null)
   const [code, setCode] = useState<BrowserExtensionPair | null>(null)
@@ -58,6 +59,7 @@ export function MacPairing({ api, connected }: { api: Api; connected: boolean })
   const [downloading, setDownloading] = useState(false)
   const [saved, setSaved] = useState('')
   const [downloadError, setDownloadError] = useState('')
+  const auto = useSignedAuto(api) ?? true
 
   useEffect(() => {
     let stop = false
@@ -105,8 +107,8 @@ export function MacPairing({ api, connected }: { api: Api; connected: boolean })
     <AppWindow size={22} aria-hidden="true" className="mac-pairing-icon" />
     <h3>{connected ? 'Your Chrome is connected' : 'Connect your Chrome'}</h3>
     <p className="mac-pairing-lead">{connected
-      ? 'No tab is open. When an agent asks for your browser, tap Allow. Its tab shows here.'
-      : 'Agents can then use a tab in your own Chrome, after you tap Allow.'}</p>
+      ? auto ? 'No tab is open. When an agent uses your browser, its tab shows here.' : 'No tab is open. When an agent asks for your browser, tap Allow. Its tab shows here.'
+      : auto ? 'Agents can then use a tab in your own Chrome. They ask in chat before a risky step.' : 'Agents can then use a tab in your own Chrome, after you tap Allow.'}</p>
 
     {!connected && <ol className="mac-pairing-steps">
       <li>On your computer, download the Tether extension.{downloadLink}</li>

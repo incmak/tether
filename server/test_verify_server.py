@@ -216,6 +216,9 @@ BLOCKED_REQUESTS = [
     ('GET', '/terminal/live/socket', {'Upgrade': 'websocket', 'Connection': 'Upgrade'}),
     ('GET', '/mobile/api/live/agent', {}),
     ('PATCH', '/mobile/api/live/offer', {}),
+    ('GET', '/mobile/api/browser/bookmarks', {}),
+    ('POST', '/mobile/api/browser/bookmarks/add', {}),
+    ('POST', '/mobile/api/browser/bookmarks/remove', {}),
     ('GET', '/mobile/api/browser/extension/connect', {'Connection': 'Upgrade', 'Upgrade': 'websocket'}),
     ('POST', '/mobile/api/browser/extension/exchange', {}),
     ('GET', '/mobile/api/browser/live', {'Connection': 'Upgrade', 'Upgrade': 'websocket'}),
@@ -257,8 +260,10 @@ COMPUTED_ROUTES = {
     # Action names come from the caller's finite set of choices.
     ('AccountLogin.tsx', 'POST', 'api', '`login/${action}`'): ('login/start', 'login/code', 'login/cancel'),
     ('AgentBrowser.tsx', 'POST', 'api', '`browser/signed/${path}`'): (
-        'browser/signed/allow', 'browser/signed/deny', 'browser/signed/end', 'browser/signed/dismiss'),
+        'browser/signed/allow', 'browser/signed/deny', 'browser/signed/end', 'browser/signed/dismiss',
+        'browser/signed/policy'),
     ('AgentBrowser.tsx', 'POST', 'api', 'path'): ('browser/agents', 'browser/ask/dismiss', 'browser/agents/setup'),
+    ('BrowserPanel.tsx', 'POST', 'act', '`browser/bookmarks/${action}`'): ('browser/bookmarks/add', 'browser/bookmarks/remove'),
     ('ExplorerPhone.tsx', 'POST', 'write', '`files/${mode}`'): ('files/copy', 'files/move'),
     ('Project.tsx', 'POST', 'api', '`projects/${path}`'): (
         'projects/note', 'projects/note-delete', 'projects/pin', 'projects/unpin',

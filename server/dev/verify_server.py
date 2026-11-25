@@ -93,7 +93,7 @@ REFUSED = {
         # Optional panels and detail views have no fixture contract. The verify
         # browser relay answers the chat stream with 204 so the UI polls instead.
         'activity', 'activity/export', 'attention', 'attention/log', 'audit', 'auto-merge', 'autonomy', 'autonomy/setup',
-        'claude-advisor', 'codex-level', 'codex-provider', 'commit-gate', 'groups/context',
+        'browser/bookmarks', 'claude-advisor', 'codex-level', 'codex-provider', 'commit-gate', 'groups/context',
         'history', 'history/hidden', 'live', 'projects/advisor-entry', 'projects/advisor-log',
         'projects/note', 'search', 'side-shells', 'stream', 'subagent', 'subagent-task', 'subagent-tool', 'tool',
         'task-tree/close-plan',
@@ -119,7 +119,7 @@ REFUSED = {
         'browser/ask/dismiss', 'browser/close', 'browser/device', 'browser/extension/pair',
         'browser/extension/revoke', 'browser/history', 'browser/input', 'browser/navigate',
         'browser/new', 'browser/show', 'browser/signed/allow', 'browser/signed/deny',
-        'browser/signed/dismiss', 'browser/signed/end', 'browser/window-view',
+        'browser/signed/dismiss', 'browser/signed/end', 'browser/signed/policy', 'browser/window-view',
         'dev-preview', 'dev-preview/release', 'dev-preview/stop', 'live/offer', 'login/cancel',
         'login/code', 'login/start', 'preview', 'push/level', 'push/settings', 'push/subscribe',
         'push/test', 'push/unsubscribe', 'transcribe', 'tts', 'update', 'upkeep/ops', 'upkeep/prune',
@@ -132,7 +132,8 @@ REFUSED = {
         'share/upload', 'share/uploads', 'share/uploads/{}', 'share/uploads/{}/cancel', 'upload',
         # These change state outside the small set of fixture writes in ALLOWED.
         'activity', 'activity/publish', 'auto-merge', 'autonomy', 'autonomy/decisions', 'autonomy/lessons',
-        'autonomy/review', 'autonomy/setup', 'claude-advisor', 'codex-level', 'codex-provider',
+        'autonomy/review', 'autonomy/setup', 'browser/bookmarks/add', 'browser/bookmarks/remove',
+        'claude-advisor', 'codex-level', 'codex-provider',
         'codex-trust', 'commit-gate', 'feedback', 'friday-notes/hold', 'friday-notes/drop',
         'friday-notes/draft', 'friday-notes/draft-edit', 'friday-notes/draft-send',
         'friday-notes/draft-close', 'friday-notes/draft-asked',

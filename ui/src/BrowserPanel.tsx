@@ -1,12 +1,12 @@
 import { RetryButton } from './Retry'
 import { Spinner } from './Skeleton'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
-import { AppWindow, ArrowLeft, ArrowRight, Bot, Check, ChevronDown, Crosshair, FlaskConical, Gauge, HatGlasses, Image, Keyboard, KeyRound, Monitor, PenLine, PictureInPicture2, Plus, RotateCw, Send, Smartphone, Square, Tablet, Trash2, Type, UserRound, X } from 'lucide-react'
+import type { FocusEvent as ReactFocusEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
+import { AppWindow, ArrowLeft, ArrowRight, Bot, Check, ChevronDown, Crosshair, FlaskConical, Gauge, HatGlasses, Image, Keyboard, KeyRound, Monitor, PenLine, PictureInPicture2, Plus, RotateCw, Send, Smartphone, Square, Star, StarOff, Tablet, Trash2, Type, UserRound, X } from 'lucide-react'
 import { errorText } from './api'
 import { useBackStep } from './backNav'
 import type { Api, BrowserAvailability, BrowserId, Pane } from './api'
-import { usePaneLabel, WATCH_EVENT } from './AgentBrowser'
+import { usePaneLabel, useSignedAuto, WATCH_EVENT } from './AgentBrowser'
 import { useHost } from './host'
 import { MacPairing } from './MacPairing'
 import { openLive } from './liveStream'
@@ -31,6 +31,8 @@ type Mode = 'private' | 'saved'
 interface BrowserTab { id: string; url: string; title: string; preset: string; mode: Mode | 'agent'; width: number; height: number; touch: boolean; owner?: { pane: string | null } | null; controller?: 'user' | 'agent' }
 interface Preset { id: string; label: string; width: number; height: number; touch: boolean }
 interface BrowserState { tabs: BrowserTab[]; presets: Preset[]; nav?: { back: boolean; forward: boolean }; browsers?: BrowserAvailability[]; live?: string; live_port?: number | null; live_run?: string | null; window_view?: boolean }
+interface Bookmark { id: string; url: string; title: string; added: number }
+interface BookmarkList { bookmarks: Bookmark[] }
 interface FrameMessage { seq: number; width: number; height: number; jpeg: string; scrollOffsetX?: number; scrollOffsetY?: number }
 type Gesture = Record<string, string | number | string[]>
 type Tool = 'point' | 'pen' | 'rect' | 'text'
@@ -53,6 +55,10 @@ function modifiers(event: { altKey: boolean; ctrlKey: boolean; metaKey: boolean;
   return (event.altKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.metaKey ? 4 : 0) | (event.shiftKey ? 8 : 0)
 }
 function shown(url: string) { return url === 'about:blank' ? '' : url }
+function bookmarkHost(url: string) {
+  if (!/^https?:\/\//i.test(url)) return ''
+  try { return new URL(url).hostname } catch { return '' }
+}
 function tabName(tab: BrowserTab) {
   if (tab.title && tab.title !== 'about:blank') return tab.title
   try { return tab.url === 'about:blank' ? 'New tab' : new URL(tab.url).host || tab.url } catch { return tab.url || 'New tab' }
@@ -137,7 +143,10 @@ function useMenu({ arrowKeys = false, maxHeight = 360 } = {}) {
       : event.key === 'ArrowDown' ? (index + 1) % items.length : index <= 0 ? last : index - 1
     items[next].focus()
   }
-  return { open, setOpen, ref, close, onKeyDown }
+  // Focus that moves to another control closes the menu: Escape there could not reach it. A blur with no new target
+  // (a click on plain text, Safari buttons that take no focus) keeps it open; a pointer outside closes it above.
+  const onBlur = (event: ReactFocusEvent) => { const next = event.relatedTarget as Node | null; if (open && next && !ref.current?.contains(next)) setOpen(false) }
+  return { open, setOpen, ref, close, onKeyDown, onBlur }
 }
 
 function usePageVisible() {
@@ -154,15 +163,17 @@ function usePageVisible() {
 // A phone: tabs it opens or takes over start at phone width.
 const onPhone = () => typeof matchMedia === 'function' && matchMedia('(pointer: coarse) and (max-width: 820px)').matches
 const savedNote = (host: string) => `Saved logins · readable by agents on ${host}`
-const signedNote = (host: string) => `Your sign-ins · agents cannot drive this browser, but can read its files on ${host}`
+const signedNote = (host: string, auto: boolean) => auto
+  ? `Your sign-ins · agents can use it and ask before risky steps · files on ${host}`
+  : `Your sign-ins · agents ask you before they use it · files on ${host}`
 const WHICH_KEY = 'tether-browser-which'
 const tabKey = (which: BrowserId) => which === 'test' ? 'tether-browser-tab' : `tether-browser-tab-${which}`
 // 'mac' is the old id for 'chrome', still saved in some browsers' localStorage.
 const asBrowser = (value: unknown): BrowserId => value === 'mac' || value === 'chrome' ? 'chrome' : value === 'signed' ? 'signed' : 'test'
 const BROWSERS: { id: BrowserId; label: string; note: string; icon: typeof UserRound }[] = [
   { id: 'test', label: 'Test', note: 'Agents can use it. No sign-ins.', icon: FlaskConical },
-  { id: 'signed', label: 'Signed in', note: 'Chromium with your sign-ins. Agents need your permission.', icon: UserRound },
-  { id: 'chrome', label: 'Your Chrome', note: 'Your own Chrome, through the Tether extension. Agents use a tab only after you allow it.', icon: AppWindow },
+  { id: 'signed', label: 'Signed in', note: 'Chromium with your sign-ins. Settings › Shared browser sets agent access.', icon: UserRound },
+  { id: 'chrome', label: 'Your Chrome', note: 'Your own Chrome, through the Tether extension. Settings › Shared browser sets agent access.', icon: AppWindow },
 ]
 
 /** The Test and Signed-in server browsers and the extension view for Your Chrome.
@@ -204,6 +215,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
   which: BrowserId; onSwitch: (id: BrowserId) => void; picture: Picture; sharpSupported: boolean | null; onPicture: (id: Picture) => void
 }) {
   const host = useHost()
+  const auto = useSignedAuto(baseApi) ?? true
   // Every request names the browser. The signed container can take longer than 10 s to start.
   const api: Api = which === 'test' ? baseApi : (path, body, signal, method, timeout, priority) => baseApi(
     body === undefined ? `${path}${path.includes('?') ? '&' : '?'}browser=${which}` : path,
@@ -241,8 +253,19 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
   const visible = usePageVisible()
   const tabMenu = useMenu()
   const deviceMenu = useMenu(hasPicture ? { arrowKeys: true, maxHeight: Infinity } : undefined)
+  const bookmarksMenu = useMenu()
+  const [bookmarks, setBookmarks] = useState<Bookmark[] | null>(null)
+  const [bookmarkError, setBookmarkError] = useState('')
+  const [savingBookmark, setSavingBookmark] = useState(false)
+  const [loadingBookmarks, setLoadingBookmarks] = useState(false)
+  const bookmarkRequest = useRef(0)
+  const bookmarkButton = useRef<HTMLButtonElement>(null)
+  const bookmarkAction = useRef<HTMLButtonElement>(null)
   const tab = tabs.find(item => item.id === current) ?? tabs[0] ?? null
   const tabId = tab?.id ?? null
+  const currentBookmark = bookmarks?.find(item => item.url === tab?.url)
+  // Offer add or remove only from a list fetched since the popover opened: another device can have changed it.
+  const canBookmark = !!tab && !!bookmarkHost(tab.url) && !savingBookmark && !loadingBookmarks && !!bookmarks && !bookmarkError
   // Agent tabs are watch-only until the person takes over: no clicks, keys or navigation reach the page.
   // The server holds who controls the viewport, so every phone and desktop shows the same state.
   const watching = tab?.mode === 'agent' && tab.controller !== 'user'
@@ -333,6 +356,9 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
   // Start the browser only when the panel is first shown.
   // eslint-disable-next-line react-hooks/set-state-in-effect -- Loading starts an external request; state changes occur after await or when the request fails.
   useEffect(() => { if (active && !loaded) void load() }, [active]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (loaded && !failure && which !== 'chrome' && !bookmarkRequest.current) void loadBookmarks()
+  }, [loaded, failure, which]) // eslint-disable-line react-hooks/exhaustive-deps
   // eslint-disable-next-line react-hooks/set-state-in-effect -- Keep fallback tab selection, frame reset, navigation reset, and saved tab identity in one transition.
   useEffect(() => { if (tab && tab.id !== current) choose(tab.id) }, [tab?.id]) // eslint-disable-line react-hooks/exhaustive-deps
   // "Watch" in a chat card (AgentBrowser.tsx): show that tab. Reload the list: the tab can be newer than the stream's last list.
@@ -788,9 +814,9 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
     setStatus('')
     try { return await api<T>(path, body) } catch (error) { setStatus(errorText(error)); return null }
   }
-  async function newTab(mode: Mode) {
+  async function newTab(mode: Mode, url?: string) {
     tabMenu.setOpen(false)
-    const row = await act<BrowserTab>('browser/new', { mode })
+    const row = await act<BrowserTab>('browser/new', { mode, url })
     if (!row) return
     const fitted = onPhone() ? await act<BrowserTab>('browser/device', { tab: row.id, preset: 'phone' }) : null
     setTabs(list => [...list.filter(item => item.id !== row.id), fitted ?? row])
@@ -812,6 +838,42 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
     if (row.error) setStatus(`Could not open ${row.url}: ${row.error.replace(/^net::/, '')}`)
     setDraft(null)
     urlRef.current?.blur()
+  }
+
+  async function loadBookmarks() {
+    const request = ++bookmarkRequest.current
+    setLoadingBookmarks(true)
+    try {
+      const reply = await api<BookmarkList>('browser/bookmarks')
+      if (request !== bookmarkRequest.current) return
+      setBookmarks(reply.bookmarks)
+      setBookmarkError('')
+    } catch (error) {
+      if (request === bookmarkRequest.current) setBookmarkError(errorText(error))
+    } finally {
+      if (request === bookmarkRequest.current) setLoadingBookmarks(false)
+    }
+  }
+  async function changeBookmark(action: 'add' | 'remove', body: { id: string } | { url: string; title: string }, rowButton?: HTMLButtonElement) {
+    if (savingBookmark) return
+    setSavingBookmark(true)
+    const reply = await act<BookmarkList>(`browser/bookmarks/${action}`, body)
+    if (reply) {
+      // A pending refresh can contain the list from before the write.
+      ++bookmarkRequest.current
+      setLoadingBookmarks(false)
+      if (rowButton && document.activeElement === rowButton) bookmarkAction.current?.focus()
+      setBookmarks(reply.bookmarks)
+      setBookmarkError('')
+    }
+    setSavingBookmark(false)
+  }
+  function openBookmark(url: string) {
+    if (watching || windowView) return
+    bookmarksMenu.setOpen(false)
+    bookmarkButton.current?.focus()
+    if (tab) void navigate(url)
+    else void newTab(which === 'signed' ? 'saved' : 'private', url)
   }
   async function sendDevice(body: Record<string, unknown>) {
     if (viewChange.current.pending) return null
@@ -990,7 +1052,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
   }
 
   const chosen = BROWSERS.find(item => item.id === which)!
-  const switcher = <div className="browser-menu-anchor" ref={switchMenu.ref} onKeyDown={switchMenu.onKeyDown}>
+  const switcher = <div className="browser-menu-anchor" ref={switchMenu.ref} onKeyDown={switchMenu.onKeyDown} onBlur={switchMenu.onBlur}>
     <button type="button" className="browser-switch" aria-label={`Browser: ${chosen.label}`} aria-haspopup="menu" aria-expanded={switchMenu.open} onClick={() => switchMenu.setOpen(!switchMenu.open)}>
       <chosen.icon size={15} aria-hidden="true" /><span>{chosen.label}</span><ChevronDown size={14} aria-hidden="true" />
     </button>
@@ -1021,7 +1083,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
       {switcher}
       <div className="browser-tab-strip">{tabs.map(item => {
         const name = tabName(item)
-        return <div key={item.id} className={item.id === tab?.id ? 'browser-tab active' : 'browser-tab'} title={item.mode === 'saved' ? `${name} · ${which === 'signed' ? signedNote(host) : savedNote(host)}` : item.mode === 'agent' ? `${name} · Agent` : `${name} · Private`}>
+        return <div key={item.id} className={item.id === tab?.id ? 'browser-tab active' : 'browser-tab'} title={item.mode === 'saved' ? `${name} · ${which === 'signed' ? signedNote(host, auto) : savedNote(host)}` : item.mode === 'agent' ? `${name} · Agent` : `${name} · Private`}>
           <button type="button" role="tab" aria-selected={item.id === tab?.id} className="browser-tab-main" onClick={() => choose(item.id)}>
             {item.mode === 'saved' ? <KeyRound size={14} aria-label="Saved" /> : item.mode === 'agent' ? <Bot size={14} aria-label="Agent" /> : <HatGlasses size={14} aria-label="Private" />}
             <span>{name}</span>
@@ -1029,7 +1091,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
           <button type="button" className="browser-tab-close" aria-label={`Close ${name}`} onClick={() => void closeTab(item.id)}><X size={14} /></button>
         </div>
       })}</div>
-      {which !== 'chrome' && <div className="browser-menu-anchor" ref={tabMenu.ref} onKeyDown={tabMenu.onKeyDown}>
+      {which !== 'chrome' && <div className="browser-menu-anchor" ref={tabMenu.ref} onKeyDown={tabMenu.onKeyDown} onBlur={tabMenu.onBlur}>
         <button type="button" className="browser-icon" aria-label="New tab" aria-haspopup={which === 'signed' ? undefined : 'menu'} aria-expanded={which === 'signed' ? undefined : tabMenu.open} onClick={() => which === 'signed' ? void newTab('saved') : tabMenu.setOpen(!tabMenu.open)}><Plus size={17} /></button>
         {tabMenu.open && <div className="browser-menu" role="menu">
           <button type="button" role="menuitem" autoFocus onClick={() => void newTab('private')}><HatGlasses size={16} /><span>New private tab<small>Logins go away when the tab closes</small></span></button>
@@ -1053,7 +1115,32 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
       <input ref={urlRef} className="browser-url" aria-label="Address" readOnly={watching} disabled={windowView} placeholder="Address or port, like 8765" spellCheck={false} autoCapitalize="off" autoCorrect="off" enterKeyHint="go" inputMode="url"
         value={draft ?? shown(tab?.url ?? '')} onFocus={event => { setDraft(shown(tab?.url ?? '')); event.currentTarget.select() }} onBlur={() => setDraft(null)} onChange={event => setDraft(event.target.value)}
         onKeyDown={event => { if (event.key === 'Escape') { setDraft(null); event.currentTarget.blur() } }} />
-      <div className="browser-menu-anchor" ref={deviceMenu.ref} onKeyDown={deviceMenu.onKeyDown}>
+      {which !== 'chrome' && <div className="browser-menu-anchor" ref={bookmarksMenu.ref} onKeyDown={bookmarksMenu.onKeyDown} onBlur={bookmarksMenu.onBlur}>
+        <button ref={bookmarkButton} type="button" className="browser-icon" aria-label="Bookmarks" title="Bookmarks" aria-haspopup="dialog" aria-expanded={bookmarksMenu.open}
+          onClick={() => { if (!bookmarksMenu.open) void loadBookmarks(); bookmarksMenu.setOpen(!bookmarksMenu.open) }}><Star size={17} fill={currentBookmark ? 'currentColor' : 'none'} /></button>
+        {bookmarksMenu.open && <div className="browser-menu end browser-bookmarks" role="dialog" aria-label="Bookmarks">
+          <button ref={bookmarkAction} type="button" autoFocus aria-disabled={!canBookmark} onClick={() => {
+            if (!canBookmark || !tab) return
+            if (currentBookmark) void changeBookmark('remove', { id: currentBookmark.id })
+            else void changeBookmark('add', { url: tab.url, title: tab.title })
+          }}>{currentBookmark ? <><StarOff size={16} />Remove this page</> : <><Star size={16} />Bookmark this page</>}</button>
+          {(watching || windowView) && <p className="browser-bookmarks-note">{watching ? 'Take over the tab to open a bookmark.' : 'Switch back to page view to open a bookmark.'}</p>}
+          {bookmarkError ? <div className="browser-bookmarks-note">
+            <p role="alert">{bookmarkError}</p>
+            <RetryButton onRetry={() => { bookmarkAction.current?.focus(); return loadBookmarks() }} />
+          </div>
+            : !bookmarks ? <p className="browser-bookmarks-note" role="status">Loading bookmarks…</p>
+              : !bookmarks.length ? <p className="browser-bookmarks-note">No bookmarks yet. Open a page, then bookmark it.</p>
+                : bookmarks.map(item => <div className="browser-bookmark" key={item.id}>
+                  <button type="button" title={`${item.title}\n${item.url}`} disabled={watching || windowView} onClick={() => openBookmark(item.url)}>
+                    <span><span>{item.title}</span><small>{bookmarkHost(item.url)}</small></span>
+                  </button>
+                  <button type="button" className="browser-bookmark-remove" aria-label={`Remove ${item.title}`} aria-disabled={savingBookmark}
+                    onClick={event => void changeBookmark('remove', { id: item.id }, event.currentTarget)}><X size={16} /></button>
+                </div>)}
+        </div>}
+      </div>}
+      <div className="browser-menu-anchor" ref={deviceMenu.ref} onKeyDown={deviceMenu.onKeyDown} onBlur={deviceMenu.onBlur}>
         <button type="button" className="browser-icon" aria-label={displayLabel} title={displayLabel} aria-haspopup="menu" aria-expanded={deviceMenu.open} disabled={!tab || (!hasPicture && (watching || windowView))} onClick={() => deviceMenu.setOpen(!deviceMenu.open)}><DeviceIcon preset={tab?.preset ?? 'desktop'} /></button>
         {deviceMenu.open && <div className="browser-menu end" role="menu">
           {presets.map((item, index) => <button key={item.id} type="button" role="menuitemradio" aria-checked={item.id === tab?.preset} aria-disabled={watching || windowView || undefined}
@@ -1078,7 +1165,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
     </form>}
 
     {(windowView || tab?.mode === 'saved') && <p className="browser-saved">{which === 'signed' ? <><UserRound size={13} aria-hidden="true" />
-      <span>{windowView ? "Whole Chrome window · use Chrome's own toolbar and dialogs" : signedNote(host)}</span>
+      <span>{windowView ? "Whole Chrome window · use Chrome's own toolbar and dialogs" : signedNote(host, auto)}</span>
       {!windowView && <button type="button" className="browser-window-link" aria-disabled={changingWindow} onClick={() => void changeWindowView(true)}>Dialog not showing? Show the whole window</button>}
     </> : <><KeyRound size={13} />{savedNote(host)}</>}</p>}
     {tab?.mode === 'agent' && <div className="browser-agent" role="note">
