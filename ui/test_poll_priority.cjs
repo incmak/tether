@@ -63,7 +63,7 @@ async function agentBrowserChain() {
   now = 0; timers = []
   let subscribe = null
   const react = { useEffect() {}, useRef: value => ({ current: value }), useState: value => [value, () => {}], useSyncExternalStore: (sub, get) => { subscribe = sub; return get() } }
-  const mod = load('AgentBrowser.tsx', { react, './api': { errorText: String }, './BrowserPanel': {}, './backNav': {} },
+  const mod = load('AgentBrowser.tsx', { react, 'react-dom': {}, './api': { errorText: String }, './BrowserPanel': {}, './backNav': {} },
     { window: fakeWindow, document: { visibilityState: 'visible' }, clearTimeout: fakeWindow.clearTimeout, clearInterval: fakeWindow.clearInterval })
   const calls = []
   const api = (path, body, signal, method, timeout, priority) => {

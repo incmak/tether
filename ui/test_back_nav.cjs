@@ -107,6 +107,34 @@ function loadNav({ active = true, navigation } = {}) {
 const places = []
 const can = nav => nav.useNavAvailability()
 
+// BrowserSheet registers the full-screen effect before the sheet effect so its cleanup runs first.
+for (const action of ['back', 'close']) {
+  const { nav, h } = loadNav()
+  nav.setPlace({ screen: 'chats' }, { push: false })
+  let sheetOpen = true, full = true
+  const sheet = nav.openOverlay(() => { sheetOpen = false })
+  const fullscreen = nav.openOverlay(() => { full = false })
+  assert.equal(h.at, 2)
+  if (action === 'back') {
+    h.userBack(); h.settle()
+    nav.closeOverlay(fullscreen); h.settle()
+    assert.equal(full, false)
+    assert.equal(sheetOpen, true)
+    assert.equal(h.at, 1, 'Back leaves the sheet entry current')
+    h.userBack(); h.settle()
+    assert.equal(sheetOpen, false)
+  } else {
+    nav.closeOverlay(fullscreen)
+    nav.closeOverlay(sheet)
+    h.settle()
+    assert.equal(h.backs, 2, 'both entries close in the same render')
+  }
+  assert.equal(h.at, 0)
+  assert.equal(h.history.state.layer, 0)
+  assert.equal(can(nav).back, false)
+  console.log(`ok browser sheet: ${action} from full screen leaves the right active history entries`)
+}
+
 // 1. Places: the first is replaced, the next ones are pushed. Back and Forward walk them; Back stops at Tether's first entry.
 {
   const { nav, h } = loadNav()

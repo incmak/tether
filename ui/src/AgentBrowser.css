@@ -29,7 +29,27 @@
   display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--line); background: var(--surface); color: var(--accent-ink);
   box-shadow: 0 1px 2px rgb(0 0 0 / .08), 0 6px 18px rgb(0 0 0 / .14); }
 .browser-bubble:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.browser-sheet > .browser-panel { flex: 1; min-height: 0; }
+.browser-sheet-body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
+.browser-sheet-body > .browser-panel { flex: 1; min-height: 0; }
+
+.browser-sheet-full[open] { inset: 0; border-radius: 0; padding: 0; }
+/* The body is the fullscreen element, so it keeps the page clear of the notch and the gesture bar itself. */
+.browser-sheet-full .browser-sheet-body { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+.browser-sheet-full > .browser-sheet-head,
+.browser-sheet-full .browser-sheet-body > .browser-panel > :is(.browser-tabs, .browser-bar, .browser-saved, .browser-agent, .browser-status:empty) { display: none; }
+.browser-sheet-full .browser-status { height: auto; line-height: 1.4; padding-block: 4px; white-space: normal; overflow-wrap: anywhere; }
+/* Keep the status clear of the pill's resting corner. */
+.browser-sheet-full:has(.browser-full-controls[data-corner^="b"]) .browser-status { order: -1; }
+.browser-full-controls { position: absolute; z-index: 1; display: flex; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 90%, transparent); box-shadow: 0 1px 2px rgb(0 0 0 / .08), 0 6px 18px rgb(0 0 0 / .14);
+  touch-action: none; user-select: none; }
+.browser-full-controls[data-corner^="t"] { top: calc(12px + env(safe-area-inset-top)); }
+.browser-full-controls[data-corner^="b"] { bottom: calc(12px + env(safe-area-inset-bottom)); }
+.browser-full-controls[data-corner$="l"] { left: calc(12px + env(safe-area-inset-left)); }
+.browser-full-controls[data-corner$="r"] { right: calc(12px + env(safe-area-inset-right)); }
+.browser-full-controls .browser-icon { width: 44px; height: 44px; border-radius: 50%; }
+.browser-full-controls .browser-icon:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.browser-full-keyboard { display: contents; }
 
 /* "Needs you" list row for a browser ask (Inbox.tsx). */
 .inbox-row.browser { border-color: color-mix(in srgb, var(--attention) 55%, var(--line)); }

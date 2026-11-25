@@ -2,6 +2,7 @@ import { RetryButton } from './Retry'
 import { Spinner } from './Skeleton'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { FocusEvent as ReactFocusEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
+import { createPortal } from 'react-dom'
 import { AppWindow, ArrowLeft, ArrowRight, Bot, Check, ChevronDown, Crosshair, FlaskConical, Gauge, HatGlasses, Image, Keyboard, KeyRound, Monitor, PenLine, PictureInPicture2, Plus, RotateCw, Send, Smartphone, Square, Star, StarOff, Tablet, Trash2, Type, UserRound, X } from 'lucide-react'
 import { errorText } from './api'
 import { useBackStep } from './backNav'
@@ -21,6 +22,7 @@ export interface BrowserPanelProps {
   pane: Pick<Pane, 'id'>
   folder: string | null
   active: boolean
+  fullControls?: HTMLElement | null
   onPopOut?: (event: ReactMouseEvent<HTMLButtonElement>) => void
   onAttach?: (file: File) => Promise<string | null>
 }
@@ -211,7 +213,7 @@ export function BrowserPanel(props: BrowserPanelProps) {
   return <BrowserView key={which} {...props} which={which} onSwitch={change} picture={picture} sharpSupported={sharpSupported} onPicture={changePicture} />
 }
 
-function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, onSwitch, picture: localPicture, sharpSupported, onPicture }: BrowserPanelProps & {
+function BrowserView({ api: baseApi, pane, active, fullControls, onPopOut, onAttach, which, onSwitch, picture: localPicture, sharpSupported, onPicture }: BrowserPanelProps & {
   which: BrowserId; onSwitch: (id: BrowserId) => void; picture: Picture; sharpSupported: boolean | null; onPicture: (id: Picture) => void
 }) {
   const host = useHost()
@@ -1078,7 +1080,10 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
     <MacPairing api={baseApi} connected={!!browsers.find(row => row.id === 'chrome')?.available} />
   </div>
 
+  const keyboard = !noting && !windowView && <button type="button" className="browser-icon browser-touch-only" aria-label="Type into the page"
+    disabled={watching || liveOffline} onClick={() => keysRef.current?.focus()}><Keyboard size={fullControls ? 20 : 17} /></button>
   return <div className={`browser-panel${which === 'signed' ? ' browser-signed' : ''}`} onKeyDown={event => { if (noting && event.key === 'Escape' && !event.defaultPrevented) stopNotes() }}>
+    {fullControls && !watching && !liveOffline && createPortal(keyboard, fullControls)}
     <div ref={wheelSideways} className="browser-tabs" role="tablist" aria-label="Browser tabs">
       {switcher}
       <div className="browser-tab-strip">{tabs.map(item => {
@@ -1159,7 +1164,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
           </>}
         </div>}
       </div>
-      {!windowView && <button type="button" className="browser-icon browser-touch-only" aria-label="Type into the page" disabled={watching || liveOffline} onClick={() => keysRef.current?.focus()}><Keyboard size={17} /></button>}
+      {!fullControls && keyboard}
       {which === 'signed' && <button type="button" className="browser-icon" aria-label="Show the whole Chrome window" title="Whole window: Chrome's dialogs, toolbar and extensions" aria-pressed={windowView} aria-disabled={changingWindow || grabbing} disabled={!tab} onClick={() => void changeWindowView(!windowView)}><AppWindow size={17} /></button>}
       <button type="button" className="browser-icon" aria-label="Add notes to this frame" title={windowView ? 'Notes are available in page view' : 'Notes'} aria-description={windowView ? 'Notes are available in page view.' : undefined} disabled={(liveMode ? !liveReady : !frame) || windowView || changingWindow || grabbing} onClick={() => void startNotes()}><PenLine size={17} /></button>
     </form>}

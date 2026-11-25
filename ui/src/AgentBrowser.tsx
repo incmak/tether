@@ -1,5 +1,6 @@
-import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react'
-import { Bot, ChevronDown, CircleSlash, Globe, Hand, KeyRound, X } from 'lucide-react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { flushSync } from 'react-dom'
+import { Bot, ChevronDown, CircleSlash, Globe, Hand, KeyRound, Maximize2, Minimize2, Move, X } from 'lucide-react'
 import { errorText } from './api'
 import type { Api, Pane, SignedBrowserAccess } from './api'
 import type { BrowserAskRow } from './needs'
@@ -242,13 +243,100 @@ function AgentBrowserCard({ api, pane, tabs, ask }: { api: Api; pane: string; ta
   </div>
 }
 
-/** Phone: the browser panel full screen, over the chat. */
+const CORNERS = ['tl', 'tr', 'br', 'bl'] as const
+type Corner = typeof CORNERS[number]
+const CORNER_KEY = 'tether-browser-full-corner'
+
+function readCorner(): Corner {
+  try {
+    const saved = localStorage.getItem(CORNER_KEY)
+    return CORNERS.find(corner => corner === saved) ?? 'bl'
+  } catch { return 'bl' }
+}
+
+function exitNativeFullscreen() {
+  if (document.fullscreenElement) void document.exitFullscreen().catch(() => {})
+}
+
+// Listen on the DOM so drag also works on the keyboard button portalled from BrowserPanel.
+function bindFullDrag(pill: HTMLDivElement, body: HTMLDivElement, moveTo: (corner: Corner) => void) {
+  const controller = new AbortController()
+  const options = { signal: controller.signal }
+  let start: { id: number; x: number; y: number } | null = null
+  let dragged = false
+  function track(event: PointerEvent) {
+    if (start?.id !== event.pointerId) return
+    const x = event.clientX - start.x, y = event.clientY - start.y
+    if (!dragged && Math.hypot(x, y) <= 8) return
+    dragged = true
+    pill.style.transform = `translate(${x}px, ${y}px)`
+  }
+  function end(event: PointerEvent) {
+    if (start?.id !== event.pointerId) return
+    if (event.type === 'pointerup') {
+      track(event)
+      if (dragged) {
+        const box = pill.getBoundingClientRect()
+        const area = body.getBoundingClientRect()
+        const padding = getComputedStyle(body)
+        const midX = (area.left + area.right + parseFloat(padding.paddingLeft) - parseFloat(padding.paddingRight)) / 2
+        const midY = (area.top + area.bottom + parseFloat(padding.paddingTop) - parseFloat(padding.paddingBottom)) / 2
+        const left = box.left + box.width / 2 < midX
+        moveTo(box.top + box.height / 2 < midY ? (left ? 'tl' : 'tr') : (left ? 'bl' : 'br'))
+      }
+    }
+    start = null
+    pill.style.transform = ''
+  }
+  pill.addEventListener('pointerdown', event => {
+    if (!event.isPrimary || event.button !== 0) return
+    dragged = false
+    start = { id: event.pointerId, x: event.clientX, y: event.clientY }
+    if (event.target instanceof Element) event.target.setPointerCapture(event.pointerId)
+  }, options)
+  pill.addEventListener('pointermove', track, options)
+  pill.addEventListener('pointerup', end, options)
+  pill.addEventListener('pointercancel', end, options)
+  pill.addEventListener('lostpointercapture', end, options)
+  pill.addEventListener('click', event => {
+    if (dragged && event.detail > 0) { event.preventDefault(); event.stopPropagation() }
+  }, { ...options, capture: true })
+  return () => controller.abort()
+}
+
 // Phone: a sheet over the chat. Minimise keeps the browser's tabs and shows a round button; the stream stops meanwhile.
 export function BrowserSheet({ api, pane, onClose }: { api: Api; pane: Pane; onClose: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null)
+  const body = useRef<HTMLDivElement>(null)
   const bubble = useRef<HTMLButtonElement>(null)
+  const enterButton = useRef<HTMLButtonElement>(null)
+  const exitButton = useRef<HTMLButtonElement>(null)
   const [small, setSmall] = useState(false)
+  const [full, setFull] = useState(false)
+  const [fullControls, setFullControls] = useState<HTMLSpanElement | null>(null)
+  const [corner, setCorner] = useState(readCorner)
+  const wasFull = useRef(false)
+  const exitFull = () => setFull(false)
+  const minimise = () => { exitFull(); setSmall(true) }
+  // These clean up in hook order. Close the nested entry before the sheet's entry on minimise or unmount.
+  // Back leaves full screen first; the next Back closes the sheet, as before full screen existed.
+  useBackStep(full && !small, exitFull)
   useBackStep(!small, onClose)
+  useLayoutEffect(() => {
+    if (!full || small) {
+      if (wasFull.current && !small) enterButton.current?.focus()
+      wasFull.current = false
+      return
+    }
+    wasFull.current = true
+    exitButton.current?.focus()
+    const onFullscreenChange = () => { if (!document.fullscreenElement) setFull(false) }
+    document.addEventListener('fullscreenchange', onFullscreenChange)
+    return () => {
+      document.removeEventListener('fullscreenchange', onFullscreenChange)
+      exitNativeFullscreen()
+    }
+  }, [full, small])
   useEffect(() => {
     const box = dialog.current
     if (!box) return
@@ -261,15 +349,45 @@ export function BrowserSheet({ api, pane, onClose }: { api: Api; pane: Pane; onC
     window.addEventListener(WATCH_EVENT, onWatch)
     return () => window.removeEventListener(WATCH_EVENT, onWatch)
   }, [])
+  function enterFull() {
+    // requestFullscreen consumes user activation. Register the Back step before making the request.
+    flushSync(() => setFull(true))
+    // The sheet body, not <html>: the fullscreen element joins the top layer last, and <html> there paints over the
+    // modal sheet. A <dialog> itself cannot go fullscreen (Fullscreen Standard).
+    const target = body.current
+    if (target && document.fullscreenEnabled && typeof target.requestFullscreen === 'function') {
+      void target.requestFullscreen({ navigationUI: 'hide' }).then(() => {
+        if (!body.current || !wasFull.current) exitNativeFullscreen()
+      }, () => {})
+    }
+  }
+  const moveTo = useCallback((next: Corner) => {
+    setCorner(next)
+    try { localStorage.setItem(CORNER_KEY, next) } catch { /* private mode */ }
+  }, [])
+  const controlsRef = useCallback((pill: HTMLDivElement | null) => {
+    // The pill mounts only in full screen, after the body is attached.
+    if (pill && body.current) return bindFullDrag(pill, body.current, moveTo)
+  }, [moveTo])
   return <>
-    <dialog ref={dialog} className="browser-sheet" aria-label="Browser" onCancel={event => { event.preventDefault(); setSmall(true) }}
-      onClick={event => { if (event.target === event.currentTarget && event.clientY < event.currentTarget.getBoundingClientRect().top) setSmall(true) }}>
+    <dialog ref={dialog} className={full ? 'browser-sheet browser-sheet-full' : 'browser-sheet'} aria-label="Browser"
+      onCancel={event => { event.preventDefault(); if (full) exitFull(); else minimise() }}
+      onClick={event => { if (!full && event.target === event.currentTarget && event.clientY < event.currentTarget.getBoundingClientRect().top) minimise() }}>
       <header className="browser-sheet-head">
-        <button type="button" className="icon-button" aria-label="Minimise the browser" title="Minimise" onClick={() => setSmall(true)}><ChevronDown /></button>
+        <button type="button" className="icon-button" aria-label="Minimise the browser" title="Minimise" onClick={minimise}><ChevronDown /></button>
         <strong>Browser</strong>
+        <button ref={enterButton} type="button" className="icon-button" aria-label="Full screen" title="Full screen" onClick={enterFull}><Maximize2 /></button>
         <button type="button" className="icon-button" aria-label="Close the browser" title="Close" onClick={onClose}><X /></button>
       </header>
-      <BrowserPanel api={api} pane={pane} folder={null} active={!small} />
+      <div ref={body} className="browser-sheet-body">
+      <BrowserPanel api={api} pane={pane} folder={null} active={!small} fullControls={full ? fullControls : null} />
+      {full && <div ref={controlsRef} className="browser-full-controls" data-corner={corner} role="group" aria-label="Full screen controls">
+        <button type="button" className="browser-icon" aria-label="Move these buttons" title="Move these buttons"
+          onClick={() => moveTo(CORNERS[(CORNERS.indexOf(corner) + 1) % CORNERS.length])}><Move size={20} /></button>
+        <span className="browser-full-keyboard" ref={setFullControls} />
+        <button ref={exitButton} type="button" className="browser-icon" aria-label="Exit full screen" title="Exit full screen" onClick={exitFull}><Minimize2 size={20} /></button>
+      </div>}
+      </div>
     </dialog>
     {small && <button ref={bubble} type="button" className="browser-bubble" aria-label="Open the browser" title="Browser" onClick={() => setSmall(false)}><Globe size={22} /></button>}
   </>
