@@ -93,7 +93,7 @@ REFUSED = {
         # Optional panels and detail views have no fixture contract. The verify
         # browser relay answers the chat stream with 204 so the UI polls instead.
         'activity', 'activity/export', 'attention', 'attention/log', 'audit', 'auto-merge', 'autonomy', 'autonomy/setup',
-        'claude-advisor', 'codex-level', 'codex-provider', 'commit-gate', 'groups/context',
+        'browser/bookmarks', 'claude-advisor', 'codex-level', 'codex-provider', 'commit-gate', 'groups/context',
         'history', 'history/hidden', 'live', 'projects/advisor-entry', 'projects/advisor-log',
         'projects/note', 'search', 'side-shells', 'stream', 'subagent', 'subagent-task', 'subagent-tool', 'tool',
         'task-tree/close-plan',
@@ -132,7 +132,8 @@ REFUSED = {
         'share/upload', 'share/uploads', 'share/uploads/{}', 'share/uploads/{}/cancel', 'upload',
         # These change state outside the small set of fixture writes in ALLOWED.
         'activity', 'activity/publish', 'auto-merge', 'autonomy', 'autonomy/decisions', 'autonomy/lessons',
-        'autonomy/review', 'autonomy/setup', 'claude-advisor', 'codex-level', 'codex-provider',
+        'autonomy/review', 'autonomy/setup', 'browser/bookmarks/add', 'browser/bookmarks/remove',
+        'claude-advisor', 'codex-level', 'codex-provider',
         'codex-trust', 'commit-gate', 'feedback', 'friday-notes/hold', 'friday-notes/drop',
         'friday-notes/draft', 'friday-notes/draft-edit', 'friday-notes/draft-send',
         'friday-notes/draft-close', 'friday-notes/draft-asked',
