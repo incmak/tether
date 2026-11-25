@@ -52,6 +52,36 @@ class ClaudeWorkingTests(unittest.TestCase):
         idle.insert(top + 2, '✻ Working… (1s) esc to interrupt')
         self.assertIs(terminal.claude_screen_working('\n'.join(idle)), False)
 
+    def test_text_shaped_like_the_footer_does_not_signal_working(self):
+        # Review r1: an indented rule typed in the draft must not end the box, and a status line that quotes the
+        # hint is not the hint.
+        idle = fixture('idle_reply_quotes_status.txt').splitlines()
+        anchor = next(index for index, row in enumerate(idle) if row.startswith('❯'))
+        width = len(idle[anchor - 1].rstrip())
+        for draft in (['  ' + '─' * (width - 2), '  esc to interrupt is the hint'],
+                      ['  ' + '─' * width, '  esc to interrupt'],
+                      ['─' * 10, 'esc to interrupt']):
+            with self.subTest(draft=draft):
+                frame = idle[:anchor + 1] + draft + idle[anchor + 1:]
+                self.assertIs(terminal.claude_screen_working('\n'.join(frame)), False)
+                self.assertEqual(terminal._live_status(self.entry, self.run, '\n'.join(frame))['state'], 'Idle')
+        bottom = max(index for index, row in enumerate(idle) if row.startswith('─'))
+        for status in ('  Opus 5.5 | esc to interrupt is the hint', '  esc to interrupt is the hint · main'):
+            with self.subTest(status=status):
+                frame = idle[:bottom + 1] + [status] + idle[bottom + 1:]
+                self.assertIs(terminal.claude_screen_working('\n'.join(frame)), False)
+        frame = idle[:bottom + 1] + ['  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt'] + idle[bottom + 2:]
+        self.assertIs(terminal.claude_screen_working('\n'.join(frame)), True)
+
+    def test_side_question_without_registry_uses_its_answering_state(self):
+        for answering, state in ((True, 'Working'), (False, 'Idle')):
+            with self.subTest(answering=answering), patch.object(
+                    side_question, 'observe', return_value={'reason': 'side', 'pending': True, 'answering': answering}):
+                self.assertEqual(terminal._live_status(self.entry, self.run, '')['state'], state)
+        self.registry.write_text('{"status": "idle"}')
+        with patch.object(side_question, 'observe', return_value={'reason': 'side', 'pending': True, 'answering': True}):
+            self.assertEqual(terminal._live_status(self.entry, self.run, '')['state'], 'Idle')
+
     def test_footer_hint_is_case_insensitive(self):
         screen = '──────────\n❯\n──────────\n  Esc To Interrupt'
         self.assertIs(terminal.claude_screen_working(screen), True)

@@ -1210,6 +1210,7 @@ def live_status(entry, run=subprocess.run):
 
 WORKING = detection_rules.pattern('common', 'WORKING')
 CLAUDE_SPINNER = detection_rules.pattern('claude', 'SPINNER')
+CLAUDE_INTERRUPT = re.compile(r'^esc to interrupt(?:\s*…)?$', re.I)
 
 
 def claude_screen_working(plain_screen):
@@ -1220,8 +1221,15 @@ def claude_screen_working(plain_screen):
     anchor = footer.input_anchor(lines)
     if anchor is None:
         return None
-    bottom = next(index for index in range(anchor + 1, len(lines)) if footer.RULE.match(lines[index].strip()))
-    if any('esc to interrupt' in line.lower() for line in lines[bottom + 1:]):
+    # The bottom border is an unindented, dashes-only row as wide as the top border. Claude indents draft rows,
+    # so a "─────" typed in the draft is not it.
+    width = _terminal_columns(lines[anchor - 1].rstrip())
+    bottom = next((index for index in range(anchor + 1, len(lines)) if lines[index].rstrip()
+                   and not lines[index].rstrip().strip('─') and _terminal_columns(lines[index].rstrip()) == width), None)
+    if bottom is None:
+        return None
+    # Claude's interrupt hint is a whole " · " item of a footer row; a status line that quotes it is not the hint.
+    if any(CLAUDE_INTERRUPT.match(item.strip()) for line in lines[bottom + 1:] for item in line.split(' · ')):
         return True
     top = anchor - 1
     for line in reversed(lines[max(0, top - 40):top]):
@@ -1257,7 +1265,9 @@ def _live_status(entry, run, screen, login_screen=None, styled_screen=None):
         side = side_question.observe(entry, screen, styled_screen)
         if side:
             prompt_actions.ledger.forget(entry['id'])
-            working = claude_registry(entry).get('status') == 'busy'
+            registry = claude_registry(entry)
+            # The overlay hides the status area. Without a registry status, the overlay's own answering state is the signal.
+            working = registry['status'] == 'busy' if registry.get('status') else bool(side.get('answering'))
             return {'state': 'Working' if working else 'Idle', 'approval': None, 'attention': side}
     pending = approval(screen)
     if pending:
