@@ -3,6 +3,7 @@ const assert = require('node:assert/strict')
 const { mkdirSync, readFileSync } = require('node:fs')
 const http = require('node:http')
 const { resolve } = require('node:path')
+const { gzipSync } = require('node:zlib')
 const { chromium } = require('playwright-core')
 const ts = require('typescript')
 
@@ -45,6 +46,30 @@ const pictureSettings = {
   light: { video_fullcolor: false, framerate: 30, video_bitrate: 3000 },
 }
 
+function picturePayload({ video_fullcolor, framerate, video_bitrate }) {
+  return {
+    video_fullcolor: { value: video_fullcolor, locked: false },
+    framerate: { value: [1, 60], min: 1, max: 60, default: framerate },
+    video_bitrate: { value: [100, 8000], min: 100, max: 8000, default: video_bitrate },
+  }
+}
+
+function serverPicture(frame, settings) {
+  return frame.evaluate(payload => {
+    window.selkiesReady = true
+    window.postMessage({ type: 'serverSettings', payload }, location.origin)
+  }, picturePayload(settings))
+}
+
+async function assertPictureMenu(page, label, checked) {
+  const display = page.getByRole('button', { name: label, exact: true })
+  await display.press('Enter')
+  const rows = page.getByRole('group', { name: 'Picture' }).getByRole('menuitemradio', { checked: true })
+  assert.equal(await rows.count(), checked ? 1 : 0)
+  if (checked) assert((await rows.innerText()).startsWith(checked))
+  await page.keyboard.press('Escape')
+}
+
 async function assertPicture(frame, preset) {
   const settings = pictureSettings[preset]
   await frame.waitForFunction(preset => window.pictureMessages?.at(-1)?.preset === preset, preset)
@@ -52,7 +77,9 @@ async function assertPicture(frame, preset) {
     if (window.selkiesReady) return null
     window.selkiesReady = true
     const count = window.selkiesSettings.length
-    window.postMessage({ type: 'serverSettings', payload: {} }, location.origin)
+    window.postMessage({ type: 'serverSettings', payload: {
+      video_fullcolor: { value: false }, framerate: { default: 60 }, video_bitrate: { default: 8000 },
+    } }, location.origin)
     return count
   })
   if (beforeReady !== null) assert.equal(beforeReady, 0, 'the first preset waits for the Selkies settings receiver')
@@ -115,11 +142,21 @@ async function exercisePictureMenu(page, frame, width) {
     return
   }
 
+  await page.keyboard.press('Escape')
+  assert.equal(await page.evaluate(() => localStorage.getItem('tether-browser-picture')), null)
+  await serverPicture(frame, pictureSettings.light)
+  await assertPictureMenu(page, 'Display: Desktop · Low data', 'Low data')
+  await assertNoPicture(page, frame)
+  await serverPicture(frame, pictureSettings.sharp)
+  await display.press('Enter')
+
   await low.press('Enter')
-  await assertPicture(frame, 'light')
   const lowDisplay = page.getByRole('button', { name: 'Display: Desktop · Low data', exact: true })
   assert(await lowDisplay.evaluate(button => document.activeElement === button))
+  await assertPicture(frame, 'light')
   assert.equal(await page.evaluate(() => localStorage.getItem('tether-browser-picture')), 'light')
+  await serverPicture(frame, pictureSettings.standard)
+  await assertPictureMenu(page, 'Display: Desktop · Standard', 'Standard')
 
   // The bridge ignores unknown names and messages which did not come from the parent.
   await frame.evaluate(() => {
@@ -136,8 +173,44 @@ async function exercisePictureMenu(page, frame, width) {
   await frame.waitForFunction(() => window.selkiesSettings.some(message => message.settings?.video_fullcolor === false))
   assert.deepEqual(await frame.evaluate(() => window.selkiesSettings), [{ type: 'settings', settings: pictureSettings.standard }])
   await page.reload()
-  await lowDisplay.waitFor()
-  await assertNoPicture(page, await (await page.locator('iframe.browser-live').elementHandle()).contentFrame())
+  const reloadedFrame = await (await page.locator('iframe.browser-live').elementHandle()).contentFrame()
+  await assertNoPicture(page, reloadedFrame)
+  assert.equal(await page.evaluate(() => localStorage.getItem('tether-browser-picture')), 'light')
+  await serverPicture(reloadedFrame, pictureSettings.sharp)
+  await assertPictureMenu(page, 'Display: Desktop · Sharp text', 'Sharp text')
+  await page.evaluate(() => {
+    const frame = document.querySelector('iframe.browser-live')
+    const origin = new URL(frame.src).origin
+    const receive = (source, from, preset) => window.dispatchEvent(new MessageEvent('message', {
+      source, origin: from, data: { tether: 'picture-state', preset },
+    }))
+    receive(window, origin, 'light')
+    receive(frame.contentWindow, location.origin, 'light')
+    for (const preset of ['unknown', 'constructor', ['sharp'], undefined]) receive(frame.contentWindow, origin, preset)
+  })
+  await assertPictureMenu(page, 'Display: Desktop · Sharp text', 'Sharp text')
+  await serverPicture(reloadedFrame, { ...pictureSettings.light, video_bitrate: 4000 })
+  await assertPictureMenu(page, 'Display: Desktop · Custom picture', null)
+  await reloadedFrame.evaluate(() => { window.selkiesTransport = new EventTarget() })
+  await serverPicture(reloadedFrame, pictureSettings.sharp)
+  await assertPictureMenu(page, 'Display: Desktop · Sharp text', 'Sharp text')
+  await page.evaluate(() => {
+    window.reportedPictures = []
+    window.addEventListener('message', ({ data }) => {
+      if (data?.tether === 'picture-state') window.reportedPictures.push(data.preset)
+    })
+  })
+  const snapshot = JSON.stringify({ type: 'server_settings', settings: picturePayload(pictureSettings.standard) })
+  await reloadedFrame.evaluate(({ bytes, settings }) => {
+    const emit = data => window.selkiesTransport.dispatchEvent(new MessageEvent('message', { data }))
+    emit(new Uint8Array(bytes).buffer)
+    emit(JSON.stringify({ type: 'display_settings', displayId: 'primary', settings }))
+  }, { bytes: [5, ...gzipSync(snapshot)], settings: pictureSettings.light })
+  await serverPicture(reloadedFrame, pictureSettings.sharp)
+  await page.waitForFunction(() => window.reportedPictures.length >= 2)
+  await assertPictureMenu(page, 'Display: Desktop · Low data', 'Low data')
+  assert.deepEqual(await page.evaluate(() => window.reportedPictures), ['standard', 'light'])
+  await assertNoPicture(page, reloadedFrame)
   await page.getByRole('button', { name: 'Browser: Test', exact: true }).click()
   await page.getByRole('menuitemradio', { name: /^Signed in browser/ }).click()
   await lowDisplay.waitFor()
@@ -164,7 +237,7 @@ async function exercisePictureMenu(page, frame, width) {
   }
   await page.locator('.browser-wait').waitFor({ state: 'detached' })
   await assertPicture(await (await page.locator('iframe.browser-live').elementHandle()).contentFrame(), 'standard')
-  console.log('Browser live view: Picture sends only on explicit choice, with fixed settings, keyboard and sender checks')
+  console.log('Browser live view: shared Picture reports, Custom picture, sender checks, and explicit sends pass')
 }
 
 async function exerciseFloatResize(browser, url) {
@@ -468,11 +541,14 @@ async function main() {
         await windowFrame.getByRole('button', { name: 'Menu opened' }).waitFor()
         assert(await notes.isDisabled())
         assert.equal(await notes.getAttribute('aria-description'), 'Notes are available in page view.')
-        const display = page.getByRole('button', { name: /^Display: Phone · / })
-        await display.click()
+        await serverPicture(windowFrame, width === 1280 ? pictureSettings.light : { ...pictureSettings.light, framerate: 25 })
+        const pictureLabel = width === 1280 ? 'Low data' : 'Custom picture'
+        await page.getByRole('button', { name: `Display: Phone · ${pictureLabel}`, exact: true }).press('Enter')
         const desktop = page.getByRole('menuitemradio', { name: /^Desktop/ })
         assert(await desktop.isDisabled())
         const low = page.getByRole('menuitemradio', { name: /^Low data/ })
+        const focused = width === 1280 ? low : page.getByRole('menuitemradio', { name: /^Standard/ })
+        assert(await focused.evaluate(row => row === document.activeElement), 'whole window starts on the checked or first enabled Picture row')
         assert(await low.isEnabled())
         await low.click()
         await assertPicture(await (await frame.elementHandle()).contentFrame(), 'light')
@@ -533,9 +609,15 @@ async function main() {
         assert(Math.abs(coverBox.width - box.width) < 1 && Math.abs(coverBox.height - box.height) < 1)
         assert.equal(await page.evaluate(([x, y]) => document.elementFromPoint(x, y).className, [box.x + box.width / 2, box.y + box.height / 2]), 'browser-live-block')
         await keysStayOut(page, frame)
-        await page.getByRole('button', { name: /^Display: Desktop · / }).click()
+        const watchFrame = await (await frame.elementHandle()).contentFrame()
+        await serverPicture(watchFrame, pictureSettings.light)
+        await page.getByRole('button', { name: 'Display: Desktop · Low data', exact: true }).press('Enter')
+        const low = page.getByRole('menuitemradio', { name: /^Low data/ })
+        assert(await low.evaluate(row => row === document.activeElement), 'watch-only starts on the checked Picture row')
         const desktop = page.getByRole('menuitemradio', { name: /^Desktop/ })
         assert(await desktop.isDisabled())
+        await page.keyboard.press('ArrowDown')
+        assert(await desktop.evaluate(row => row === document.activeElement), 'arrow keys keep the existing row order')
         await desktop.press('Enter')
         assert(await desktop.isVisible(), 'agent-owned device items cannot be activated')
         await page.getByRole('menuitemradio', { name: /^Low data/ }).click()
@@ -568,11 +650,14 @@ async function main() {
       }
 
       // A new container run loads the page again.
+      await serverPicture(await (await frame.elementHandle()).contentFrame(), pictureSettings.light)
+      await page.getByRole('button', { name: 'Display: Desktop · Low data', exact: true }).waitFor()
       const loads = liveLoads
       await page.evaluate(() => { window.run = 'run-2' })
       await page.waitForFunction(() => window.calls.filter(call => call.path === 'browser/tabs?tab=fixture').length >= 3, null, { timeout: 6000 })
       for (let wait = 0; wait < 50 && liveLoads === loads; wait++) await page.waitForTimeout(100)
       assert.equal(liveLoads, loads + 1, 'a new run reloads the live view once')
+      await assertPictureMenu(page, 'Display: Desktop · Standard', 'Standard')
       assert.equal(await frame.count(), 1)
 
       // Notes take one CDP screenshot, then draw on it.

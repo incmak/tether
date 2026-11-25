@@ -200,7 +200,7 @@ export function BrowserPanel(props: BrowserPanelProps) {
   return <BrowserView key={which} {...props} which={which} onSwitch={change} picture={picture} sharpSupported={sharpSupported} onPicture={changePicture} />
 }
 
-function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, onSwitch, picture, sharpSupported, onPicture }: BrowserPanelProps & {
+function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, onSwitch, picture: localPicture, sharpSupported, onPicture }: BrowserPanelProps & {
   which: BrowserId; onSwitch: (id: BrowserId) => void; picture: Picture; sharpSupported: boolean | null; onPicture: (id: Picture) => void
 }) {
   const host = useHost()
@@ -222,6 +222,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
   // The browser runs in a Selkies container and shows its real window as video (state.live is the path).
   // The video page has its own origin (state.live_port), so a page from the container cannot reach Tether.
   const [liveBase, setLiveBase] = useState<{ path: string; port: number; run: string } | null>(null)
+  const [pictureState, setPictureState] = useState<{ liveBase: typeof liveBase; preset: Picture | null } | null>(null)
   const [liveReady, setLiveReady] = useState(false)
   const [liveReach, setLiveReach] = useState<'checking' | 'ok' | 'down'>('checking')
   const [liveAttempt, setLiveAttempt] = useState(0)
@@ -257,6 +258,20 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
   const liveView = liveMode && !noting
   const liveOffline = liveView && liveReach === 'down'
   const liveSrc = liveBase ? `${location.protocol}//${location.hostname}:${liveBase.port}${liveBase.path}` : ''
+  const picture = pictureState && pictureState.liveBase === liveBase ? pictureState.preset : localPicture
+  useLayoutEffect(() => {
+    if (!liveSrc) return
+    const origin = new URL(liveSrc).origin
+    const onMessage = (event: MessageEvent) => {
+      const frame = liveFrameRef.current
+      if (!frame || event.source !== frame.contentWindow || event.origin !== origin || event.data?.tether !== 'picture-state') return
+      const preset: unknown = event.data.preset
+      if (preset !== null && preset !== 'sharp' && preset !== 'standard' && preset !== 'light') return
+      setPictureState(previous => previous?.liveBase === liveBase && previous.preset === preset ? previous : { liveBase, preset })
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [liveBase, liveSrc])
   // Selkies sizes the remote display from the iframe's viewport. Scale the iframe without changing that viewport.
   // Native Wayland Chromium needs 500 CSS px to show the full window, even on a narrower panel.
   const liveViewport = windowView
@@ -940,8 +955,10 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
   const scale = size && stage.width && stage.height ? Math.min(stage.width / size.width, stage.height / size.height) : 0
   const view = size && scale ? { width: Math.floor(size.width * scale), height: Math.floor(size.height * scale) } : { width: 0, height: 0 }
   const presetLabel = presets.find(item => item.id === tab?.preset)?.label ?? 'Desktop'
-  const pictureLabel = PICTURES.find(item => item.id === picture)?.label
+  const pictureLabel = PICTURES.find(item => item.id === picture)?.label ?? 'Custom picture'
   const displayLabel = hasPicture ? `Display: ${presetLabel} · ${pictureLabel}` : `Device: ${presetLabel}`
+  const focusPicture = hasPicture && (watching || windowView || !presets.length)
+  const firstPicture = !picture || (picture === 'sharp' && !sharpSupported) ? (sharpSupported ? 'sharp' : 'standard') : picture
   function sendPendingPicture() {
     const preset = pendingPicture.current
     const frame = liveFrameRef.current?.contentWindow
@@ -953,6 +970,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
     if (id === 'sharp' && !sharpSupported) return
     deviceMenu.close()
     onPicture(id)
+    setPictureState({ liveBase, preset: id })
     pendingPicture.current = id
     if (liveReady) sendPendingPicture()
   }
@@ -1039,7 +1057,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
         <button type="button" className="browser-icon" aria-label={displayLabel} title={displayLabel} aria-haspopup="menu" aria-expanded={deviceMenu.open} disabled={!tab || (!hasPicture && (watching || windowView))} onClick={() => deviceMenu.setOpen(!deviceMenu.open)}><DeviceIcon preset={tab?.preset ?? 'desktop'} /></button>
         {deviceMenu.open && <div className="browser-menu end" role="menu">
           {presets.map((item, index) => <button key={item.id} type="button" role="menuitemradio" aria-checked={item.id === tab?.preset} aria-disabled={watching || windowView || undefined}
-            autoFocus={hasPicture ? index === 0 : item.id === tab?.preset} tabIndex={hasPicture ? -1 : undefined} onClick={() => { if (!watching && !windowView) void setDevice(item.id) }}>
+            autoFocus={hasPicture ? !focusPicture && index === 0 : item.id === tab?.preset} tabIndex={hasPicture ? -1 : undefined} onClick={() => { if (!watching && !windowView) void setDevice(item.id) }}>
             <DeviceIcon preset={item.id} /><span>{item.label}<small>{item.id === 'desktop' ? 'Fits the panel' : `${item.width} × ${item.height}`}</small></span>{item.id === tab?.preset && <Check size={16} />}
           </button>)}
           {hasPicture && <>
@@ -1047,7 +1065,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
             <div role="group" aria-label="Picture">
               <div className="browser-menu-heading" aria-hidden="true">Picture</div>
               {PICTURES.map(item => <button key={item.id} type="button" role="menuitemradio" aria-checked={item.id === picture}
-                aria-disabled={item.id === 'sharp' && !sharpSupported ? true : undefined} autoFocus={!presets.length && item.id === picture} tabIndex={-1} onClick={() => setPicture(item.id)}>
+                aria-disabled={item.id === 'sharp' && !sharpSupported ? true : undefined} autoFocus={focusPicture && item.id === firstPicture} tabIndex={-1} onClick={() => setPicture(item.id)}>
                 <item.icon size={17} /><span>{item.label}<small>{item.id === 'sharp' && sharpSupported === false ? 'This device cannot decode it' : item.hint}</small></span>{item.id === picture && <Check size={16} />}
               </button>)}
             </div>
