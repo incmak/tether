@@ -1,12 +1,13 @@
 """ops_agent.py and lesson_candidates.py: the daily ops report (B212). Real git in a temporary folder; tmux, the tab
 launcher and the clock are stand-ins. No model runs."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import os
 import subprocess
 import tempfile
 import time
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -14,9 +15,12 @@ from unittest import mock
 import factory
 import lesson_candidates
 import lessons
+import model_catalog
 import ops_agent
 import paths
+import prefs_sync
 import projects
+import tether_zone
 
 PID = 'c' * 12
 DAY = '2026-11-17'
@@ -25,7 +29,7 @@ ENV = {**os.environ, 'GIT_AUTHOR_NAME': 'T', 'GIT_AUTHOR_EMAIL': 't@example.com'
 
 
 def at(hour, day=DAY):
-    return datetime.strptime(f'{day} {hour:02d}:00', '%Y-%m-%d %H:%M').timestamp()
+    return datetime.fromisoformat(f'{day}T{hour:02d}:00').replace(tzinfo=tether_zone.zone()).timestamp()
 
 
 class Case(unittest.TestCase):
@@ -43,6 +47,9 @@ class Case(unittest.TestCase):
         self.repo.mkdir()
         self.git('init', '-q', '-b', 'main')
         factory._root_cache.clear()
+        # B405: run_day validates the tab through model_catalog, which probes the real `claude` binary in a daemon
+        # thread. That thread outlives the test and makes folders in paths.CACHE (it ran `claude -p` for real).
+        self.enterContext(mock.patch.object(model_catalog.shutil, 'which', return_value=None))
 
     def git(self, *args, when=None):
         env = dict(ENV)
@@ -67,6 +74,39 @@ class Case(unittest.TestCase):
 
 
 class FactTests(Case):
+    def test_report_date_only_deploys_follow_the_written_day_without_a_clock(self):
+        day, previous = '2026-11-21', '2026-11-20'
+        line = f'- {day} · Date-only test'
+        (self.repo / 'DEPLOYED.md').write_text(line + '\n')
+        self.addCleanup(time.tzset)
+        self.enterContext(mock.patch.dict(os.environ, TZ='Asia/Kolkata'))
+        time.tzset()
+        self.assertEqual(factory.parse_deployed_line(line)['at'],
+                         datetime.fromisoformat('2026-11-20T18:30:00Z').timestamp())
+        for zone in ('America/New_York', 'Pacific/Auckland'):
+            with self.subTest(zone=zone), mock.patch.dict(os.environ, TETHER_REMINDER_ZONE=zone):
+                facts = ops_agent.gather(day, [str(self.repo)], [])
+                self.assertEqual([row['text'] for row in facts['deploys']], ['Date-only test'])
+                self.assertEqual(ops_agent.gather(previous, [str(self.repo)], [])['deploys'], [])
+                self.assertIn(f'- {day} Date-only test (no Verified stamp; repo)', ops_agent.note_text(facts, 'test'))
+
+    def test_day_bounds_cover_havana_midnight_fold_and_gap(self):
+        with mock.patch.dict(os.environ, TETHER_REMINDER_ZONE='America/Havana'):
+            for day, start, end in (('2026-11-01', '2026-11-01T04:00:00Z', '2026-11-02T05:00:00Z'),
+                                    ('2026-03-08', '2026-03-08T05:00:00Z', '2026-03-09T04:00:00Z')):
+                with self.subTest(day=day):
+                    expected = tuple(datetime.fromisoformat(value).timestamp() for value in (start, end))
+                    self.assertEqual(ops_agent.day_bounds(day), expected)
+
+    def test_deploy_lines_with_numeric_offsets_cross_utc_midnight(self):
+        (self.repo / 'DEPLOYED.md').write_text(
+            '- 2026-11-16 23:00 -0200 · aaaaaaa Hotfix · Verified: tests(ok)\n'
+            '- 2026-11-17 01:00 +05:30 · bbbbbbb Earlier · Verified: none\n')
+        start = datetime.fromisoformat('2026-11-17T00:00:00+00:00').timestamp()
+        found = ops_agent.deploys(str(self.repo), DAY, start, start + 86400)
+        self.assertEqual([(row['at'], row['text'], row['stamp']) for row in found],
+                         [(start + 3600, 'aaaaaaa Hotfix', 'verified')])
+
     def test_stamp_follows_the_verification_rule(self):
         self.assertEqual(ops_agent.stamp('Fix\n\nVerified: tests(server 412 ok) review(codex APPROVED)'),
                          ('verified', 'tests(server 412 ok) review(codex APPROVED)'))
@@ -96,15 +136,14 @@ class FactTests(Case):
             '- 2026-11-17 10:00 UTC · ccccccc Hotfix · Verified: none (urgent)',
             '- 2026-11-17 11:00 UTC · ddddddd No stamp line',
             'not a deploy line']))
-        start, end = at(0), at(0) + 86400
-        with mock.patch.dict(os.environ, {'TZ': 'UTC'}):
-            time.tzset()
-            self.addCleanup(time.tzset)
-            found = ops_agent.deploys(str(self.repo), *ops_agent.day_bounds(DAY))
+        self.enterContext(mock.patch.object(prefs_sync, 'FILE', self.root / 'cache' / 'prefs.json'))
+        prefs_sync.save({'timeZone': 'UTC'})
+        start, end = ops_agent.day_bounds(DAY)
+        found = ops_agent.deploys(str(self.repo), DAY, start, end)
         self.assertEqual([(row['commit'], row['stamp']) for row in found],
                          [('bbbbbbb', 'verified'), ('ccccccc', 'none'), ('ddddddd', 'missing')])
         self.assertEqual(found[1]['text'], 'ccccccc Hotfix')
-        self.assertEqual(ops_agent.deploys(str(self.root), start, end), [])
+        self.assertEqual(ops_agent.deploys(str(self.root), DAY, start, end), [])
 
     def test_review_log_keeps_only_pauses(self):
         entries = self.entries()
@@ -369,6 +408,22 @@ class ScheduleTests(Case):
         clock[0] = datetime(2026, 11, 19, ops_agent.HOUR, 1)
         self.assertEqual(self.observe(ops), (True, ['2026-11-18']))
         self.assertEqual(len(ops_agent.load()['runs']), 2)
+
+    def test_default_scheduler_and_report_day_use_the_preference_zone(self):
+        self.enterContext(mock.patch.object(prefs_sync, 'FILE', self.root / 'cache' / 'prefs.json'))
+        prefs_sync.save({'timeZone': 'America/New_York'})
+        ops_agent.set_enabled(True)
+        ops_agent._change(lambda state: state.update(last_day=DAY))
+        ops = ops_agent.Ops()
+        # At 02:00 UTC it is already 07:30 the next day in Kolkata, but still the 17th in New York.
+        for hour, minute, expected in ((2, 0, (False, [])), (11, 59, (False, [])), (12, 0, (True, [DAY]))):
+            with self.subTest(hour=hour), mock.patch.object(
+                    tether_zone.time, 'time', return_value=datetime(2026, 11, 18, hour, minute, tzinfo=timezone.utc).timestamp()):
+                self.assertEqual(self.observe(ops), expected)
+        start, end = ops_agent.day_bounds('2026-03-08')
+        self.assertEqual(start, datetime(2026, 3, 8, 5, tzinfo=timezone.utc).timestamp())
+        self.assertEqual(end - start, 23 * 3600)
+        self.assertEqual(ops_agent._clock(end), '00:00')
 
     def test_run_now_works_when_off_and_counts_as_the_days_run(self):
         ops, clock = self.ops(datetime(2026, 11, 18, 3, 0))

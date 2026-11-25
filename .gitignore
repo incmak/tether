@@ -8,3 +8,7 @@ __pycache__/
 .work-notes/
 .work-notes-lane/
 .work/
+# Release notes, screenshots and tool output stay local (B251: 30,000+ files made the checklist "not checked").
+.release-work/
+.playwright-mcp/
+.claude/worktrees/

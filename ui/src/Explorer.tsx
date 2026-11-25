@@ -21,6 +21,7 @@ import { baseName, crumbs, filesUrl, formatModified, formatSize, fullDate, gitTe
 import type { FileEntry, FileList, FilePreview, FileSearch, FileStat, PlacesData, SecretsState, Shape, SortKey, ViewMode } from './files'
 import './Explorer.css'
 import { wheelSideways } from './wheelSideways'
+import { useTetherZone } from './zone'
 
 const MENU_ICONS = { open: FolderOpen, add: AtSign, terminal: SquareTerminal, rename: Pencil, duplicate: CopyPlus, copyTo: Copy, moveTo: FolderInput, copyPath: Copy, pin: BookMarked, download: Download, trash: Trash2 }
 
@@ -88,6 +89,7 @@ interface Props {
 }
 
 export function Explorer({ api, panes, pane, target, onTarget, onAddToMessage, onTerminalHere, onPin }: Props) {
+  useTetherZone()
   const [stored, setStored] = useState(loadStored)
   const [places, setPlaces] = useState<PlacesData | null>(null)
   const sessionCwd = places?.sessions.find(item => item.session === pane?.id)?.cwd

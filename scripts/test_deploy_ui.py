@@ -1,6 +1,8 @@
 """Regression checks for preserving open-tab assets during an internal UI deploy."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from functools import partial
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -16,6 +18,7 @@ spec.loader.exec_module(deploy_ui)
 
 class DeployUiTest(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch.object(deploy_ui.review_gate, 'pane_identity', return_value=None))
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
         self.build = Path(self.folder.name) / 'build'
@@ -63,6 +66,7 @@ class GuardCase(unittest.TestCase):
     """A real git repository, a stamped build and a live target."""
 
     def setUp(self):
+        self.identity = self.enterContext(patch.object(deploy_ui.review_gate, 'pane_identity', return_value=None))
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
         root = Path(self.folder.name)
@@ -289,7 +293,7 @@ class VerifiedStampTest(GuardCase):
         clean = 'tests(server 412 ok, ui 91/93) screenshots(24) review(codex APPROVED)'
         self.assertEqual(self.record()['verified'], clean)
         line, = self.log.read_text().splitlines()
-        self.assertRegex(line, r'^- \d{4}-\d{2}-\d{2} \d{2}:\d{2} \S+ · ')
+        self.assertRegex(line, r'^- \d{4}-\d{2}-\d{2} \d{2}:\d{2} [+-]\d{4} · ')
         self.assertTrue(line.endswith(f'{self.live[:7]} UI deploy: live feature · Verified: {clean}'), line)
 
     def test_explicit_none_installs_and_is_listed_as_unverified(self):
@@ -355,6 +359,112 @@ class VerifiedStampTest(GuardCase):
             deploy_ui.main()
         self.assertEqual(caught.exception.code, 1)
         self.assert_untouched()
+
+
+class ReviewGateTest(GuardCase):
+    def setUp(self):
+        super().setUp()
+        self.identity.return_value = '%42'
+        self.store = self.repo.parent / 'review-links.json'
+        self.enterContext(patch.object(deploy_ui.review_gate, '_store_path', return_value=self.store))
+        self.approve(self.base)
+
+    def approve(self, commit):
+        self.store.write_text(json.dumps([{'worker': '%42', 'reviewer': '%43', 'approved_commit': commit}]))
+
+    def test_force_cannot_install_a_commit_the_reviewer_did_not_approve(self):
+        self.stamp(self.live)
+        with self.assertRaisesRegex(deploy_ui.ReviewRefused, self.live[:12]):
+            self.deploy(force=True)
+        self.assert_untouched()
+        self.assertFalse(self.log.exists())
+
+    def test_dry_run_cli_reports_the_refusal_and_exits_one(self):
+        self.stamp(self.live)
+        argv = ['deploy-ui.py', '--verified', 'tests(ui ok)', '--force', '--dry-run', str(self.build), str(self.target)]
+        stderr = io.StringIO()
+        with patch.object(deploy_ui.sys, 'argv', argv), patch.object(deploy_ui, 'deploy', partial(
+                deploy_ui.deploy, repo=self.repo, log=self.log)), patch('sys.stderr', stderr), \
+                self.assertRaises(SystemExit) as caught:
+            deploy_ui.main()
+        self.assertEqual(caught.exception.code, 1)
+        self.assertIn('Deployment refused by the review gate.', stderr.getvalue())
+        self.assertIn(self.live[:12], stderr.getvalue())
+        self.assertIn('stop the review link with Mak', stderr.getvalue())
+        self.assert_untouched()
+
+    def test_force_cannot_install_a_dirty_or_missing_stamp_for_a_linked_pane(self):
+        with self.assertRaisesRegex(deploy_ui.ReviewRefused, 'no valid commit stamp'):
+            self.deploy(force=True)
+        with self.assertRaisesRegex(deploy_ui.ReviewRefused, 'no valid commit stamp'):
+            self.deploy(dry_run=True)
+        self.stamp(self.base, dirty=True)
+        with self.assertRaisesRegex(deploy_ui.ReviewRefused, 'does not show a clean checkout'):
+            self.deploy(force=True)
+        self.assert_untouched()
+
+    def test_checked_commit_comes_from_the_stamp_not_head(self):
+        self.stamp(self.base)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), self.live)
+        self.assertEqual(self.deploy(), 2)
+        self.assertEqual(self.record()['commit'], self.base)
+
+    def test_unlinked_pane_can_use_the_existing_force_behavior(self):
+        self.store.write_text('[]')
+        self.assertEqual(self.deploy(force=True), 2)
+        self.assertFalse((self.target / '.live-commit').exists())
+
+    def test_missing_review_store_stops_force(self):
+        self.store.unlink()
+        self.stamp(self.base)
+        with self.assertRaisesRegex(deploy_ui.ReviewRefused, 'could not read the review store'):
+            self.deploy(force=True)
+        self.assert_untouched()
+
+    def merge_setup(self, side=False):
+        """Approve a worker commit, move remote main (origin is this repo), and merge main, or a side branch that is
+        not on remote main, into the approved commit. Returns the merge commit."""
+        self.git('remote', 'add', 'origin', str(self.repo))
+        self.git('checkout', '-q', '-b', 'worker', self.base)
+        approved = self.commit('approved')
+        self.approve(approved)
+        self.git('checkout', '-q', '-b', 'main-tip', self.base)
+        main = self.commit('main moved')
+        self.git('update-ref', 'refs/heads/main', main)
+        if side:
+            self.git('checkout', '-q', '-b', 'side', main)
+            other = self.commit('not on main')
+        else:
+            other = main
+        self.git('checkout', '-q', 'worker')
+        self.git('merge', '-q', '--no-edit', other)
+        return self.git('rev-parse', 'HEAD')
+
+    def test_clean_merge_of_remote_main_into_the_approved_commit_deploys(self):
+        merged = self.merge_setup()
+        self.stamp(merged)
+        self.assertEqual(self.deploy(), 2)
+        self.assertEqual(self.record()['commit'], merged)
+
+    def test_merge_with_a_commit_not_on_remote_main_is_refused_even_with_force(self):
+        merged = self.merge_setup(side=True)
+        self.stamp(merged)
+        with self.assertRaisesRegex(deploy_ui.ReviewRefused, merged[:12]):
+            self.deploy(force=True)
+        self.assert_untouched()
+
+    def test_merge_forward_base_comes_from_the_remote_not_the_tracking_ref(self):
+        self.git('remote', 'add', 'origin', str(self.repo))
+        self.git('update-ref', 'refs/heads/main', self.base)
+        self.git('update-ref', 'refs/remotes/origin/main', self.live)
+        self.assertEqual(deploy_ui.review_base(self.repo), self.base)
+
+    def test_merge_forward_base_must_be_available_locally(self):
+        result = subprocess.CompletedProcess([], 0, stdout=f'{"f" * 40}\trefs/heads/main\n')
+        git = deploy_ui.git
+        with patch.object(deploy_ui, 'git', side_effect=lambda repo, *args, **options:
+                          result if args[0] == 'ls-remote' else git(repo, *args, **options)):
+            self.assertIsNone(deploy_ui.review_base(self.repo))
 
 
 class ScreenshotProofTest(GuardCase):

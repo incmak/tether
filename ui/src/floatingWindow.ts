@@ -11,10 +11,18 @@ type Place = { mode: FloatMode; rect: Rect; bubble: Point }
 type Drag = { id: number; target: HTMLElement; element: HTMLElement; vx: number; vy: number; lastX: number; lastY: number; time: number; caught: boolean; kind: 'move' | 'resize' | 'bubble'; edge?: Edge; x: number; y: number; rect: Rect; bubble: Point; moved: boolean }
 
 const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches
-const translate = (point: Point) => `translate3d(${point.x}px, ${point.y}px, 0)`
+const translate = (point: Point) => `${point.x}px ${point.y}px`
+// Where the element is placed now. Open and bloom keyframes set translate to none and carry the whole position in
+// transform. A relative motion (settle) keeps its offset in transform on top of translate; it keeps running after a
+// grab, so reading it here would count it twice.
 const position = (element: HTMLElement): Point => {
-  const matrix = new DOMMatrix(getComputedStyle(element).transform)
-  return { x: matrix.m41, y: matrix.m42 }
+  const style = getComputedStyle(element)
+  if (style.translate === 'none') {
+    const matrix = new DOMMatrix(style.transform === 'none' ? undefined : style.transform)
+    return { x: matrix.m41, y: matrix.m42 }
+  }
+  const [x, y] = style.translate.split(/\s+/)
+  return { x: parseFloat(x) || 0, y: parseFloat(y) || 0 }
 }
 const elastic = (point: Point, fitted: Point): Point => ({ x: fitted.x + (point.x - fitted.x) * 0.25, y: fitted.y + (point.y - fitted.y) * 0.25 })
 const MARGIN = 8
@@ -90,7 +98,7 @@ const keyStep = (event: React.KeyboardEvent, shift = true): Point | null => {
 export function useFloatingWindow(storageKey: string, options: Options): {
   ref: React.RefCallback<HTMLDivElement>
   mode: FloatMode
-  setMode: (mode: FloatMode) => void
+  setMode: (mode: FloatMode, bubble?: Point) => void
   rect: Rect
   bubble: Point
   moving: boolean
@@ -118,7 +126,7 @@ export function useFloatingWindow(storageKey: string, options: Options): {
     window.clearTimeout(f.timer)
     flight.current = null
     f.element.style.transition = 'none'
-    f.element.style.transform = translate(point)
+    f.element.style.translate = translate(point)
     const p = current.current
     current.current = f.kind === 'bubble' ? { ...p, bubble: point } : { ...p, rect: { ...p.rect, ...point } }
   }
@@ -127,12 +135,12 @@ export function useFloatingWindow(storageKey: string, options: Options): {
     setPlace(next)
     if (commit) savePlace(storageKey, next)
   }
-  const setMode = (mode: FloatMode) => {
+  const setMode = (mode: FloatMode, at?: Point) => {
     interrupt()
     setMoving(false)
     if (element.current) element.current.style.transition = ''
     const p = current.current
-    update({ ...p, mode, rect: fitRect(p.rect, minW, minH), bubble: fitBubble(p.bubble, size) }, true)
+    update({ ...p, mode, rect: fitRect(p.rect, minW, minH), bubble: fitBubble(at ?? p.bubble, size) }, true)
   }
 
   useEffect(() => {
@@ -147,7 +155,7 @@ export function useFloatingWindow(storageKey: string, options: Options): {
       const el = element.current
       if (el && p.mode !== 'full') {
         el.style.transition = 'none'
-        el.style.transform = translate(p.mode === 'bubble' ? next.bubble : next.rect)
+        el.style.translate = translate(p.mode === 'bubble' ? next.bubble : next.rect)
         if (p.mode === 'window') { el.style.width = `${next.rect.w}px`; el.style.height = `${next.rect.h}px` }
       }
       current.current = next
@@ -188,7 +196,7 @@ export function useFloatingWindow(storageKey: string, options: Options): {
     if (!el) return
     const point = position(el)
     el.style.transition = 'none'
-    el.style.transform = translate(point)
+    el.style.translate = translate(point)
     const p = current.current
     const next = kind === 'bubble' ? { ...p, bubble: point } : { ...p, rect: { ...p.rect, ...point } }
     current.current = next
@@ -226,7 +234,7 @@ export function useFloatingWindow(storageKey: string, options: Options): {
       next = { ...p, rect: { ...rect, ...elastic(rect, fitRect(rect, minW, minH)) } }
     }
     current.current = next
-    d.element.style.transform = translate(d.kind === 'bubble' ? next.bubble : next.rect)
+    d.element.style.translate = translate(d.kind === 'bubble' ? next.bubble : next.rect)
     if (d.kind === 'resize') { d.element.style.width = `${next.rect.w}px`; d.element.style.height = `${next.rect.h}px` }
   }
   const finish = (event: React.PointerEvent<HTMLElement>, cancel = false) => {
@@ -253,8 +261,8 @@ export function useFloatingWindow(storageKey: string, options: Options): {
     const curve = d.kind === 'bubble' && speed > 0.5 ? 'cubic-bezier(.34,1.3,.64,1)' : 'cubic-bezier(.32,.72,0,1)'
     // Flush the tracked position before the browser sees the release target.
     void d.element.offsetWidth
-    d.element.style.transition = ms ? `transform ${ms}ms ${curve}` : 'none'
-    d.element.style.transform = translate(to)
+    d.element.style.transition = ms ? `translate ${ms}ms ${curve}` : 'none'
+    d.element.style.translate = translate(to)
     current.current = next
     const done = () => {
       flight.current = null
@@ -278,7 +286,7 @@ export function useFloatingWindow(storageKey: string, options: Options): {
       interrupt()
       setMoving(false)
       const el = element.current
-      if (el) el.style.transition = reduced() ? 'none' : 'transform 220ms cubic-bezier(.32,.72,0,1)'
+      if (el) el.style.transition = reduced() ? 'none' : 'translate 220ms cubic-bezier(.32,.72,0,1)'
       const p = current.current
       if (kind === 'bubble') update({ ...p, bubble: fitBubble({ x: p.bubble.x + step.x, y: p.bubble.y + step.y }, size) }, true)
       else if (kind === 'resize' && edge) update({ ...p, rect: resizeRect(p.rect, edge, step.x, step.y, minW, minH) }, true)
@@ -290,15 +298,15 @@ export function useFloatingWindow(storageKey: string, options: Options): {
     const el = element.current
     if (!el || (!drag.current && !flight.current)) return
     const p = current.current
-    el.style.transform = translate(p.mode === 'bubble' ? p.bubble : p.rect)
+    el.style.translate = translate(p.mode === 'bubble' ? p.bubble : p.rect)
     if (p.mode === 'window') { el.style.width = `${p.rect.w}px`; el.style.height = `${p.rect.h}px` }
   })
 
   const { mode, rect, bubble } = place
   return {
     ref, mode, setMode, rect, bubble, moving,
-    windowStyle: mode === 'full' ? {} : { transform: translate(rect), width: rect.w, height: rect.h },
-    bubbleStyle: { transform: translate(bubble), width: size.w, height: size.h },
+    windowStyle: mode === 'full' ? {} : { translate: translate(rect), width: rect.w, height: rect.h },
+    bubbleStyle: { translate: translate(bubble), width: size.w, height: size.h },
     move: handlers('move'),
     resize: edge => handlers('resize', edge),
     bubbleHandlers: {

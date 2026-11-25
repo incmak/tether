@@ -1,9 +1,13 @@
 """Stop restores Claude's interrupted draft without touching pre-existing text."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import subprocess
 import unittest
 from unittest.mock import Mock, patch
 
 import terminal_input as terminal
+
+
+BOX = '──────────\n❯\n──────────'
 
 
 class StopTurnTests(unittest.TestCase):
@@ -33,6 +37,7 @@ class StopTurnTests(unittest.TestCase):
         self.assertEqual(self.sleep.call_count, 2)
 
     def test_empty_idle_box_stops_after_one_second(self):
+        self.capture.return_value = '● The footer says esc to interrupt.\n' + BOX
         with patch.object(terminal, 'prompt_draft', return_value=['']):
             self.assertEqual(self.stop(), {'restored': ''})
         self.assert_escape()
@@ -40,11 +45,17 @@ class StopTurnTests(unittest.TestCase):
         self.assertEqual(self.sleep.call_count, 5)
 
     def test_working_box_polls_for_two_seconds(self):
-        self.capture.return_value = '✻ Thinking… (esc to interrupt)'
+        self.capture.return_value = "✻ Beboppin'…\n" + BOX
         with patch.object(terminal, 'prompt_draft', return_value=[]):
             self.assertEqual(self.stop(), {'restored': ''})
         self.assertEqual(self.sleep.call_count, 10)
         self.clear.assert_not_called()
+
+    def test_unknown_screen_keeps_waiting_for_restored_draft(self):
+        with patch.object(terminal, 'prompt_draft', side_effect=[[]] * 6 + [['restored']] * 2):
+            self.assertEqual(self.stop(), {'restored': 'restored'})
+        self.capture.assert_called_once_with(self.entry, self.run)
+        self.clear.assert_called_once_with(self.entry, self.run)
 
     def test_existing_terminal_draft_is_preserved(self):
         with patch.object(terminal, 'prompt_draft', return_value=['typed text']) as draft:

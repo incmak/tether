@@ -1,3 +1,4 @@
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import sqlite3
 import subprocess
 import unittest
@@ -615,4 +616,4 @@ class CodexSendTests(unittest.TestCase):
                 server.send_text({'agent': 'codex', 'id': '%fixture'}, message, state='Idle')
                 self.assertEqual(capture.called, expected)
                 self.assertEqual(thread.called, expected)
-                submit.assert_called_once_with(message, {'agent': 'codex', 'id': '%fixture'})
+                submit.assert_called_once_with(message, {'agent': 'codex', 'id': '%fixture'}, user=False)

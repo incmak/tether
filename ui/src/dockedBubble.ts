@@ -2,10 +2,10 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { useBackStep } from './backNav'
 
 type Point = { x: number; y: number }
-type Shape = { transform: string; width: number; height: number; borderRadius: string | number }
+type Shape = { translate: string; width: number; height: number; borderRadius: string | number }
 type Drag = { id: number; x: number; y: number; dx: number; dy: number; moved: boolean; caught: boolean; point: Point; vx: number; vy: number; lastX: number; lastY: number; time: number }
 const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches
-const translate = (point: Point) => `translate3d(${point.x}px, ${point.y}px, 0)`
+const translate = (point: Point) => `${point.x}px ${point.y}px`
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), Math.max(min, max))
 const elastic = (value: number, max: number) => { const fitted = clamp(value, 0, max); return fitted + (value - fitted) * 0.25 }
 const SIZE = 52
@@ -35,9 +35,9 @@ function bounds() {
 }
 const tabShape = (place: Place, point: Point): Shape => {
   const vw = document.documentElement.clientWidth || window.innerWidth
-  return { transform: translate({ x: place.side === 'left' ? 0 : vw - TAB_W, y: point.y + (SIZE - TAB_H) / 2 }), width: TAB_W, height: TAB_H, borderRadius: place.side === 'left' ? `0 ${TAB_H / 2}px ${TAB_H / 2}px 0` : `${TAB_H / 2}px 0 0 ${TAB_H / 2}px` }
+  return { translate: translate({ x: place.side === 'left' ? 0 : vw - TAB_W, y: point.y + (SIZE - TAB_H) / 2 }), width: TAB_W, height: TAB_H, borderRadius: place.side === 'left' ? `0 ${TAB_H / 2}px ${TAB_H / 2}px 0` : `${TAB_H / 2}px 0 0 ${TAB_H / 2}px` }
 }
-const freeShape = (point: Point): Shape => ({ transform: translate(point), width: SIZE, height: SIZE, borderRadius: SIZE / 2 })
+const freeShape = (point: Point): Shape => ({ translate: translate(point), width: SIZE, height: SIZE, borderRadius: SIZE / 2 })
 const toPoint = (place: Place) => { const b = bounds(); return { x: place.side === 'left' ? b.left : b.right, y: b.top + place.y * (b.bottom - b.top) } }
 
 export function useDockedBubble(storageKey: string, fallback: Place, onEscape?: () => boolean) {
@@ -57,7 +57,9 @@ export function useDockedBubble(storageKey: string, fallback: Place, onEscape?: 
   const timer = useRef(0)
   const escape = useRef(onEscape)
   useEffect(() => { escape.current = onEscape })
-  const docked = !open && !dragging
+  // The tab keeps its place and shape while its popover is open, so a second press on the same spot closes it.
+  // It turns into a free bubble only while it is dragged.
+  const docked = !dragging
 
   useEffect(() => {
     const fit = () => {
@@ -97,16 +99,17 @@ export function useDockedBubble(storageKey: string, fallback: Place, onEscape?: 
     if (event.button !== 0 || drag.current) return
     const el = event.currentTarget
     const caught = !!flight.current
-    const computed = getComputedStyle(el), matrix = new DOMMatrix(computed.transform)
-    const at = { x: matrix.m41, y: matrix.m42 }
+    const computed = getComputedStyle(el)
+    const [x, y] = computed.translate.split(/\s+/)
+    const at = { x: parseFloat(x) || 0, y: parseFloat(y) || 0 }
     const width = computed.width, height = computed.height, borderRadius = computed.borderRadius
     const raw = { x: clamp(at.x, 0, window.innerWidth - SIZE), y: clamp(at.y, 0, window.innerHeight - SIZE) }
     raw.x += (at.x - raw.x) * 4; raw.y += (at.y - raw.y) * 4
     window.clearTimeout(flight.current); flight.current = 0
     el.style.transition = 'none'
-    el.style.transform = translate(at)
+    el.style.translate = translate(at)
     if (caught) {
-      visual.current = { transform: translate(at), width: parseFloat(width), height: parseFloat(height), borderRadius }
+      visual.current = { translate: translate(at), width: parseFloat(width), height: parseFloat(height), borderRadius }
       el.style.width = width; el.style.height = height; el.style.borderRadius = borderRadius
     }
     try { el.setPointerCapture(event.pointerId) } catch { /* pointer already gone */ }
@@ -130,7 +133,7 @@ export function useDockedBubble(storageKey: string, fallback: Place, onEscape?: 
     const el = event.currentTarget
     el.style.transition = 'none'
     el.style.scale = ''
-    el.style.transform = translate(d.point)
+    el.style.translate = translate(d.point)
     el.style.width = `${SIZE}px`; el.style.height = `${SIZE}px`; el.style.borderRadius = `${SIZE / 2}px`
   }
   const up = (event: React.PointerEvent<HTMLButtonElement>) => {
@@ -155,8 +158,8 @@ export function useDockedBubble(storageKey: string, fallback: Place, onEscape?: 
     const curve = speed > 0.5 ? 'cubic-bezier(.34,1.3,.64,1)' : 'cubic-bezier(.32,.72,0,1)'
     visual.current = shape
     void el.offsetWidth
-    el.style.transition = ms ? `transform ${ms}ms ${curve}, width ${ms}ms cubic-bezier(.32,.72,0,1), height ${ms}ms cubic-bezier(.32,.72,0,1), border-radius ${ms}ms cubic-bezier(.32,.72,0,1), scale ${ms}ms cubic-bezier(.32,.72,0,1)` : 'none'
-    el.style.transform = shape.transform
+    el.style.transition = ms ? `translate ${ms}ms ${curve}, width ${ms}ms cubic-bezier(.32,.72,0,1), height ${ms}ms cubic-bezier(.32,.72,0,1), border-radius ${ms}ms cubic-bezier(.32,.72,0,1), scale ${ms}ms cubic-bezier(.32,.72,0,1)` : 'none'
+    el.style.translate = shape.translate
     el.style.width = `${TAB_W}px`; el.style.height = `${TAB_H}px`; el.style.borderRadius = String(shape.borderRadius); el.style.scale = '1'
     const done = () => {
       flight.current = 0
@@ -191,7 +194,7 @@ export function useDockedBubble(storageKey: string, fallback: Place, onEscape?: 
     // Keep React's shape changes from resetting an active drag or release.
     const el = button.current, shape = visual.current
     if (!el || !shape) return
-    el.style.transform = shape.transform
+    el.style.translate = shape.translate
     el.style.width = `${shape.width}px`; el.style.height = `${shape.height}px`
     el.style.borderRadius = typeof shape.borderRadius === 'number' ? `${shape.borderRadius}px` : shape.borderRadius
   })

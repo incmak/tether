@@ -1,22 +1,30 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { ArrowUp, AudioLines, Check, ChevronDown, GripHorizontal, Maximize2, Mic, MicOff, Minimize2, Minus, PhoneOff, Square } from 'lucide-react'
-import { errorText, SESSION_NAME, type Api, type Approval, type ChatData, type Choice, type Pane, type SessionsData } from './api'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { ArrowDown, ArrowUp, AudioLines, Check, ChevronDown, GripHorizontal, Maximize2, Mic, MicOff, Minimize2, Minus, PhoneOff, Square } from 'lucide-react'
+import { chatMessages, errorText, SESSION_NAME, type Api, type Approval, type ChatData, type Choice, type Pane, type SessionsData } from './api'
 import type { Command } from './CommandMenu'
-import { agentNames, groupSessions, paneTitle } from './Sidebar'
+import { agentNames, groupSessions, paneTitle, type Session } from './Sidebar'
 import { agentReady, FridayAgent, type AgentChats, type AgentEvent, type ToolHandler } from './fridayAgent'
+import type { Waiting } from './attention'
+import { findPane, findSession, fridayHomePane, sessionChoice, sessionPanes, spokenForm, spokenName } from './fridayNames'
 import { fridayChatList } from './fridaySessions'
 import { fridayChatFolder } from './fridayFolders'
+import { findLastReply, isReply, replyPage } from './fridayReply'
 import { LiveVoice, sentences } from './liveVoice'
 import { useBackStep } from './backNav'
 import { useFloatingWindow, type Edge, type FloatMode, type Point, type Rect } from './floatingWindow'
 import { bloomFromBubble, foldToBubble, openFrom, popBubble, settle } from './liveMotion'
-import { speakable } from './speech'
+import { holdReadAloud, speakable } from './speech'
 import { BACKLOG_PATH } from './backlogNews'
+import { addReminders, listReminders } from './fridayReminders'
+import { closeDraft, createDraftWatch, dropNotes, editPrompt, holdNotes, makePrompt, readNotes, sendPrompt, useHeldNotes } from './fridayNotes'
+import { HeldNotes } from './HeldNotes'
 import { parseBacklog, type Item } from './backlogItems'
 import { itemPrompt } from './backlogSend'
 import { reportVoice } from './voiceLog'
 import { ASSISTANT } from './assistant'
+import { answered, heard, remember, type Hero, type Line, type Spoken } from './liveHistory'
 import './Live.css'
+import { zoneParts } from './zone'
 
 // Live mode: talk to the agents hands-free. The orb listens, the words go to the target pane,
 // and the reply comes back as one or two spoken sentences. Colors come from the Settings color scheme.
@@ -32,6 +40,7 @@ interface Brief { speech: string }
 
 const STATUS: Record<Phase, string> = { starting: 'Starting', idle: 'Tap to talk', paused: 'Paused', listening: 'Listening', converting: 'Converting', thinking: 'Thinking', sending: 'Sending', speaking: 'Speaking' }
 const PANELS: Record<string, string> = { preview: 'browser', browser: 'browser', terminal: 'terminal', changes: 'changes', diff: 'changes', file: 'files', files: 'files', sidebar: 'sidebar', backlog: 'backlog' }
+const ACTS_OFF = 'Friday cannot change the screen: Friday can act in Tether is off in Settings.'
 
 const approvalOf = (pane: Pane) => {
   const approval = pane.approval as Approval | null
@@ -46,33 +55,105 @@ const firstRect = (): Rect => {
   const w = Math.min(400, vw - 32), h = Math.min(600, vh - 48)
   return { x: vw - w - 24, y: vh - h - 24, w, h }
 }
+// The bubble must not cover a message box: on a phone chat its default spot sits on the composer.
+// When it would, it moves up to just above that composer.
+const clearOfComposer = (at: Point): Point => {
+  let y = at.y
+  for (const form of document.querySelectorAll<HTMLElement>('form.composer')) {
+    const box = form.getBoundingClientRect()
+    if (!box.width || !box.height) continue
+    const covers = at.x < box.right && at.x + BUBBLE.w > box.left && y < box.bottom && y + BUBBLE.h > box.top
+    if (covers) y = box.top - 8 - BUBBLE.h
+  }
+  return { x: at.x, y }
+}
 const name = (pane: Pane) => `${paneTitle(pane)} · ${agentNames[pane.agent]}`
-const lastReply = (data: ChatData) => [...data.messages].reverse().find(item => item.role === 'assistant' && !item.kind && item.text.trim()) ?? null
+const lastReply = (data: ChatData) => [...chatMessages(data)].reverse().find(isReply) ?? null
 const shortText = (text: string, limit: number) => { const plain = speakable(text); return plain.length > limit ? `${plain.slice(0, limit).replace(/\s+\S*$/, '')}…` : plain }
 const yesOption = (approval: Approval) => approval.options!.find(option => !option.free && !/^no\b/i.test(option.text)) ?? approval.options![0]
 const noOption = (approval: Approval) => { const options = approval.options!; return options.find(option => /^no\b/i.test(option.text)) ?? options[options.length - 1] }
-/** Speech has no hyphens: "weekly reporting" must match "weekly-reporting". */
-const spokenForm = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
-const spokenName = (wanted: string) => spokenForm(wanted).replace(/^the /, '').replace(/ (pane|chat|tab|session)$/, '')
-const inSession = (agents: Pane[], name: string) => agents.filter(pane => spokenForm(pane.tmux_session) === name)
-/** A chat by its spoken name: exact title first, then a part of it, then the agent name, then a tmux session with one chat. */
-const findPane = (agents: Pane[], wanted: string) => {
-  const name = spokenName(wanted)
-  if (!name) return undefined
-  const session = inSession(agents, name)
-  return agents.find(pane => spokenForm(paneTitle(pane)) === name) ?? agents.find(pane => spokenForm(paneTitle(pane)).includes(name) || pane.agent === name)
-    ?? (session.length === 1 ? session[0] : undefined)
-}
-/** A name that means a tmux session with several chats: Friday must ask which one, and must not guess. */
-const sessionChoice = (agents: Pane[], wanted: string) => {
-  const name = spokenName(wanted)
-  const session = name && !findPane(agents, wanted) ? inSession(agents, name) : []
-  return session.length ? { error: `${session[0].tmux_session} is a tmux session with ${session.length} chats: ${session.map(paneTitle).join(', ')}. Ask which one.` } : null
+// eslint-disable-next-line react-refresh/only-export-components -- The approval selector is exported for unit tests.
+export function approvalTarget(agents: Pane[], chat: string): Pane | { error: string } {
+  const waiting = agents.filter(approvalOf)
+  const fullName = spokenForm(chat)
+  const strippedName = spokenName(chat)
+  const matches = chat ? waiting.filter(pane => {
+    const title = spokenForm(paneTitle(pane))
+    return title === fullName || title === strippedName
+  }) : waiting
+  if (matches.length === 1) return matches[0]
+  if (matches.length > 1) return { error: `Multiple chats are waiting for approval: ${matches.map(paneTitle).join(', ')}. Ask which one.` }
+  if (chat) return { error: `No chat called ${chat} is waiting for approval. Waiting: ${waiting.map(paneTitle).join(', ') || 'none'}.` }
+  return { error: 'No chat is waiting for approval.' }
 }
 const chatState = (pane: Pane) => approvalOf(pane) ? 'needs approval' : pane.needs ? `needs ${pane.needs.kind}` : pane.state.toLowerCase()
-const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+const needsOf = (pane: Pane) => pane.needs?.text ?? (approvalOf(pane) ? shortText(approvalOf(pane)!.text, 140) : '')
+const waitingText = (ask: Waiting['ask']) => shortText(ask.next, 140)
+const wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 
-export function Live({ api, panes, selected, commands, onClose, onBacklog, reveal = 0, from = null }: { api: Api; panes: Pane[]; selected?: Pane; commands: Command[]; onClose: () => void; onBacklog?: () => void; reveal?: number; from?: DOMRect | null }) {
+interface LiveAttention { asks: Waiting[]; count: number; done: string[] }
+interface FridayChats extends AgentChats {
+  waiting: { chat: string; kind: Waiting['ask']['kind']; text: string }[]
+  waiting_count: number
+  done: { chat: string }[]
+  done_count: number
+}
+
+/** Prompt state: names of idle chats come from list_chats. */
+// eslint-disable-next-line react-refresh/only-export-components -- Test the same facts that Friday receives.
+export function chats(agents: Pane[], target: Pane | undefined, attention: LiveAttention): FridayChats {
+  const waitingIds = new Set(attention.asks.map(({ pane }) => pane.id))
+  const needs = agents.flatMap(pane => {
+    const text = needsOf(pane)
+    return text ? [{ chat: paneTitle(pane), needs: text }] : []
+  })
+  const waiting = attention.asks.filter(({ pane }) => !needsOf(pane))
+    .map(({ pane, ask }) => ({ chat: paneTitle(pane), kind: ask.kind, text: waitingText(ask) }))
+  const available = agents.filter(pane => !needsOf(pane) && !waitingIds.has(pane.id))
+  const availableById = new Map(available.map(pane => [pane.id, pane]))
+  const doneIds = new Set(attention.done)
+  const done = [...doneIds].flatMap(id => {
+    const pane = availableById.get(id)
+    return pane ? [{ chat: paneTitle(pane) }] : []
+  })
+  const busy = available.filter(pane => !doneIds.has(pane.id) && chatState(pane) !== 'idle').map(paneTitle)
+  return { target: target ? paneTitle(target) : '', busy, needs, waiting, waiting_count: attention.count,
+    done, done_count: done.length, idle: agents.length - busy.length - needs.length - waiting.length - done.length }
+}
+
+/** Every chat, one short line each, with the sidebar's session name. */
+// eslint-disable-next-line react-refresh/only-export-components -- Test the tool result without starting a call.
+export function chatList(agents: Pane[], panes: Pane[], target: Pane | undefined, attention: LiveAttention, session?: string) {
+  const waiting = new Map(attention.asks.map(({ pane, ask }) => [pane.id, ask]))
+  const doneIds = new Set(attention.done)
+  return fridayChatList(agents.map(pane => {
+    const needs = needsOf(pane)
+    const ask = needs ? undefined : waiting.get(pane.id)
+    const text = ask ? waitingText(ask) : ''
+    const done = doneIds.has(pane.id)
+    const state = needs ? 'needs you' : ask ? `waiting on you (${ask.kind}${text ? `: ${text}` : ''})`
+      : done ? 'done (finished, not opened yet)' : chatState(pane)
+    return { session: pane.tmux_session, chat: paneTitle(pane), agent: agentNames[pane.agent], state,
+      busy: !needs && !ask && !done && state !== 'idle' }
+  }), groupSessions(panes), target ? paneTitle(target) : '', session)
+}
+
+interface LiveProps {
+  api: Api
+  panes: Pane[]
+  attention: LiveAttention
+  selected?: Pane
+  commands: Command[]
+  acts: boolean
+  onShowPane: (id: string) => string | null
+  onShowSession: (sessionId: string) => { pane: string } | { error: string }
+  onClose: () => void
+  onBacklog?: () => void
+  reveal?: number
+  from?: DOMRect | null
+}
+
+export function Live({ api, panes, attention, selected, commands, acts, onShowPane, onShowSession, onClose, onBacklog, reveal = 0, from = null }: LiveProps) {
   // The floating window refits on viewport resize; its minimum must fit the same viewport too.
   const viewport = window.visualViewport
   const { ref: attachWindow, mode, setMode, moving, bubble, windowStyle, bubbleStyle, move, resize, bubbleHandlers } = useFloatingWindow('tether.live-window.v1', { minW: Math.min(300, (viewport?.width ?? window.innerWidth) - 16), minH: Math.min(360, (viewport?.height ?? window.innerHeight) - 16), bubble: BUBBLE, initial: firstRect, initialMode: 'window' })
@@ -85,7 +166,8 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
   const focusBubble = useRef(false)
   function shrink(focus = false) {
     if (mode === 'bubble' || folding.current) return
-    const fold = foldToBubble(root.current, bubble, BUBBLE)
+    const spot = clearOfComposer(bubble)
+    const fold = foldToBubble(root.current, spot, BUBBLE)
     let fallback = 0, over = false
     const done = () => {
       if (over) return
@@ -93,7 +175,7 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
       window.clearTimeout(fallback)
       folded.current = !!fold
       focusBubble.current = focus
-      setMode('bubble')
+      setMode('bubble', spot)
     }
     if (!fold) { done(); return }
     folding.current = fold
@@ -121,9 +203,34 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
   const [phase, setPhase] = useState<Phase>('starting')
   const [said, setSaid] = useState('')
   const [reply, setReply] = useState({ who: ASSISTANT, text: '' })
+  // The hero shows the newest exchange; earlier lines stay above it, so the call scrolls back.
+  const [past, setPast] = useState<Line[]>([])
+  const hero = useRef<Hero>({ said: '', reply: { who: ASSISTANT, text: '' } })
+  const lineId = useRef(0)
+  // Plain refs and setters only, so the voice callbacks can hold these for the whole call.
+  const lines = useRef({
+    keep(step: { hero: Hero; keep: Omit<Line, 'id'>[] }) {
+      hero.current = step.hero
+      if (step.keep.length) setPast(old => remember(old, step.keep, () => ++lineId.current))
+      setSaid(step.hero.said)
+      setReply(step.hero.reply)
+    },
+    said(text: string) { lines.current.keep(heard(hero.current, text)) },
+    reply(next: Spoken, fresh = false) { lines.current.keep(answered(hero.current, next, fresh)) },
+  })
+  const showSaid = (text: string) => lines.current.said(text)
+  /** A whole line Friday or a chat says: always a new reply. */
+  const showReply = (next: Spoken) => lines.current.reply(next, true)
   const [muted, setMuted] = useState(false)
   const [awake, setAwake] = useState(false)
   const [problem, setProblem] = useState('')
+  const [attempt, setAttempt] = useState(0)  // Start again after a start that gave up runs the start effect again
+  const [stopped, setStopped] = useState(false)
+  const notes = useHeldNotes(api)
+  const [shownDraft, setShownDraft] = useState<{ id: string; rev: number; at: number } | null>(null)
+  const draftWatches = useRef<ReturnType<typeof createDraftWatch> | null>(null)
+  const held = useRef(notes.refresh)
+  held.current = notes.refresh
   const [menu, setMenu] = useState(false)
   const [watching, setWatching] = useState(0)
   const voice = useRef<LiveVoice | null>(null)
@@ -133,25 +240,81 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
   const canvas = useRef<HTMLCanvasElement>(null)
   const lit = useRef<HTMLElement>(null)  // the light in the Interrupt pill, or in the bubble
   const words = useRef<HTMLDivElement>(null)
-  // Keep the newest words in view when a long reply scrolls.
-  useEffect(() => { const box = words.current; if (box) box.scrollTop = box.scrollHeight }, [said, reply.text, problem, approval?.id])
+  // Follow the newest words, unless the person scrolled back to read; then offer a way back down.
+  const following = useRef(true)
+  const jumping = useRef(false)
+  const lastTop = useRef(0)
+  const [behind, setBehind] = useState(false)
+  useEffect(() => {
+    const box = words.current
+    if (!box) return
+    if (following.current) box.scrollTop = box.scrollHeight
+    else setBehind(true)
+  }, [said, reply.text, problem, approval?.id, past.length])
+  const hasPast = past.length > 0
+  // Keep the newest line in view while the box or its lines change size, for example when the orb shrinks.
+  useEffect(() => {
+    const box = words.current
+    if (!box || typeof ResizeObserver === 'undefined') return
+    const pin = new ResizeObserver(() => { if (following.current) box.scrollTop = box.scrollHeight })
+    pin.observe(box)
+    for (const child of Array.from(box.children)) pin.observe(child)
+    return () => pin.disconnect()
+  }, [hasPast])
+  const onWordsScroll = () => {
+    const box = words.current
+    if (!box) return
+    const top = box.scrollTop
+    const bottom = box.scrollHeight - top - box.clientHeight < 32
+    // Any drop counts, so a slow scroll of 1 px steps stops following too. A layout clamp
+    // (the box grows) also lowers scrollTop, but it lands at the bottom, which is handled first.
+    const up = top < lastTop.current
+    lastTop.current = top
+    // A smooth jump to the latest line passes through "not at the bottom": keep following until it lands.
+    if (jumping.current) { if (bottom) jumping.current = false; return }
+    if (bottom) { following.current = true; setBehind(false); return }
+    // Only the person scrolling up stops following. A layout change (the orb resizing) only moves the bottom.
+    if (up) { following.current = false; setBehind(true) }
+    else if (following.current) box.scrollTop = box.scrollHeight
+  }
+  /** The person scrolls again during a jump: they take over. */
+  const stopJump = () => { jumping.current = false }
+  const toLatest = () => {
+    const box = words.current
+    if (!box) return
+    following.current = true
+    jumping.current = true
+    // The button goes away on use: keep keyboard focus in the conversation, not on the page body.
+    if (document.activeElement instanceof HTMLElement && document.activeElement.classList.contains('live-latest')) box.focus({ preventScroll: true })
+    setBehind(false)
+    const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    box.scrollTo({ top: box.scrollHeight, behavior: still ? 'auto' : 'smooth' })
+  }
   const talkButton = useRef<HTMLButtonElement>(null)
+  // When the held-notes chip goes away under the focus, focus moves to the call controls.
+  const focusControls = useCallback(() => {
+    const talkNow = talkButton.current
+    ;(talkNow && !talkNow.disabled ? talkNow : root.current?.querySelector<HTMLElement>('.live-controls button:not(:disabled)'))?.focus()
+  }, [])
   const phaseNow = useRef<Phase>('starting')
   const talking = useRef(false)  // the person is mid-phrase: hold announcements until they pause
   const queue = useRef<{ who: string; text: string }[]>([])
   const watches = useRef(new Map<string, Watch>())
   const announced = useRef(new Set<string>())
-  const live = useRef({ agents, panes, target, approval, approvalPane, commands, api, onClose, onBacklog })
-  useEffect(() => { live.current = { agents, panes, target, approval, approvalPane, commands, api, onClose, onBacklog } })
+  const chatFacts = chats(agents, target, attention)
+  const live = useRef({ agents, panes, target, attention, chatFacts, approval, commands, api, acts, onShowPane, onShowSession, onClose, onBacklog })
+  useLayoutEffect(() => { live.current = { agents, panes, target, attention, chatFacts, approval, commands, api, acts, onShowPane, onShowSession, onClose, onBacklog } })
   const go = (next: Phase) => { phaseNow.current = next; setPhase(next) }
 
   // Every step reads the latest panes and commands through `live`, so the voice callbacks never go stale.
   const flow = useRef({
+    // The Live window steps aside so the chat shows (set below, next to the window code).
+    shown() {},
     async say(who: string, text: string) {
       if (!text.trim()) return
-      if (agent.current) { setReply({ who, text }); agent.current.say(text); return }
+      if (agent.current) { showReply({ who, text }); agent.current.say(text); return }
       if (!voice.current) return
-      setReply({ who, text })
+      showReply({ who, text })
       go('speaking')
       const done = await voice.current.speak(sentences(text))
       if (done) flow.current.next()
@@ -192,8 +355,7 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
         if (!response.ok) throw new Error(data.error || 'Voice-to-text failed.')
         const text = (data.text ?? '').trim()
         if (!text) { flow.current.rest(); return }
-        setSaid(text)
-        setReply(old => ({ ...old, text: '' }))
+        showSaid(text)
         setProblem('')
         await flow.current.act(text)
       } catch (failure) {
@@ -203,19 +365,22 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
     },
     /** Commands Live mode runs itself; anything else goes to the target pane. */
     async act(text: string) {
-      const { agents, target, approval, approvalPane } = live.current
+      const { agents, target } = live.current
       const words = text.toLowerCase().replace(/[.!?,]/g, '').trim()
       if (/^(stop|cancel|quiet|be quiet|never ?mind|shh+)$/.test(words)) { flow.current.rest(); return }
       if (/^(end|exit|close|stop) (live|live mode|session)$|^(goodbye|bye)\b/.test(words)) { live.current.onClose(); return }
       if (/\b(what'?s|what is) (running|happening|going on)\b|^(status|brief me|catch me up|briefing)$/.test(words)) { await flow.current.brief(); return }
-      if (approval && approvalPane && /^(approve|approved|yes|yeah|yep|allow|go ahead|do it|accept|ok(ay)?)\b/.test(words)) {
-        await flow.current.choose(approvalPane, approval, approval.options!.find(option => !option.free && !/^no\b/i.test(option.text)) ?? approval.options![0], 'Approved.')
-        return
-      }
-      if (approval && approvalPane && /^(deny|denied|no|nope|reject|don'?t|do not|decline)\b/.test(words)) {
-        const options = approval.options!
-        await flow.current.choose(approvalPane, approval, options.find(option => /^no\b/i.test(option.text)) ?? options[options.length - 1], 'Denied.')
-        return
+      const approvalPane = approvalTarget(agents, '')
+      if (!('error' in approvalPane)) {
+        const approval = approvalOf(approvalPane)!
+        if (/^(approve|approved|yes|yeah|yep|allow|go ahead|do it|accept|ok(ay)?)\b/.test(words)) {
+          await flow.current.choose(approvalPane, approval, yesOption(approval), 'Approved.')
+          return
+        }
+        if (/^(deny|denied|no|nope|reject|don'?t|do not|decline)\b/.test(words)) {
+          await flow.current.choose(approvalPane, approval, noOption(approval), 'Denied.')
+          return
+        }
       }
       const panel = words.match(/\b(open|show|close|hide)\b.*?\b(preview|browser|terminal|changes|diff|files?|sidebar|backlog)\b/)
       if (panel) { flow.current.panel(panel[1], PANELS[panel[2]]); return }
@@ -233,16 +398,18 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
     /** Type the words into the pane, then watch it for the reply. */
     async deliver(pane: Pane, text: string) {
       const before = await live.current.api<ChatData>(`chat?session=${encodeURIComponent(pane.id)}&limit=4`).catch(() => null)
-      await live.current.api('message', { session: pane.id, thread: before?.thread ?? pane.thread ?? null, message: text })
+      const sent = await live.current.api<{ delivery?: string }>('message', { session: pane.id, thread: before?.thread ?? pane.thread ?? null, message: text })
       watches.current.set(pane.id, { lastId: before ? lastReply(before)?.id ?? null : null, since: Date.now(), name: paneTitle(pane) })
       setWatching(watches.current.size)
+      // 'queued': the agent was busy, so the prompt waits in its input queue until the current step ends.
+      return sent?.delivery === 'queued' ? 'queued' as const : 'submitted' as const
     },
     async send(pane: Pane, text: string) {
       go('sending')
       try {
         await flow.current.deliver(pane, text)
         voice.current?.cue('sent')
-        setReply({ who: name(pane), text: '' })
+        showReply({ who: name(pane), text: '' })
         flow.current.listenOrWork()
       } catch (failure) {
         await flow.current.say(ASSISTANT, `That did not send. ${errorText(failure)}`)
@@ -289,23 +456,12 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
       const folder = fridayChatFolder(live.current.panes, live.current.target, project, FRIDAY_SESSION)
       if ('error' in folder) throw new Error(folder.error)
       const { api } = live.current
-      const clean = wanted.replace(/[^A-Za-z0-9 _-]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40).replace(/[ ]+$/, '') || `${kind} ${new Date().toTimeString().slice(0, 5).replace(':', '')}`
+      const { hour, minute } = zoneParts(Date.now())
+      const stamp = `${String(hour).padStart(2, '0')}${String(minute).padStart(2, '0')}`
+      const clean = wanted.replace(/[^A-Za-z0-9 _-]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40).replace(/[ ]+$/, '') || `${kind} ${stamp}`
       if (!SESSION_NAME.test(clean)) throw new Error('Use letters, numbers, spaces or hyphens for the chat name.')
-      // Friday's chats live together in one tmux session, one tab each. Other sessions stay as they are.
-      const home = (await api<SessionsData>('sessions')).sessions.find(item => item.tmux_session === FRIDAY_SESSION)
-      let id: string
-      if (home) id = (await api<{ pane: string }>('split', { session: home.id, direction: 'right', cwd: folder.dir })).pane
-      else {
-        const made = await api<{ session: string; name: string }>('tmux-sessions', { name: FRIDAY_SESSION, cwd: folder.dir })
-        let first: Pane | undefined
-        for (let tries = 0; tries < 20 && !first; tries++) {
-          first = (await api<SessionsData>('sessions')).sessions.find(item => item.label === made.name)
-          if (!first) await wait(300)
-        }
-        if (!first) throw new Error(`The session ${made.name} started, but its pane is not visible yet.`)
-        id = first.id
-      }
-      await api('pane-name', { pane: id, name: clean })
+      const { pane: id } = await fridayHomePane(api, FRIDAY_SESSION, folder.dir, wait)
+      await api('pane-name', { pane: id, name: clean, keep_session: true })
       await api('start', { session: id, thread: null, agent: kind })
       const made = { name: clean }
       if (prompt.trim()) void (async () => {
@@ -334,33 +490,39 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
 
   // The tools Friday's brain calls. They run here, with the page's own sign-in, and reply in short facts.
   const tools = useRef<Record<string, ToolHandler>>({
-    list_chats: async ({ session }) => ({ ...chatList(typeof session === 'string' && session.trim() ? session : undefined) }),
+    list_chats: async ({ session }) => {
+      const { agents, panes, target, attention } = live.current
+      return { ...chatList(agents, panes, target, attention, typeof session === 'string' && session.trim() ? session : undefined) }
+    },
     send_to_chat: async ({ chat, prompt }) => {
       const choice = sessionChoice(live.current.agents, String(chat ?? ''))
       if (choice) return choice
       const pane = findPane(live.current.agents, String(chat ?? '')) ?? (chat ? undefined : live.current.target)
       if (!pane) return { error: `No chat called ${chat}.` }
       if (!String(prompt ?? '').trim()) return { error: 'The prompt is empty.' }
-      await flow.current.deliver(pane, String(prompt))
-      return { ok: true, chat: paneTitle(pane) }
+      const delivery = await flow.current.deliver(pane, String(prompt))
+      return { ok: true, chat: paneTitle(pane), delivery }
     },
     answer_approval: async ({ chat, decision }) => {
-      const choice = sessionChoice(live.current.agents, String(chat ?? ''))
+      const { agents } = live.current
+      const wanted = String(chat ?? '')
+      const choice = sessionChoice(agents, wanted)
       if (choice) return choice
-      const pane = findPane(live.current.agents, String(chat ?? '')) ?? live.current.approvalPane
-      const approval = pane && approvalOf(pane)
-      if (!pane || !approval) return { error: 'No chat is waiting for approval.' }
+      const pane = approvalTarget(agents, wanted)
+      if ('error' in pane) return pane
+      const approval = approvalOf(pane)!
       await flow.current.answer(pane, approval, decision === 'approve' ? yesOption(approval) : noOption(approval))
       return { ok: true, chat: paneTitle(pane), decision: decision === 'approve' ? 'approve' : 'deny' }
     },
-    read_last_reply: async ({ chat }) => {
+    read_last_reply: async ({ chat, offset, reply_id }) => {
       const choice = sessionChoice(live.current.agents, String(chat ?? ''))
       if (choice) return choice
-      const pane = findPane(live.current.agents, String(chat ?? '')) ?? live.current.target
+      const pane = findPane(live.current.agents, String(chat ?? '')) ?? (chat ? undefined : live.current.target)
       if (!pane) return { error: `No chat called ${chat}.` }
-      const data = await live.current.api<ChatData>(`chat?session=${encodeURIComponent(pane.id)}&limit=6`)
-      const message = lastReply(data)
-      return { chat: paneTitle(pane), text: message ? shortText(message.text, 1500) : 'No reply yet.' }
+      const { message, searchedAll } = await findLastReply(limit => live.current.api<ChatData>(`chat?session=${encodeURIComponent(pane.id)}&limit=${limit}`))
+      if (!message) return { chat: paneTitle(pane), text: searchedAll ? 'No reply yet.' : 'No reply in the last 2000 messages.' }
+      const part = replyPage(speakable(message.text), message.id, typeof offset === 'number' ? offset : undefined, typeof reply_id === 'string' ? reply_id : undefined)
+      return { chat: paneTitle(pane), ...part }
     },
     new_chat: async ({ name: wanted, agent: kind, prompt, project }) => {
       const made = await flow.current.create(String(wanted ?? ''), kind === 'codex' ? 'codex' : 'claude', String(prompt ?? ''), String(project ?? ''))
@@ -374,7 +536,27 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
       setTargetId(pane.id)
       return { ok: true, chat: paneTitle(pane) }
     },
+    show_chat: async ({ chat }) => {
+      const { acts, agents, panes } = live.current
+      if (!acts) return { error: ACTS_OFF }
+      const wanted = String(chat ?? '')
+      const pane = findPane(agents, wanted)
+      if (pane) return showChatPane(pane, wanted)
+      const [match] = sessionPanes(agents, wanted)
+      const session = match && groupSessions(panes).find(item => item.id === match.tmux_session)
+      return session ? showSessionPane(session) : showChatPane(undefined, wanted)
+    },
+    show_session: async ({ session }) => {
+      const { acts, agents, panes } = live.current
+      if (!acts) return { error: ACTS_OFF }
+      const wanted = String(session ?? '')
+      const found = findSession(groupSessions(panes), wanted)
+      if (!found) return showChatPane(findPane(agents, wanted), wanted)
+      if ('error' in found) return found
+      return showSessionPane(found)
+    },
     open_panel: async ({ panel, open }) => {
+      if (!live.current.acts) return { error: ACTS_OFF }
       const kind = PANELS[String(panel ?? '').toLowerCase()]
       if (!kind) return { error: `No panel called ${panel}.` }
       const done = flow.current.toggle(open !== false, kind)
@@ -402,38 +584,65 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
       if (!words || !found.length) return { error: `No open backlog item matches ${wanted}.` }
       if (found.length > 1) return { error: `Several items match: ${found.slice(0, 3).map(item => item.ref).join(', ')}. Ask which one.` }
       const item = found[0]
-      await flow.current.deliver(pane, itemPrompt(item, data.command))
+      const delivery = await flow.current.deliver(pane, itemPrompt(item, data.command))
       const who = [pane.agent, `pane ${pane.id}`, pane.thread && `chat ${pane.thread}`].filter(Boolean).join(' · ')
       await live.current.api(`${BACKLOG_PATH}-start`, { item: item.ref, who }).catch(() => null)
-      return { ok: true, item: item.ref, chat: paneTitle(pane) }
+      return { ok: true, item: item.ref, chat: paneTitle(pane), delivery }
     },
+    reminder_add: async ({ reminders: asked }) => addReminders(live.current.api, asked),
+    reminder_list: async () => listReminders(live.current.api),
+    hold_note: args => holdNotes(live.current.api, args).finally(() => void held.current()),
+    read_notes: args => readNotes(live.current.api, args),
+    drop_notes: args => dropNotes(live.current.api, args).finally(() => void held.current()),
+    make_prompt: args => startDraft(makePrompt, args),
+    edit_prompt: args => startDraft(editPrompt, args),
+    send_prompt: args => sendPrompt(live.current.api, args).finally(() => void held.current()),
+    close_draft: args => closeDraft(live.current.api, args).finally(() => void held.current()),
   })
+  function startDraft(tool: typeof makePrompt, args: Record<string, unknown>) {
+    const watches = draftWatches.current
+    return tool(live.current.api, args, id => {
+      if (watches === draftWatches.current) watches?.start(id)
+    }).finally(() => void held.current())
+  }
+  function showChatPane(pane: Pane | undefined, wanted: string) {
+    if (!pane) return { error: `No chat called ${wanted}.` }
+    const error = live.current.onShowPane(pane.id)
+    if (error !== null) return { error }
+    setTargetId(pane.id)
+    flow.current.shown()
+    return { ok: true, chat: paneTitle(pane) }
+  }
+  function showSessionPane(session: Session) {
+    const opened = live.current.onShowSession(session.id)
+    if ('error' in opened) return opened
+    const pane = live.current.panes.find(pane => pane.id === opened.pane)
+    if (!pane) return { error: 'That chat is gone.' }
+    if (pane.agent !== 'shell') setTargetId(pane.id)
+    flow.current.shown()
+    return { ok: true, session: session.name, chat: paneTitle(pane) }
+  }
   /** The open backlog items, in list order. */
   async function openItems() {
     const data = await live.current.api<{ text: string }>(BACKLOG_PATH)
     return parseBacklog(data.text).filter((row): row is Item => row.kind === 'item' && !row.done)
   }
-  /** The chats as Friday sees them: name, agent, state, and what each needs from you. */
-  function needsOf(pane: Pane) { return pane.needs?.text ?? (approvalOf(pane) ? shortText(approvalOf(pane)!.text, 140) : '') }
-  /** Prompt state: only what matters now. Names of idle chats come from list_chats. */
-  function chats(): AgentChats {
-    const { agents, target } = live.current
-    const needs = agents.filter(pane => needsOf(pane)).map(pane => ({ chat: paneTitle(pane), needs: needsOf(pane) }))
-    const busy = agents.filter(pane => !needsOf(pane) && chatState(pane) !== 'idle').map(pane => paneTitle(pane))
-    return { target: target ? paneTitle(target) : '', busy, needs, idle: agents.length - busy.length - needs.length }
-  }
-  /** Every chat, one short line each, with the sidebar's session name. */
-  function chatList(session?: string) {
-    const { agents, panes, target } = live.current
-    return fridayChatList(agents.map(pane => ({
-      session: pane.tmux_session, chat: paneTitle(pane), agent: agentNames[pane.agent],
-      state: needsOf(pane) ? 'needs you' : chatState(pane), busy: !needsOf(pane) && chatState(pane) !== 'idle',
-    })), groupSessions(panes), target ? paneTitle(target) : '', session)
-  }
-
   // Start: the Friday agent when its worker runs, else the phrase loop. Then a short briefing.
   useEffect(() => {
+    const { release: releaseReadAloud, ready: readAloudReady } = holdReadAloud()
     let gone = false
+    const watches = createDraftWatch(live.current.api, (text, show) => {
+      void held.current()
+      if (show) setShownDraft({ ...show, at: Date.now() })
+      if (agent.current) agent.current.say(text)
+      else flow.current.announce(ASSISTANT, text)
+    })
+    draftWatches.current = watches
+    const stopDraftWatches = () => {
+      draftWatches.current = null
+      watches.clear()
+    }
+    window.addEventListener('pagehide', stopDraftWatches)
     const blocked = (failure: unknown) => failure instanceof DOMException && failure.name === 'NotAllowedError'
     const classic = () => {
       const engine = new LiveVoice({
@@ -449,7 +658,17 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
       })
     }
     void agentReady().then(async ready => {
+      const readAloud = await readAloudReady
       if (gone) return
+      if (readAloud !== 'quiet') {
+        releaseReadAloud()
+        setProblem(readAloud === 'busy'
+          ? 'Another Tether tab is still playing audio. Stop it there, then press Start again.'
+          : 'Live could not check for audio in other Tether tabs. Press Start again.')
+        setStopped(true)
+        go('idle')
+        return
+      }
       if (!ready) { classic(); return }
       const friday = new FridayAgent({
         tools: tools.current,
@@ -457,10 +676,11 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
           if (turn === 'listening') flow.current.listen()
           else go(turn)
         },
-        onUserText: (text, final) => { if (final) { setSaid(text); setReply(old => ({ ...old, text: '' })); setProblem('') } },
-        onBotText: text => setReply({ who: ASSISTANT, text }),
+        onUserText: (text, final) => { if (final) { lines.current.said(text); setProblem('') } },
+        onBotText: (text, fresh) => lines.current.reply({ who: ASSISTANT, text }, fresh),
         onMetrics: metrics => console.debug('Friday turn', metrics),
         onVoice: kind => { if (!gone) setVoiceKind(kind) },
+        onShowDraft: show => { if (!gone && agent.current === friday) setShownDraft({ ...show, at: Date.now() }) },
         onClosed: reason => {
           reportVoice({ kind: 'friday', event: 'closed', detail: String(reason) })
           if (gone || agent.current !== friday) return
@@ -477,7 +697,7 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
         await friday.open()
         if (gone) return
         // No spoken briefing: Friday has the chat state and answers when asked.
-        friday.state(chats())
+        friday.state(live.current.chatFacts)
         go('listening')
       } catch (failure) {
         reportVoice({ kind: 'friday', event: 'start-failed', detail: errorText(failure) })
@@ -491,12 +711,18 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
         classic()
       }
     })
-    return () => { gone = true; agent.current?.close('ended'); agent.current = null; voice.current?.close(); voice.current = null }
-  }, [])
+    return () => {
+      gone = true
+      window.removeEventListener('pagehide', stopDraftWatches)
+      stopDraftWatches()
+      agent.current?.close('ended'); agent.current = null; voice.current?.close(); voice.current = null
+      releaseReadAloud()
+    }
+  }, [attempt])
 
   // Friday hears the chat list whenever it changes, so it can answer "what's running" from facts.
-  const chatsKey = JSON.stringify([agents.map(pane => [pane.id, paneTitle(pane), pane.state, approvalOf(pane)?.id, pane.needs?.text]), target?.id])
-  useEffect(() => { if (agentOn) agent.current?.state(chats()) }, [agentOn, chatsKey])
+  const chatsKey = JSON.stringify(chatFacts)
+  useEffect(() => { if (agentOn) agent.current?.state(live.current.chatFacts) }, [agentOn, chatsKey])
 
   // Keep the screen on. The browser drops the lock when the page hides, so ask again when it shows.
   useEffect(() => {
@@ -688,10 +914,11 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
   }, [])
 
   function talk() {
+    if (stopped) { setStopped(false); setProblem(''); go('starting'); setAttempt(count => count + 1); return }
     if (agent.current) {  // Friday hears all the time: this only stops its reply. The mic button mutes.
       if (phase === 'speaking' || phase === 'thinking') agent.current.interrupt('tap', phase)
       // A tap while Friday thinks drops the answer it was about to give, so say so.
-      if (phase === 'thinking') setReply({ who: ASSISTANT, text: 'Stopped. Say it again.' })
+      if (phase === 'thinking') showReply({ who: ASSISTANT, text: 'Stopped. Say it again.' })
       return
     }
     const engine = voice.current
@@ -737,13 +964,21 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
   useEffect(() => { if (lastMode.current === 'bubble' && mode !== 'bubble') root.current?.focus(); lastMode.current = mode }, [mode])
   // Back shrinks Friday to its bubble, like a call app. Only End stops the call.
   useBackStep(mode !== 'bubble', () => shrink())
+  // After Friday shows a chat, the window steps aside so the chat is in view. The call stays on.
+  // A phone window covers most of the screen, so it folds to the bubble; a desktop full screen steps down to a window.
+  useLayoutEffect(() => {
+    flow.current.shown = () => {
+      if (window.innerWidth < 600) shrink()  // the phone breakpoint of firstRect
+      else if (mode === 'full') setMode('window')
+    }
+  })
   const revealed = useRef(reveal)
   useEffect(() => { if (reveal !== revealed.current) { revealed.current = reveal; if (mode === 'bubble') setMode('window') } }, [reveal, mode, setMode])
   useEffect(() => { talkButton.current?.focus() }, [])
 
   const working = agents.filter(pane => pane.state === 'Working').length
-  const status = STATUS[phase]
-  const talkLabel = agentOn ? 'Interrupt' : phase === 'speaking' ? 'Interrupt' : phase === 'listening' ? 'Send now' : phase === 'paused' ? 'Resume' : 'Talk'
+  const status = stopped ? 'Not started' : STATUS[phase]
+  const talkLabel = stopped ? 'Start again' : agentOn ? 'Interrupt' : phase === 'speaking' ? 'Interrupt' : phase === 'listening' ? 'Send now' : phase === 'paused' ? 'Resume' : 'Talk'
   const picker = agents.map(pane => <button key={pane.id} type="button" role="menuitemradio" aria-checked={pane.id === targetId} className="live-pane" data-state={approvalOf(pane) ? 'asking' : pane.state === 'Working' ? 'working' : 'idle'} onClick={() => { setTargetId(pane.id); setMenu(false) }}>
     <i aria-hidden="true" /><span><b>{paneTitle(pane)}</b><small>{agentNames[pane.agent]}{approvalOf(pane) ? ' · needs your OK' : pane.state === 'Working' ? ' · working' : ''}</small></span><Check size={15} className="live-check" aria-hidden="true" />
   </button>)
@@ -787,11 +1022,18 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
           <canvas ref={canvas} aria-hidden="true" onClick={talk} />
         </div>
         <div className="live-status" aria-live="polite" title={`${awake ? 'Screen on' : 'Screen may sleep'}${agentOn ? ` · ${voiceInfo}` : ''}`}>{status}{working ? <span> · {working} working</span> : null}</div>
-        <div ref={words} className="live-words" data-no-drag aria-live="polite">
-          {said && <p className="live-said" data-small={!!reply.text}>{said}</p>}
-          {reply.text && <p className="live-reply" data-long={reply.text.length > 110}>{reply.who !== ASSISTANT && <span className="live-who">{reply.who}</span>}{reply.text}</p>}
-          {problem && <p className="live-problem" role="alert">{problem}</p>}
+        <HeldNotes api={api} topics={notes.topics} refresh={notes.refresh} onEmpty={focusControls} show={shownDraft} />
+        <div ref={words} className="live-words" data-no-drag tabIndex={past.length ? 0 : undefined} role={past.length ? 'region' : undefined} aria-label={past.length ? 'Conversation' : undefined} onScroll={onWordsScroll} onWheel={stopJump} onTouchStart={stopJump} onKeyDown={stopJump}>
+          {past.length > 0 && <ol className="live-past" aria-label="Earlier in this call">
+            {past.map(line => <li key={line.id} data-you={line.you}><span className="live-who">{line.you ? 'You' : line.who}</span>{line.text}</li>)}
+          </ol>}
+          <div className="live-now" aria-live="polite">
+            {said && <p className="live-said" data-small={!!reply.text}>{said}</p>}
+            {reply.text && <p className="live-reply" data-long={reply.text.length > 110}>{reply.who !== ASSISTANT && <span className="live-who">{reply.who}</span>}{reply.text}</p>}
+            {problem && <p className="live-problem" role="alert">{problem}</p>}
+          </div>
         </div>
+        {behind && <button type="button" className="live-latest" data-no-drag onClick={toLatest}><ArrowDown size={14} aria-hidden="true" />Latest</button>}
       </div>
 
       {approval && approvalPane && <div className="live-approval" data-no-drag role="group" aria-label={`${paneTitle(approvalPane)} needs your OK`}>
@@ -802,7 +1044,7 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
       </div>}
 
       <div className="live-controls">
-        <div className="live-ctl"><button type="button" className="live-round" aria-pressed={muted} aria-label={agentOn ? 'Mute microphone' : muted ? 'Resume listening' : 'Pause listening'} onClick={togglePause} disabled={phase === 'starting'}>{muted ? <MicOff size={22} aria-hidden="true" /> : <Mic size={22} aria-hidden="true" />}</button><span>{agentOn ? (muted ? 'Unmute' : 'Mute') : muted ? 'Paused' : 'Pause'}</span></div>
+        <div className="live-ctl"><button type="button" className="live-round" aria-pressed={muted} aria-label={agentOn ? 'Mute microphone' : muted ? 'Resume listening' : 'Pause listening'} onClick={togglePause} disabled={phase === 'starting' || stopped}>{muted ? <MicOff size={22} aria-hidden="true" /> : <Mic size={22} aria-hidden="true" />}</button><span>{agentOn ? (muted ? 'Unmute' : 'Mute') : muted ? 'Paused' : 'Pause'}</span></div>
         <div className="live-ctl live-talk"><button ref={talkButton} type="button" className="live-pill" aria-label={talkLabel} onClick={talk} disabled={agentOn ? !interruptable : phase === 'starting'}>
           {mode !== 'bubble' && <i ref={lit} className="live-lit" aria-hidden="true" />}
           {phase === 'speaking' || (agentOn && interruptable) ? <Square size={20} fill="currentColor" aria-hidden="true" /> : agentOn ? null : phase === 'listening' ? <ArrowUp size={24} aria-hidden="true" /> : phase === 'paused' ? <Mic size={22} aria-hidden="true" /> : <AudioLines size={24} aria-hidden="true" />}

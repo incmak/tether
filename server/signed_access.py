@@ -51,7 +51,9 @@ PAGE_METHODS = {
 PAGE_ALLOWED = {domain + '.' + method for domain, methods in PAGE_METHODS.items() for method in methods.split()}
 REQUEST_SECONDS = 120
 END_MESSAGES = {
-    'debugger_detached': "Chrome's debugging bar was closed.",
+    'debugger_canceled': "Chrome's debugging bar was closed.",
+    'debugger_target_closed': 'Chrome closed the debugging connection to the tab. Ask again.',
+    'debugger_detached': 'Chrome ended the debugging connection.',
     'tab_closed': 'The tab was closed.',
     'expired': 'The time ran out.',
     'action_stop': 'It was stopped from the Chrome extension.',
@@ -62,7 +64,8 @@ END_MESSAGES = {
     'connection_changed': 'Chrome disconnected.',
     'backpressure': 'Too many commands at once.',
     'command_limit': 'Too many commands at once.',
-    'stream_backpressure': 'Too many commands at once.',
+    'stream_backpressure': 'Your Chrome sent page frames faster than Tether could take them. Update the Tether extension.',
+    'stream_overflow': 'Your Chrome could not send page updates fast enough.',
     'attach_failed': 'Chrome did not allow the debugger.',
     'browser_stopped': 'The browser stopped.',
     'conversation_changed': "The agent's chat changed or ended.",

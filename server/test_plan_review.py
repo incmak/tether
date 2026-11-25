@@ -1,4 +1,5 @@
 """Plan review pairs only unresolved transcript plans with the native chooser."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 from pathlib import Path
 import subprocess

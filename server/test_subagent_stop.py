@@ -1,8 +1,11 @@
 """All terminal writes use a fake tmux runner and isolated transcript files."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
+from itertools import permutations
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -59,7 +62,7 @@ class RowsTests(unittest.TestCase):
 ''')
         self.assertEqual([(row['label'], row['section']) for row in stop.rows(screen)],
                          [('sleep 1502', 'Shells'), ('sleep 1501', 'Shells')])
-        self.assertEqual([row['section'] for row in stop.rows('1 active agent\n❯ ● Quiet wait  running · Haiku 5.5\n')],
+        self.assertEqual([row['section'] for row in stop.rows('Background\n1 active agent\n❯ ● Quiet wait  running · Haiku 5.5\n')],
                          ['Local agents'])
 
     def test_shell_detail_facts(self):
@@ -72,7 +75,7 @@ class RowsTests(unittest.TestCase):
         self.assertFalse(stop.fits(screen.replace('sleep 1502', 'sleep 1501'), target, 79))
 
     def test_five_rows_across_sections_ignore_other_lines_and_stop_at_hint(self):
-        screen = ('● Before section\nShells (2)\n❯ ● Shell one running\n'
+        screen = ('Background\n● Before section\nShells (2)\n❯ ● Shell one running\n'
                   '● Shell two completed\n\nOther text\nLocal agents (2)\n'
                   '● Agent one failed\n● Agent two stopped\nEarlier in this session (1)\n'
                   '● Old agent killed\n' + LIST_HINT + '\n● After hint running\n')
@@ -407,7 +410,7 @@ class StopTests(unittest.TestCase):
         self.assertEqual(self.pane.keys, [])
 
     def test_changed_list_after_move_refuses_stop_and_closes(self):
-        self.pane.after_move = ('Local agents (1)\n❯ ● Different task    running · Haiku 5.5\n' + LIST_HINT)
+        self.pane.after_move = ('Background\nLocal agents (1)\n❯ ● Different task    running · Haiku 5.5\n' + LIST_HINT)
         with self.assertRaisesRegex(stop.StopError, 'Could not identify'):
             self.stop()
         self.assertNotIn(('x',), self.pane.keys)
@@ -415,7 +418,7 @@ class StopTests(unittest.TestCase):
 
     def test_navigation_is_bounded_at_40_keys(self):
         self.pane.after_move = (
-            'Local agents (2)\n❯ ● Beta wait    running · Haiku 5.5\n'
+            'Background\nLocal agents (2)\n❯ ● Beta wait    running · Haiku 5.5\n'
             '  ● Alpha wait    running · Haiku 5.5\n' + LIST_HINT)
         with self.assertRaisesRegex(stop.StopError, 'Could not reach'):
             self.stop()
@@ -711,6 +714,47 @@ class ProcessStopTests(unittest.TestCase):
         self.pane.on_stop = None
         self.assertEqual(self.stop(), {'ok': True, 'state': 'stopped'})
 
+    def test_shell_output_that_looks_like_an_exit_hides_the_selected_parent_after_clear(self):
+        self.make_tasks()
+        old = self.tasks.parent.name
+        new = '22222222-2222-2222-2222-222222222222'
+        project = self.meta.parent.parent.parent / 'projects' / 'project'
+        old_folder = project / old / 'subagents'
+        current_folder = project / new / 'subagents'
+        old_folder.mkdir(parents=True)
+        current_folder.mkdir(parents=True)
+        meta = json.dumps({'description': AgentBarTests.NAME, 'agentType': 'general-purpose',
+                           'requestShape': 'background', 'finished': True})
+        records = Path(self.entry['transcript']).read_text()
+        for folder, identifier, transcript in (
+                (old_folder, 'beta', records.replace('shell02', 'shell01').replace('bash-start', 'other-start')),
+                (current_folder, 'alpha', records)):
+            path = folder / f'agent-{identifier}.jsonl'
+            path.write_text(transcript)
+            path.with_suffix('.meta.json').write_text(meta)
+            # After /clear Claude can repoint the link before the old agent writes again.
+            (self.tasks / f'{identifier}.output').symlink_to(current_folder / path.name)
+        (self.tasks / 'shell01.output').write_text('ordinary output\n[exited with code 0]\n')
+        main = project / f'{new}.jsonl'
+        main.write_text('')
+        self.entry.update(transcript=str(main), thread=new)
+        self.enterContext(patch.object(subagents, 'PROJECTS', project.parent))
+        self.enterContext(patch.object(terminal, 'live_status', return_value={'state': 'Working'}))
+        listed = subagents.listing(self.entry, limit=False)['agents']
+        self.assertEqual([(item['id'], item['waiting']) for item in listed],
+                         [('alpha', {'shell': 1, 'monitor': 0})])
+
+        # The single visible row belongs to beta. The same-name target is hidden.
+        selected = (AgentBarTests.FOLDER / 'agent_selected.txt').read_text().replace(
+            'waiting on 1 shell, 1 monitor', 'waiting on 1 shell')
+
+        def run(args, **kwargs):
+            self.assertEqual(args[1], 'capture-pane')
+            return subprocess.CompletedProcess(args, 0, selected, '')
+
+        with self.assertRaisesRegex(stop.StopError, 'share this name'):
+            stop.stop(self.entry, 'alpha', run=run, sleep=lambda _: None)
+
 
 class StopRouteTests(unittest.TestCase):
     def setUp(self):
@@ -780,6 +824,8 @@ class StopRouteTests(unittest.TestCase):
 class RealScreenTests(unittest.TestCase):
     """Real /tasks screens captured from Claude Code. Add a folder for each new version whose screens change."""
     FOLDER = Path(__file__).parent / 'fixtures' / 'claude_2.1.325_tasks'
+    FOLDER_327 = FOLDER.parent / 'claude_2.1.327_tasks'
+    FOLDER_330 = FOLDER.parent / 'claude_2.1.330_tasks'
 
     def screen(self, name):
         return (self.FOLDER / f'{name}.txt').read_text()
@@ -788,6 +834,124 @@ class RealScreenTests(unittest.TestCase):
         self.assertEqual([(row['label'], row['selected'], row['section']) for row in stop.rows(self.screen('list'))], [
             ('Fixture monitor', True, 'Shells'), ('sleep 401', False, 'Shells'), ('Fixture wait 2', False, 'Local agents')])
         self.assertEqual([row['selected'] for row in stop.rows(self.screen('list_agent_selected'))], [False, False, True])
+
+    def test_2_1_327_list_identifies_each_task(self):
+        screen = (self.FOLDER_327 / 'list.txt').read_text()
+        self.assertTrue(stop.dialog_open(screen.replace(' · x to stop', '')))
+        rows = stop.rows(screen)
+        self.assertEqual([(row['label'], row['selected'], row['section']) for row in rows], [
+            ('Stop canary monitor', True, 'Shells'), ('sleep 600', False, 'Shells'),
+            ('Stop canary agent', False, 'Background agents')])
+        for label, is_task in (('Stop canary monitor', True), ('sleep 600', True), ('Stop canary agent', False)):
+            with self.subTest(label=label):
+                target = {'task': is_task}
+                self.assertEqual([row['label'] for row in rows if stop.in_section(target, row['section'])
+                                  and stop.matches(label, row['label'])], [label])
+
+    def test_2_1_330_lists_identify_main_tasks_and_refuse_child_tasks(self):
+        cases = (
+            ('list', 'Stop canary agent', ['sleep 601']),
+            ('list_no_sections', 'Stop canary monitor', ['sleep 601']),
+            ('list_subagent_shell', 'Wait for background sleep 601 to finish',
+             ['Wait for background sleep 601 to finish', 'sleep 601']),
+        )
+        for name, selected, children in cases:
+            with self.subTest(name=name):
+                screen = (self.FOLDER_330 / f'{name}.txt').read_text()
+                self.assertTrue(stop.dialog_open(screen))
+                rows = stop.rows(screen)
+                self.assertEqual([row['label'] for row in rows if row['selected']], [selected])
+                self.assertEqual([row['label'] for row in rows if row.get('unverified_task')], children)
+                for label in ('sleep 600', 'Stop canary monitor'):
+                    target = {'task': True, 'labels': [label]}
+                    self.assertEqual([row['label'] for row in rows if stop.is_target(target, row)], [label])
+                for label in children:
+                    target = {'task': True, 'labels': [label]}
+                    self.assertFalse(any(stop.is_target(target, row) for row in rows))
+
+    def test_2_1_330_single_kind_summary_parses_selected_task(self):
+        for summary, section in (('1 shell', 'Shells'), ('3 shells', 'Shells'), ('1 monitor', 'Monitors')):
+            with self.subTest(summary=summary):
+                screen = (self.FOLDER_330 / 'list_no_sections.txt').read_text().replace('2 shells, 1 monitor', summary)
+                self.assertTrue(any(row['selected'] and row['section'] == section for row in stop.rows(screen)))
+
+    def test_2_1_330_agent_detail_matches_prompt_and_runtime(self):
+        screen = (self.FOLDER_330 / 'detail_agent.txt').read_text()
+        body = ('Run Bash `sleep 601` with run_in_background true and timeout 600000. '
+                'Wait for that shell to finish before you reply. Then reply done.')
+        target = {'task': False, 'labels': ['Stop canary agent'], 'kind': 'general-purpose',
+                  'started': 1000, 'body': body}
+        self.assertTrue(stop.detail_open(screen))
+        self.assertEqual(stop.detail_facts(screen, target), (True, '2s', body))
+        self.assertTrue(stop.fits(screen, target, 1002))
+
+    def test_detail_footer_distinguishes_both_versions_from_the_list(self):
+        detail = (self.FOLDER_327 / 'detail_agent.txt').read_text()
+        for screen in (self.screen('agent_detail'), detail):
+            with self.subTest(footer=screen.splitlines()[-1]):
+                self.assertTrue(stop.detail_open(screen))
+                self.assertTrue(stop.dialog_open(screen.replace(' · x to stop', '')))
+                self.assertFalse(stop.list_navigation(screen))
+        for screen in (self.screen('list'), (self.FOLDER_327 / 'list.txt').read_text()):
+            with self.subTest(footer=screen.splitlines()[-1]):
+                self.assertTrue(stop.list_navigation(screen))
+                self.assertTrue(stop.dialog_open(screen))
+                self.assertFalse(stop.detail_open(screen))
+        for footer in (' · Enter/Space to close', ' · Esc to close'):
+            with self.subTest(missing=footer):
+                self.assertFalse(stop.detail_open(detail.replace(footer, '')))
+        self.assertFalse(stop.detail_open(detail.replace(' · Esc to close', ' and Esc to close')))
+
+    def test_2_1_327_list_ignores_chat_above_last_background_title(self):
+        screen = (self.FOLDER_327 / 'list.txt').read_text()
+        chat = 'Background\nShells\n● sleep 600  running\n'
+        self.assertEqual(stop.rows(chat + screen), stop.rows(screen))
+
+    def test_list_refuses_without_background_title(self):
+        screen = (self.FOLDER_327 / 'list.txt').read_text().replace('  Background\n', '')
+        self.assertEqual(stop.rows(screen), [])
+        target = {'task': True, 'labels': ['sleep 600'], 'body': 'sleep 600'}
+        with patch.object(stop, 'visible', side_effect=['❯ /tasks', screen]), patch.object(stop, 'press') as press:
+            with self.assertRaisesRegex(stop.StopError, 'Could not identify that task'):
+                stop.stop_selected({}, target, None, lambda _: None)
+        self.assertEqual([call.args[1:] for call in press.call_args_list], [('-l', '/tasks'), ('Enter',)])
+
+    def test_2_1_327_matching_shell_suffix_refuses_before_row_keys(self):
+        screen = (self.FOLDER_327 / 'list_subagent_shell.txt').read_text()
+        target = {'task': True, 'labels': ['sleep 600'], 'body': 'sleep 600'}
+        for suffix in (' · general-purpose subagent', ' · general-purpose subag…', ' · unknown stopped', ' owned elsewhere', '·'):
+            for only_match in (False, True):
+                with self.subTest(suffix=suffix, only_match=only_match):
+                    listed = screen.replace(' · general-purpose subagent', suffix)
+                    if only_match:
+                        listed = listed.replace('  ❯ ● sleep 600             running\n', '').replace(
+                            '    ● sleep 600', '  ❯ ● sleep 600')
+                    with patch.object(stop, 'visible', side_effect=['❯ /tasks', listed]), \
+                            patch.object(stop, 'press') as press, \
+                            self.assertRaisesRegex(stop.StopError, 'Could not identify that task'):
+                        stop.stop_selected({}, target, None, lambda _: None)
+                    self.assertEqual([call.args[1:] for call in press.call_args_list], [('-l', '/tasks'), ('Enter',)])
+
+    def test_matching_monitor_suffix_appears_during_selection(self):
+        screen = (self.FOLDER_327 / 'list.txt').read_text().replace('    Shells', '    Monitors').replace(
+            '  ❯ ● Stop canary monitor', '    ● Stop canary monitor').replace('    ● sleep 600', '  ❯ ● sleep 600')
+        changed = screen.replace('Stop canary monitor   running', 'Stop canary monitor   running · unknown')
+        target = {'task': True, 'labels': ['Stop canary monitor'], 'body': 'sleep 599'}
+        with patch.object(stop, 'visible', side_effect=['❯ /tasks', screen, changed]), \
+                patch.object(stop, 'press') as press, self.assertRaisesRegex(stop.StopError, 'Could not identify that task'):
+            stop.stop_selected({}, target, None, lambda _: None)
+        self.assertEqual([call.args[1:] for call in press.call_args_list], [('-l', '/tasks'), ('Enter',), ('Up',)])
+
+    def test_2_1_327_list_without_sections_distinguishes_session_tasks_from_child_shell(self):
+        screen = (self.FOLDER_327 / 'list_no_sections.txt').read_text()
+        rows = stop.rows(screen)
+        self.assertEqual([(row['label'], row['section'], row['selected']) for row in rows], [
+            ('sleep 601', 'Shells', True), ('Stop canary monitor', 'Shells', False), ('sleep 600', 'Shells', False),
+        ])
+        for label, matches in (('Stop canary monitor', [1]), ('sleep 600', [2]), ('sleep 601', [])):
+            with self.subTest(label=label):
+                target = {'task': True, 'labels': [label]}
+                self.assertEqual([i for i, row in enumerate(rows) if stop.is_target(target, row)], matches)
 
     def test_shell_detail(self):
         target = {'task': True, 'labels': ['Fixture shell', 'sleep 401'], 'kind': 'shell', 'started': 1000.0,
@@ -803,6 +967,18 @@ class RealScreenTests(unittest.TestCase):
         self.assertEqual(stop.detail_facts(self.screen('monitor_detail'), target), (True, '2m 41s', 'sleep 402'))
         self.assertTrue(stop.fits(self.screen('monitor_detail'), target, 1161))
 
+    def test_detail_views_on_2_1_330(self):
+        for name, label, body, runtime, started in (
+                ('shell_detail', 'Background sleep 600 for Stop test', 'sleep 600', '4s', 1000.0),
+                ('monitor_detail', 'Stop canary monitor', 'sleep 599', '6s', 1000.0)):
+            with self.subTest(name=name):
+                screen = (self.FOLDER_330 / f'{name}.txt').read_text()
+                target = {'task': True, 'labels': [label, body], 'kind': name.split('_')[0], 'started': started,
+                          'body': body}
+                self.assertEqual(stop.detail_facts(screen, target), (True, runtime, body))
+                other = dict(target, labels=['sleep 1'], body='sleep 1')
+                self.assertFalse(stop.detail_facts(screen, other)[0])
+
     def test_agent_detail(self):
         target = {'task': False, 'labels': ['Fixture wait 2'], 'kind': 'general-purpose', 'started': 1000.0,
                   'body': 'Run this Bash command in the foreground with timeout 400000: '
@@ -812,6 +988,537 @@ class RealScreenTests(unittest.TestCase):
         self.assertTrue(stop.fits(self.screen('agent_detail'), target, 1138))
         self.assertFalse(stop.fits(self.screen('agent_detail'), dict(target, body='Another prompt'), 1138))
         self.assertFalse(stop.fits(self.screen('agent_detail'), dict(target, kind='Explore'), 1138))
+
+    def test_2_1_327_agent_detail_matches_the_name_kind_prompt_and_runtime(self):
+        screen = (self.FOLDER_327 / 'detail_agent.txt').read_text()
+        body = 'Run Bash `sleep 600` in the foreground with timeout 600000, then reply done.'
+        target = {'task': False, 'labels': ['Stop canary agent'], 'kind': 'general-purpose',
+                  'started': 1000.0, 'body': body}
+        self.assertEqual(stop.detail_facts(screen, target), (True, '2s', body))
+        self.assertTrue(stop.fits(screen, target, 1002))
+        self.assertFalse(stop.fits(screen, target, 1010))
+        for field, wrong in (('kind', 'Explore'), ('labels', ['Another agent']), ('body', 'Another prompt')):
+            with self.subTest(field=field):
+                self.assertFalse(stop.fits(screen, dict(target, **{field: wrong}), 1002))
+
+    def test_2_1_327_shell_and_monitor_details_match_command_and_runtime(self):
+        for name, label, command, runtime in (('detail_shell', 'sleep 600', 'sleep 600', 8),
+                                              ('detail_monitor', 'Stop canary monitor', 'sleep 599', 10)):
+            with self.subTest(name=name):
+                screen = (self.FOLDER_327 / f'{name}.txt').read_text()
+                self.assertTrue(stop.detail_open(screen))
+                self.assertFalse(stop.list_navigation(screen))
+                self.assertTrue(stop.has_action(screen, 'x to stop'))
+                target = {'task': True, 'labels': [label, command], 'kind': '', 'started': 1000.0, 'body': command}
+                self.assertEqual(stop.detail_facts(screen, target), (True, f'{runtime}s', command))
+                self.assertTrue(stop.fits(screen, target, 1000 + runtime))
+                self.assertFalse(stop.fits(screen, target, 1000 + runtime + 30))
+                self.assertFalse(stop.fits(screen, dict(target, labels=['sleep 601'], body='sleep 601'), 1000 + runtime))
+
+
+class AgentBarTests(unittest.TestCase):
+    FOLDER = Path(__file__).parent / 'fixtures' / 'claude_2.1.330_agent_bar'
+    NAME = 'Stop canary agent'
+    ROW = '  ◯ general-purpose  waiting on 1 shell, 1 monitor · Stop canary agent · since 8:54 AM'
+
+    def screen(self, name):
+        return (self.FOLDER / f'{name}.txt').read_text()
+
+    def setUp(self):
+        self.agent = {'id': 'alpha', 'description': self.NAME, 'type': 'general-purpose',
+                      'state': 'running', 'waiting': {'shell': 1, 'monitor': 1}}
+        self.siblings = []
+        self.keys = []
+        self.reads = []
+        self.verify = self.enterContext(patch.object(terminal, 'verify'))
+        self.status = self.enterContext(patch.object(terminal, 'live_status', return_value={'state': 'Working'}))
+        self.enterContext(patch.object(stop, 'claude_version', return_value='2.1.330'))
+        # Refusals name the running version when it differs from the last version checked live.
+        self.enterContext(patch.object(stop, 'CHECKED_TASKS_UI', '2.1.325'))
+
+    def test_all_captured_focus_states(self):
+        cases = {
+            'prompt_waiting_shell_monitor': ('prompt', None, None),
+            'prompt_waiting_working': ('prompt', None, None),
+            'pill_focus': ('pill', None, None),
+            'main_selected': ('row', 0, None),
+            'agent_selected': ('row', 1, 'stop'),
+            'agent_stopped': ('row', 1, 'clear'),
+            'after_escape': ('prompt', None, None),
+            'narrow_prompt_waiting': ('prompt', None, None),
+            'narrow_pill_focus': ('pill', None, None),
+            'narrow_main_selected': ('row', 0, None),
+            'narrow_agent_selected': ('row', 1, 'stop'),
+            'narrow_agent_stopped': ('row', 1, 'clear'),
+            'narrow_after_escape': ('prompt', None, None),
+            'after_stop_resume_footer': ('prompt', None, None),
+            'pill_focus_after_stop': ('pill', None, None),
+        }
+        for name, expected in cases.items():
+            with self.subTest(name=name):
+                screen = self.screen(name)
+                bar = stop.agent_bar(screen)
+                self.assertIsNotNone(bar)
+                self.assertEqual((bar['focus'], bar['selected'], bar['action']), expected)
+                self.assertFalse(bar['draft'])
+                self.assertEqual(bar['rows'][0]['kind'], 'main')
+                self.assertEqual(stop.agent_bar('❯ ● main\n' + self.ROW + '\n' + screen), bar)
+        for name in ('agent_view_open', 'background_session_dialog'):
+            with self.subTest(name=name):
+                self.assertIsNone(stop.agent_bar(self.screen(name)))
+
+    def test_waiting_identity_requires_supported_counts_and_complete_name(self):
+        screen = self.screen('agent_selected')
+        self.assertEqual(stop.agent_bar(screen)['rows'][1], {
+            'kind': 'general-purpose', 'value': self.NAME + ' · since 8:54 AM', 'waiting': self.agent['waiting'],
+        })
+        for text in (screen.replace('1 monitor', '1 worker'), screen.replace('1 monitor', '2 shells'),
+                     screen.replace(' · since 8:54 AM', '')):
+            self.assertIsNone(stop.agent_bar(text)['rows'][1]['waiting'])
+        narrow = self.screen('narrow_agent_selected')
+        self.assertEqual(stop.agent_bar(narrow)['rows'][1], {
+            'kind': 'general-purpose', 'value': 'Prob…', 'waiting': {'shell': 1, 'monitor': 0},
+        })
+
+    def drive(self, frames, fresh=None):
+        """Each step is (visible frame, allowed key). An empty key allows only reads."""
+        position = 0
+        self.keys.clear()
+        self.reads.clear()
+
+        def run(args, **kwargs):
+            nonlocal position
+            screen, key = frames[position]
+            if args[1] == 'capture-pane':
+                self.reads.append(position)
+                if callable(screen):
+                    screen = screen()
+                return subprocess.CompletedProcess(args, 0, screen, '')
+            self.assertEqual(args[1], 'send-keys')
+            self.assertEqual(args[4:], [key])
+            self.assertTrue(self.reads and self.reads[-1] == position)
+            self.keys.append(key)
+            position += 1
+            return subprocess.CompletedProcess(args, 0, '', '')
+
+        def listing(entry, *, limit=True):
+            if fresh is not None and self.keys and 'x' not in self.keys:
+                self.assertFalse(limit)
+                fresh()
+            state = 'stopped' if 'x' in self.keys else self.agent['state']
+            return {'agents': [dict(self.agent, state=state), *self.siblings], 'tasks': []}
+
+        entry = {'id': '%fake-bar', 'agent': 'claude'}
+        with patch.object(subagents, 'listing', side_effect=listing), \
+                patch.object(subagents, 'bar_candidates', side_effect=lambda _: [self.agent, *self.siblings]):
+            return stop.stop(entry, 'alpha', run=run, sleep=lambda _: None)
+
+    def wide_frames(self):
+        return [(self.screen(name), key) for name, key in (
+            ('prompt_waiting_shell_monitor', 'Down'), ('pill_focus', 'Down'), ('main_selected', 'Down'),
+            ('agent_selected', 'x'), ('agent_stopped', 'Escape'), ('after_escape', None),
+        )]
+
+    def narrow_frames(self):
+        self.agent.update(description='Probe agent', waiting={'shell': 1, 'monitor': 0})
+        return [self.screen('narrow_' + name)
+                for name in ('prompt_waiting', 'pill_focus', 'main_selected', 'agent_selected')]
+
+    def test_driver_writes_only_verified_keys(self):
+        self.assertEqual(self.drive(self.wide_frames()), {'ok': True, 'state': 'stopped'})
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
+        self.assertEqual(self.reads.count(3), 2)  # Fresh screen before x.
+
+    def test_cleanup_accepts_the_resume_footer_after_a_stop(self):
+        # Live 2.1.330: after x and Escape the prompt footer says "↓ to resume subagent".
+        frames = self.wide_frames()
+        frames[-1] = (self.screen('after_stop_resume_footer'), None)
+        self.assertEqual(self.drive(frames), {'ok': True, 'state': 'stopped'})
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
+
+    def test_stop_from_an_already_selected_row_closes_the_bar_after_x(self):
+        self.assertEqual(self.drive(self.wide_frames()[3:]), {'ok': True, 'state': 'stopped'})
+        self.assertEqual(self.keys, ['x', 'Escape'])
+
+    def test_closes_a_recognized_tasks_panel_before_navigating_the_bar(self):
+        for name in ('list_subagent_shell', 'list', 'detail_agent', 'shell_detail'):
+            with self.subTest(name=name):
+                tasks = RealScreenTests.FOLDER_330 / f'{name}.txt'
+                frames = [(tasks.read_text(), 'Escape'), *self.wide_frames()]
+                self.assertEqual(self.drive(frames), {'ok': True, 'state': 'stopped'})
+                self.assertEqual(self.keys, ['Escape', 'Down', 'Down', 'Down', 'x', 'Escape'])
+
+    def test_btw_panel_body_actions_do_not_authorize_escape(self):
+        screen = (self.FOLDER.parent / 'claude_btw_answer.txt').read_text()
+        body, footer = screen.rstrip().rsplit('\n', 1)
+        for text in ('x to stop', '↑/↓ to navigate · x to stop · Enter to view · Esc to close'):
+            with self.subTest(text=text), self.assertRaisesRegex(stop.StopError, 'Could not read'):
+                self.drive([(f'{body}\n  {text}\n\n{footer}\n', None)])
+            self.assertEqual(self.keys, [])
+
+    def test_wide_selection_allows_one_stop_with_the_stop_all_hint(self):
+        frames = self.wide_frames()
+        for index in (2, 3, 4):
+            screen, key = frames[index]
+            footer = ('↑/↓ to select', 'x to stop', 'x to clear')[index - 2]
+            frames[index] = (screen.replace(footer, footer + ' · ctrl+x ctrl+k to stop all agents'), key)
+        self.assertEqual(self.drive(frames), {'ok': True, 'state': 'stopped'})
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
+
+    def test_unique_match_at_and_after_the_since_separator(self):
+        for suffix in (' ·…', ' · s…', ' · sin…', ' · since 8:5…', ' · since lunch…'):
+            with self.subTest(suffix=suffix):
+                frames = self.wide_frames()
+                frames[3] = (frames[3][0].replace(' · since 8:54 AM', suffix), 'x')
+                self.siblings = [dict(self.agent, id='beta', description='Different agent')]
+                self.assertEqual(self.drive(frames), {'ok': True, 'state': 'stopped'})
+                self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
+
+    def test_complete_since_field_matches_the_rendered_description(self):
+        frames = self.wide_frames()
+        self.agent['description'] = 'a' * 200 + ' suffix'
+        literal_name = 'a' * 199 + '…'
+        frames = [(screen.replace(self.NAME, literal_name), key) for screen, key in frames]
+        self.assertEqual(self.drive(frames), {'ok': True, 'state': 'stopped'})
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
+
+    def test_ambiguous_rendered_names_refuse_even_if_only_one_row_is_visible(self):
+        frames = self.wide_frames()
+        self.agent['description'] = 'a' * 199 + '…'
+        self.siblings = [dict(self.agent, id='beta', description='a' * 200 + ' suffix')]
+        selected = frames[3][0].replace(self.NAME, self.agent['description'])
+        with self.assertRaisesRegex(stop.StopError, 'share this name'):
+            self.drive([(selected, None)])
+        self.assertEqual(self.keys, [])
+
+    def test_misclassified_finished_agent_is_selected_with_the_target_hidden(self):
+        frames = self.wide_frames()
+        # The visible row belongs to beta. Its live monitor was classified as dead.
+        self.siblings = [dict(self.agent, id='beta', state='finished', waiting=None)]
+        with self.assertRaisesRegex(stop.StopError, 'share this name'):
+            self.drive([*frames[:3], (frames[3][0], 'Escape'), frames[-1]])
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+
+    def test_inactive_same_name_agents_block_a_stop_of_the_visible_target(self):
+        selected = self.wide_frames()[3][0]
+        for state in ('finished', 'stopped', 'failed'):
+            with self.subTest(state=state):
+                self.siblings = [dict(self.agent, id='beta', state=state, waiting=None)]
+                with self.assertRaisesRegex(stop.StopError, 'share this name'):
+                    self.drive([(selected, None)])
+                self.assertEqual(self.keys, [])
+
+    def test_description_port_normalizes_spacing_before_counting_columns(self):
+        self.assertEqual(stop.rendered_description(' Café\t·  déjà\r\n vu\xa0 '), 'Café · déjà vu')
+        self.assertEqual(stop.rendered_description('é' * 200), 'é' * 200)
+        self.assertEqual(stop.rendered_description('é' * 201), 'é' * 199 + '…')
+
+    def test_unverified_descriptions_refuse_before_x(self):
+        selected = self.wide_frames()[3][0]
+        for description in ('\x1b[31m' + self.NAME + '\x1b[0m', '界' + self.NAME, 'Cafe\u0301'):
+            for unsupported_target in (True, False):
+                with self.subTest(description=description, unsupported_target=unsupported_target):
+                    self.agent['description'] = description if unsupported_target else self.NAME
+                    self.siblings = [] if unsupported_target else [dict(self.agent, id='beta', description=description)]
+                    with self.assertRaisesRegex(stop.StopError, 'Could not identify'):
+                        self.drive([(selected, None)])
+                    self.assertEqual(self.keys, [])
+
+    def test_working_prompt_with_tasks_indicator_and_draft_refuses_without_keys(self):
+        screen = self.screen('prompt_waiting_working').replace(
+            'esc to interrupt · ← for agents · ↓ to manage', 'cohort · enter to view tasks').replace(
+            '\n❯\n', '\n❯ Unsent draft\n')
+        self.assertEqual(stop.agent_bar(screen)['focus'], 'pill')
+        with self.assertRaisesRegex(stop.StopError, 'unsent draft'):
+            self.drive([(screen, None)])
+        self.assertEqual(self.keys, [])
+
+    def test_prompt_and_tasks_pill_actions_together_refuse(self):
+        pill = self.screen('pill_focus')
+        for action in ('enter to view tasks', 'enter to view tas…'):
+            with self.subTest(action=action):
+                self.assertIsNone(stop.agent_bar(pill.replace('enter to view tasks', '↓ to manage · ' + action)))
+
+    def test_refusal_leaves_existing_pill_focus_alone(self):
+        screen = self.screen('pill_focus').replace('\n❯\n', '\n❯ Unsent draft\n')
+        with self.assertRaisesRegex(stop.StopError, 'unsent draft'):
+            self.drive([(screen, None)])
+        self.assertEqual(self.keys, [])
+
+    def test_refusal_after_down_to_the_pill_leaves_it_focused(self):
+        prompt, (pill, _), *_ = self.wide_frames()
+        self.agent['description'] = 'Different agent'
+        prompt = (prompt[0].replace(self.NAME, self.agent['description']), 'Down')
+        self.assertEqual(stop.agent_bar(pill)['focus'], 'pill')
+        with self.assertRaisesRegex(stop.StopError, 'agent bar did not close') as raised:
+            self.drive([prompt, (pill, None)])
+        self.assertEqual(self.keys, ['Down'])
+        self.assertEqual(str(raised.exception.__cause__.__context__), stop.BAR_ID_ERROR)
+
+    def test_pill_cleanup_checks_fresh_focus_after_refusal(self):
+        prompt, pill, *_ = self.wide_frames()
+        refused = pill[0].replace(self.NAME, 'Different agent')
+        unknown = refused.replace('enter to view tasks', 'unrecognized footer')
+        for fresh, error in ((prompt[0], 'Could not identify'), (unknown, 'agent bar did not close')):
+            with self.subTest(error=error):
+                screens = iter((refused, fresh))
+                with self.assertRaisesRegex(stop.StopError, error):
+                    self.drive([prompt, (lambda: next(screens), None)])
+                self.assertEqual(self.keys, ['Down'])
+
+    def test_refusal_after_first_down_never_sends_escape_to_a_prompt_indicator(self):
+        prompt, pill, *_ = self.wide_frames()
+        refused = pill[0].replace(self.NAME, 'Different agent')
+        returned = self.screen('prompt_waiting_working').replace(
+            'esc to interrupt · ← for agents · ↓ to manage', 'cohort · enter to view tasks')
+        self.assertEqual(stop.agent_bar(returned)['focus'], 'pill')
+        screens = iter((refused, returned))
+        with self.assertRaisesRegex(stop.StopError, 'agent bar did not close'):
+            self.drive([prompt, (lambda: next(screens), None)])
+        self.assertEqual(self.keys, ['Down'])
+
+    def test_second_down_with_a_rowless_redraw_cannot_authorize_escape(self):
+        prompt, pill, *_ = self.wide_frames()
+        refused = pill[0].replace('waiting on 1 shell, 1 monitor', 'waiting on 2 shells')
+        with self.assertRaisesRegex(stop.StopError, 'agent bar did not close') as raised:
+            self.drive([prompt, pill, (refused, None)])
+        self.assertEqual(self.keys, ['Down', 'Down'])
+        self.assertEqual(str(raised.exception.__cause__.__context__), stop.BAR_ID_ERROR)
+
+    def test_prompt_footer_that_mimics_the_pill_never_gets_a_second_escape(self):
+        frames = self.wide_frames()
+        prompt = self.screen('after_stop_resume_footer').replace(
+            '↓ to resume subagent', 'cohort · enter to view tasks')
+        self.assertEqual(stop.agent_bar(prompt)['focus'], 'pill')
+        with self.assertRaisesRegex(stop.StopError, 'agent bar did not close'):
+            self.drive([*frames[:5], (prompt, None)])
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
+
+    def test_expanded_idle_teammates_keep_the_row_cursor_for_a_second_escape(self):
+        frames = self.wide_frames()
+        expanded = ''.join(f'  ◯ teammate-{index}  idle\n' for index in range(1, 5))
+        selected = frames[3][0].replace('x to stop', 'x to stop · esc to collapse') + expanded
+        stopped = frames[4][0].replace('x to clear', 'x to clear · esc to collapse') + expanded
+        collapsed = frames[4][0] + expanded.rsplit('  ◯ ', 1)[0] + '  ◯ 1 idle agent\n'
+        prompt = frames[-1][0] + expanded.rsplit('  ◯ ', 1)[0] + '  ◯ 1 idle agent\n'
+        self.assertEqual(self.drive([(selected, 'x'), (stopped, 'Escape'), (collapsed, 'Escape'),
+                                     (prompt, None)]), {'ok': True, 'state': 'stopped'})
+        self.assertEqual(self.keys, ['x', 'Escape', 'Escape'])
+
+    def test_artifact_and_ambiguous_footers_refuse_navigation_and_cleanup(self):
+        frames = self.wide_frames()
+        for action in ('enter to view arti…', 'enter to view…'):
+            with self.subTest(action=action):
+                unknown = frames[1][0].replace('enter to view tasks', 'esc to interrupt · ' + action)
+                with self.assertRaisesRegex(stop.StopError, 'Could not read'):
+                    self.drive([(unknown, None)])
+                self.assertEqual(self.keys, [])
+                with self.assertRaisesRegex(stop.StopError, 'agent bar did not close'):
+                    self.drive([frames[0], (unknown, None)])
+                self.assertEqual(self.keys, ['Down'])
+
+    def test_whole_interrupt_hint_identifies_prompt_before_task_toggle_hint(self):
+        screen = self.screen('prompt_waiting_working').replace(
+            '← for agents · ↓ to manage', 'ctrl+t to show tasks')
+        self.assertEqual(stop.agent_bar(screen)['focus'], 'prompt')
+
+    def test_refusals_at_prompt_press_no_keys(self):
+        prompt = self.screen('prompt_waiting_shell_monitor')
+        cases = (
+            (prompt + self.ROW + '\n', 'share this name'),
+            (prompt.replace('waiting on 1 shell, 1 monitor', 'waiting on 2 shells'), 'Could not identify'),
+            (self.screen('agent_view_open'), 'Could not read'),
+            (self.screen('background_session_dialog'), 'Could not read'),
+            (prompt.replace('\n❯\n', '\n❯ unsent text\nmore text\n'), 'unsent draft'),
+            (prompt.replace('↓ to manage', '↓ to manage the terminal'), 'Could not read'),
+            (prompt.replace('↓ to manage', '↓ t…'), 'Could not read'),
+        )
+        for screen, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(stop.StopError, message):
+                    self.drive([(screen, None)])
+                self.assertEqual(self.keys, [])
+
+    def test_probe_five_cuts_inside_the_name_and_refuses_without_keys(self):
+        for screen in self.narrow_frames():
+            with self.subTest(footer=screen.splitlines()[-4]):
+                with self.assertRaisesRegex(stop.StopError, r'terminal is too narrow.*Claude Code 2\.1\.330'):
+                    self.drive([(screen, None)])
+                self.assertEqual(self.keys, [])
+
+    def test_clipped_values_without_the_whole_name_and_separator_refuse(self):
+        selected = self.wide_frames()[3][0]
+        for value in ('', '…', 'Stop can ', 'Stop can …', self.NAME, self.NAME + '…', self.NAME + ' …'):
+            with self.subTest(value=value), self.assertRaisesRegex(stop.StopError, 'terminal is too narrow'):
+                self.drive([(selected.replace(self.NAME + ' · since 8:54 AM', value), None)])
+            self.assertEqual(self.keys, [])
+
+    def test_every_clip_of_displayed_names_can_only_stop_the_requested_agent(self):
+        long_name = 'a' * 199 + '…'
+        descriptions = [(name, name) for name in ('A', 'A · single run', 'A…', 'B')]
+        descriptions += [('a' * 200 + suffix, long_name) for suffix in (' one', ' two')]
+        footer = '───\n❯\n───\n  enter to view · x to stop\n  ● main\n'
+        prompt = '───\n❯\n───\n  ↓ to manage\n  ● main\n'
+        row = '◯ general-purpose  waiting on 1 shell, 1 monitor · '
+        keys = []
+        screen = ''
+
+        def press_key(_entry, key, *, run):
+            nonlocal screen
+            keys.append(key)
+            screen = prompt
+
+        def clip(value, length):
+            return value[:length] + '…' if length < len(value) else value
+
+        successes = 0
+        for (target, target_render), (other, other_render) in permutations(descriptions, 2):
+            agent = dict(self.agent, description=target)
+            sibling = dict(self.agent, id='beta', description=other)
+            values = [name + ' · since 8:54 AM' for name in (target_render, other_render)]
+            with patch.object(stop, 'press', new=press_key), \
+                    patch.object(stop, 'visible', new=lambda *_: screen), \
+                    patch.object(subagents, 'bar_candidates', return_value=[agent, sibling]), \
+                    patch.object(subagents, 'listing', new=lambda _, *, limit: {'agents': [agent, sibling]}):
+                for shown, selected in ((False, 1), (True, 1), (True, 0)):
+                    first = 0 if shown else 1
+                    for width in range(max(map(len, values[first:])) + 1):
+                        # Both rows have the same width when the target is visible.
+                        screen = footer + ''.join(('❯ ' if index == selected else '  ') + row
+                                                  + clip(values[index], width) + '\n'
+                                                  for index in range(first, 2))
+                        keys.clear()
+                        try:
+                            stop.stop_from_agent_bar({}, agent, {'kind': agent['type']}, None, lambda _: None, {})
+                        except stop.StopError:
+                            pass
+                        if 'x' in keys:
+                            self.assertEqual((shown, selected, keys), (True, 0, ['x']), (target, other, width))
+                            self.assertGreaterEqual(width, len(target_render) + len(' ·'))
+                            successes += 1
+        self.assertGreater(successes, 0)
+
+    def test_clipped_since_can_be_part_of_a_second_bar_candidates_name(self):
+        frames = self.wide_frames()
+        self.siblings = [dict(self.agent, id='beta', description=self.NAME + ' · single run')]
+        # Only the longer-named agent is visible. The shorter-named target also fits its row.
+        frames = [(re.sub(r' · since 8:5[34] AM', ' · sin…', screen), key) for screen, key in frames]
+        frames[3:] = [(frames[3][0], 'Escape'), frames[-1]]
+        with self.assertRaisesRegex(stop.StopError, 'share this name'):
+            self.drive(frames)
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+
+    def test_refusals_during_navigation_close_recognized_focus(self):
+        frames = self.wide_frames()
+        selected, _ = frames[3]
+        other = '❯ ◯ general-purpose  waiting on 1 shell · A different agent · since 8:54 AM'
+        stopped, _ = frames[4]
+        cases = (
+            (selected.replace('❯ ◯ general-purpose', '  ◯ general-purpose') + other + '\n', 'Could not reach'),
+            (selected.replace('❯ ◯ general-purpose  waiting on 1 shell, 1 monitor · ' + self.NAME
+                              + ' · since 8:54 AM', other), 'Could not identify'),
+            (stopped.replace('  ● main\n', '  ● main\n' + self.ROW + '\n'), 'Could not reach'),
+            (selected.replace('\n❯\n', '\n❯ New draft\n'), 'unsent draft'),
+        )
+        for changed, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(stop.StopError, message):
+                self.drive([*frames[:3], (changed, 'Escape'), frames[-1]])
+            self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+
+    def test_unknown_footer_allows_escape_only_if_a_single_row_has_the_cursor(self):
+        frames = self.wide_frames()
+        for action in ('x to stop all', 'x to stop · Esc to cancel'):
+            unknown = frames[3][0].replace('x to stop', action)
+            with self.subTest(action=action), self.assertRaisesRegex(
+                    stop.StopError, 'Could not read.*Claude Code 2.1.330'):
+                self.drive([*frames[:3], (unknown, 'Escape'), frames[-1]])
+            self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+        for unknown in (frames[3][0].replace('  ● main', '❯ ● main'),
+                        frames[3][0].replace('❯ ◯', '  ◯').replace('  enter to view · x to stop', '❯ ● main')):
+            with self.assertRaisesRegex(stop.StopError, 'agent bar did not close'):
+                self.drive([*frames[:3], (unknown, None)])
+            self.assertEqual(self.keys, ['Down', 'Down', 'Down'])
+
+    def test_cursor_in_an_invalid_row_block_does_not_authorize_escape(self):
+        frames = self.wide_frames()
+        selected = frames[3][0]
+        for changed in (selected + '  unrelated text\n', selected.replace('  ● main\n', ''),
+                        selected + '  ● main\n'):
+            with self.subTest(changed=changed.rsplit('─\n', 1)[-1]):
+                with self.assertRaisesRegex(stop.StopError, 'agent bar did not close'):
+                    self.drive([*frames[:3], (changed, None)])
+                self.assertEqual(self.keys, ['Down', 'Down', 'Down'])
+
+    def test_changed_snapshot_immediately_before_x_refuses(self):
+        frames = self.wide_frames()
+        frames[3:] = [(frames[3][0], 'Escape'), frames[-1]]
+
+        def redraw():
+            frames[3] = (frames[3][0].replace('\n❯\n', '\n❯ New draft\n'), 'Escape')
+
+        with self.assertRaisesRegex(stop.StopError, 'unsent draft'):
+            self.drive(frames, fresh=redraw)
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+
+    def test_same_name_replacement_after_listing_refuses(self):
+        for earlier, later in (('8:54 AM', '8:55 AM'), ('8:54 AM', '8:54  AM')):
+            with self.subTest(later=later):
+                frames = self.wide_frames()
+                frames[3:] = [(frames[3][0], 'Escape'), frames[-1]]
+
+                def replace_selected():
+                    self.assertEqual(self.reads.count(3), 1)
+                    frames[3] = (frames[3][0].replace(earlier, later), 'Escape')
+
+                with self.assertRaisesRegex(stop.StopError, 'Could not identify'):
+                    self.drive(frames, fresh=replace_selected)
+                self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+
+    def test_same_name_agent_appears_in_final_pool(self):
+        frames = self.wide_frames()
+        frames[3:] = [(frames[3][0], 'Escape'), frames[-1]]
+
+        def add_agent():
+            self.siblings.append(dict(self.agent, id='beta', waiting={'shell': 2, 'monitor': 0}))
+
+        with self.assertRaisesRegex(stop.StopError, 'share this name'):
+            self.drive(frames, fresh=add_agent)
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+
+    def test_conflicting_metadata_for_the_target_refuses_even_with_one_fitting_name(self):
+        selected = self.wide_frames()[3][0]
+        self.siblings = [dict(self.agent, description='Earlier name')]
+        with self.assertRaisesRegex(stop.StopError, 'Could not identify'):
+            self.drive([(selected, None)])
+        self.assertEqual(self.keys, [])
+
+    def test_waiting_counts_change_in_final_listing(self):
+        frames = self.wide_frames()
+        frames[3:] = [(frames[3][0], 'Escape'), frames[-1]]
+        with self.assertRaisesRegex(stop.StopError, 'Could not identify'):
+            self.drive(frames, fresh=lambda: self.agent.update(waiting={'shell': 2, 'monitor': 0}))
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+
+    def test_target_must_still_be_running_in_final_listing(self):
+        frames = self.wide_frames()
+        frames[3:] = [(frames[3][0], 'Escape'), frames[-1]]
+        with self.assertRaisesRegex(stop.StopError, 'Could not identify'):
+            self.drive(frames, fresh=lambda: self.agent.update(state='finished'))
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+
+    def test_navigation_stops_after_eight_down_keys(self):
+        prompt = self.screen('prompt_waiting_shell_monitor')
+        with self.assertRaisesRegex(stop.StopError, 'Could not reach that agent'):
+            self.drive([(prompt, 'Down')] * 8 + [(prompt, None)])
+        self.assertEqual(self.keys, ['Down'] * 8)
+
+    def test_cleanup_stops_after_three_escape_keys(self):
+        frames = self.wide_frames()
+        stopped = frames[4][0]
+        with self.assertRaisesRegex(stop.StopError, 'agent bar did not close'):
+            self.drive([*frames[:4], (stopped, 'Escape'), (stopped, 'Escape'),
+                        (stopped, 'Escape'), (stopped, None)])
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape', 'Escape', 'Escape'])
 
 
 if __name__ == '__main__':

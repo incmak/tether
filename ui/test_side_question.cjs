@@ -3,7 +3,7 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal, prefsStore } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = process.env.SHOTS || ''
@@ -25,7 +25,7 @@ function fixtures(state) {
     chat: { messages, busy: false, thread: pane.thread, agent: pane.agent, writable: true, session: pane.id, earlier: 0, limit: 100,
       state: ['stale', 'fresh', 'other'].includes(state) ? 'Working' : 'Idle', approval: null, attention },
     footer: { observed: true, model: 'Claude', mode: 'default', notices: [] },
-    prefs: { prefs: {}, version: 1 }, 'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
+    'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
     update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Test server', office: false },
     catalog: { commands: [], plugins: [], mcp: [], note: '' }, stream: {},
     'codex-runs': { pane: '%1', running: 0, runs: [] }, 'autonomy/review': { due: false, reason: null, new: 0, disputed: 0, total: 0, last_review: 0, snoozed_until: 0, groups: [] },
@@ -69,11 +69,13 @@ async function main() {
       page.on('pageerror', error => pageErrors.push(error.message))
       await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'light' })
       await page.routeWebSocket('**/*', socket => socket.close())
+      const prefs = prefsStore()
       await page.route('**/*', async route => {
         const request = route.request(), url = new URL(request.url())
         if (url.pathname.endsWith('/sw.js')) return route.fulfill({ status: 404, body: '' })
         if (url.pathname.includes('/api/')) {
           const endpoint = url.pathname.split('/api/')[1]
+          if (endpoint === 'prefs') return route.fulfill({ json: request.method() === 'GET' ? prefs.get() : prefs.post(request.postDataJSON()) })
           if (request.method() !== 'GET') {
             if (endpoint === 'key') keys.push(request.postDataJSON().key)
             return route.fulfill({ json: { ok: true, accepted: true } })

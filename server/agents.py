@@ -21,6 +21,7 @@ from side_shells import SESSION as SIDE_SHELLS
 HOME = paths.HOME
 ICON = re.compile(r"[a-z0-9][a-z0-9-]{0,43}")  # tmux option @chat_icon: a lucide icon name, or svg-<name> (pane_icons.py)
 METRICS = paths.CACHE / 'usage'
+FRIDAY_DRAFT_ROLE = 'friday-draft'  # Internal only: a temporary chat must keep its read-only launch options.
 
 
 def records(path):
@@ -41,6 +42,32 @@ def descendants(pid, processes):
         if children <= found:
             return found
         found |= children
+
+
+def _pane_agent(pane_pid, processes, tree, registered=()):
+    """Choose the closest agent process to the pane root, with PID as the tie-breaker. A process with a Claude
+    registry for this pane (`registered`) is Claude whatever its process name; a nested `claude -p` or `codex exec`
+    run by the pane's agent never wins."""
+    def depth_from_pane(pid):
+        depth = 0
+        while pid != pane_pid:
+            pid = processes[pid][0]
+            depth += 1
+        return depth
+
+    candidates = (pid for pid in tree if pid in processes
+                  and (pid in registered or processes[pid][1] in ('claude', 'codex', 'agy', 'exe')))
+    owner = min(candidates, key=lambda pid: (depth_from_pane(pid), pid), default=None)
+    if owner is None:
+        return None, None
+    return owner, 'claude' if owner in registered else processes[owner][1]
+
+
+def _pane_registries(claude, pane, tree):
+    """The Claude registries of processes in this pane, by pid. A print or SDK run (`claude -p`: entrypoint sdk-cli)
+    is a tool of the pane's agent, never the pane's own conversation."""
+    return {r['pid']: r for r in claude if r['pid'] in tree and r.get('tmux', '').endswith('.' + pane)
+            and not str(r.get('entrypoint') or '').startswith('sdk')}
 
 
 UUID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
@@ -546,7 +573,8 @@ def codex_recheck(entry, run):
     """The conversation the pane of `entry` shows now, by the same binding as discovery over every live Codex pane:
     one pane's evidence can rule out another pane's thread. None when the pane no longer runs that Codex process."""
     processes = procinfo.table(run)
-    result = run([paths.TMUX, 'list-panes', '-a', '-F', '#{pane_id}\t#{pane_pid}\t#{session_name}\t#{@zoom_for}\t#{pane_current_path}'],
+    result = run([paths.TMUX, 'list-panes', '-a', '-f', '#{==:#{pane_dead},0}', '-F',
+                  '#{pane_id}\t#{pane_pid}\t#{session_name}\t#{@zoom_for}\t#{pane_current_path}'],
                  capture_output=True, text=True, timeout=5, check=True)
     claude = claude_registries(processes)
     entries = []
@@ -554,13 +582,15 @@ def codex_recheck(entry, run):
         pane, pid, session, zoom, cwd = (line.split('\t', 4) + [''] * 4)[:5]
         if not pid.isdigit() or zoom or session == SIDE_SHELLS:  # the panes that discover() skips
             continue
-        tree = descendants(int(pid), processes)
-        if any(r['pid'] in tree and r.get('tmux', '').endswith('.' + pane) for r in claude) \
-                or any(processes[p][1] == 'claude' for p in tree if p in processes):
-            continue  # a Claude pane, by the rules of discover(), even when Claude runs `codex exec`
-        owner = next((p for p in tree if p in processes and processes[p][1] == 'codex'), None)
-        if owner:
-            entries.append({'id': pane, 'agent': 'codex', 'cwd': cwd, 'owner_pid': owner, 'process_start': process_start(owner)})
+        pane_pid = int(pid)
+        tree = descendants(pane_pid, processes)
+        owner, agent = _pane_agent(pane_pid, processes, tree, _pane_registries(claude, pane, tree))
+        if agent == 'codex':
+            try:
+                started = process_start(owner)
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            entries.append({'id': pane, 'agent': 'codex', 'cwd': cwd, 'owner_pid': owner, 'process_start': started})
     connection = codex_database()
     try:
         bind_codex(connection, entries, run, processes, strict=True)
@@ -570,32 +600,33 @@ def codex_recheck(entry, run):
     return fresh if fresh and (fresh['owner_pid'], fresh['process_start']) == (entry['owner_pid'], entry['process_start']) else None
 
 
-def discover(config, run):
-    pane_view.zoom_repair_all()
+def discover(config, run, *, repair_zoom=True):
+    if repair_zoom:
+        pane_view.zoom_repair_all()
     result = run([paths.TMUX, 'list-panes', '-a', '-F',
-                  '#{pane_id}\t#{session_id}\t#{session_name}\t#{window_index}.#{pane_index}\t#{pane_pid}\t#{pane_current_path}\t#{@chat_name_at}\t#{@chat_name}\t#{@chat_icon}\t#{@worktree}\t#{@group}\t#{@zoom_for}\t#{@tether_role}'],
+                  '#{pane_id}\t#{session_id}\t#{session_name}\t#{window_index}.#{pane_index}\t#{pane_pid}\t#{pane_current_path}\t#{@chat_name_at}\t#{@chat_name}\t#{@chat_icon}\t#{@worktree}\t#{@group}\t#{@zoom_for}\t#{@tether_role}\t#{pane_dead}'],
                  capture_output=True, text=True, timeout=5)
     if result.returncode:
         return ([{'id': 'saved', 'label': 'Last chat', 'agent': 'codex',
                   'thread': config['thread'], 'transcript': config['transcript'], 'writable': False}] if config.get('thread') else [])
-    positions = {}
+    panes, positions = [], {}
     for line in result.stdout.splitlines():
         fields = line.split('\t')
-        if len(fields) > 12:
-            fields.pop()  # @tether_role
-        if len(fields) > 9 and fields[-1]:
-            positions[(fields[1], fields[-1])] = fields[3]
+        if len(fields) > 13 and fields.pop() == '1':
+            continue  # #{pane_dead}: tmux can keep panes after their process exits.
+        # @tether_role (delegate.ROLES): a helper tab's job, such as "advisor". Older callers send no such field.
+        role = fields.pop() if len(fields) > 12 else ''
+        zoom_for = fields.pop() if len(fields) > 9 else ''
+        if zoom_for:
+            positions[(fields[1], zoom_for)] = fields[3]
+            continue  # @zoom_for identifies the placeholder, never a chat.
+        panes.append((fields, role))
     processes = procinfo.table(run)
     claude = claude_registries(processes)
     connection = codex_database()
     entries = []
     try:
-        for line in result.stdout.splitlines():
-            fields = line.split('\t')
-            # @tether_role (delegate.ROLES): a helper tab's job, such as "advisor". Older callers send no such field.
-            role = fields.pop() if len(fields) > 12 else ''
-            if len(fields) > 9 and fields.pop():
-                continue  # @zoom_for identifies the placeholder, never a chat.
+        for fields, role in panes:
             group = fields.pop() if len(fields) > 10 else ''  # @group (groups.py); older callers send no such field
             worktree = fields.pop() if len(fields) > 9 else ''
             pane, tmux_session, label, position, pid = fields[:5]
@@ -613,44 +644,57 @@ def discover(config, run):
                 cwd, pane_name = '\t'.join(fields[5:-1]), fields[-1]
             else:
                 cwd, pane_name = '\t'.join(fields[5:]), ''
-            tree = descendants(int(pid), processes)
-            names = {processes[p][1] for p in tree if p in processes}
+            pane_pid = int(pid)
+            try:
+                pane_start = process_start(pane_pid)
+            except (FileNotFoundError, ProcessLookupError):
+                continue  # The pane process exited after tmux listed it.
+            tree = descendants(pane_pid, processes)
+            registered = _pane_registries(claude, pane, tree)
+            owner, agent = _pane_agent(pane_pid, processes, tree, registered)
+            if agent in ('claude', 'codex'):
+                try:
+                    started = process_start(owner)
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
             entry = {'id': pane, 'tmux_session': tmux_session, 'label': label, 'position': position,
                      'agent': 'shell', 'writable': False, 'worktree': worktree.strip()[:200], 'group': group.strip()[:16],
-                     'pane_pid': int(pid), 'pane_start': process_start(int(pid)), 'cwd': cwd, 'pane_name': pane_name.strip()[:40], 'tmux_pane_name': pane_name.strip()[:40], 'full_pane_name': pane_name.strip(), 'pane_icon': icon if ICON.fullmatch(icon) else '',
+                     'pane_pid': pane_pid, 'pane_start': pane_start, 'cwd': cwd, 'pane_name': pane_name.strip()[:40], 'tmux_pane_name': pane_name.strip()[:40], 'full_pane_name': pane_name.strip(), 'pane_icon': icon if ICON.fullmatch(icon) else '',
                      'pane_named_at': int(named_at) if named_at.isdigit() else 0}
             if role in ('advisor', 'second-advisor'):
                 entry['role'] = 'advisor'
             elif role == 'reviewer':
                 entry['helper'] = 'reviewer'  # not a role: reviewers keep their AI tab names (tab_brief.py)
-            live = next((r for r in claude if r['pid'] in tree and r.get('tmux', '').endswith('.' + pane)), None)
+            elif role == FRIDAY_DRAFT_ROLE:
+                entry['friday_draft'] = True
+            elif role in ('coordinator', 'coordinator-needs', 'coordinator-off'):
+                entry['coordinator'] = role.partition('-')[2] or 'all'  # the session's coordinator tab and what it gets (coordinator.py)
+            live = registered.get(owner) if agent == 'claude' else None
             if live:
                 transcript = claude_transcript(live['cwd'], live['sessionId'])
                 entry.update(agent='claude', thread=live['sessionId'], transcript=str(transcript),
-                             registry=live['registry'], writable=True, owner_pid=live['pid'],
-                             process_start=process_start(live['pid']),
-                             busy=live.get('status') == 'busy')
+                             registry=live['registry'], writable=True, owner_pid=owner, process_start=started,
+                             busy=live.get('status') == 'busy', agent_version=live.get('version'))
                 # A name the user gave (/rename or claude --name). Claude's own derived names ("projects-40") are not shown.
                 if live.get('nameSource') == 'user' and isinstance(live.get('name'), str) and live['name'].strip():
                     entry['agent_name'] = ' '.join(live['name'].split())
                     entry['agent_named_at'] = live.get('nameSince') if isinstance(live.get('nameSince'), int) else 0
-            elif 'claude' in names:
-                owner = next(p for p in tree if p in processes and processes[p][1] == 'claude')
-                started = process_start(owner)
+            elif agent == 'claude':
                 pending = 'pending-' + str(owner) + '-' + started
                 transcript = HOME / '.claude/projects' / 'pending' / (pending + '.jsonl')
                 entry.update(agent='claude', thread=pending, transcript=str(transcript),
                              writable=True, owner_pid=owner, process_start=started,
                              pending_conversation=True)
-            elif 'codex' in names:
-                owner = next(p for p in tree if p in processes and processes[p][1] == 'codex')
-                started = process_start(owner)
+            elif agent == 'codex':
                 entry['codex_profile'] = codex_provider.pane_profile(owner)  # 'foundry' for `codex -p foundry`; None = the plan
                 # bind_codex (below) chooses the conversation once every pane is known: one pane's evidence can rule out another's guess.
                 entry.update(agent='codex', writable=True, cwd=cwd, owner_pid=owner, process_start=started)
-            elif 'agy' in names or any(processes[p][1] in ('agy', 'exe') for p in tree if p in processes):
+            elif agent in ('agy', 'exe'):
                 entry['agent'] = 'antigravity'
-                entry.update(antigravity_entry([p for p in tree if p in processes and processes[p][1] in ('agy', 'exe')], cwd=cwd))
+                # The native binary can hold the conversation lock inside the agy wrapper.
+                pids = [owner] + sorted(p for p in descendants(owner, processes)
+                                        if p != owner and processes[p][1] in ('agy', 'exe'))
+                entry.update(antigravity_entry(pids, cwd=cwd))
             entries.append(entry)
         bind_codex(connection, entries, run, processes)
     finally:
@@ -841,6 +885,50 @@ def scheduled_runs(state, index, record):
             runs[current]['result'] = text[:600]
 
 
+def claude_advisor_model(record, message):
+    usage = message.get('usage')
+    iterations = usage.get('iterations') if isinstance(usage, dict) else None
+    if isinstance(iterations, list):
+        for item in iterations:
+            if isinstance(item, dict) and item.get('type') == 'advisor_message':
+                model = item.get('model')
+                if isinstance(model, str) and model:
+                    return model
+    model = record.get('advisorModel')
+    return model if isinstance(model, str) else ''
+
+
+def claude_advisor_result(messages, part, ts):
+    identifier = part.get('tool_use_id')
+    if not isinstance(identifier, str) or not identifier:
+        return
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        advisor = message.get('advisor')
+        if message.get('kind') != 'advisor' or not advisor or advisor['id'] != identifier:
+            continue
+        content = part.get('content')
+        result_type = content.get('type') if isinstance(content, dict) else None
+        updated = {key: advisor[key] for key in ('id', 'model', 'started')}
+        updated['ended'] = ts
+        if result_type == 'advisor_redacted_result':
+            updated['status'] = 'answered'
+            text = 'answered'
+        elif result_type == 'advisor_tool_result_error':
+            updated['status'] = 'error'
+            error = content.get('error_code')
+            updated['error'] = error if isinstance(error, str) and re.fullmatch(r'[a-z0-9_]{1,80}', error) else 'unknown'
+            text = 'no answer'
+        else:
+            updated['status'] = 'unknown'
+            updated['result_type'] = (
+                result_type if isinstance(result_type, str) and re.fullmatch(r'[a-z0-9_]{1,80}', result_type) else 'unknown'
+            )
+            text = 'reply in an unknown form'
+        messages[index] = dict(message, advisor=updated, text=f'Asked the advisor · {text}')
+        break
+
+
 def claude_consume(messages, index, record, clean):
     """Fold one transcript record into the list of chat messages."""
     fire = scheduled_fire(record)
@@ -870,8 +958,11 @@ def claude_consume(messages, index, record, clean):
             messages.append(notice)
             return
         if isinstance(prompt, str) and clean(prompt).strip():
-            messages.append({'id': str(index), 'role': 'user', 'text': tidy_user_text(clean(prompt)), 'time': record.get('timestamp'),
-                             'delivery': 'queued'})
+            item = {'id': str(index), 'role': 'user', 'text': tidy_user_text(clean(prompt)), 'time': record.get('timestamp'),
+                    'delivery': 'queued'}
+            if isinstance(record.get('uuid'), str):
+                item['_record_id'] = record['uuid']
+            messages.append(item)
         return
     message = record.get('message', {})
     role = message.get('role')
@@ -926,12 +1017,14 @@ def claude_consume(messages, index, record, clean):
                                  'time': record.get('timestamp')})
             return
     text = content if isinstance(content, str) else '\n'.join(
-        item.get('text', '') for item in content if item.get('type') == 'text')
+        item.get('text', '') for item in content if isinstance(item, dict) and item.get('type') == 'text')
     text = clean(text)
     if role == 'user':
         text = tidy_user_text(text)
     if text.strip() and not text.startswith(('<system-reminder>', '<local-command', '<command-name>')):
         item = {'id': str(index), 'role': role, 'text': text, 'time': record.get('timestamp')}
+        if role == 'user' and isinstance(record.get('uuid'), str):
+            item['_record_id'] = record['uuid']
         if role == 'user' and isinstance(content, list):
             count = len(tool_details.images({'content': content}))
             if count > 0 and isinstance(record.get('uuid'), str):
@@ -942,18 +1035,32 @@ def claude_consume(messages, index, record, clean):
         messages.append(item)
     if role == 'user' and isinstance(content, list):
         for part in content:
-            if part.get('type') == 'tool_result':
+            if isinstance(part, dict) and part.get('type') == 'tool_result':
                 tool_details.mark_result(messages, part.get('tool_use_id'), part, time=record.get('timestamp'),
                                           details=record.get('toolUseResult'))
     if role == 'assistant' and isinstance(content, list):
+        ts = record.get('timestamp')
         for position, part in enumerate(content):
+            if not isinstance(part, dict):
+                continue
             if part.get('type') == 'tool_use':
-                item = activity.action(f'{index}.{position}', record.get('timestamp'),
+                item = activity.action(f'{index}.{position}', ts,
                                        activity.claude_tool_line(part.get('name', 'Tool'), part.get('input')))
                 item['tool'] = tool_details.summary(part)
-                if record.get('timestamp'):
-                    item['tool']['started'] = record['timestamp']
+                if ts:
+                    item['tool']['started'] = ts
                 messages.append(item)
+            elif part.get('type') == 'server_tool_use' and part.get('name') == 'advisor':
+                identifier = part.get('id')
+                if isinstance(identifier, str) and identifier:
+                    messages.append({
+                        'id': f'{index}.{position}', 'role': 'assistant', 'kind': 'advisor',
+                        'text': 'Asked the advisor', 'time': ts,
+                        'advisor': {'id': identifier, 'model': claude_advisor_model(record, message),
+                                    'status': 'pending', 'started': ts},
+                    })
+            elif part.get('type') == 'advisor_tool_result':
+                claude_advisor_result(messages, part, ts)
 
 
 def ask_questions(part):
@@ -968,7 +1075,31 @@ def ask_questions(part):
                    for option in (item.get('options') or [])[:8] if isinstance(option, dict) and text(option.get('label'), 300)]
         questions.append({'question': text(item.get('question'), 2000), 'header': text(item.get('header'), 60),
                           'multi': bool(item.get('multiSelect')), 'options': options})
-    return {'id': part.get('id'), 'questions': questions} if questions and part.get('id') else None
+    identifier = part.get('id')
+    return {'id': identifier, 'questions': questions} if questions and isinstance(identifier, str) and identifier else None
+
+
+def _update_claude_ask(state, part, role):
+    if part.get('type') == 'tool_use' and part.get('name') == 'AskUserQuestion' and role == 'assistant':
+        state['ask'] = None  # A newer call supersedes the previous one even if its input cannot be read.
+        state['ask'] = ask_questions(part)
+    elif part.get('type') == 'tool_result' and part.get('tool_use_id') == (state.get('ask') or {}).get('id'):
+        state['ask'] = None
+
+
+def open_claude_ask(entry):
+    """Read the outstanding native question without loading the conversation's messages."""
+    def consume(state, _, record):
+        if record.get('isSidechain') or record.get('isMeta') or record.get('type') not in ('assistant', 'user'):
+            return
+        content = (record.get('message') or {}).get('content')
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    _update_claude_ask(state, part, record['type'])
+
+    return history.read(entry.get('transcript'), lambda: {'ask': None}, consume, trim=False,
+                        namespace='claude-ask')['ask']
 
 
 def claude_model(thread):
@@ -982,8 +1113,64 @@ def claude_model(thread):
     return str(model.get('display_name') or model.get('id') or '') if isinstance(model, dict) else ''
 
 
+def claude_queue(state, index, record):
+    """Fold one transcript record into Claude's pending input queue."""
+    if record.get('isSidechain'):
+        return
+    queue, taken = state['queue'], state['taken']
+    kind = record.get('type')
+    if kind == 'queue-operation':
+        operation, text = record.get('operation'), record.get('content')
+        if operation == 'enqueue' and isinstance(text, str):
+            queue.append({'id': index, 'text': text, 'time': record.get('timestamp')})
+        elif operation == 'dequeue' and queue:
+            first = next((i for i, item in enumerate(queue)
+                          if not item['text'].lstrip().startswith('<task-notification>')), 0)
+            taken.append([queue.pop(first)['text'], 0])
+        elif operation == 'popAll':
+            queue.clear()
+            taken.clear()
+        elif operation == 'remove':
+            for i, item in enumerate(queue):
+                if item['text'] == text:
+                    taken.append([queue.pop(i)['text'], 0])
+                    break
+        if len(taken) > 50:
+            del taken[0]
+        return
+    if kind == 'system' and record.get('subtype') == 'turn_duration':
+        # A dequeued prompt can arrive just after the turn end that took it (227 of 604 delivered prompts in local
+        # transcripts), and most taken texts never arrive with the same text. Keep each one through one turn end.
+        taken[:] = [[text, turns + 1] for text, turns in taken if turns < 1]
+        return
+    if not (queue or taken):
+        return
+    if kind == 'user':
+        text = (record.get('message') or {}).get('content')
+        if isinstance(text, list):
+            text = '\n'.join(part['text'] for part in text if isinstance(part, dict)
+                             and part.get('type') == 'text' and isinstance(part.get('text'), str))
+    elif kind == 'attachment':
+        attachment = record.get('attachment') or {}
+        text = attachment.get('prompt') if attachment.get('type') == 'queued_command' else None
+    else:
+        return
+    if isinstance(text, str):
+        prefix = 'Another Claude session sent a message:\n'
+        text = text.removeprefix(prefix)
+        for i, (removed, _) in enumerate(taken):
+            if removed.removeprefix(prefix) == text:
+                del taken[i]
+                return
+        for i, item in enumerate(queue):
+            if item['text'].removeprefix(prefix) == text:
+                del queue[i]
+                break
+
+
 def claude_snapshot(entry, clean):
     def consume(state, index, record):
+        claude_queue(state, index, record)
         claude_consume(state['messages'], index, record, clean)
         scheduled_runs(state, index, record)
         if record.get('type') == 'custom-title' and isinstance(record.get('customTitle'), str):
@@ -994,17 +1181,24 @@ def claude_snapshot(entry, clean):
         if record.get('type') not in ('assistant', 'user') or not isinstance(content, list):
             return
         for part in content:
+            if not isinstance(part, dict):
+                continue
             if part.get('type') == 'tool_use' and part.get('name') == 'ExitPlanMode' and record['type'] == 'assistant':
                 text = (part.get('input') or {}).get('plan')
                 state['plan'] = {'id': part.get('id') or str(index), 'text': text} if isinstance(text, str) and text.strip() else None
             elif part.get('type') == 'tool_result' and part.get('tool_use_id') == (state.get('plan') or {}).get('id'):
                 state['plan'] = None  # A finished request must not pair with a later menu.
-            if part.get('type') == 'tool_use' and part.get('name') == 'AskUserQuestion' and record['type'] == 'assistant':
-                state['ask'] = ask_questions(part)
-            elif part.get('type') == 'tool_result' and part.get('tool_use_id') == (state.get('ask') or {}).get('id'):
-                state['ask'] = None
-    state = history.read(entry['transcript'], lambda: {'messages': [], 'dropped': 0, 'plan': None, 'ask': None}, consume)
+            _update_claude_ask(state, part, record['type'])
+    state = history.read(entry['transcript'], lambda: {
+        'messages': [], 'dropped': 0, 'plan': None, 'ask': None, 'queue': [], 'taken': [],
+    }, consume)
     messages = activity.group_actions(activity.merge(list(state['messages'])))
+    queued = []
+    for item in list(state['queue']):
+        if task_notice(item['text'], 0, None) is None:
+            display = tidy_user_text(clean(item['text']))
+            if display.strip():
+                queued.append({'id': item['id'], 'text': display, 'time': item['time']})
     metrics = {}
     try:
         metrics = json.loads((METRICS / (entry['thread'] + '.json')).read_text())
@@ -1041,4 +1235,4 @@ def claude_snapshot(entry, clean):
                   model=(metrics.get('model') or {}).get('display_name') or (metrics.get('model') or {}).get('id') or '')
     return {'messages': merge_quota_notices(dict(entry, agent='claude'), messages), 'dropped': state['dropped'],
             'busy': entry.get('busy', False), 'usage': report, 'plan': state.get('plan'), 'ask': state.get('ask'), 'claude_name': state.get('name'),
-            'scheduled': {key: dict(value) for key, value in state.get('scheduled', {}).items()}}
+            'scheduled': {key: dict(value) for key, value in state.get('scheduled', {}).items()}, 'queued': queued}

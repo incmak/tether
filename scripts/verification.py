@@ -12,7 +12,7 @@ Commands:
   check STAMP                              exit 0 when STAMP is valid
 """
 import argparse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import re
@@ -105,12 +105,14 @@ def observe_shots(path, folder, warn):
 
 def line(text, stamp, commit=None, now=None, shots=None):
     now = now or datetime.now().astimezone()
+    if now.utcoffset() is None:
+        now = now.replace(tzinfo=timezone.utc)
     text = re.sub(r'\s+', ' ', str(text or '')).strip()
     if not text:
         raise ValueError('Say what was deployed.')
     if FOUND.search(text):
         raise ValueError('Give the stamp with --verified, not in the text.')
-    head = now.strftime('%Y-%m-%d %H:%M ') + (now.strftime('%Z') or 'UTC')
+    head = now.strftime('%Y-%m-%d %H:%M %z')
     return f'- {head} · ' + (f'{commit} ' if commit else '') + f'{text}{_shots_field(shots)} · Verified: {valid(stamp)}'
 
 

@@ -33,10 +33,10 @@ def _darwin_ps():
                           check=True, capture_output=True, text=True, timeout=1).stdout
 
 
-def _darwin_snapshot(pid=None):
+def _darwin_snapshot(pid=None, fresh=False):
     global _DARWIN_SNAPSHOT, _DARWIN_SNAPSHOT_AT
     with _DARWIN_LOCK:
-        refresh = _DARWIN_SNAPSHOT is None or time.monotonic() - _DARWIN_SNAPSHOT_AT >= 1
+        refresh = fresh or _DARWIN_SNAPSHOT is None or time.monotonic() - _DARWIN_SNAPSHOT_AT >= 1
         if refresh or (pid is not None and pid not in _DARWIN_SNAPSHOT):
             _DARWIN_SNAPSHOT = _parse_ps(_darwin_ps())
             _DARWIN_SNAPSHOT_AT = time.monotonic()
@@ -339,10 +339,12 @@ def socket_owner(local_port, remote_port, uid):
     return pid_with_socket(inode, uid) if inode is not None else None
 
 
-def table(run=subprocess.run):
+def table(run=subprocess.run, fresh=False):
+    """All processes as {pid: (ppid, name)}. On macOS the ps snapshot is shared for a second; fresh=True reads it
+    again (Linux always reads ps)."""
     if DARWIN:
         result = {}
-        for pid, row in _darwin_snapshot().items():
+        for pid, row in _darwin_snapshot(fresh=fresh).items():
             try:
                 args = argv(pid)
                 name = os.path.basename(os.fsdecode(args[0])) if args else ''
@@ -350,7 +352,10 @@ def table(run=subprocess.run):
             except OSError:
                 continue
         return result
-    ps = run(['ps', '-eo', 'pid=,ppid=,comm='], capture_output=True, text=True, timeout=5)
+    command = ['ps', '-eo', 'pid=,ppid=,comm=']
+    ps = run(command, capture_output=True, text=True, timeout=5)
+    if ps.returncode:
+        raise subprocess.CalledProcessError(ps.returncode, command, output=ps.stdout)
     processes = {}
     for line in ps.stdout.splitlines():
         fields = line.strip().split(None, 2)

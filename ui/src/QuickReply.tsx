@@ -1,7 +1,7 @@
 import { Loading } from './Skeleton'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ArrowUp } from 'lucide-react'
-import { ApiError, errorText } from './api'
+import { ApiError, chatMessages, errorText } from './api'
 import type { Api, Approval, AskBridge, Attention, ChatData, Choice, DialogAction, Pane, PromptAction } from './api'
 import { ChoiceDock } from './Dock'
 import { usePolling } from './hooks'
@@ -29,7 +29,8 @@ export function QuickReply({ api, pane, id, focus, onOpen, onSuccess }: Props) {
   const agent = agentNames[pane.agent]
   const approval = (data?.approval as Approval | null) ?? null
   const attention = data?.attention ?? null
-  const ownAnswer = !approval && attention?.reason === 'menu' ? attention.options?.find(option => option.free) : undefined
+  const menuRevision = attention?.menu_verified || undefined
+  const ownAnswer = !approval && attention?.reason === 'menu' && attention.menu_verified !== false && !attention.ask_current?.multi ? attention.options?.find(option => option.free) : undefined
   const reply = !!data && !data.plan && ((!approval && !attention) || !!ownAnswer)
   const disabled = busy || pane.writable === false || data?.writable === false
 
@@ -99,14 +100,15 @@ export function QuickReply({ api, pane, id, focus, onOpen, onSuccess }: Props) {
   }
   async function choose(kind: 'approval' | 'menu', option: Choice, approval: Approval | null, feedback?: string) {
     if (kind === 'approval' && approval?.id) await write('approval', { approval: approval.id, choice: option.id, feedback }, true)
-    else await write('menu', { choice: option.id, label: option.text }, true)
+    else await write('menu', { choice: option.id, label: option.text, revision: menuRevision }, true)
   }
   const send = () => {
     if (!text.trim()) return
-    if (ownAnswer) void write('menu', { choice: ownAnswer.id, answer: text }, true)
+    if (ownAnswer) void write('menu', { choice: ownAnswer.id, answer: text, revision: menuRevision }, true)
     else void write('message', { message: text }, false)
   }
-  const lastTurn = pane.finished ?? (data?.messages.length ? Date.parse(data.messages[data.messages.length - 1].time) / 1000 : 0)
+  const transcript = chatMessages(data)
+  const lastTurn = pane.finished ?? (transcript.length ? Date.parse(transcript[transcript.length - 1].time) / 1000 : 0)
   const ago = lastTurn ? agoSeconds(lastTurn) : 'now'
   const context = approval ? `${agent} needs your permission` : data?.state === 'Working' || data?.busy ? 'Working'
     : ago === 'now' ? 'Last turn just now' : `Last turn ${ago} ago`

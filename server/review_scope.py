@@ -9,11 +9,14 @@ import json
 import os
 from pathlib import Path
 import re
+import selectors
 import subprocess
 import sys
+import time
 
 RULES = 'origin/main:REVIEW.md'
 TIMEOUT = 5
+READ_CHUNK_SIZE = 64 * 1024
 HASH = re.compile(r'[0-9a-f]{40}|[0-9a-f]{64}')  # SHA-1 or SHA-256 repositories
 UI_PATH = re.compile(
     r'^ui/(src|public)/|^ui/(index\.html|vite\.config\.ts|package\.json|package-lock\.json)$'
@@ -35,6 +38,39 @@ def git_result(folder, *args):
         return None
 
 
+def _hash_command(root, args, digest):
+    """Hash git stdout in bounded chunks and report whether the output is complete."""
+    deadline = time.monotonic() + TIMEOUT
+    try:
+        with subprocess.Popen(['git', *args], cwd=root, env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'},
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+            try:
+                has_stderr = False
+                with selectors.DefaultSelector() as selector:
+                    selector.register(process.stdout, selectors.EVENT_READ)
+                    selector.register(process.stderr, selectors.EVENT_READ)
+                    while selector.get_map():
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            return False
+                        for key, _ in selector.select(remaining):
+                            chunk = os.read(key.fd, READ_CHUNK_SIZE)
+                            if not chunk:
+                                selector.unregister(key.fileobj)
+                            elif key.fileobj is process.stdout:
+                                digest.update(chunk)
+                            else:
+                                has_stderr = True
+                # A child can close both pipes before it exits.
+                remaining = deadline - time.monotonic()
+                return remaining > 0 and process.wait(timeout=remaining) == 0 and not has_stderr
+            finally:
+                if process.returncode is None:
+                    process.kill()  # Popen closes the pipes and reaps the child on exit.
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        return False
+
+
 def git(folder, *args, complete=False):
     """stdout of a read-only git command in `folder`, or None when it fails. complete: also None when git wrote a
     warning: it can exit with 0 after it skipped a path that it could not read, and the output is then partial."""
@@ -50,6 +86,21 @@ def head(folder):
         return None
     found = (git(folder, 'rev-parse', '--verify', 'HEAD^{commit}') or '').strip()
     return found if HASH.fullmatch(found) else None
+
+
+def repo_identity(folder):
+    """The repository of `folder`: {'path', 'dev', 'ino'} of its resolved common Git directory, or None. Read fresh
+    each time, never from a cache: a checkout of another repository can take the same folder path (B368)."""
+    found = git(folder, 'rev-parse', '--path-format=absolute', '--git-common-dir') if folder else None
+    path = (found or '').removesuffix('\n')
+    if not found or not found.endswith('\n') or '\n' in path or not os.path.isabs(path):
+        return None
+    try:
+        real = Path(path).resolve(strict=True)
+        info = real.stat()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return {'path': str(real), 'dev': info.st_dev, 'ino': info.st_ino}
 
 
 def checklist(folder):
@@ -114,9 +165,11 @@ def ui_paths(folder):
 
 
 def fingerprint(folder):
-    """A digest of everything a scope depends on, or None when git cannot read it: HEAD, origin/main, the status,
-    the tracked and the staged diff, and the size, the modification time and the change time of each untracked file. The same digest means the
-    same scope, so a request that is retried on each monitor tick does not run the checker again."""
+    """The worktree and base digests, or None when git cannot read the scope.
+
+    The worktree digest covers HEAD, status, both the tracked and staged diffs, and untracked file metadata.
+    The base digest also invalidates the scope cache when origin/main changes.
+    """
     root = git(folder, 'rev-parse', '--show-toplevel')
     if not root:
         return None
@@ -125,16 +178,18 @@ def fingerprint(folder):
     base = git_result(root, *BASE_REF)
     if base is None:
         return None
-    digest.update(base.stdout + bytes([base.returncode & 255]))
+    base_mark = hashlib.sha256(base.stdout + bytes([base.returncode & 255])).hexdigest()
     for command in (('rev-parse', 'HEAD'), ('status', '--porcelain', '-z', '--untracked-files=all'),
                     # As the checker reads them: no text conversion, or an edit could leave the digest as it was.
                     ('diff', '--no-ext-diff', '--no-textconv', '--text', 'HEAD'),
-                    ('diff', '--no-ext-diff', '--no-textconv', '--text', '--cached', 'HEAD'),
-                    ('ls-files', '--others', '--exclude-standard', '-z')):
-        result = git_result(root, *command)
-        if result is None or result.returncode != 0 or result.stderr:
+                    ('diff', '--no-ext-diff', '--no-textconv', '--text', '--cached', 'HEAD')):
+        if not _hash_command(root, command, digest):
             return None
-        digest.update(result.stdout + b'\0\0')
+        digest.update(b'\0\0')
+    result = git_result(root, 'ls-files', '--others', '--exclude-standard', '-z')
+    if result is None or result.returncode != 0 or result.stderr:
+        return None
+    digest.update(result.stdout + b'\0\0')
     for name in result.stdout.split(b'\0'):
         if name:
             try:
@@ -143,12 +198,17 @@ def fingerprint(folder):
                 digest.update(b'%d:%d:%d:%d;' % (found.st_size, found.st_mtime_ns, found.st_ctime_ns, found.st_ino))
             except OSError:
                 digest.update(b'unreadable;')
-    return digest.hexdigest()
+    return f'{digest.hexdigest()}:{base_mark}'
 
 
-def scope(folder):
-    """{'commit', 'dirty', 'folder', 'rules', 'checklist', 'ui'} for a review request, or None when the folder has no
-    readable commit. checklist: the reliability checklist result. ui: the changed UI paths, or None when not known.
+def same_work_mark(before, after):
+    """A change to the base ref alone leaves the worker's work unchanged."""
+    return before.partition(':')[0] == after.partition(':')[0]
+
+
+def scope(folder, *, light=False):
+    """Read the commit, dirty and folder fields, or return None when the folder has no readable commit.
+    Include the rules, checklist and changed UI paths for a review request unless light is True.
     dirty: True when tracked or untracked changes exist, False when the tree is clean, None when the status cannot be
     read. Only False counts as clean. The commit and the status come from one git command, so they describe the same
     moment: a commit made between two reads cannot pair one commit with the status of another.
@@ -166,6 +226,8 @@ def scope(folder):
         commit = head(folder)  # the status failed or is slow: the review can still be bound, the tree is unknown
     if commit is None:
         return None
-    return {'commit': commit, 'dirty': dirty, 'folder': str(folder),
-            'rules': git(folder, 'cat-file', '-e', RULES) is not None,
-            'checklist': checklist(folder), 'ui': ui_paths(folder)}
+    found = {'commit': commit, 'dirty': dirty, 'folder': str(folder)}
+    if not light:
+        found.update(rules=git(folder, 'cat-file', '-e', RULES) is not None,
+                     checklist=checklist(folder), ui=ui_paths(folder))
+    return found

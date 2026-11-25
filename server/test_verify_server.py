@@ -1,10 +1,14 @@
 """Test the verify server against decoys and a fresh private tmux."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
+from collections import Counter
 import errno
 from http.server import BaseHTTPRequestHandler
 from io import BytesIO
+from itertools import islice
 import json
 import os
 from pathlib import Path
+import re
 import selectors
 import shutil
 import signal
@@ -15,8 +19,11 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 import urllib.error
+from urllib.parse import parse_qs
 import urllib.request
 from unittest.mock import Mock, patch
+
+from test_tmux_isolation import private_tmux, watch_request
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / 'dev'))
@@ -63,10 +70,62 @@ class Configuration(unittest.TestCase):
             self.assertNotEqual(run.returncode, 0)
             self.assertIn('MOBILE_TMUX_TMUX and PATH must select the fixture wrapper', run.stderr)
 
+    def test_supplied_root_requires_a_private_directory_and_only_allows_its_socket(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix='tv-', dir=verify_server.TEMP)))
+        other = Path(self.enterContext(tempfile.TemporaryDirectory(prefix='tv-', dir=verify_server.TEMP)))
+        self.assertEqual(verify_server.check_supplied_root(root), root)
+        root.chmod(0o755)
+        with self.assertRaisesRegex(SystemExit, 'private 0700 directory'):
+            verify_server.check_supplied_root(root)
+        root.chmod(0o700)
+        with patch.object(verify_server.os, 'getuid', return_value=os.getuid() + 1):
+            with self.assertRaisesRegex(SystemExit, 'owned by this user'):
+                verify_server.check_supplied_root(root)
+        alias = other.with_name(other.name + '-link')
+        alias.symlink_to(root, target_is_directory=True)
+        self.addCleanup(alias.unlink)
+        with self.assertRaisesRegex(SystemExit, 'private 0700 directory'):
+            verify_server.check_supplied_root(alias)
+        sock = root / 'tmux.sock'
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server_socket:
+            server_socket.bind(str(other / 'tmux.sock'))
+            sock.symlink_to(other / 'tmux.sock')
+            with self.assertRaisesRegex(SystemExit, 'empty except for'):
+                verify_server.check_supplied_root(root)
+            sock.unlink()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server_socket:
+            server_socket.bind(str(sock))
+            self.assertEqual(verify_server.check_supplied_root(root), root)
+            (root / 'extra').touch()
+            with self.assertRaisesRegex(SystemExit, 'empty except for'):
+                verify_server.check_supplied_root(root)
+
+    def test_supplied_root_uses_client_only_tmux_and_leaves_cleanup_to_the_watcher(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix='tv-', dir=verify_server.TEMP)))
+        dist = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (dist / 'index.html').touch()
+        fake = dist / 'tmux'
+        fake.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$0.log"\nexit 1\n')
+        fake.chmod(0o700)
+        done = subprocess.run([sys.executable, SCRIPT, '--root', str(root), '--dist', str(dist)],
+                              env={**os.environ, 'PATH': str(dist) + os.pathsep + os.defpath},
+                              capture_output=True, text=True, timeout=10)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn('tmux did not start', done.stderr)
+        self.assertTrue((root / verify_server.MARKER).is_file())
+        log = dist / 'tmux.log'
+        client = ['-N', '-S', str(root / 'tmux.sock'), '-f', '/dev/null']
+        self.assertEqual(log.read_text().splitlines()[:6], [*client, 'new-session'])
+        shown = subprocess.run([str(root / 'bin/tmux'), 'list-sessions'],
+                               capture_output=True, text=True, timeout=5)
+        self.assertEqual(shown.returncode, 1, shown.stderr)
+        self.assertEqual(log.read_text().splitlines(), [*client, 'list-sessions'])
+
     def test_signals_while_root_and_tmux_are_being_created(self):
         script = r'''
 import os, signal, sys, tempfile
 from pathlib import Path
+import re
 import verify_server as v
 
 when, signum, dist = sys.argv[1:]
@@ -81,7 +140,7 @@ def temporary(*args, **kwargs):
 original = tempfile.mkdtemp
 tempfile.mkdtemp = temporary
 commands = []
-def tmux(executable, root, env, *args):
+def tmux(executable, root, env, *args, client_options=()):
     assert root == tracked[0]
     commands.append(args[0])
     if args[0] == 'new-session':
@@ -173,11 +232,311 @@ BLOCKED_REQUESTS = [
     ('POST', '/mobile/api/start', {}),
     ('POST', '/mobile/api/login/start', {}),
     ('POST', '/mobile/api/reminders/add', {}),
+    ('GET', '/mobile/api/friday-notes?topic=Spec', {}),
+    ('POST', '/mobile/api/friday-notes/hold', {}),
+    ('POST', '/mobile/api/friday-notes/drop', {}),
     ('POST', '/mobile/api/tmux-sessions', {}),
 ]
 
 
+UI_SRC = HERE.parent / 'ui/src'
+CALL = re.compile(
+    r'\b(?<!function )(?<!wakeLock\.)(api|baseApi|request|requestIfChanged|withApproval|usePoll|'
+    r'fetch|reach|EventSource|openLive|xhr\.open|usePolling|write|act)\s*(?:<(?:[^\n]*?|[^()]*?)>\s*)?\('
+)
+JS_TOKEN = re.compile(r"""'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|\x60|//[^\n]*|/\*.*?\*/|[()[\]{},]""", re.S)
+TEMPLATE_TOKEN = re.compile(r'\\.|\x60|\$\{', re.S)
+ABSOLUTE_PATH = re.compile(re.escape(verify_server.API_PREFIX)
+                           + r'(?:[\w/.-]|\$\{[^}\n]*\})*(?:\?(?:[\w%&=.+/-]|\$\{[^}\n]*\})*)?')
+METHOD = re.compile(r"""\bmethod\s*:\s*['"]([A-Z]+)['"]""")
+
+
+# Keys identify a computed call by file, method, helper and URL expression.
+# Values are its concrete routes, or () for a forwarding helper or non-API call.
+COMPUTED_ROUTES = {
+    # Action names come from the caller's finite set of choices.
+    ('AccountLogin.tsx', 'POST', 'api', '`login/${action}`'): ('login/start', 'login/code', 'login/cancel'),
+    ('AgentBrowser.tsx', 'POST', 'api', '`browser/signed/${path}`'): (
+        'browser/signed/allow', 'browser/signed/deny', 'browser/signed/end', 'browser/signed/dismiss'),
+    ('AgentBrowser.tsx', 'POST', 'api', 'path'): ('browser/agents', 'browser/ask/dismiss', 'browser/agents/setup'),
+    ('ExplorerPhone.tsx', 'POST', 'write', '`files/${mode}`'): ('files/copy', 'files/move'),
+    ('Project.tsx', 'POST', 'api', '`projects/${path}`'): (
+        'projects/note', 'projects/note-delete', 'projects/pin', 'projects/unpin',
+        'projects/instructions', 'projects/seen', 'projects/budget'),
+    ('attention.ts', 'POST', 'api', '`attention/${action}`'): ('attention/handled', 'attention/snooze', 'attention/opened'),
+    ('reminders.ts', 'POST', 'api', '`${PATH}/${action}`'): (
+        'reminders/add', 'reminders/edit', 'reminders/done', 'reminders/reopen', 'reminders/snooze',
+        'reminders/delete', 'reminders/restore'),
+    # These variables or functions supply the path and possibly its query.
+    ('ActivityLog.tsx', 'GET', 'api', 'path'): ('audit',),
+    ('ActivityLog.tsx', 'GET', 'api', 'queryOf(filters, next)'): ('audit',),
+    ('ActivityLog.tsx', 'GET', 'api', 'queryOf(filters, zone, next)'): ('audit',),
+    ('Autonomy.tsx', 'GET', 'api', 'path'): ('autonomy',),
+    ('Chat.tsx', 'GET', 'usePolling', 'streamPath'): ('stream',),
+    ('ClaudeAdvisor.tsx', 'GET', 'api', 'path'): ('claude-advisor',),
+    ('CodexLevel.tsx', 'GET', 'api', 'path'): ('codex-level',),
+    ('CommitGate.tsx', 'GET', 'api', 'path'): ('commit-gate',),
+    ('Factory.tsx', 'GET', 'usePoll', "agent.pane.agent === 'shell' ? null : `footer?session=${id}`"): ('footer',),
+    ('Project.tsx', 'GET', 'api',
+     'groupId ? `groups/context?session=${encodeURIComponent(session.id)}&group=${encodeURIComponent(groupId)}`'
+     ' : `projects/project?session=${encodeURIComponent(session.id)}`'): ('groups/context', 'projects/project'),
+    ('Sidebar.tsx', 'GET', 'api', "live ? 'usage?live=1' : 'usage'"): ('usage?live=1', 'usage'),
+    ('ToolGroup.tsx', 'GET', 'api', 'source'): ('tool', 'subagent-tool'),
+    ('Worktree.tsx', 'GET', 'api', "`worktree-info${session ? `?session=${encodeURIComponent(session)}` : ''}`"): (
+        'worktree-info',),
+    # These URLs come from filesUrl, sizeUrl or the view's file URL.
+    ('Chat.tsx', 'GET', 'fetch', 'url'): ('file',),
+    ('CreateFields.tsx', 'GET', 'api', 'filesUrl.places()'): ('files/places',),
+    ('CreateFields.tsx', 'GET', 'api', "filesUrl.list(folder, false, 'name', true)"): ('files/list',),
+    ('Explorer.tsx', 'GET', 'api', 'filesUrl.stat(target.select)'): ('files/stat',),
+    ('Explorer.tsx', 'POST', 'api', 'filesUrl.secrets()'): ('files/secrets',),
+    ('Explorer.tsx', 'GET', 'api', 'url'): ('files/list', 'files/search'),
+    ('Explorer.tsx', 'GET', 'api', 'filesUrl.places()'): ('files/places',),
+    ('Explorer.tsx', 'GET', 'api', 'filesUrl.stat(detailPath)'): ('files/stat',),
+    ('Explorer.tsx', 'GET', 'api', 'filesUrl.preview(detailPath)'): ('files/preview',),
+    ('Explorer.tsx', 'GET', 'api', 'filesUrl.stat(cwd)'): ('files/stat',),
+    ('ExplorerPhone.tsx', 'POST', 'api', 'filesUrl.secrets()'): ('files/secrets',),
+    ('ExplorerPhone.tsx', 'GET', 'api', 'filesUrl.places()'): ('files/places',),
+    ('ExplorerPhone.tsx', 'GET', 'api', 'url'): ('files/list', 'files/search'),
+    ('ExplorerPhone.tsx', 'GET', 'api', 'sizeUrl(paths)'): ('files/size',),
+    ('ExplorerPhone.tsx', 'GET', 'api', "filesUrl.list(folder, hidden, 'name', true)"): ('files/list',),
+    ('ExplorerPhone.tsx', 'GET', 'api', 'filesUrl.preview(row.full)'): ('files/preview',),
+    ('ExplorerWrites.tsx', 'GET', 'api', "filesUrl.list(folder, false, 'name', true)"): ('files/list',),
+    ('OfficeViewer.tsx', 'GET', 'reach', 'file.url'): ('file', 'files/raw'),
+    ('TextViewer.tsx', 'GET', 'reach', 'url'): ('file', 'files/raw'),
+    ('panelProps.tsx', 'GET', 'fetch', 'url'): ('file',),
+    # These paths use named constants, including Share's API base and encoded IDs.
+    ('Backlog.tsx', 'GET', 'api', 'PATH'): ('projects/backlog',),
+    ('Backlog.tsx', 'POST', 'api', 'PATH'): ('projects/backlog',),
+    ('CommandMenu.tsx', 'GET', 'api', 'BACKLOG_PATH'): ('projects/backlog',),
+    ('Factory.tsx', 'GET', 'usePoll', 'BACKLOG_PATH'): ('projects/backlog',),
+    ('HeldNotes.tsx', 'POST', 'api', '`${PATH}/drop`'): ('friday-notes/drop',),
+    ('Live.tsx', 'GET', 'api', 'BACKLOG_PATH'): ('projects/backlog',),
+    ('Live.tsx', 'POST', 'api', '`${BACKLOG_PATH}-add`'): ('projects/backlog-add',),
+    ('Live.tsx', 'POST', 'api', '`${BACKLOG_PATH}-start`'): ('projects/backlog-start',),
+    ('MacPairing.tsx', 'GET', 'reach', 'EXTENSION_ZIP'): ('browser/extension/download',),
+    ('Share.tsx', 'GET', 'fetch', 'rawUrl(file.id)'): ('share/raw/{}',),
+    ('backlogNews.ts', 'GET', 'api', 'BACKLOG_PATH'): ('projects/backlog',),
+    ('fridayNotes.ts', 'GET', 'api', 'PATH'): ('friday-notes',),
+    ('fridayNotes.ts', 'GET', 'api', 'path'): ('friday-notes',),
+    ('fridayNotes.ts', 'GET', 'api', '`${PATH}?${new URLSearchParams({ topic, scope })}`'): ('friday-notes',),
+    ('fridayNotes.ts', 'POST', 'api', '`${PATH}/hold`'): ('friday-notes/hold',),
+    ('fridayNotes.ts', 'POST', 'api', '`${PATH}/drop`'): ('friday-notes/drop',),
+    ('fridayNotes.ts', 'POST', 'api', '`${PATH}/draft`'): ('friday-notes/draft',),
+    ('fridayNotes.ts', 'POST', 'api', '`${PATH}/draft-edit`'): ('friday-notes/draft-edit',),
+    ('fridayNotes.ts', 'POST', 'api', '`${PATH}/draft-send`'): ('friday-notes/draft-send',),
+    ('fridayNotes.ts', 'POST', 'api', '`${PATH}/draft-close`'): ('friday-notes/draft-close',),
+    ('fridayNotes.ts', 'POST', 'api', '`${PATH}/draft-asked`'): ('friday-notes/draft-asked',),
+    ('fridayReminders.ts', 'GET', 'api', 'PATH'): ('reminders',),
+    ('fridayReminders.ts', 'POST', 'api', '`${PATH}/add`'): ('reminders/add',),
+    ('quickBacklog.ts', 'GET', 'api', 'BACKLOG_PATH'): ('projects/backlog',),
+    ('quickBacklog.ts', 'POST', 'api', 'BACKLOG_PATH'): ('projects/backlog',),
+    ('reminders.ts', 'GET', 'api', 'PATH'): ('reminders',),
+    ('shareApi.ts', 'GET', 'reach', '`${BASE}raw/${encodeURIComponent(id)}?text=1`'): ('share/raw/{}',),
+    ('shareApi.ts', 'POST', 'xhr.open', '`${BASE}upload`'): ('share/upload',),
+    ('shareApi.ts', 'POST', 'reach', '`${BASE}thumb/${encodeURIComponent(id)}`'): ('share/thumb/{}',),
+    ('shareApi.ts', 'POST', 'xhr.open', '`${BASE}uploads/${encodeURIComponent(id)}?offset=${offset}`'): ('share/uploads/{}',),
+    ('shareApi.ts', 'POST', 'request', '`share/uploads/${encodeURIComponent(id)}/cancel`'): ('share/uploads/{}/cancel',),
+    ('shareApi.ts', 'GET', 'request', '`share/uploads/${encodeURIComponent(session.id)}`'): ('share/uploads/{}',),
+    ('shareApi.ts', 'GET', 'fetch', 'url'): ('share/raw/{}',),
+    ('work.ts', 'GET', 'api', 'BOARD_PATH'): ('work/board',),
+    # Forwarding helpers. Their call sites supply the route and are scanned separately.
+    ('App.tsx', 'POST', 'request', 'path'): (),
+    ('BrowserPanel.tsx', 'POST', 'baseApi', "body === undefined ? `${path}${path.includes('?') ? '&' : '?'}browser=${which}` : path"): (),
+    ('BrowserPanel.tsx', 'POST', 'api', 'path'): (),
+    ('Chat.tsx', 'POST', 'api', 'path'): (),
+    ('ExplorerPhone.tsx', 'POST', 'reach', '`/mobile/api/${path}`'): (),
+    ('Factory.tsx', 'GET', 'api', 'path'): (),
+    ('QuickReply.tsx', 'POST', 'api', 'path'): (),
+    ('api.ts', 'GET', 'reach', '`/mobile/api/${path}`'): (),
+    ('api.ts', 'GET', 'fetch', 'input'): (),
+    ('approval.ts', 'POST', 'api', 'path'): (),
+    ('hooks.ts', 'GET', 'EventSource', "`/mobile/api/${typeof streamPath === 'function' ? streamPath(shown.current) : streamPath}`"): (),
+    # These calls use another origin, a static asset, or the unrelated RegExp helper.
+    ('BrowserPanel.tsx', 'GET', 'fetch', 'liveSrc'): (),
+    ('HostMenu.tsx', 'GET', 'fetch', "origin + '/chat/icon.svg'"): (),
+    ('HostMenu.tsx', 'GET', 'reach', 'url'): (),
+    ('lazyPanels.ts', 'GET', 'fetch', 'href'): (),
+    ('reviewText.ts', 'POST', 'request', '`${NAME}?`'): (),
+    ('reviewText.ts', 'POST', 'request', 'NAME'): (),
+}
+
+# Track repeated shapes so copying a computed call also needs an explicit decision.
+REPEATED_COMPUTED = {
+    ('Backlog.tsx', 'POST', 'api', 'PATH'): 3,
+    ('Live.tsx', 'GET', 'api', 'BACKLOG_PATH'): 2,
+    ('api.ts', 'GET', 'reach', '`/mobile/api/${path}`'): 2,
+    ('approval.ts', 'POST', 'api', 'path'): 2,
+    ('fridayNotes.ts', 'GET', 'api', 'PATH'): 3,
+    ('quickBacklog.ts', 'GET', 'api', 'BACKLOG_PATH'): 3,
+}
+
+ABSOLUTE_EXCEPTIONS = {
+    # AppIdentity's preview constant is joined with the two image names.
+    ('AppIdentity.tsx', 'app-identity/preview/'): (
+        ('GET', 'app-identity/preview/art.png'), ('GET', 'app-identity/preview/draft.png')),
+    # Share's BASE is a prefix. The calls above cover the writes and raw GETs.
+    ('shareApi.ts', 'share/'): (('GET', 'share/raw/{}'), ('GET', 'share/thumb/{}')),
+    # SmallWebRTCTransport uses POST for the offer and PATCH for trickled ICE.
+    ('fridayAgent.ts', 'live/offer'): (('POST', 'live/offer'), ('PATCH', 'live/offer')),
+}
+
+
+def js_arguments(source, start, closing=')'):
+    """Split call arguments, keeping commas in strings, templates and groups."""
+    stack = []
+    position = start
+    while True:
+        while match := JS_TOKEN.search(source, position):
+            token = match[0]
+            position = match.end()
+            if token == '`':
+                _, position = template_path(source, position)
+            elif token in ('(', '[', '{'):
+                stack.append({'(': ')', '[': ']', '{': '}'}[token])
+            elif stack:
+                if token == stack[-1]:
+                    stack.pop()
+            elif token in (',', closing):
+                break
+        else:
+            return
+        yield source[start:match.start()].strip(), position
+        start = position
+        if token == closing:
+            return
+
+
+def template_path(source, start):
+    """Keep the literal parts and represent each interpolation with {}."""
+    parts = []
+    position = start
+    while match := TEMPLATE_TOKEN.search(source, position):
+        position = match.end()
+        if match[0] == '`':
+            return ''.join(parts) + source[start:match.start()], position
+        if match[0] == '${':
+            parts.extend((source[start:match.start()], '{}'))
+            for _, position in js_arguments(source, position, closing='}'):
+                pass
+            start = position
+    return ''.join(parts) + source[start:], len(source)
+
+
+def literal_path(argument):
+    if argument.startswith('`'):
+        value, end = template_path(argument, 1)
+        return value if end == len(argument) and argument.endswith('`') else None
+    if re.fullmatch(JS_TOKEN, argument) and argument[:1] in ("'", '"'):
+        return argument[1:-1]
+    return None
+
+
+def route_key(path):
+    # Most query strings only select fixture data. This one changes the route's safety.
+    route, _, query = path.partition('?')
+    if route == 'usage' and '1' in parse_qs(query).get('live', ()):
+        return 'usage?live=1'
+    return route
+
+
+def ui_route_calls(file, source):
+    """Scan the current URL forms without a TypeScript toolchain."""
+    # Strip documentation without shifting the source lines used for diagnostics.
+    source = re.sub(r'(?m)(?:^[ \t]*|[ \t]+)//(?:[ \t]|$)[^\n]*|^[ \t]*/\*[\s\S]*?\*/',
+                    lambda match: re.sub(r'[^\n]', ' ', match[0]), source)
+    relative = {'api', 'baseApi', 'request', 'requestIfChanged', 'withApproval', 'usePoll', 'usePolling'}
+    wrappers = {'BrowserPanel.tsx': {'act'}, 'Chat.tsx': {'write'}, 'QuickReply.tsx': {'write'},
+                'ExplorerPhone.tsx': {'write'}}.get(file, set())
+    relative.update(wrappers)
+    handled = []
+    for match in CALL.finditer(source):
+        helper = match[1]
+        if helper in {'write', 'act'} and helper not in wrappers:
+            continue
+        args = list(islice(js_arguments(source, match.end()), 4 if helper in relative else 2))
+        index = 2 if helper == 'usePolling' else int(helper in {'withApproval', 'usePoll', 'xhr.open'})
+        if len(args) <= index or not args[index][0]:
+            continue
+        argument, end = args[index]
+        if helper == 'usePolling' and argument in ('undefined', 'null'):
+            continue
+        method = 'GET'
+        if helper in ('api', 'baseApi', 'request'):
+            method = 'POST' if len(args) > 1 and args[1][0] != 'undefined' else 'GET'
+            if len(args) > 3 and literal_path(args[3][0]):
+                method = literal_path(args[3][0])
+        elif helper == 'withApproval' or helper in wrappers:
+            method = 'POST'
+        elif helper == 'xhr.open':
+            method = literal_path(args[0][0])
+        elif helper in ('fetch', 'reach') and len(args) > 1:
+            method_match = METHOD.search(args[1][0])
+            if method_match:
+                method = method_match[1]
+        line = source.count('\n', 0, match.start()) + 1
+        path = literal_path(argument)
+        if helper not in relative and path is not None:
+            prefix, found, path = path.partition(verify_server.API_PREFIX)
+            if not found:
+                if not prefix.startswith('/') or prefix.startswith('//'):
+                    yield line, method, None, (helper, argument)
+                continue
+        handled.append((match.end() if not index else args[index - 1][1], end))
+        if path is None or '{}' in route_key(path):
+            yield line, method, None, (helper, ' '.join(argument.split()))
+        else:
+            yield line, method, route_key(path), None
+
+    # Direct links and URLs set on DOM attributes, as well as request helpers that
+    # take absolute URLs. Scan them even if there is no fetch call at the site.
+    for match in ABSOLUTE_PATH.finditer(source):
+        if any(start <= match.start() < end for start, end in handled):
+            continue
+        path = match[0][len(verify_server.API_PREFIX):]
+        line = source.count('\n', 0, match.start()) + 1
+        path = route_key(re.sub(r'\$\{[^}\n]*\}', '{}', path))
+        if (file, path) in ABSOLUTE_EXCEPTIONS:
+            yield line, 'GET', None, ('URL literal', path)
+        else:
+            yield line, 'GET', path, None
+
+
 class RouteGate(unittest.TestCase):
+    def test_ui_api_routes_are_classified(self):
+        files = sorted(path for path in UI_SRC.rglob('*')
+                       if path.suffix in {'.ts', '.tsx', '.js', '.jsx', '.css', '.html'})
+        self.assertTrue(files, f'No UI sources found in {UI_SRC}')
+        seen = Counter()
+        problems = []
+        for file in files:
+            relative = file.relative_to(UI_SRC)
+            for line, method, path, computed in ui_route_calls(relative.as_posix(), file.read_text(encoding='utf-8')):
+                location = f'ui/src/{relative}:{line}'
+                if computed:
+                    helper, expression = computed
+                    key = (relative.as_posix(), method, helper, expression)
+                    seen[key] += 1
+                    if helper == 'URL literal' and seen[key] == 1:
+                        cases = ABSOLUTE_EXCEPTIONS[(relative.as_posix(), expression)]
+                    elif key in COMPUTED_ROUTES and seen[key] <= REPEATED_COMPUTED.get(key, 1):
+                        cases = [(method, route) for route in COMPUTED_ROUTES[key]]
+                    else:
+                        problems.append(f'{location}: unclassified computed {method} {helper}({expression})')
+                        continue
+                else:
+                    cases = [(method, path)]
+                for verb, route in cases:
+                    target = verify_server.API_PREFIX + route
+                    allowed = (verify_server.allowed_route(verb, target)
+                               or verb == 'GET' and route.partition('?')[0] in verify_server.FIXTURES)
+                    refused = route in verify_server.REFUSED.get(verb, ())
+                    if allowed == refused:
+                        problem = 'both allowed and refused' if allowed else 'unclassified'
+                        problems.append(f'{location}: {problem} {verb} {target}')
+        self.assertFalse(problems, 'Classify UI requests in verify_server or list the computed call in this test:\n'
+                         + '\n'.join(problems))
+
     def test_rejects_before_method_dispatch(self):
         class Base(BaseHTTPRequestHandler):
             def do_GET(self):
@@ -226,6 +585,7 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
+import re
 from unittest.mock import patch
 import server
 import verify_server
@@ -293,6 +653,7 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from unittest.mock import patch
@@ -359,6 +720,7 @@ with (patch('http.server.ThreadingHTTPServer', InMemoryServer),
 GUARDED = r'''
 import os, signal, socket, subprocess, sys
 from pathlib import Path
+import re
 import verify_server
 
 root, outside, dist = map(Path, sys.argv[1:4])
@@ -441,6 +803,7 @@ class Folders(unittest.TestCase):
         script = r"""
 import os, sys
 from pathlib import Path
+import re
 import verify_server
 root, decoy = Path(sys.argv[1]), sys.argv[2]
 sys.path.insert(0, str(verify_server.SERVER))
@@ -453,9 +816,10 @@ os.symlink(decoy, root / 'work' / 'link')          # a link that leads out
 os.symlink(decoy + '/missing', root / 'work' / 'dead')
 os.symlink(decoy, root / 'work' / 'ws')            # next to a real folder whose name differs by one space
 (root / 'work' / 'ws ').mkdir()
-asked = []
+(root / 'work' / 'file').write_text('x')           # a file is not a folder
+asked, followed = [], []
 real_stat, real_lstat = os.stat, os.lstat
-os.stat = lambda path, *a, **k: (asked.append(os.fspath(path)), real_stat(path, *a, **k))[1]
+os.stat = lambda path, *a, **k: (asked.append(os.fspath(path)), followed.append(os.fspath(path)), real_stat(path, *a, **k))[2]
 os.lstat = lambda path, *a, **k: (asked.append(os.fspath(path)), real_lstat(path, *a, **k))[1]
 def answer(value):
     try:
@@ -471,7 +835,7 @@ cases = [
     (str(root / 'work' / 'ws'), GONE), (str(root / 'work' / 'ws') + '/.', GONE),
     # The name with the space is the real folder. The checked string is the string that is looked up.
     (str(root / 'work' / 'ws ') + '/.', str(root / 'work' / 'ws ')),
-    (str(root / 'work' / 'none'), GONE),
+    (str(root / 'work' / 'none'), GONE), (str(root / 'work' / 'file'), GONE), (str(root / 'work' / 'file' / 'below'), GONE),
     # A path that leaves the root and returns is looked up by its normalized form, whatever exists outside.
     (f'{root}/../{there}/../{root.name}/work', str(root / 'work')),
     (f'{root}/../{missing}/../{root.name}/work', str(root / 'work')),
@@ -500,6 +864,9 @@ bad = [path for path in folder_questions if not (path + os.sep).startswith(str(r
        or any(part in path.split(os.sep) for part in ('..',))
        or path.startswith((str(root / 'work' / 'link') + os.sep, str(root / 'work' / 'ws') + os.sep, str(root / 'work' / 'dead') + os.sep))]
 assert bad == [], bad
+# One lstat per part (B254): a stat that follows links could see a link swapped in after the lstat.
+followed_below = [path for path in followed if isinstance(path, str) and (path + os.sep).startswith(str(root / 'work') + os.sep)]
+assert followed_below == [], followed_below
 print('ok')
 """
         with tempfile.TemporaryDirectory(prefix='tv-') as root, tempfile.TemporaryDirectory(prefix='tv-decoy-') as decoy:
@@ -601,6 +968,7 @@ DECOYS = r'''
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json, os, signal, subprocess, threading, urllib.error, urllib.request
 from pathlib import Path
+import re
 import server, verify_server
 
 root = Path(os.environ['HOME']).parent
@@ -687,23 +1055,32 @@ class ProxyDecoys(unittest.TestCase):
 class Boot(unittest.TestCase):
     def setUp(self):
         require_loopback(self)
-        self.dist = Path(self.enterContext(tempfile.TemporaryDirectory(dir=verify_server.TEMP)))
+        self.dist = Path(tempfile.mkdtemp(dir=verify_server.TEMP))
+        watch_request('own', self.dist)
+        self.addCleanup(watch_request, 'stop', self.dist)
         (self.dist / 'index.html').write_text('<!doctype html><title>Fixture build</title>')
-        self.decoy = self.dist / 'other.sock'
         self.env = verify_server.clean_env(self.dist, self.dist)
-        started = self.tmux(self.decoy, 'new-session', '-d', '-s', 'Decoy', 'exec sleep 60')
-        if 'Operation not permitted' in started.stderr or 'Permission denied' in started.stderr:
-            self.skipTest('not run (sandbox): private tmux socket: ' + started.stderr.strip())
-        started.check_returncode()
-        self.addCleanup(lambda: self.tmux(self.decoy, 'kill-server').check_returncode())
+        decoy = private_tmux(self, 'ttz', self.env)
+        self.decoy = Path(decoy.socket)
+        decoy.tmux('new-session', '-d', '-s', 'Decoy', 'exec sleep 60').check_returncode()
 
     def tmux(self, sock, *args):
-        return subprocess.run([TMUX, '-S', str(sock), '-f', '/dev/null', *args], env=self.env,
+        return subprocess.run([TMUX, '-N', '-S', str(sock), '-f', '/dev/null', *args], env=self.env,
                               capture_output=True, text=True, timeout=10)
 
+    def launch(self, launcher=(SCRIPT,), *, pass_fds=()):
+        root = Path(tempfile.mkdtemp(prefix='tv-', dir=verify_server.TEMP))
+        watch_request('own', root)
+        watch_request('start', root, env=verify_server.clean_env(root, self.dist))
+        self.addCleanup(watch_request, 'stop', root)
+        process = subprocess.Popen([sys.executable, *launcher, '--dist', str(self.dist), '--until-stdin-closes',
+                                    '--root', str(root)],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE,
+                                   pass_fds=pass_fds)
+        return process, root
+
     def start(self):
-        process = subprocess.Popen([sys.executable, SCRIPT, '--dist', str(self.dist), '--until-stdin-closes'],
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
+        process, _ = self.launch()
 
         def stop():
             if process.poll() is None:
@@ -755,8 +1132,18 @@ class Boot(unittest.TestCase):
         self.assertTrue(sessions[0]['dir'].startswith(str(root)))
         status, body = self.request(info, '/mobile/api/chat?session=' + info['pane'].replace('%', '%25'))
         self.assertEqual(status, 200, body)
-        self.assertEqual([message['role'] for message in json.loads(body)['messages']], ['user', 'assistant', 'user', 'assistant'])
+        messages = json.loads(body)['messages']
+        self.assertEqual([(message['role'], message.get('kind')) for message in messages], [
+            ('user', None), ('user', None), ('assistant', None), ('user', None), ('assistant', None),
+            ('assistant', 'advisor'), ('assistant', 'actions'), ('assistant', 'advisor'),
+        ])
+        self.assertEqual([message['advisor']['status'] for message in messages if message.get('kind') == 'advisor'],
+                         ['answered', 'error'])
+        self.assertNotIn(b'encrypted_content', body)
         self.assertIn(verify_server.CHAT_LINE.encode(), body)
+        self.assertIn(f'start it with `APPROVED {verify_server.REVIEW_COMMIT}`'.encode(), body)  # the chat-review surface
+        self.assertEqual((messages[0]['source'], messages[0]['prompt']), ('tether', 'review'))
+        self.assertNotIn(b'[Tether id ', body)
         for title in (b'Write the release notes', b'Fix the flaky share test', b'Add backlog search', b'Draw the new icon set'):
             self.assertNotIn(title, body)
         status, body = self.request(info, '/mobile/api/projects/backlog')
@@ -777,6 +1164,9 @@ class Boot(unittest.TestCase):
         pid = int(panes.stdout.strip())
         process.send_signal(signal.SIGTERM)
         self.assertEqual(process.wait(timeout=15), 0)
+        self.assertTrue(root.is_dir())
+        self.tmux(sock, 'list-sessions').check_returncode()
+        self.assertTrue(self.doCleanups())
         self.assertFalse(root.exists())
         self.assertNotEqual(self.tmux(sock, 'list-sessions').returncode, 0)
         # A session killed with its private server can briefly leave a zombie until its parent reaps it.

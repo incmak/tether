@@ -1,4 +1,4 @@
-// Upkeep in Settings › Agents (server: prune.py, ops_agent.py, upkeep_api.py).
+// Upkeep in Settings › Learning & upkeep (server: prune.py, ops_agent.py, upkeep_api.py).
 // - Clean-up (B211): a weekly check flags lessons that never repeated and notes nobody touched for 30 days. The
 //   person removes each one with its own button; nothing goes without that tap. Undo works for 7 days.
 // - Daily ops report (B212): once a day Tether writes yesterday's facts to a postmortem note and a cheap tab says
@@ -15,6 +15,7 @@ import type { Lesson } from './Autonomy'
 import './Settings.css'
 import './lessonsReview.css'
 import './Upkeep.css'
+import { fmtDate, useTetherZone } from './zone'
 
 interface StaleLesson extends Lesson { key: string; mark: string; project: string | null; project_name: string | null }
 interface StaleNote { key: string; mark: string; project: string; project_name: string; name: string; title: string; size: number; mtime: number }
@@ -27,7 +28,7 @@ interface Candidate { id: string; text: string; kind: 'avoid' | 'keep'; quote: s
 interface OpsRun { day: string; project: string; project_name: string; status: 'started' | 'quiet' | 'failed' | ''; why: string; pane: string; at: number; note: boolean; problems: number }
 interface OpsState { enabled: boolean; hour: number; model: string; tabs: number; busy: boolean; runs: OpsRun[]; candidates: Candidate[]; skipped: string[] }
 
-const day = (seconds: number) => new Date(seconds * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
+const day = (seconds: number) => fmtDate(seconds * 1000, { day: 'numeric', month: 'short', year: 'numeric' })
 const count = (number: number, word: string) => `${number} ${number === 1 ? word : `${word}s`}`
 const daysLeft = (until: number, now: number) => Math.max(1, Math.ceil((until - now) / 86400))
 
@@ -45,6 +46,7 @@ function useAct(refresh: () => Promise<void>) {
 
 /** The clean-up sheet: every flagged lesson and note with its own Keep and Remove, then what can be undone. */
 export function CleanUp({ api, onClose }: { api: Api; onClose: () => void }) {
+  useTetherZone()
   const modal = useModal(true, onClose, undefined, { view: 'cleanup' })
   const fetcher = useCallback((signal: AbortSignal) => api<PruneState>('upkeep/prune', undefined, signal), [api])
   const { data, error: loadError, refresh } = usePolling(fetcher, 60000)
@@ -103,7 +105,7 @@ export function CleanUp({ api, onClose }: { api: Api; onClose: () => void }) {
   </dialog>
 }
 
-/** Settings › Agents: the entry to the clean-up sheet, with the counts. */
+/** Settings › Learning & upkeep: the entry to the clean-up sheet, with the counts. */
 export function CleanUpSettings({ api }: { api: Api }) {
   const fetcher = useCallback((signal: AbortSignal) => api<PruneState>('upkeep/prune', undefined, signal), [api])
   const { data, error, refresh } = usePolling(fetcher, 120000)
@@ -139,8 +141,9 @@ function Postmortem({ api, run, onClose }: { api: Api; run: OpsRun; onClose: () 
   </dialog>
 }
 
-/** Settings › Agents: the daily ops report's switch, its last runs and the lessons it proposes. */
+/** Settings › Learning & upkeep: the daily ops report's switch, its last runs and the lessons it proposes. */
 export function OpsSettings({ api }: { api: Api }) {
+  useTetherZone()
   const fetcher = useCallback((signal: AbortSignal) => api<OpsState>('upkeep/ops', undefined, signal), [api])
   const { data, error, refresh } = usePolling(fetcher, 15000)
   const { busy, failure, act } = useAct(refresh)

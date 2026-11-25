@@ -1,4 +1,5 @@
 """The /login menu in a narrow pane, the sign-in link screen, and saved accounts from ccswap (with a fake runner)."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import subprocess
 import unittest
@@ -59,8 +60,8 @@ class LoginScreens(unittest.TestCase):
     def test_wrapped_menu_with_middle_dot_is_a_menu(self):
         found = seen({'id': '%91', 'agent': 'claude'}, LOGIN_MENU)
         self.assertEqual(found['reason'], 'menu')
-        self.assertEqual([o['id'] for o in found['options']], [1, 2, 3])
-        self.assertTrue(found['options'][0]['selected'])
+        self.assertFalse(found['menu_verified'])
+        self.assertNotIn('options', found)
 
     def test_spinner_below_a_sent_numbered_message_is_still_chat(self):
         screen = ' ❯ 1. Do what is compliant\n\n· Thinking…\n'

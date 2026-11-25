@@ -75,6 +75,11 @@ assert.equal((html.match(/type="radio"/g) || []).length, 3)
 assert(checked(html, 'observe') && !checked(html, 'enforce'))
 assert(html.includes('<legend>Mode</legend>') && html.includes('<strong>Observe.</strong> Each Claude commit is checked and logged.'))
 assert(html.includes('role="status"') && html.includes('<strong>Last 7 days</strong><small>No commits checked yet.</small>'))
+polled = { data: pollData({ stats: null }), error: '', refresh() {} }
+for (const section of [render(gate.GlobalCommitGate), render(gate.ProjectCommitGate, { project: 'abcdef012345' })]) {
+  assert.match(section, /role="status"><span><small>Commit gate stats are temporarily unavailable\.<\/small>/)
+  assert(checked(section, 'observe'), 'unavailable stats keep the mode controls')
+}
 polled = { data: pollData(), error: 'Reload the page and try again.', refresh() {} }
 html = render(gate.GlobalCommitGate)
 assert(html.includes('<p class="error" role="alert">Reload the page and try again.</p>') && html.includes('type="radio"'), 'a failed save keeps the controls')

@@ -1,4 +1,5 @@
 """The shared backlog: no live tmux or agent. Several processes write at once, as the server and agents do."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import multiprocessing
 import os
@@ -9,10 +10,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import audit
 import backlog
 import paths
 import projects
 import projects_api
+import tether_zone
 from test_projects import Handler
 
 
@@ -86,7 +89,7 @@ class BacklogTests(unittest.TestCase):
         self.assertLessEqual(len(kept), backlog.ARCHIVE_TO)
         self.assertIn('- [ ] Inbox open #B60', kept)
         self.assertIn('- [x] Newest done #B62', done)
-        self.assertRegex(kept, r'- \[x\] Open web item #B61\n  - Done: [0-9-]+ [0-9:]+ · shipped')
+        self.assertRegex(kept, r'- \[x\] Open web item #B61\n  - Done: [0-9-]+ [0-9:]+ [+-]\d{4} · shipped')
         self.assertNotIn('Old 1 #B1', kept)
         self.assertTrue(done.startswith('# Finished backlog items'))
         self.assertRegex(done, r'\n## web \(moved [0-9-]+ [0-9:]+\)\n- \[x\] Newest done #B62\n  - Done: ok\n- \[x\] Old 1 #B1\n  - Done: word')
@@ -128,6 +131,31 @@ class BacklogTests(unittest.TestCase):
         self.assertEqual(backlog.archive_done(), (0, len(self.text()), len(self.text())))
         backlog.add('New')
         self.assertIn('- [ ] New #B5', self.text())
+
+    def test_done_ids_reads_the_archive_with_the_bounded_reader(self):
+        backlog.save('- [x] Now #B2\n- [ ] Open #B3\n', backlog.read()['version'])
+        archive = backlog.folder() / 'DONE.md'
+        archive.write_text('## Inbox\n- [x] Archived #B1\n')
+        self.assertEqual(backlog.done_ids(), {'B1', 'B2'})
+        with mock.patch.object(backlog, 'ARCHIVE_READ', 10):  # over the limit: refused, as the B303 snapshot does
+            with self.assertRaises(backlog.ProjectError):
+                backlog.done_ids()
+        archive.unlink()
+        os.mkfifo(archive)  # a pipe with no writer: the read must not wait
+        with self.assertRaises(OSError):
+            backlog.done_ids()
+
+    def test_done_ids_never_waits_on_the_list_or_last_id(self):
+        backlog.save('- [x] Now #B2\n', backlog.read()['version'])
+        last = backlog.folder() / 'last-id'
+        last.unlink(missing_ok=True)
+        os.mkfifo(last)  # the done check does not need the next ID: a pipe here must not block it
+        self.assertEqual(backlog.done_ids(), {'B2'})
+        listing = backlog.folder() / 'BACKLOG.md'
+        listing.unlink()
+        os.mkfifo(listing)  # a pipe in place of the list is refused at once
+        with self.assertRaises(OSError):
+            backlog.done_ids()
 
     def test_a_save_over_the_limit_is_kept_when_its_finished_items_can_move(self):
         done = ''.join(f'- [x] Done {n} ' + 'x' * 900 + f' #B{n}\n' for n in range(1, 41))
@@ -225,14 +253,14 @@ class BacklogTests(unittest.TestCase):
             backlog.mark_done('secret', 'tether')
         backlog.add_detail('LOGIN', 'second', 'tether')
         backlog.mark_done('Fix login', 'tether')
-        self.assertRegex(self.text(), r'^- \[x\] Fix login \(codex · chat a\) #B1\n  - first\n  - second\n  - Done: \d{4}-\d\d-\d\d \d\d:\d\d · finished\n- \[ \] Fix upload #B2\n\n## other\n- \[ \] Fix secret #B3\n$')
+        self.assertRegex(self.text(), r'^- \[x\] Fix login \(codex · chat a\) #B1\n  - first\n  - second\n  - Done: \d{4}-\d\d-\d\d \d\d:\d\d [+-]\d{4} · finished\n- \[ \] Fix upload #B2\n\n## other\n- \[ \] Fix secret #B3\n$')
         with self.assertRaises(projects.ProjectError):
             backlog.mark_done('Fix login', 'tether')
 
     def test_an_exact_match_beats_a_longer_one(self):
         backlog.save('- [ ] Fix\n- [ ] Fix login\n', backlog.read()['version'])
         backlog.mark_done('fix')
-        self.assertRegex(self.text(), r'^- \[x\] Fix #B1\n  - Done: \d{4}-\d\d-\d\d \d\d:\d\d · finished\n- \[ \] Fix login #B2\n$')
+        self.assertRegex(self.text(), r'^- \[x\] Fix #B1\n  - Done: \d{4}-\d\d-\d\d \d\d:\d\d [+-]\d{4} · finished\n- \[ \] Fix login #B2\n$')
 
     def test_versions_keep_a_direct_overwrite_and_stay_limited(self):
         state = backlog.save('- [ ] One\n', backlog.read()['version'])
@@ -247,8 +275,9 @@ class BacklogTests(unittest.TestCase):
         self.assertEqual(len(list((backlog.folder() / 'versions').glob('*.md'))), 3)
 
     def test_a_failed_copy_does_not_stop_a_save(self):
-        with mock.patch.object(backlog, '_write', side_effect=[None, None]), mock.patch.object(Path, 'glob', side_effect=OSError('full')):
+        with mock.patch.object(Path, 'glob', side_effect=OSError('full')):
             backlog.save('- [ ] One\n', backlog.read()['version'])
+        self.assertEqual(self.text(), '- [ ] One #B1\n')
 
     def test_nothing_is_lost_with_many_processes_writing(self):
         context = multiprocessing.get_context('fork')
@@ -383,7 +412,7 @@ class BacklogTests(unittest.TestCase):
         self.assertEqual(self.text(), '- [ ] Fix login (codex · chat a) #B1\n  - Doing: claude · pane %5 · chat y\n  - why\n')
         self.assertEqual(backlog.list_open(), 'Inbox:\n- [ ] Fix login (codex · chat a) #B1\n  - Doing: claude · pane %5 · chat y\n  - why')
         backlog.mark_done('B1', result='fixed in 1234abc', who='claude · chat y')
-        self.assertRegex(self.text(), r'^- \[x\] Fix login \(codex · chat a\) #B1\n  - why\n  - Done: \d{4}-\d\d-\d\d \d\d:\d\d · fixed in 1234abc \(claude · chat y\)\n$')
+        self.assertRegex(self.text(), r'^- \[x\] Fix login \(codex · chat a\) #B1\n  - why\n  - Done: \d{4}-\d\d-\d\d \d\d:\d\d [+-]\d{4} · fixed in 1234abc \(claude · chat y\)\n$')
         with self.assertRaises(projects.ProjectError):
             backlog.start('B1', 'claude')
 
@@ -400,7 +429,7 @@ class BacklogTests(unittest.TestCase):
             self.assertEqual(agent_backlog_cli.main(['start', 'B1']), 0)
             self.assertIn('  - Doing: claude · chat abc', self.text())
             self.assertEqual(agent_backlog_cli.main(['done', 'B1', 'shipped in PR 9']), 0)
-        self.assertRegex(self.text(), r'^- \[x\] Fix it #B1\n  - Done: \d{4}-\d\d-\d\d \d\d:\d\d · shipped in PR 9 \(claude · chat abc\)\n$')
+        self.assertRegex(self.text(), r'^- \[x\] Fix it #B1\n  - Done: \d{4}-\d\d-\d\d \d\d:\d\d [+-]\d{4} · shipped in PR 9 \(claude · chat abc\)\n$')
 
     def test_reword_and_move_keep_the_id_source_and_details(self):
         backlog.save('## other-app\n- [ ] A long title (claude · chat a) #B1\n  - Doing: claude\n\n## tether\n- [ ] Other #B2\n', backlog.read()['version'])
@@ -422,6 +451,122 @@ class BacklogTests(unittest.TestCase):
 
 
 
+class BacklogAuditTests(unittest.TestCase):
+    def setUp(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(paths, 'TETHER', root / 'tether'))
+        self.enterContext(mock.patch.object(paths, 'CONFIG', root / 'config'))
+        initial = '## Docs\n- [ ] Write the release notes #B56\n\n## Build\n- [ ] Fix warnings #B57\n'
+        backlog.folder().mkdir(parents=True)
+        (backlog.folder() / 'BACKLOG.md').write_text(initial)
+        self.actor = {'source': 'ui', 'device': 'Chrome on Mac'}
+        self.enterContext(audit.acting(**self.actor))
+
+    def assert_entry(self, kind, summary, project):
+        entries = audit.query()['entries']
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertEqual((entry['kind'], entry['summary'], entry['project'], entry['actor']),
+                         (kind, summary, project, self.actor))
+        self.assertNotIn('old', entry)
+        self.assertNotIn('new', entry)
+        return entry
+
+    def test_add_caps_the_title(self):
+        title = 'Add the checklist ' * 6
+        backlog.add(title, project='Docs')
+        self.assert_entry('backlog.add', 'B58 added: ' + 'Add the checklist ' * 4 + 'Add…', 'Docs')
+
+    def test_start_uses_the_item_project_and_ignores_a_repeat(self):
+        backlog.start('B56', 'claude', project='Build')
+        backlog.start('B56', 'claude', project='Build')
+        self.assert_entry('backlog.start', 'B56 started: Write the release notes', 'Docs')
+
+    def test_done_records_the_actor_and_ignores_archiving(self):
+        backlog.mark_done('B57')
+        backlog.archive_done()
+        self.assert_entry('backlog.done', 'B57 done: Fix warnings', 'Build')
+
+    def test_done_clips_a_long_title_at_a_word_break(self):
+        state = backlog.read()
+        prefix = 'Check that the backlog shows the full item title before reporting the'
+        title = prefix + ' verification results'
+        backlog.save(state['text'].replace('Fix warnings', title), state['version'])
+        backlog.mark_done('B57')
+        self.assert_entry('backlog.done', f'B57 done: {prefix}…', 'Build')
+
+    def test_move_uses_the_actual_source_and_destination(self):
+        backlog.move('B56', 'Build')
+        entry = self.assert_entry('backlog.move', 'B56 moved: Write the release notes', 'Build')
+        self.assertEqual(entry['detail'], {'from_project': 'Docs', 'to_project': 'Build'})
+
+    def test_save_records_a_removal_and_no_event_for_unchanged_items(self):
+        state = backlog.read()
+        backlog.save(state['text'].replace('- [ ] Fix warnings #B57\n', ''), state['version'])
+        self.assert_entry('backlog.remove', 'B57 removed: Fix warnings', 'Build')
+
+    def test_work_board_status_writes_use_the_same_kind(self):
+        card = backlog.board_items()[1]
+        backlog.set_stage(card['id'], 'building', card['version'])
+        self.assert_entry('backlog.start', 'B57 started: Fix warnings', 'Build')
+
+    def test_sheet_mark_done_uses_the_same_kind(self):
+        state = backlog.read()
+        backlog.save(state['text'].replace('- [ ] Write', '- [x] Write'), state['version'])
+        self.assert_entry('backlog.done', 'B56 done: Write the release notes', 'Docs')
+
+    def test_assigning_id_to_existing_legacy_item_is_silent(self):
+        file = backlog.folder() / 'BACKLOG.md'
+        file.write_text(file.read_text() + '- [ ] Typed by hand\n')
+        legacy = backlog.read()
+        saved = backlog.save(legacy['text'], legacy['version'])
+        self.assertIn('Typed by hand #B58', saved['text'])
+        self.assertEqual(audit.query()['entries'], [])
+
+    def test_an_add_preserves_legacy_id_assignment(self):
+        (backlog.folder() / 'BACKLOG.md').write_text('## Docs\n- [ ] Typed by hand\n')
+        self.assertEqual(backlog.add('New item', project='Docs'), '- [ ] New item #B2')
+        self.assertIn('Typed by hand #B3', backlog.read()['text'])
+        self.assert_entry('backlog.add', 'B2 added: New item', 'Docs')
+
+    def test_same_legacy_title_in_two_projects_pairs_by_project(self):
+        # B56 review: both done in their own projects must not read as two moves.
+        (backlog.folder() / 'BACKLOG.md').write_text('## Docs\n- [ ] Same title\n\n## Build\n- [ ] Same title\n')
+        legacy = backlog.read()
+        backlog.save(legacy['text'].replace('- [ ]', '- [x]'), legacy['version'])
+        entries = audit.query()['entries']
+        self.assertEqual(sorted((entry['kind'], entry['project']) for entry in entries),
+                         [('backlog.done', 'Build'), ('backlog.done', 'Docs')])
+
+    def test_mixed_save_with_one_title_records_one_move_and_one_done(self):
+        # B56 review: in one save, move the Build item to Ops and mark the Docs item done. Each list order must give
+        # one move (Build → Ops) and one done (Docs), not two moves.
+        build, docs = '## Build\n- [ ] Same title\n', '## Docs\n- [ ] Same title\n'
+        for build_first in (True, False):
+            for ops_first in (True, False):
+                with self.subTest(build_first=build_first, ops_first=ops_first):
+                    for file in audit.folder().glob('*') if audit.folder().exists() else ():
+                        file.unlink()
+                    (backlog.folder() / 'BACKLOG.md').write_text(build + '\n' + docs if build_first else docs + '\n' + build)
+                    legacy = backlog.read()
+                    ops, done = '## Ops\n- [ ] Same title\n', '## Docs\n- [x] Same title\n'
+                    backlog.save((ops + '\n' + done if ops_first else done + '\n' + ops) + '\n## Build\n', legacy['version'])
+                    found = sorted((entry['kind'], entry['project'], entry.get('detail', {}).get('from_project'))
+                                   for entry in audit.query()['entries'])
+                    self.assertEqual(found, [('backlog.done', 'Docs', None), ('backlog.move', 'Ops', 'Build')])
+
+    def test_start_a_legacy_item_tracks_its_assigned_id(self):
+        (backlog.folder() / 'BACKLOG.md').write_text('## Docs\n- [ ] Typed by hand\n- [ ] Another old item\n')
+        self.assertEqual(backlog.start('typed', 'claude', project='Docs'), '- [ ] Typed by hand')
+        self.assert_entry('backlog.start', 'B1 started: Typed by hand', 'Docs')
+
+    def test_save_records_removal_of_an_item_without_an_id(self):
+        (backlog.folder() / 'BACKLOG.md').write_text('## Docs\n- [ ] Typed by hand\n- [ ] Another old item\n')
+        legacy = backlog.read()
+        backlog.save(legacy['text'].replace('- [ ] Typed by hand\n', ''), legacy['version'])
+        self.assert_entry('backlog.remove', 'Removed backlog item: Typed by hand', 'Docs')
+
+
 class BoardTests(unittest.TestCase):
     """The backlog's items as work board cards, and moves from the board (work_backlog.py)."""
     def setUp(self):
@@ -430,8 +575,9 @@ class BoardTests(unittest.TestCase):
         patch = mock.patch.object(paths, 'TETHER', Path(temp.name))
         patch.start()
         self.addCleanup(patch.stop)
-        today = time.strftime('%Y-%m-%d %H:%M')
-        old = time.strftime('%Y-%m-%d %H:%M', time.localtime(time.time() - 8 * 86400))
+        now = time.time()
+        today = tether_zone.stamp(now)
+        old = tether_zone.stamp(now - 8 * 86400)
         self.text = (f'- [ ] Inbox item (codex · chat a) #B1\n  - why it matters\n\n'
                      f'## tether\n- [ ] Started #B2\n  - Doing: claude · pane %4\n  - [ ] a sub step\n'
                      f'- [x] Shipped #B3\n  - Done: {today} · in 1234abc (claude)\n'
@@ -474,7 +620,7 @@ class BoardTests(unittest.TestCase):
         self.assertEqual((card['stage'], card['doing'], card['details']), ('ready', None, ['a sub step']))
         card = backlog.set_stage('B2', 'done', card['version'])
         self.assertEqual(card['stage'], 'done')
-        self.assertRegex(self.file(), r'- \[x\] Started #B2\n  - \[ \] a sub step\n  - Done: [0-9-]+ [0-9:]+ · finished \(Mak\)\n')
+        self.assertRegex(self.file(), r'- \[x\] Started #B2\n  - \[ \] a sub step\n  - Done: [0-9-]+ [0-9:]+ [+-]\d{4} · finished \(Mak\)\n')
         card = backlog.set_stage('B3', 'ready', self.card('B3')['version'])
         self.assertEqual((card['stage'], card['done']), ('ready', None))
         self.assertIn('- [ ] Shipped #B3\n- [x] Ticked', self.file())
@@ -524,8 +670,9 @@ class BoardTests(unittest.TestCase):
         self.assertNotIn('Inbox item', done)
 
     def test_the_last_done_line_counts_for_the_card_and_the_archive(self):
-        today = time.strftime('%Y-%m-%d %H:%M')
-        old = time.strftime('%Y-%m-%d %H:%M', time.localtime(time.time() - 8 * 86400))
+        now = time.time()
+        today = tether_zone.stamp(now)
+        old = tether_zone.stamp(now - 8 * 86400)
         twice = f'- [x] Done twice #B9\n  - Done: {old} · first\n  - Done: {today} · again\n'
         filler = ''.join(f'- [x] Old {n} #B{n + 10}\n  - Done: ' + 'word ' * 200 + '\n' for n in range(60))
         (backlog.folder() / 'BACKLOG.md').write_text(twice + filler)
@@ -535,7 +682,7 @@ class BoardTests(unittest.TestCase):
         self.assertEqual(self.card('B9')['stage'], 'done')
 
     def test_this_weeks_done_items_move_too_when_the_list_would_not_fit(self):
-        today = time.strftime('%Y-%m-%d %H:%M')
+        today = tether_zone.stamp()
         done = ''.join(f'- [x] Done {n} ' + 'x' * 900 + f' #B{n}\n  - Done: {today} · ok\n' for n in range(1, 41))
         open_part = '- [ ] Open ' + 'y' * (backlog.LIMIT - 1000) + ' #B41\n'
         backlog.save(done + open_part, backlog.read()['version'])

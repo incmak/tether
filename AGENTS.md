@@ -8,6 +8,7 @@ Tether is a browser chat UI for Claude Code, Codex, and Antigravity in tmux, for
 - `ui/`: React/Vite UI. Production builds go to `ui/dist`, served at `/chat/`.
 - `server/index.html` and `server/app.js`: legacy UI, served at `/mobile/chat/`.
 - Server checks: `cd server && python3 -m unittest discover -q`.
+  If you run a suite with `timeout`, add `-k 10s` so a leaked child cannot keep it alive after SIGTERM.
 - UI checks: `cd ui && npm ci && npx tsc -b && npx eslint .`. Build from a clean checkout before deployment.
 - Before a commit that changes `ui/`, run `node ui/tools/verify.cjs --surface NAME` for each changed surface and look at every screenshot. Add the printed `screenshots(...)` item to the `Verified:` line only when the driver builds the UI, the source ID matches before and after the run, and all shots pass at both 320 px and 1280 px. See [.claude/skills/verify/SKILL.md](.claude/skills/verify/SKILL.md).
 - Deployment and configuration: see [README.md](README.md).
@@ -55,7 +56,9 @@ Claude Code, Codex and Antigravity redraw their screens between versions. Code t
 - Resolve routine conflicts between sessions. Ask Mak only when the conflict requires a product decision or destructive action.
 - Preserve unrelated work. Build the UI from the selected commit in a clean checkout, then install the output atomically.
 - Install with `python3 scripts/deploy-ui.py --verified STAMP BUILD_DIR ui/dist`. It preserves old chunks and publishes the entry page last.
-- The commit gate checks each Claude `git commit` for a valid `Verified:` line (`server/commit_gate.py`; mode in Settings › Agents, log in `~/.cache/tether/commit-gate.log`). It starts in observe mode: it logs and does not block.
+- The commit gate checks each Claude `git commit` for a valid `Verified:` line (`server/commit_gate.py`; mode in Settings › Commit & merge, log in `~/.cache/tether/commit-gate.log`). It starts in observe mode: it logs and does not block.
+  Install it as a Git `commit-msg` hook for Codex and terminal commits with `python3 server/commit_gate.py install-hook`.
+- The review gate refuses a push to `main` or a tag, a `deploy-ui.py` install, and an auto-merge when the commit is not the hash that every live reviewer of the tab approved. For a `main` push and a deploy only, a clean merge of remote `main` into the approved commit also passes; a tag push and auto-merge need the exact hash. Install it from the main checkout with `python3 server/review_gate.py install-hook`; it adds a block to the `pre-push` hook. Any lookup error refuses.
 - Every commit and deploy says how it was verified. End each commit message with a stamp such as `Verified: tests(server 412 ok, ui 91/93) screenshots(24) review(codex APPROVED)`, or `Verified: none (reason)`. Give the same stamp to `deploy-ui.py --verified`; it refuses an install without one and adds the `DEPLOYED.md` line. For a backend-only deploy, run `python3 scripts/verification.py log --verified STAMP --commit HASH "what changed"`. List unverified work with `python3 scripts/verification.py unverified`.
 - The build writes `.build-commit`; the install records it in `ui/dist/.live-commit`. The install refuses a build that does not contain the live commit, or one from uncommitted changes. To fix, rebase or merge `origin/main` and any deployed commits not yet pushed, then rebuild. Check first with `--dry-run`. Use `--force` only to remove deployed work on purpose.
 - Verify the served entry page and deployed behavior after installation.

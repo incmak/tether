@@ -16,9 +16,11 @@ export function groupOf(pane: Pane, groups: GroupInfo[] | undefined): string {
 /** Unstacked (only while it holds a tab) and every group, in order. Empty for a session with no groups. */
 export function placesOf(panes: Pane[], groups: GroupInfo[] | undefined): Place[] {
   if (!groups?.length) return []
-  const main = panes.filter(pane => !groupOf(pane, groups))
+  const roots = new Map(panes.filter(pane => !pane.task).map(pane => [pane.id, pane]))
+  const place = (pane: Pane) => groupOf(roots.get(pane.task ?? '') ?? pane, groups)
+  const main = panes.filter(pane => !place(pane))
   return [...(main.length ? [{ id: '', name: 'Unstacked', panes: main }] : []),
-    ...groups.map(group => ({ id: group.id, name: group.name, panes: panes.filter(pane => pane.group === group.id) }))]
+    ...groups.map(group => ({ id: group.id, name: group.name, panes: panes.filter(pane => place(pane) === group.id) }))]
 }
 
 export function placeName(id: string, groups: GroupInfo[] | undefined) {
@@ -28,8 +30,9 @@ export function placeName(id: string, groups: GroupInfo[] | undefined) {
 /** The tabs a chat's strip and swipe use: the open tab's group, or the whole session when it has no groups. */
 export function groupPanes(panes: Pane[], groups: GroupInfo[] | undefined, pane: Pane): Pane[] {
   if (!groups?.length) return panes
-  const id = groupOf(pane, groups)
-  return panes.filter(item => groupOf(item, groups) === id)
+  const places = placesOf(panes, groups)
+  return (places.find(place => place.panes.some(item => item.id === pane.id))
+    ?? places.find(place => place.id === groupOf(pane, groups)))?.panes ?? []
 }
 
 /**

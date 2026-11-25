@@ -1,5 +1,7 @@
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -12,12 +14,16 @@ from unittest import mock
 
 import paths
 import backlog
+import autonomy
+import codex_level
 import project_launch
 import projects
 from agent_browser_cli import note
+from test_tmux_isolation import private_tmux
 
 HERE = Path(__file__).resolve().parent
 PID = 'a1b2c3d4e5f6'
+SUBAGENT_INSTRUCTIONS = 'features.multi_agent_v2.subagent_developer_instructions'
 
 
 class UnitTests(unittest.TestCase):
@@ -28,6 +34,11 @@ class UnitTests(unittest.TestCase):
         for name, value in (('TETHER', self.temp / 'tether'), ('CODEX', self.temp / 'codex'),
                             ('CONFIG', self.temp / 'config')):
             patch = mock.patch.object(paths, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        for name, file in (('SYSTEM_CONFIG', 'system.toml'), ('MANAGED_CONFIG', 'managed.toml'),
+                           ('MANAGED_PREFERENCES', 'managed-preferences')):
+            patch = mock.patch.object(project_launch, name, self.temp / file)
             patch.start()
             self.addCleanup(patch.stop)
         patch = mock.patch.dict(os.environ, {'TMUX': '', 'TMUX_PANE': '', 'CODEX_HOME': '',
@@ -338,8 +349,7 @@ class UnitTests(unittest.TestCase):
         args = project_launch.claude_args(PID, ['fix the bug'])
         # No --add-dir: from Claude Code 2.1.326 it stops a new tab on a trust prompt (B188).
         self.assertNotIn('--add-dir', args)
-        self.assertEqual(args[0], '--settings')
-        self.assertEqual(args[-1], 'fix the bug')
+        self.assertEqual([*args[:1], *args[2:]], ['--settings', 'fix the bug'])
         self.assertEqual(json.loads(args[1])['permissions']['additionalDirectories'], [str(projects.bundle(PID))])
         hook = json.loads(args[1])['hooks']['SessionStart'][0]
         self.assertEqual(hook['matcher'], 'startup|resume|clear|compact')
@@ -391,7 +401,7 @@ class UnitTests(unittest.TestCase):
         folder = str(backlog.folder())
         items = str(paths.items())
         rem = str(paths.reminders())
-        self.assertEqual((args[0], args[2:]), ('-c', ['--add-dir', folder, '--add-dir', items, '--add-dir', rem, 'resume', '--last']))
+        self.assertEqual(args[2:], ['--add-dir', folder, '--add-dir', items, '--add-dir', rem, 'resume', '--last'])
         self.assertTrue(paths.items().is_dir())
         self.assertTrue(backlog.folder().is_dir())
         self.assertIn('## Notes', tomllib.loads('v = ' + args[1].partition('=')[2])['v'])
@@ -407,14 +417,320 @@ class UnitTests(unittest.TestCase):
         projects.set_instructions(PID, 'x', 0)
         for args in (['exec', 'hi'], ['e', 'hi'], ['login'], ['--help'], ['review']):
             self.assertEqual(project_launch.codex_args(PID, args), args)
-        # Own instructions: Tether adds none, but the item and backlog folders still open, so `tether item` works.
-        folders = ['--add-dir', str(backlog.folder()), '--add-dir', str(paths.items()), '--add-dir', str(paths.reminders())]
-        mine = ['-c', 'developer_instructions="mine"']
-        self.assertEqual(project_launch.codex_args(PID, mine), [*folders, *mine])
-        (paths.CODEX).mkdir()
-        (paths.CODEX / 'config.toml').write_text('model = "x"\ndeveloper_instructions = "own"\n')
-        self.assertEqual(project_launch.codex_args(PID, []), folders)
-        self.assertEqual(project_launch.codex_args('', []), [])
+
+    def standing_instructions(self, argv):
+        options = argv[:argv.index('--')] if '--' in argv else argv
+        values = {}
+        for arg in project_launch._option(options, '-c', '--config'):
+            key, _, value = arg.partition('=')
+            if key in ('developer_instructions', SUBAGENT_INSTRUCTIONS):
+                values[key] = value
+        self.assertNotIn(SUBAGENT_INSTRUCTIONS, values)  # It would replace what subagents inherit.
+        return {key: tomllib.loads('v = ' + value)['v'] for key, value in values.items()}
+
+    @staticmethod
+    def block(pid):
+        return autonomy.codex_standing_rules(autonomy.resolve(pid), codex_level.resolve(pid))
+
+    def test_codex_gets_standing_rules_for_the_project_or_the_global_settings(self):
+        autonomy.set_global(2)
+        codex_level.set_global(1)
+        autonomy.set_project(PID, True, 0)
+        codex_level.set_project(PID, True, 4)
+        for pid, level, codex in ((PID, 0, 4), (None, 2, 1)):
+            with self.subTest(project=pid):
+                overrides = self.standing_instructions(project_launch.codex_args(pid, ['resume', '--last']))
+                block = self.block(pid)
+                self.assertIn(autonomy.SAFETY, block)
+                self.assertIn(f'Autonomy level {level} (', block)
+                self.assertIn(f'Codex level {codex} (', block)
+                self.assertTrue(overrides['developer_instructions'].endswith(block))
+
+    def test_codex_keeps_home_and_cli_instructions_with_standing_rules(self):
+        home = 'Keep "quotes" and \\slashes.\nNext line 🙂'
+        self.config('"developer_instructions" = \'\'\'\n' + home + "'''\n")
+        cli = 'Keep "CLI" and \\slashes.\nTake precedence 🙂'
+        value = 'developer_instructions=' + project_launch.toml_string(cli)
+        for args, expected in (([], home), (['-c', value], cli), (['-c' + value], cli),
+                               (['--config=' + value], cli), (['-c=' + value], cli),
+                               (['-c', 'developer_instructions=older', 'resume', '--config', value,
+                                 '--', 'developer_instructions=prompt'], cli),
+                               (['--', '--config=developer_instructions=prompt'], home),
+                               (['-c', 'developer_instructions=unquoted CLI text'], 'unquoted CLI text')):
+            with self.subTest(args=args), mock.patch.dict(os.environ, TETHER_CDP_URL='ws://127.0.0.1:1/cdp/x'):
+                argv = project_launch.codex_args(PID, args)
+                overrides = self.standing_instructions(argv)
+                self.assertEqual(overrides['developer_instructions'],
+                                 expected + '\n\n' + self.block(PID))
+                folders = ['--add-dir', str(backlog.folder()), '--add-dir', str(paths.items()),
+                           '--add-dir', str(paths.reminders())]
+                self.assertIn(folders, [argv[i:i+len(folders)] for i in range(len(argv))])
+                self.assertFalse(any(arg.startswith('shell_environment_policy.set.TETHER_CDP_URL') for arg in argv))
+
+    def instruction_repo(self, name='repo'):
+        repo = self.temp / name
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        return repo
+
+    @staticmethod
+    def instruction_layer(folder, contents):
+        layer = folder / '.codex' / 'config.toml'
+        layer.parent.mkdir(parents=True, exist_ok=True)
+        layer.write_text(contents)
+        return layer
+
+    @staticmethod
+    def project_trust(folder, level='trusted'):
+        key = project_launch.toml_string(os.path.realpath(folder))
+        return f'\n[projects.{key}]\n' + (f'trust_level = "{level}"\n' if level else '')
+
+    def assert_codex_text(self, cwd, text, args=()):
+        heading = text + '\n\n' if text is not None else ''
+        override = 'developer_instructions=' + project_launch.toml_string(heading + self.block(None))
+        self.assertEqual(project_launch.codex_args(None, list(args), cwd=cwd), ['-c', override, *args])
+
+    def test_codex_trusted_instructions_replace_home_text(self):
+        repo = self.instruction_repo()
+        self.config('developer_instructions = "home"' + self.project_trust(repo))
+        self.instruction_layer(repo, 'developer_instructions = "repo"')
+        self.assert_codex_text(repo, 'repo')
+
+    def test_codex_untrusted_instructions_leave_home_or_tether_text(self):
+        repo = self.instruction_repo()
+        without_layer = project_launch.codex_args(PID, [], cwd=repo)
+        self.instruction_layer(repo, 'developer_instructions = "repo"\n' + self.project_trust(repo))
+        for trust in ('', self.project_trust(repo, 'untrusted')):
+            with self.subTest(trust=trust):
+                self.config(trust)
+                self.assertEqual(project_launch.codex_args(PID, [], cwd=repo), without_layer)
+                self.config('developer_instructions = "home"' + trust)
+                self.assert_codex_text(repo, 'home')
+
+    def test_codex_empty_project_layers_leave_home_text(self):
+        repo = self.instruction_repo()
+        self.config('developer_instructions = "home"' + self.project_trust(repo))
+        (repo / '.codex').mkdir()
+        self.assert_codex_text(repo, 'home')
+        self.instruction_layer(repo, 'sandbox_mode = "workspace-write"')
+        self.assert_codex_text(repo, 'home')
+
+    def test_codex_nested_trust_and_layer_order(self):
+        repo = self.instruction_repo()
+        nested = repo / 'src'
+        nested.mkdir()
+        root_trust = self.project_trust(repo)
+        self.config(root_trust)
+        self.instruction_layer(repo, 'developer_instructions = "root"')
+        self.assert_codex_text(nested, 'root')
+        self.instruction_layer(nested, 'developer_instructions = "nested"')
+        for level, expected in (('trusted', 'nested'), ('untrusted', 'root'), (None, 'nested')):
+            with self.subTest(level=level):
+                self.config(root_trust + self.project_trust(nested, level))
+                self.assert_codex_text(nested, expected)
+
+    def test_codex_project_layers_stop_at_git_root(self):
+        repo = self.instruction_repo()
+        self.config('developer_instructions = "home"' + self.project_trust(self.temp))
+        self.instruction_layer(self.temp, 'developer_instructions = "above root"')
+        self.assert_codex_text(repo, 'home')
+
+    def test_codex_worktree_uses_main_checkout_trust_only(self):
+        repo = self.instruction_repo()
+        git = ['git', '-C', str(repo), '-c', 'user.email=t@example.com', '-c', 'user.name=t']
+        subprocess.run([*git, 'commit', '-q', '--allow-empty', '-m', 'x'], check=True)
+        linked = self.temp / 'linked'
+        subprocess.run([*git, 'worktree', 'add', '-q', str(linked)], check=True)
+        self.config('developer_instructions = "home"' + self.project_trust(repo))
+        self.instruction_layer(repo, 'developer_instructions = "main"')
+        self.assert_codex_text(linked, 'home')
+        self.instruction_layer(linked, 'developer_instructions = "worktree"')
+        self.assert_codex_text(linked, 'worktree')
+
+    def test_codex_cli_instructions_win_over_trusted_project_layer(self):
+        repo = self.instruction_repo()
+        self.config(self.project_trust(repo))
+        self.instruction_layer(repo, 'developer_instructions = "repo"')
+        args = ['resume', '--config=developer_instructions="cli"']
+        self.assertEqual(project_launch.codex_args(None, args, cwd=repo), [
+            'resume', '--config=developer_instructions=' + project_launch.toml_string('cli\n\n' + self.block(None))])
+
+    def test_codex_ignore_user_config_drops_user_and_profile_but_keeps_cli_trust(self):
+        repo = self.instruction_repo()
+        trust = self.project_trust(repo)
+        self.config('developer_instructions = "home"' + trust)
+        (paths.CODEX / 'work.config.toml').write_text('developer_instructions = "profile"' + trust)
+        self.instruction_layer(repo, 'developer_instructions = "repo"')
+        args = ['--ignore-user-config', '-p', 'work']
+        self.assert_codex_text(repo, None, args)
+        self.assert_codex_text(repo, 'repo', [*args, '-c', f'projects.{os.path.realpath(repo)}.trust_level="trusted"'])
+
+    def test_codex_invalid_or_unreadable_config_omits_override(self):
+        repo = self.instruction_repo()
+        self.config('developer_instructions = "home"' + self.project_trust(repo))
+        files = (project_launch.SYSTEM_CONFIG, paths.CODEX / 'config.toml', paths.CODEX / 'work.config.toml',
+                 project_launch.MANAGED_CONFIG, self.instruction_layer(repo, 'developer_instructions = "repo"'))
+        args = ['-p', 'work']
+        read_text = Path.read_text
+        for file in files:
+            with self.subTest(file=file):
+                original = file.read_text() if file.exists() else ''
+                file.write_text('invalid [toml')
+                self.assertEqual(project_launch.codex_args(None, args, cwd=repo), args)
+                file.write_text(original)
+
+                def read(path, *a, **kw):
+                    if os.path.realpath(path) == os.path.realpath(file):
+                        raise PermissionError(path)
+                    return read_text(path, *a, **kw)
+
+                with mock.patch.object(Path, 'read_text', read):
+                    self.assertEqual(project_launch.codex_args(None, args, cwd=repo), args)
+
+    def test_codex_legacy_profile_or_invalid_markers_omit_override(self):
+        repo = self.instruction_repo()
+        for config, args in (('profile = "old"', []), ('', ['-c', 'profile="old"']),
+                             ('project_root_markers = false', []), ('project_root_markers = [1]', []),
+                             ('', ['-c', 'project_root_markers.invalid=".git"'])):
+            with self.subTest(config=config, args=args):
+                self.config(config)
+                self.assertEqual(project_launch.codex_args(None, args, cwd=repo), args)
+
+    def test_codex_unmodelled_managed_config_uses_home_and_rules(self):
+        repo = self.instruction_repo()
+        self.config('developer_instructions = "home"' + self.project_trust(repo))
+        self.instruction_layer(repo, 'invalid [toml')  # The trusted project file would normally cancel the override.
+        prefs = project_launch.MANAGED_PREFERENCES / 'user'
+        prefs.mkdir(parents=True)
+        (prefs / 'com.openai.codex.plist').touch()
+        for platform in ('darwin', 'win32'):
+            with self.subTest(platform=platform), mock.patch.object(project_launch.sys, 'platform', platform):
+                self.assert_codex_text(repo, 'home')
+
+    def test_codex_never_opens_untrusted_instruction_layer(self):
+        repo = self.instruction_repo()
+        self.config('developer_instructions = "home"' + self.project_trust(repo, 'untrusted'))
+        without_layer = project_launch.codex_args(None, [], cwd=repo)
+        layer = self.instruction_layer(repo, 'invalid [toml')
+        with mock.patch.object(project_launch, '_toml', wraps=project_launch._toml) as load:
+            self.assertEqual(project_launch.codex_args(None, [], cwd=repo), without_layer)
+            self.assertNotIn(os.path.realpath(layer), [os.path.realpath(call.args[0]) for call in load.call_args_list])
+        layer_dir = os.path.realpath(layer.parent)
+        stat = os.stat
+
+        def deny_layer_dir(path, *args, **kwargs):
+            if str(path) == layer_dir:
+                raise PermissionError(path)
+            return stat(path, *args, **kwargs)
+
+        with mock.patch.object(os, 'stat', deny_layer_dir):
+            self.assertEqual(project_launch.codex_args(None, [], cwd=repo), without_layer)
+
+    def test_codex_profile_overrides_home_text_and_trust(self):
+        repo = self.instruction_repo()
+        profile = paths.CODEX / 'work.config.toml'
+        self.config('developer_instructions = "home"' + self.project_trust(repo))
+        profile.write_text('developer_instructions = "profile"' + self.project_trust(repo, 'untrusted'))
+        self.instruction_layer(repo, 'developer_instructions = "repo"')
+        for args in (['-p', 'work'], ['--profile', 'work'], ['--profile=work']):
+            with self.subTest(args=args):
+                self.assert_codex_text(repo, 'profile', args)
+        self.config('developer_instructions = "home"')
+        profile.write_text('developer_instructions = "profile"' + self.project_trust(repo))
+        self.assert_codex_text(repo, 'repo', ['-p', 'work'])
+
+    def test_codex_cli_discovery_splits_dots_literally_and_replaces_intermediate_scalars(self):
+        repo = self.instruction_repo('repo.with.dot')
+        self.instruction_layer(repo, 'developer_instructions = "dotted"')
+        dotted_key = project_launch.toml_string(os.path.realpath(repo))
+        self.assert_codex_text(repo, None, ['-c', f'projects.{dotted_key}.trust_level="trusted"'])
+        repo = self.instruction_repo('plain')
+        self.instruction_layer(repo, 'developer_instructions = "plain"')
+        key = os.path.realpath(repo)
+        trust = ['-c', f'projects.{key}.trust_level="trusted"']
+        self.assert_codex_text(repo, 'plain', trust)
+        self.assert_codex_text(repo, 'plain', ['-c', 'projects=1', '-c', f'projects.{key}=false', *trust])
+        self.assert_codex_text(repo, None, [*trust, '-c', 'projects={}'])
+
+    def test_codex_managed_instructions_and_trust_have_highest_precedence(self):
+        repo = self.instruction_repo()
+        self.config(self.project_trust(repo, 'untrusted'))
+        self.instruction_layer(repo, 'developer_instructions = "repo"')
+        args = ['-c', f'projects.{os.path.realpath(repo)}.trust_level="untrusted"']
+        project_launch.MANAGED_CONFIG.write_text(self.project_trust(repo))
+        self.assert_codex_text(repo, 'repo', args)
+        project_launch.MANAGED_CONFIG.write_text('developer_instructions = "managed"')
+        self.assertEqual(project_launch.codex_args(None, args, cwd=repo), args)
+
+    def test_codex_system_config_provides_instructions_and_trust(self):
+        repo = self.instruction_repo()
+        project_launch.SYSTEM_CONFIG.write_text('developer_instructions = "system"' + self.project_trust(repo))
+        self.assert_codex_text(repo, 'system')
+        self.config('developer_instructions = "home"')
+        self.assert_codex_text(repo, 'home')
+        self.instruction_layer(repo, 'developer_instructions = "repo"')
+        self.assert_codex_text(repo, 'repo')
+
+    def test_codex_cd_selects_start_folder(self):
+        repo = self.instruction_repo()
+        self.config(self.project_trust(repo))
+        self.instruction_layer(repo, 'developer_instructions = "root"')
+        self.instruction_layer(repo / 'src', 'developer_instructions = "nested"')
+        self.assert_codex_text(repo, 'root')
+        self.assert_codex_text(repo, 'nested', ['-C', 'src'])
+        self.assert_codex_text(self.temp, 'nested', ['--cd=repo/src'])
+
+    def test_codex_cd_tries_canonical_trust_key_before_logical_key(self):
+        repo = self.instruction_repo()
+        alias = self.temp / 'alias'
+        alias.symlink_to(repo)
+        self.instruction_layer(repo, 'developer_instructions = "repo"')
+        logical = f'[projects."{os.path.realpath(self.temp)}/alias"]\ntrust_level = "trusted"\n'
+        self.config(logical)
+        self.assert_codex_text(self.temp, 'repo', ['-C', 'alias'])
+        self.config(logical + self.project_trust(repo, 'untrusted'))
+        self.assert_codex_text(self.temp, None, ['-C', 'alias'])
+
+    def test_codex_cd_keeps_logical_ancestors_for_git_trust(self):
+        repo = self.instruction_repo()
+        nested = repo / 'src'
+        self.instruction_layer(nested, 'developer_instructions = "nested"')
+        (self.temp / 'alias').symlink_to(nested)
+        self.config(self.project_trust(repo))
+        self.assert_codex_text(repo, 'nested', ['-C', 'src'])
+        self.assert_codex_text(self.temp, None, ['-C', 'alias'])
+
+    def test_codex_managed_worktree_does_not_use_source_instructions(self):
+        repo = self.instruction_repo()
+        self.config('developer_instructions = "home"' + self.project_trust(repo))
+        self.instruction_layer(repo, 'developer_instructions = "source repo"')
+        self.assert_codex_text(repo, 'home', ['--worktree'])
+
+    def test_codex_project_markers_can_change_or_disable_root_discovery(self):
+        repo = self.instruction_repo()
+        nested = repo / 'src'
+        nested.mkdir()
+        (nested / '.git').mkdir()  # Missing HEAD, so it is not a marker.
+        self.config(self.project_trust(repo))
+        self.instruction_layer(repo, 'developer_instructions = "root"')
+        self.assert_codex_text(nested, 'root')
+        self.assert_codex_text(nested, None, ['-c', 'project_root_markers=[]'])
+        (nested / '.project').touch()
+        self.config('project_root_markers = [".project"]' + self.project_trust(repo))
+        self.assert_codex_text(nested, None)
+        self.assert_codex_text(nested, 'root', ['-c', 'project_root_markers=[".git"]'])
+
+    def test_codex_home_directory_is_not_a_project_layer_even_through_a_symlink(self):
+        repo = self.instruction_repo()
+        self.config('developer_instructions = "home"' + self.project_trust(repo))
+        (paths.CODEX / 'work.config.toml').write_text('developer_instructions = "profile"')
+        (repo / '.codex').symlink_to(paths.CODEX)
+        self.assert_codex_text(repo, 'profile', ['-p', 'work'])
+
+    def test_codex_non_string_project_instructions_omit_override(self):
+        repo = self.instruction_repo()
+        self.config('developer_instructions = "home"' + self.project_trust(repo))
+        self.instruction_layer(repo, 'developer_instructions = 1')
+        self.assertEqual(project_launch.codex_args(None, ['resume'], cwd=repo), ['resume'])
 
     def test_hook_prints_context_or_nothing(self):
         def run_hook(pid):
@@ -434,19 +750,18 @@ class UnitTests(unittest.TestCase):
             for enabled in (False, True):
                 with self.subTest(pid=pid, enabled=enabled), mock.patch.dict(os.environ, TETHER_CDP_URL='ws://127.0.0.1:1/cdp/x' if enabled else ''):
                     args = project_launch.codex_args(pid, ['resume', '--last'])
-                    if not pid and not enabled:
-                        self.assertEqual(args, ['resume', '--last'])
-                        continue
                     text = tomllib.loads(args[1])['developer_instructions']
                     self.assertEqual(note() in text, enabled)
+                    self.standing_instructions(args)
+                    block = self.block(pid)
                     if pid:
                         self.assertIn('## Notes', text)
                         if enabled:
-                            self.assertTrue(text.endswith('\n\n' + note()))
+                            self.assertTrue(text.endswith('\n\n' + note() + '\n\n' + block))
                     else:
-                        self.assertEqual(text, note())
+                        self.assertEqual(text, note() + '\n\n' + block if enabled else block)
 
-    def test_codex_browser_keeps_plain_commands_and_own_instructions(self):
+    def test_codex_browser_keeps_plain_commands(self):
         with mock.patch.dict(os.environ, TETHER_CDP_URL='ws://127.0.0.1:1/cdp/x'):
             self.test_codex_plain_cases()
 
@@ -490,7 +805,8 @@ url = "https://example.test/playwright"
         self.assertEqual(config['mcp_servers']['browser.tool']['env_vars'],
                          ['USER_TOKEN', {'name': 'REMOTE_TOKEN', 'source': 'remote'}, 'PLAYWRIGHT_MCP_CDP_ENDPOINT'])
         with mock.patch.dict(os.environ, TETHER_CDP_URL=''):
-            self.assertEqual(project_launch.codex_args(None, []), [])
+            args = project_launch.codex_args(None, [])
+            self.assertFalse(any(arg.startswith('mcp_servers.') for arg in args))
 
     def test_codex_launch_without_project_and_fail_open(self):
         with mock.patch.dict(os.environ, TETHER_CDP_URL='ws://127.0.0.1:1/cdp/x'), \
@@ -498,7 +814,8 @@ url = "https://example.test/playwright"
                 mock.patch.object(project_launch, 'current_project', return_value=None), \
                 mock.patch.object(project_launch.os, 'execv') as execute:
             project_launch.launch('codex', ['resume'])
-            self.assertEqual(tomllib.loads(execute.call_args.args[1][2])['developer_instructions'], note())
+            overrides = self.standing_instructions(execute.call_args.args[1][1:])
+            self.assertEqual(overrides['developer_instructions'], note() + '\n\n' + self.block(None))
             os.environ.pop('TETHER_LAUNCH')
             with mock.patch.object(project_launch, 'codex_browser_env_args', side_effect=ValueError('bad config')), \
                     mock.patch.object(project_launch.sys, 'stderr'):
@@ -521,24 +838,31 @@ class WrapperTests(unittest.TestCase):
             fake.write_text(f'#!{sys.executable}\nimport json, os, sys\n'
                             f'open({str(self.temp / "argv")!r}, "a").write(json.dumps([sys.argv[0]] + sys.argv[1:] + [os.environ.get("TETHER_LAUNCH", "")]) + "\\n")\n')
             fake.chmod(0o755)
-        self.socket = str(self.temp / 'tmux.sock')
-        self.env = {key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE', 'TETHER_LAUNCH', 'INVOCATION_ID', 'TETHER_CDP_URL')}
-        self.env.update(PATH=f'{bin_dir}:{os.environ["PATH"]}', TETHER_HOME=str(self.temp / 'tether'), CODEX_HOME=str(self.temp / 'codex'), SHELL='/bin/sh',
-                        MOBILE_TMUX_CONFIG=str(self.temp / 'config'))  # not the developer's own advisor choice
+        env = dict(PATH=f'{bin_dir}:{os.environ["PATH"]}', TETHER_HOME=str(self.temp / 'tether'),
+                   CODEX_HOME=str(self.temp / 'codex'), SHELL='/bin/sh', MOBILE_TMUX_CONFIG=str(self.temp / 'config'),
+                   TETHER_LAUNCH=None, INVOCATION_ID=None, TETHER_CDP_URL=None,  # the panes inherit the server env
+                   MOBILE_TMUX_TMUX=str(bin_dir / 'private-tmux'))  # written below, once the socket is known
+        self.private = private_tmux(self, 'tlaunch-', env)
+        self.env = self.private.env
+        self.socket = self.private.socket
+        self.tmux = self.private.tmux
+        # The launcher reads its pane context. The tmux client needs only the socket.
+        client = bin_dir / 'private-tmux'
+        binary = shlex.quote(shutil.which('tmux'))
+        client.write_text(f'#!/bin/sh\nunset TMUX TMUX_PANE\nexec {binary} -N -S {self.socket} -f /dev/null "$@"\n')
+        client.chmod(0o755)
+        # The pane launcher must reach this server only through the wrapper.
+        self.assertEqual(self.tmux('show-environment', '-g', 'MOBILE_TMUX_TMUX').stdout.strip(), f'MOBILE_TMUX_TMUX={client}')
         (self.temp / 'codex').mkdir()
         (self.temp / 'codex' / 'config.toml').write_text('sandbox_mode = "workspace-write"\n')  # --add-dir needs a writable sandbox
         self.tmux('new-session', '-d', '-s', 'proj', '-c', str(self.temp),  # no real .codex folder above it
-                   '-x', '120', '-y', '30', '/bin/sh')  # not a login shell: /etc/profile would reset PATH
-        self.addCleanup(self.tmux, 'kill-server')
-
-    def tmux(self, *args):
-        assert self.socket
-        return subprocess.run(['tmux', '-f', '/dev/null', '-S', self.socket, *args], capture_output=True, text=True, env=self.env, timeout=5)
+                  '-x', '120', '-y', '30', '/bin/sh').check_returncode()  # A login shell would reset PATH.
 
     def run_in_pane(self, command):
         target = self.temp / 'argv'
         target.unlink(missing_ok=True)
-        self.tmux('send-keys', '-t', 'proj', f'{command}; tmux -S {self.socket} wait-for -S done', 'Enter')
+        self.tmux('send-keys', '-t', 'proj',
+                  f'{command}; env -u TMUX -u TMUX_PANE tmux -N -S {self.socket} -f /dev/null wait-for -S done', 'Enter')
         self.tmux('wait-for', 'done')
         for _ in range(50):
             if target.exists():
@@ -576,6 +900,60 @@ class WrapperTests(unittest.TestCase):
         self.addCleanup((self.temp / 'tether/projects').chmod, 0o700)
         self.tmux('set-option', '-t', 'proj', '@project', 'b1b2c3d4e5f6')
         self.assertEqual(self.run_in_pane(f'{launcher} claude y')[1:], ['y', '1'])
+
+    def hook_in(self, pane, pid):
+        """The SessionStart hook as Claude Code runs it in that pane, with the project id it started with."""
+        out = self.temp / 'hook-out'
+        out.unlink(missing_ok=True)
+        self.tmux('send-keys', '-t', pane, f'{sys.executable} {HERE / "project_launch.py"} hook {pid} </dev/null >{out}; '
+                  f'env -u TMUX -u TMUX_PANE tmux -N -S {self.socket} -f /dev/null wait-for -S hooked', 'Enter')
+        self.tmux('wait-for', 'hooked')
+        text = out.read_text()
+        return json.loads(text)['hookSpecificOutput']['additionalContext'] if text else ''
+
+    def stale(self, pane):
+        with mock.patch.object(paths, 'TETHER', self.temp / 'tether'), mock.patch.object(paths, 'TMUX', str(self.temp / 'bin/private-tmux')):
+            return [session for session, mark in projects.marks().items() if pane in mark['stale']]
+
+    def test_hook_after_a_move_loads_the_new_project_and_keeps_the_stale_mark(self):
+        alpha, beta = 'a1a1a1a1a1a1', 'b2b2b2b2b2b2'
+        with mock.patch.object(paths, 'TETHER', self.temp / 'tether'):
+            projects.set_instructions(alpha, 'Alpha rules.', 0)
+            projects.set_instructions(beta, 'Beta rules.', 0)
+        self.tmux('set-option', '-t', 'proj', '@project', alpha)
+        for name, pid in (('other', beta), ('third', None)):
+            self.tmux('new-session', '-d', '-s', name, '-c', str(self.temp), '-x', '120', '-y', '30', '/bin/sh').check_returncode()
+            if pid:
+                self.tmux('set-option', '-t', name, '@project', pid)
+        self.tmux('split-window', '-t', 'proj', '-c', str(self.temp), '/bin/sh').check_returncode()
+        pane = self.tmux('display-message', '-p', '-t', 'proj', '#{pane_id}').stdout.strip()
+        self.tmux('set-option', '-p', '-t', pane, '@project_rev', f'{alpha}:0')
+        # At home the hook gives the start project and records it.
+        text = self.hook_in(pane, alpha)
+        self.assertIn('Alpha rules.', text)
+        self.assertNotIn(project_launch.MOVED_NOTE, text)
+        self.assertEqual(self.stale(pane), [])
+        started = self.tmux('display-message', '-p', '-t', pane, '#{@project_rev}').stdout.strip()
+        self.assertRegex(started, f'^{alpha}:[0-9]+$')
+        # Moved by break-pane (tmux_merge.move_pane and break_out): the new project's text, and the tab stays stale.
+        self.tmux('break-pane', '-d', '-s', pane, '-t', 'other:').check_returncode()
+        for _ in range(2):  # stale before and after a second hook run: the hook never clears the mark
+            text = self.hook_in(pane, alpha)
+            self.assertIn('Beta rules.', text)
+            self.assertNotIn('Alpha rules.', text)
+            self.assertIn(str(self.temp / 'tether/projects' / beta), text)
+            self.assertIn(project_launch.MOVED_NOTE, text)
+            self.assertEqual(self.tmux('display-message', '-p', '-t', pane, '#{@project_rev}').stdout.strip(), started)
+            self.assertEqual(len(self.stale(pane)), 1)
+        # Moved by move-window (tmux_merge.merge_session) into a session with no project yet: it gets its own.
+        self.tmux('move-window', '-d', '-s', pane, '-t', 'third:').check_returncode()
+        text = self.hook_in(pane, alpha)
+        third = self.tmux('show-options', '-t', 'third', '-v', '@project').stdout.strip()
+        self.assertRegex(third, projects.ID)
+        self.assertNotIn(third, (alpha, beta))
+        self.assertIn(str(self.temp / 'tether/projects' / third), text)
+        self.assertNotIn('Beta rules.', text)
+        self.assertEqual(len(self.stale(pane)), 1)
 
     def test_outside_tmux_runs_plain(self):
         out = subprocess.run([sys.executable, str(HERE / 'project_launch.py'), 'claude', 'z'], env=self.env, capture_output=True, text=True, timeout=10)

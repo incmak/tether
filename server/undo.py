@@ -21,13 +21,19 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import nullcontext
+from dataclasses import replace
 
 import auto_resume
+import coordinator
 import groups
 import helper_close
+import helper_tabs
 import paths
 import prefs_sync
 import projects
+import review_links
+import task_tree
 import tmux_merge
 import undo_store
 from terminal_input import UUID, create_session, new_window_after, resume_command, valid_name
@@ -211,13 +217,11 @@ def record_ungroup(session_id, group, index, by_before, by_user=False, label=Non
                       group=dict(group), index=index, panes=list(by_before), by_before=by_before, by_after=by_user)
 
 
-def group_remove(session_id, group_id, run=subprocess.run):
-    if not undo_store.recording():
-        return groups.remove(session_id, group_id, run)
+def group_remove(session_id, group_id, run=subprocess.run, **check):
     with groups.LOCK():
-        group, index = _group_place(session_id, group_id, run)
-        groups.remove(session_id, group_id, run)
-        if group:
+        removed = groups.remove(session_id, group_id, run, **check)
+        if removed:
+            group, index = removed
             undo_store.record('group.remove', f'Removed stack {_q(group["name"])}', session=session_id, group=group,
                               index=index)
 
@@ -281,7 +285,8 @@ def capture(pane, run=subprocess.run, entry=None):
            'session_options': session_options, 'name': options.get('@chat_name', ''), 'order': [int(window), int(index)],
            'agent': '', 'thread': '', 'profile': None, 'transcript': '', 'server': _server(run)}
     saved = auto_resume.saved_tab(pane)
-    if saved:
+    if saved and (entry is None or (saved['thread'] == helper_tabs._thread(entry)
+                                     and saved['agent'] == entry.get('agent'))):
         tab.update(agent=saved['agent'], thread=saved['thread'], profile=saved.get('profile'),
                    transcript=saved.get('transcript') or '', folder=saved.get('folder') or folder)
     elif entry is not None:
@@ -293,6 +298,8 @@ def capture(pane, run=subprocess.run, entry=None):
     if not tab['agent']:
         command = _show(run, pane, '#{pane_current_command}')
         tab['agent'] = 'shell' if command and command[0] in ('bash', 'zsh', 'sh', 'fish', 'dash', 'ksh') else ''
+    if reviews := review_links.capture_close(pane):
+        tab['reviews'] = reviews
     label = options.get('@group')
     try:
         tab['peers'] = [p for p in groups.panes_in(session_id, label, run) if p != pane] if label else []
@@ -352,13 +359,181 @@ def capture_session_safe(session_id, run=subprocess.run, entries=()):
         return None
 
 
+CLOSE_ERRORS = (OSError, RuntimeError, subprocess.SubprocessError, ValueError)
+
+
+class CloseInterrupted(RuntimeError):
+    def __init__(self, error, members, identifier, label, *, stale=False, without_undo=(), unknown=()):
+        super().__init__(error)
+        self.status = 409 if stale else 503
+        self.members = members
+        self.undo = identifier
+        self.label = label
+        self.without_undo = without_undo
+        self.unknown = unknown
+
+
+def kill_outcome(target, server, run, *, session=False):
+    """Return True if gone, False if present, or None if tmux cannot prove either."""
+    kind, current = auto_resume.server_id(run=run)
+    if kind == 'none':
+        return True
+    if kind != 'up' or current != server:
+        return None
+    try:
+        if session:
+            result = _tmux(run, 'list-sessions', '-F', '#{session_id}')
+            pattern = SESSION
+        else:
+            result = _tmux(run, 'list-panes', '-a', '-F', '#{pane_id}')
+            pattern = PANE
+        listed = result.stdout.splitlines() if result.returncode == 0 else None
+        if listed is not None and not all(pattern.fullmatch(item) for item in listed):
+            listed = None
+    except (OSError, subprocess.SubprocessError):
+        listed = None
+    kind, current = auto_resume.server_id(run=run)
+    if kind == 'none':
+        return True
+    if listed is not None and kind == 'up' and current == server:
+        return target not in listed
+    return None
+
+
+class CloseJournal:
+    """Checkpoint an in-flight close before attempting it. Keep the record when its outcome is unknown."""
+    def __init__(self, label, server):
+        self.label, self.server = label, server
+        self.identifier = self.pending = None
+        self.closed = []
+
+    def save(self, actions, *, staging=False):
+        status = ('staged' if staging else 'unknown') if self.pending and not self.closed else None
+        self.identifier = undo_store.checkpoint(self.identifier, self.label, actions, server=self.server, status=status)
+
+    def kill(self, target, run, close, actions, recover, *, session=False, checkpoint=None):
+        self.pending = target
+        try:
+            if checkpoint is None:
+                self.save(actions(), staging=True)
+            else:
+                checkpoint()
+        except CLOSE_ERRORS:
+            self.pending = None
+            raise
+        try:
+            close()
+        except helper_tabs.Stale:
+            self.pending = None  # the guard refused before the kill
+            raise
+        except CLOSE_ERRORS:
+            outcome = kill_outcome(target, self.server, run, session=session)
+            if outcome is not None:
+                self.pending = None
+            if outcome:
+                self.closed.append(target)
+                recover()
+            raise
+        self.closed.append(target)
+        self.pending = None
+
+
+def _journal_close(target, run, title, label, server, action, close, recover, after, *, session=False):
+    journal = CloseJournal(label, server)
+
+    def actions():
+        if action is None or not (journal.closed or journal.pending):
+            return []
+        return [dict(action, pending=True) if journal.pending else action]
+
+    def finish():
+        if journal.closed:
+            after()
+        journal.save(actions())
+
+    try:
+        journal.kill(target, run, close, actions, recover, session=session)
+    except CLOSE_ERRORS as exc:
+        try:
+            finish()
+        except CLOSE_ERRORS:
+            pass  # The pending step is already on disk.
+        stale = isinstance(exc, helper_tabs.Stale)
+        if stale:
+            error = str(exc)
+        elif journal.closed:
+            error = 'The close took effect, but tmux did not confirm it. Refresh the tabs.'
+        elif journal.pending:
+            error = 'Tether could not confirm whether the close took effect. Refresh the tabs.'
+        else:
+            error = 'Tether could not close the tab or session. Refresh the tabs.'
+        raise CloseInterrupted(error, [(target, title)] if journal.closed else [], journal.identifier,
+                                label, stale=stale, unknown=[title] if journal.pending else []) from exc
+    try:
+        finish()
+    except CLOSE_ERRORS as exc:
+        raise CloseInterrupted('The tab or session closed. Tether could not finish saving Undo.',
+                                [(target, title)], journal.identifier, label) from exc
+    undo_store.offer_checkpoint(journal.identifier, label)
+    return journal.identifier
+
+
+def tab_close_label(tab, title):
+    tab = tab or {}
+    return f'Closed tab {_q(tab.get("name") or tab.get("session") or title)}'
+
+
+def close_tab(pane, run, tab, title, *, close=None, server=None):
+    """Close one tab and journal any captured Undo while the caller holds the send lock."""
+    label = tab_close_label(tab, title)
+
+    def recover():
+        auto_resume.forget_pane(pane, run=run)
+        helper_close.release_reviews(pane)
+
+    return _journal_close(pane, run, title, label, server or (tab or {}).get('server'),
+                          dict(kind='tab.close', tab=tab) if tab else None,
+                          close or (lambda: helper_close.close_pane(pane, run)), recover,
+                          lambda: note_released(tab, run) if tab else None)
+
+
 def record_tab_close(tab, run=subprocess.run):
     if tab:
         try:
             note_released(tab, run)
         except Exception as error:  # noqa: BLE001 - as capture_safe: the close happened, so record it all the same
             print(f'undo: could not read the stack of closed tab {tab["pane"]}: {error!r}', file=sys.stderr)
-        undo_store.record('tab.close', f'Closed tab {_q(tab["name"] or tab["session"])}', tab=tab)
+        return undo_store.record('tab.close', f'Closed tab {_q(tab["name"] or tab["session"])}', tab=tab)
+
+
+def _task_tree_change(entry, before, after):
+    return {'pane': entry['id'], 'thread': helper_tabs.verified_thread(entry),
+            'session': entry['tmux_session'], 'before': before, 'after': after}
+
+
+def record_task_tree_move(entry, before, after):
+    if before != after:
+        return undo_store.record('task-tree.move', f'Moved tab {_q(helper_tabs.visible_name(entry))}',
+                                 **_task_tree_change(entry, before, after))
+
+
+def record_task_tree_close(closed, kept, run):
+    """Save the tabs that actually closed and the placement changes to tabs that stayed."""
+    if not undo_store.recording():
+        return
+    if not closed:
+        for entry, before, after in kept:
+            record_task_tree_move(entry, before, after)
+        return
+    for tab, _ in closed:
+        try:
+            note_released(tab, run)
+        except Exception as error:  # noqa: BLE001 - as with a single tab close
+            print(f'undo: could not read the stack of closed tab {tab["pane"]}: {error!r}', file=sys.stderr)
+    root = closed[-1][0]
+    return undo_store.record('task-tree.close', f'Closed task {_q(root["name"] or root["session"])}',
+                             closed=[{'tab': tab, 'record': record} for tab, record in closed],
+                             kept=[_task_tree_change(entry, before, after) for entry, before, after in kept])
 
 
 def capture_session(session_id, run=subprocess.run, entries=()):
@@ -379,6 +554,25 @@ def record_session_close(saved):
                           saved=saved)
 
 
+def close_session(session_id, run, saved, panes, close):
+    title = saved['name'] if saved else session_id
+    count = len(saved['tabs']) if saved else 0
+    label = f'Closed session {_q(title)} ({count} tab{"" if count == 1 else "s"})'
+    server = saved['tabs'][0].get('server') if saved else None
+
+    def release():
+        for pane in panes:
+            helper_close.release_reviews(pane)
+
+    def kill():
+        close()
+        release()
+
+    return _journal_close(session_id, run, title, label, server,
+                          dict(kind='session.close', saved=saved, removed_panes=panes) if saved else None,
+                          kill, release, lambda: None, session=True)
+
+
 def record_tab_start(pane, run=subprocess.run):
     if not undo_store.recording():
         return
@@ -392,6 +586,10 @@ def record_tab_start(pane, run=subprocess.run):
         return _unrecorded(f'the start of tab {pane}', error)
     undo_store.title(label)
     undo_store.record('tab.start', label, pane=pane, session=fields[0])
+
+
+def _root_stacks(session_id, pane, run):
+    return [stack['id'] for stack in groups.read(session_id, run) if stack.get('root') == pane]
 
 
 def record_merge(kind, source, target, run=subprocess.run):
@@ -412,6 +610,8 @@ def record_merge(kind, source, target, run=subprocess.run):
         # The stack it leaves, as it is now: the move or a later sweep can dissolve it (groups.drop_if_alone), and
         # undo brings it back.
         stack, index = _group_place(session_id, label, run) if label else (None, 0)
+        root_stacks = _root_stacks(session_id, source, run)
+        role = tmux_merge.coordinator_to_clear(run, source, target) if kind == 'pane' else ''
     except Exception as error:  # noqa: BLE001 - recording undo is optional; the move goes on
         _unrecorded(f'the move of tab {source}', error)
         return lambda moved: None
@@ -426,7 +626,8 @@ def record_merge(kind, source, target, run=subprocess.run):
         else:
             text = f'Moved {_q(name)} to a session of its own'
         undo_store.record('merge.' + kind, text, pane=source, frm=session_id, frm_name=session_name, frm_group=label,
-                          frm_by=by, to=to, frm_stack=stack, frm_stack_index=index,
+                          frm_by=by, to=to, frm_stack=stack, frm_stack_index=index, frm_role=role,
+                          frm_root_stacks=root_stacks,
                           to_name=moved.get('name', '') if kind == 'pane' else '')
     return done
 
@@ -453,9 +654,10 @@ class Env:
     """What the inverses read from the server. server.py passes its own; tests pass fakes."""
 
     def __init__(self, run=subprocess.run, entries=lambda: [], status=lambda entry: {}, draft=lambda entry: [],
-                 web_draft=lambda pane: '', name_window=lambda pane, name: None):
+                 web_draft=lambda pane: '', name_window=lambda pane, name: None, fresh=None):
         self.run, self.entries, self.status, self.draft, self.web_draft = run, entries, status, draft, web_draft
         self.name_window = name_window  # server.py name_in_tmux: the window shows the tab name
+        self.fresh = fresh or entries
         self._cache = None
 
     def live(self):
@@ -468,6 +670,9 @@ class Env:
 
     def forget(self):
         self._cache = None
+
+    def refresh(self):
+        self._cache = list(self.fresh())
 
 
 def _server(run):
@@ -813,7 +1018,7 @@ class GroupRemove:
             _check_free(a['session'], a['group'], env.run, ctx)
         else:
             _check_group(a['session'], a['group'], env.run, ctx)
-            if groups.panes_in(a['session'], a['group']['id'], env.run):
+            if groups.stack_members(a['session'], a['group']['id'], env.live(), env.run):
                 raise Refused(f'Stack {_q(a["group"]["name"])} has tabs now.')
 
     @staticmethod
@@ -821,7 +1026,7 @@ class GroupRemove:
         if d == 'undo':
             _readd(a['session'], a['group'], a['index'], env.run)
         else:
-            groups.remove(a['session'], a['group']['id'], env.run)
+            groups.remove(a['session'], a['group']['id'], env.run, entries=env.live())
 
     @staticmethod
     def effects(a, d, env):
@@ -918,11 +1123,27 @@ def _close(pane, env):
     env.forget()
 
 
+def _restore_reviews(tabs, reopened, env, sources=None):
+    snapshots = [tab['reviews'] for tab in tabs if tab.get('reviews')]
+    if not snapshots:
+        return None
+    sources = sources or {}
+    bindings = {sources.get(tab['pane'], tab['pane']): (reopened[tab['pane']], tab['thread']) for tab in tabs}
+    try:
+        threads = {entry['id']: helper_tabs.verified_thread(entry) for entry in env.fresh()}
+        if review_links.restore_close(snapshots, bindings, threads):
+            return None
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+        print(f'undo: could not restore review state: {exc}', file=sys.stderr)
+    return 'Tether could not restore all review state. Check the review links.'
+
+
 def _reopen_check(tab, env, session_ok=True):
     if tab['agent'] in ('claude', 'codex'):
         if not tab.get('thread'):
             raise Refused(f'Tab {_q(tab["name"] or tab["session"])} had no conversation yet, so there is nothing to resume.')
-        holder = next((entry for entry in env.live() if entry.get('thread') == tab['thread']), None)
+        holder = next((entry for entry in env.live() if entry.get('id') != 'saved'
+                       and entry.get('thread') == tab['thread']), None)
         if holder is not None:
             raise Refused(f'That conversation is open in tab {_q(holder.get("pane_name") or holder.get("label"))}.')
         import history  # slow import: only when a reopen is checked
@@ -1036,8 +1257,7 @@ def _options_for(tab, existing):
         return tab
     own = _saved_stack(tab)
     options = dict(tab['options'])
-    if own is None:
-        options.pop('@group', None)
+    if own is None and options.pop('@group', None):
         options.pop('@group_by', None)
     session_options = {'@groups': json.dumps([own])} if own else {}
     return dict(tab, options=options, session_options=session_options)
@@ -1110,11 +1330,58 @@ def _reopen_effects(tab):
             'A turn that was running when it closed does not continue.']
 
 
+def _check_pending_close(action, target, server, run, *, session=False):
+    if not action.get('pending'):
+        return action
+    outcome = kill_outcome(target, server, run, session=session)
+    if outcome is True:
+        closed = dict(action, release_reviews=True)
+        del closed['pending']
+        return closed
+    return action if outcome is None else None
+
+
+class _RedoCloseInterrupted(Refused):
+    """Keep the durable Undo of a Redo that stopped partway through."""
+
+
+def _redo_kill(target, server, env, close, recover, checkpoint, previous, pending, *, session=False):
+    """Use the close journal to stage Undo on the existing History step before the kill."""
+    journal = CloseJournal(None, server)
+    staged = False
+
+    def stage():
+        nonlocal staged
+        checkpoint(previous, pending={'target': target, 'server': server, 'session': session, 'action': pending})
+        staged = True
+
+    try:
+        journal.kill(target, env.run, close, None, recover, session=session, checkpoint=stage)
+    except CLOSE_ERRORS as exc:
+        if not staged:
+            raise
+        if journal.pending:
+            raise _RedoCloseInterrupted(str(exc)) from exc
+        if not journal.closed:
+            checkpoint(previous)
+            raise
+        return True  # The kill took effect even though tmux reported an error.
+    return False
+
+
+def _redo_pane_cleanup(pane, env):
+    auto_resume.forget_pane(pane, run=env.run)
+    helper_close.release_reviews(pane)
+    env.forget()
+
+
 class TabClose:
     """undo: reopen (the pane gets a new id, kept in a['reopened']). redo: close that pane again."""
     @staticmethod
     def check(a, d, env, ctx):
         if d == 'undo':
+            if a.get('pending'):
+                raise Refused('Tether could not confirm the close. Try Undo again.')
             _reopen_check(a['tab'], env)
             _check_reopen_target(a['tab'], env.run)
             _check_released(a['tab'], env.run)
@@ -1123,21 +1390,328 @@ class TabClose:
             _need_pane(a.get('reopened') or '-', env.run, f'Tab {_q(a["tab"]["name"])}')
 
     @staticmethod
-    def apply(a, d, env):
+    def apply(a, d, env, *, checkpoint=None):
         if d == 'undo':
-            a['reopened'] = _reopen(a['tab'], env)
+            tab = a['tab']
+            if a.get('release_reviews'):
+                auto_resume.forget_pane(tab['pane'], run=env.run)
+                helper_close.release_reviews(tab['pane'])
+            a['reopened'] = _reopen(tab, env)
             a['reopened_server'] = _server(env.run)
-            _restack_released(a['tab'], a['reopened'], env.run)
+            _restack_released(tab, a['reopened'], env.run)
+            a.pop('release_reviews', None)
+            return _restore_reviews([tab], {tab['pane']: a['reopened']}, env)
         else:
-            a['tab'] = capture(a['reopened'], env.run, env.entry(a['reopened'])) or a['tab']
-            _close(a['reopened'], env)
+            pane = a['reopened']
+            tab = capture(pane, env.run, env.entry(pane))
+            if tab is None:
+                raise Refused('Tether could not save the reopened tab for Undo.')
+            interrupted = _redo_kill(pane, a['reopened_server'], env, lambda: _close(pane, env),
+                                     lambda: _redo_pane_cleanup(pane, env),
+                                     checkpoint, None, dict(a, tab=tab, pending=True))
+            a['tab'] = tab
             note_released(a['tab'], env.run)
+            checkpoint(a)
+            if interrupted:
+                return 'The tab closed, but tmux did not confirm it.'
 
     @staticmethod
     def effects(a, d, env):
         if d == 'undo':
             return _reopen_effects(a['tab'])
         return _close_effects(a['reopened'], env, a['tab']['name'], a['tab'].get('agent'))
+
+
+def _tree_snapshot(env, ctx):
+    if 'tree' not in ctx:
+        try:
+            rows = helper_tabs.read_panes(env.run)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise Refused('Tether could not read the task tree. Try again.') from exc
+        ctx['tree'] = rows, {entry['id']: entry for entry in env.live()}
+    return ctx['tree']
+
+
+def _tree_check(pane, session, thread, record, rows, entries, *, target=None):
+    entry, options = entries.get(pane), rows.get(pane)
+    if entry is None or options is None or options.session != session:
+        raise Refused(f'Tab {pane} closed or moved to another tmux session.')
+    if thread:
+        same = helper_tabs.verified_thread(entry) == thread
+    else:
+        same = entry.get('agent') == 'shell'
+    if not same:
+        raise Refused(f'Tab {pane} changed conversations. Reload its tab.')
+    if not helper_tabs.record_matches(options.record, record, target) or (options.record is None and options.raw):
+        raise Refused(f'Tab {pane} changed task placement. Reload its tab.')
+
+
+def _tree_parent(pane, rows, entries):
+    if pane in entries:
+        return task_tree.placement(pane, rows, entries)
+    # A tab starting in tmux may not yet be in discovery. Treat its recorded parent as possible.
+    row = rows[pane]
+    if task_tree.is_child(row.record, row.role, row.group_by):
+        return helper_tabs.placement_owner(row.record)[0]
+    return None
+
+
+class TaskTreeMove:
+    @staticmethod
+    def check(a, d, env, ctx):
+        rows, entries = _tree_snapshot(env, ctx)
+        pane = a['pane']
+        current, target = (a['after'], a['before']) if d == 'undo' else (a['before'], a['after'])
+        _tree_check(pane, a['session'], a['thread'], current, rows, entries, target=target)
+        row = rows[pane]
+        if not task_tree.is_child(target, row.role, row.group_by):
+            return
+        if (entries.get(pane) or {}).get('coordinator') in coordinator.MODES:
+            raise Refused(f'Tab {pane} is now the coordinator. Release the coordinator role before you put it back in a task.')
+        if d == 'redo' and any(_tree_parent(child, rows, entries) == pane for child in rows):
+            raise Refused('That tab now has helpers of its own. Move them out first.')
+        prospective = {**rows, pane: replace(row, record=target)}
+        home = task_tree.placement(pane, prospective, entries)
+        if not home or not helper_tabs.verified_thread(entries[home]):
+            raise Refused(f'The task for tab {pane} closed or changed conversations.')
+        seen = {pane}
+        while home:
+            if home in seen:
+                raise Refused('That placement would make a task loop.')
+            seen.add(home)
+            home = task_tree.placement(home, prospective, entries)
+            if home and d == 'redo':
+                raise Refused('The destination is now a helper. Choose its task instead.')
+
+    @staticmethod
+    def apply(a, d, env):
+        before, after = (a['after'], a['before']) if d == 'undo' else (a['before'], a['after'])
+        helper_tabs.write_record(a['pane'], before, after, env.run)
+
+    @staticmethod
+    def effects(a, d, env):
+        return []
+
+
+_PANE_REFS = ('owner_pane', 'home_pane', 'root_pane')
+
+
+def _remap_helper(record, panes):
+    if record is None:
+        return None
+    return {key: panes.get(value, value) if key in _PANE_REFS and isinstance(value, str)
+            else value for key, value in record.items()}
+
+
+def _check_tree_server(a, direction, run):
+    if direction == 'redo':
+        _same_tmux(a['reopened_server'], run, 'the reopened task')
+        return
+    kind, current = auto_resume.server_id(run=run)
+    saved = a['closed'][-1]['tab']['server']
+    if saved and current == saved:
+        return
+    if kind == 'none' and not a['kept']:
+        # The task may have been the last session. A new tmux can reuse any old pane ID.
+        # Internal references get mapped to the new IDs; an external reference must be bound
+        # to a conversation that will not be in the new session.
+        panes = {member['tab']['pane'] for member in a['closed']}
+        threads = {member['tab']['thread'] for member in a['closed']}
+        for member in a['closed']:
+            record = member['record'] or {}
+            for key in _PANE_REFS:
+                if record.get(key) and record[key] not in panes:
+                    bound = record.get(key.replace('_pane', '_thread'))
+                    if not bound or bound in threads:
+                        raise Refused('tmux stopped. Tether cannot confirm an old relationship to another task.')
+        return
+    raise Refused('tmux restarted or could not be reached. Tether cannot confirm the task’s tabs.')
+
+
+class TaskTreeClose:
+    @staticmethod
+    def check(a, d, env, ctx):
+        if d == 'undo' and any(member.get('pending') for member in a['closed']):
+            raise Refused('Tether could not confirm which task tabs closed. Try Undo again.')
+        if not a['closed']:
+            if not a['kept']:
+                raise Refused('No task tabs closed.')
+            for change in a['kept']:
+                TaskTreeMove.check(change, d, env, ctx)
+            return
+        _check_tree_server(a, d, env.run)
+        rows, entries = _tree_snapshot(env, ctx) if d == 'redo' or a['kept'] else ({}, {})
+        panes = a.get('closed_panes', {}) if d == 'undo' else a['reopened']
+        detached = set(a.get('detached', ()))
+        for change in a['kept']:
+            field = 'after' if d == 'undo' or change['pane'] in detached else 'before'
+            _tree_check(change['pane'], change['session'], change['thread'], _remap_helper(change[field], panes),
+                        rows, entries, target=_remap_helper(change['before' if field == 'after' else 'after'], panes))
+        if d == 'undo':
+            for member in a['closed']:
+                tab = member['tab']
+                _reopen_check(tab, env)
+                _check_reopen_target(tab, env.run)
+                _check_released(tab, env.run)
+            return
+
+        closing = set()
+        for member in a['closed']:
+            tab = member['tab']
+            if tab['pane'] not in a.get('redone', ()):
+                pane = panes[tab['pane']]
+                _tree_check(pane, a['reopened_session'], tab['thread'], _remap_helper(member['record'], panes),
+                            rows, entries)
+                closing.add(pane)
+        TaskTreeClose._check_new_children(a, closing, rows, entries)
+
+    @staticmethod
+    def _check_new_children(a, closing, rows, entries):
+        expected = closing | {change['pane'] for change in a['kept']}
+        placed = task_tree.placements(rows, entries)
+        for pane in rows:
+            if pane in expected:
+                continue
+            if _tree_parent(pane, rows, entries) in closing or placed.get(pane, {}).get('task') in closing:
+                raise Refused(f'Tab {pane} joined the task since. Review the new task before closing it.')
+
+    @staticmethod
+    def _undo(a, env):
+        run = env.run
+        tabs = [member['tab'] for member in a['closed']]
+        new_session = _target_session(tabs[0], run) is None
+        panes, attached, after = {}, [], None
+        try:
+            for tab in sorted(tabs, key=lambda tab: tab['order']):
+                pane = _reopen(tab, env, after=after)
+                panes[tab['pane']] = pane
+                if new_session:
+                    after = pane
+            session = _need_pane(next(iter(panes.values())), run)[0]
+            server = _server(run)
+            if server is None:
+                raise Refused('Tether could not confirm the tmux server of the reopened task.')
+            for member in a['closed']:
+                if member['record'] is not None:
+                    helper_tabs.write_record(panes[member['tab']['pane']], None,
+                                             _remap_helper(member['record'], panes), run)
+            for change in a['kept']:
+                expected = _remap_helper(change['after'], a.get('closed_panes', {}))
+                helper_tabs.write_record(change['pane'], expected, _remap_helper(change['before'], panes), run)
+                attached.append(change)
+        except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
+            failed = []
+            for change in reversed(attached):
+                try:
+                    expected = _remap_helper(change['after'], a.get('closed_panes', {}))
+                    helper_tabs.write_record(change['pane'], _remap_helper(change['before'], panes), expected, run)
+                except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
+                    failed.append(change['pane'])
+            for pane in reversed(list(panes.values())):
+                try:
+                    _close(pane, env)
+                except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
+                    failed.append(pane)
+            if failed:
+                raise Refused(f'Tether could not restore the task. Check tabs {", ".join(failed)} before retrying.') from None
+            raise
+        a['reopened'] = panes
+        a['reopened_session'] = session
+        a['reopened_server'] = server
+        for member in a['closed']:
+            if member.pop('release_reviews', False):
+                helper_close.release_reviews(member['tab']['pane'])
+        warning = _restore_reviews(tabs, panes, env, sources=a.get('closed_panes'))
+        for tab in tabs:
+            try:
+                _restack_released(tab, panes[tab['pane']], run)
+            except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
+                stack_warning = 'The task reopened. Tether could not put all of its tabs back in their stack.'
+                return f'{stack_warning} {warning}' if warning else stack_warning
+        return warning
+
+    @staticmethod
+    def _redo(a, env, checkpoint):
+        run, panes = env.run, a['reopened']
+        redone, detached = a.get('redone', []), a.get('detached', [])
+        captures = []
+        for member in a['closed']:
+            old = member['tab']['pane']
+            if old in redone:
+                continue
+            tab = capture(panes[old], run, env.entry(panes[old]))
+            if tab is None or tab['thread'] != member['tab']['thread'] or tab['agent'] != member['tab']['agent']:
+                raise Refused(f'Tether could not save tab {panes[old]} for undo. Try again.')
+            captures.append((member, old, dict(tab, pane=old)))
+
+        def projection(*, pending=None):
+            # A partial Undo has to restore relationships to the panes that stayed open during Redo.
+            closed = [{'tab': dict(member['tab'], pane=panes[old]),
+                       'record': _remap_helper(member['record'], panes)}
+                      for member in a['closed'] if (old := member['tab']['pane']) in redone]
+            if pending:
+                member, old, tab = pending
+                closed.append({'tab': dict(tab, pane=panes[old]), 'pending': True,
+                               'record': _remap_helper(member['record'], panes)})
+            kept = [dict(change, before=_remap_helper(change['before'], panes),
+                         after=_remap_helper(change['after'], panes))
+                    for change in a['kept'] if change['pane'] in detached]
+            return dict(kind='task-tree.close', closed=closed, kept=kept) if closed or kept else None
+
+        warning = None
+        try:
+            for change in a['kept']:
+                pane = change['pane']
+                if pane not in detached:
+                    helper_tabs.write_record(pane, _remap_helper(change['before'], panes),
+                                             _remap_helper(change['after'], panes), run)
+                    detached.append(pane)
+                    a['detached'] = detached
+                    checkpoint(projection())
+            for member, old, tab in captures:
+                pane = panes[old]
+                interrupted = _redo_kill(pane, a['reopened_server'], env, lambda: _close(pane, env),
+                                         lambda: _redo_pane_cleanup(pane, env),
+                                         checkpoint, projection(), projection(pending=(member, old, tab)))
+                member['tab'] = tab
+                redone.append(old)
+                a['redone'] = redone
+                note_released(tab, run)
+                checkpoint(projection())
+                if interrupted:
+                    if len(redone) != len(a['closed']):
+                        raise _RedoCloseInterrupted('tmux did not confirm the close.')
+                    warning = 'The tabs closed. Tether could not confirm the last close.'
+        except CLOSE_ERRORS as exc:
+            if redone or detached:
+                raise _RedoCloseInterrupted(str(exc)) from exc
+            raise
+        for member in a['closed']:
+            try:
+                note_released(member['tab'], run)
+            except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
+                print(f'undo: could not read the stack of closed tab {member["tab"]["pane"]}: {exc!r}', file=sys.stderr)
+        a['closed_panes'] = a.pop('reopened')
+        for key in ('redone', 'detached', 'reopened_session', 'reopened_server'):
+            a.pop(key, None)
+        return warning
+
+    @staticmethod
+    def apply(a, d, env, *, checkpoint=None):
+        if not a['closed']:
+            for change in a['kept']:
+                TaskTreeMove.apply(change, d, env)
+            return None
+        return TaskTreeClose._undo(a, env) if d == 'undo' else TaskTreeClose._redo(a, env, checkpoint)
+
+    @staticmethod
+    def effects(a, d, env):
+        if d == 'undo':
+            reopened = [effect for member in reversed(a['closed']) for effect in _reopen_effects(member['tab'])]
+            return reopened + ['Restores the task placement of the helpers that stayed open.'] if a['kept'] else reopened
+        return [effect for member in a['closed'] if member['tab']['pane'] not in a.get('redone', ())
+                for effect in _close_effects(a['reopened'][member['tab']['pane']], env, member['tab']['name'],
+                                             member['tab']['agent'])]
 
 
 class TabStart:
@@ -1165,6 +1739,7 @@ class TabStart:
             a['pane'] = _reopen(a['tab'], env)
             a['pane_server'] = _server(env.run)
             _restack_released(a['tab'], a['pane'], env.run)
+            return _restore_reviews([a['tab']], {a['tab']['pane']: a['pane']}, env)
 
     @staticmethod
     def effects(a, d, env):
@@ -1232,6 +1807,8 @@ class SessionClose:
     @staticmethod
     def check(a, d, env, ctx):
         if d == 'undo':
+            if a.get('pending'):
+                raise Refused('Tether could not confirm the close. Try Undo again.')
             _session_reopen_check(a['saved'], env)
         else:
             _same_tmux(a.get('reopened_server'), env.run, 'that session')
@@ -1239,14 +1816,36 @@ class SessionClose:
                 raise Refused(f'Session {_q(a["saved"]["name"])} has closed or was renamed.')
 
     @staticmethod
-    def apply(a, d, env):
+    def apply(a, d, env, *, checkpoint=None):
         if d == 'undo':
+            if a.get('release_reviews'):
+                for pane in a.get('removed_panes', ()):
+                    helper_close.release_reviews(pane)
             panes = _reopen_session(a['saved'], env)
             a['reopened'] = _show(env.run, panes[0], '#{session_id}')[0] if panes else None
             a['reopened_server'] = _server(env.run)
+            a.pop('release_reviews', None)
         else:
-            a['saved'] = capture_session(a['reopened'], env.run, env.live()) or a['saved']
-            _close_session(a['reopened'], env)
+            session = a['reopened']
+            saved = capture_session(session, env.run, env.live())
+            if saved is None:
+                raise Refused('Tether could not save the reopened session for Undo.')
+            panes = [tab['pane'] for tab in saved['tabs']]
+
+            def release():
+                for pane in panes:
+                    helper_close.release_reviews(pane)
+                env.forget()
+
+            interrupted = _redo_kill(session, a['reopened_server'], env, lambda: _close_session(session, env),
+                                     release, checkpoint, None, dict(a, saved=saved, removed_panes=panes, pending=True),
+                                     session=True)
+            a.update(saved=saved, removed_panes=panes)
+            if not interrupted:
+                release()
+            checkpoint(a)
+            if interrupted:
+                return 'The session closed, but tmux did not confirm it.'
 
     @staticmethod
     def effects(a, d, env):
@@ -1307,22 +1906,54 @@ class MergePane:
     @staticmethod
     def apply(a, d, env):
         run = env.run
+        pane = a['pane']
         if d == 'redo':
-            moved = (tmux_merge.move_pane(a['pane'], a['to'], run) if a['kind'] == 'merge.pane'
-                     else tmux_merge.break_out(a['pane'], run))
+            root_stacks = _root_stacks(a['frm'], pane, run)
+            if a['kind'] == 'merge.pane':
+                role = tmux_merge.coordinator_to_clear(run, pane, a['to'])
+                moved = tmux_merge.move_pane(pane, a['to'], run)
+                a['frm_role'] = role
+            else:
+                moved = tmux_merge.break_out(pane, run)
+            a['frm_root_stacks'] = root_stacks
             a['to'] = moved['session']
-            return
+            return moved.get('warning')
         if _session_alive(a['frm'], run) is None:  # closed between the check and now
             raise Refused(f'Session {_q(a["frm_name"])} closed after this move, so the tab cannot go back.')
+        source, stack = a['frm'], a.get('frm_stack')
         restack = MergePane._stack_gone(a, run)
-        tmux_merge.move_pane(a['pane'], a['frm'], run)
+        was_root = stack and stack.get('root') == pane
+        # Older entries recorded only the pane's own stack.
+        root_stacks = set(a.get('frm_root_stacks', [stack['id']] if was_root else []))
+        tmux_merge.move_pane(pane, source, run)
         if restack:
-            _readd(a['frm'], a['frm_stack'], a.get('frm_stack_index', 0), run)
+            saved = dict(stack)
+            if was_root or saved['id'] in root_stacks:
+                saved.pop('root', None)  # Restore it after the pane rejoins the stack.
+            _readd(source, saved, a.get('frm_stack_index', 0), run)
             for root, label, by in MergePane._root(a, run):
                 if not label and by != 'user':
-                    groups._label(root, a['frm_stack']['id'], run)
-        if a.get('frm_group') and any(g['id'] == a['frm_group'] for g in _groups(a['frm'], run)):
-            _set_label(a['pane'], a['frm_group'], a.get('frm_by') == 'user', run)
+                    groups._label(root, stack['id'], run)
+        if group_id := a.get('frm_group'):
+            if any(group['id'] == group_id for group in _groups(source, run)):
+                _set_label(pane, group_id, a.get('frm_by') == 'user', run)
+        if root_stacks:
+            with groups.LOCK():
+                found = _groups(source, run)
+                restore = [group for group in found if group['id'] in root_stacks
+                           and group.get('auto') and not group.get('root')]
+                if restore:
+                    for group in restore:
+                        group['root'] = pane
+                    groups.write(source, found, run)
+        role = a.get('frm_role')
+        if (role in helper_tabs.COORDINATOR_MARKS and not tmux_merge.pane_role(run, pane)
+                and not (tmux_merge.coordinator_panes(run, source) - {pane})):
+            try:
+                coordinator._check_outside_task(pane, run)
+            except ValueError:
+                return  # A placement made after the move takes precedence.
+            coordinator._set(run, pane, 'all' if role == 'coordinator' else role.removeprefix('coordinator-'))
 
     @staticmethod
     def effects(a, d, env):
@@ -1371,11 +2002,14 @@ class PrefsOrder:
 KINDS = {'group.create': GroupCreate, 'group.rename': GroupRename, 'group.move': GroupMove,
          'group.ungroup': GroupUngroup, 'group.remove': GroupRemove, 'pane.name': PaneName,
          'session.name': SessionName, 'tab.close': TabClose, 'tab.start': TabStart, 'session.close': SessionClose, 'merge.pane': MergePane, 'merge.break': MergePane,
-         'merge.session': MergeSession, 'prefs.order': PrefsOrder}
+         'merge.session': MergeSession, 'prefs.order': PrefsOrder,
+         'task-tree.move': TaskTreeMove, 'task-tree.close': TaskTreeClose}
 # Kinds whose recorded pane and session ids belong to the tmux server of the entry. tab.start, tab.close and
 # session.close check the server of the pane or session they hold themselves (_same_tmux): an undo or redo makes a new one.
+TASK_TREE_STEPS = {'task-tree.move', 'task-tree.close'}
+REDO_CLOSE_STEPS = {'tab.close', 'session.close', 'task-tree.close'}
 LIVE_IDS = {'group.create', 'group.rename', 'group.move', 'group.ungroup', 'group.remove', 'pane.name', 'session.name',
-            'merge.pane', 'merge.break', 'merge.session'}
+            'merge.pane', 'merge.break', 'merge.session', 'task-tree.move'}
 
 
 # ---------------------------------------------------------------- planning and running
@@ -1412,10 +2046,114 @@ def _effects(entry, direction, env):
     return lines
 
 
-def view(entry, env=None, check=True):
-    """An entry for the page. can_undo / can_redo carry the reason as 'why' when the step cannot run now."""
+def _resolve_close_actions(actions, server, run):
+    """Keep unresolved closes and drop only the panes or sessions that the probe proves still open."""
+    resolved, refusal = [], None
+    for action in actions:
+        kind = action['kind']
+        if kind == 'tab.close' and action.get('pending'):
+            tab = action['tab']
+            action = _check_pending_close(action, tab['pane'], tab.get('server') or server, run)
+        elif kind == 'session.close' and action.get('pending'):
+            saved = action['saved']
+            action = _check_pending_close(action, saved['session_id'], saved['tabs'][0].get('server') or server,
+                                          run, session=True)
+        elif kind == 'task-tree.close':
+            members = []
+            for member in action['closed']:
+                tab = member['tab']
+                closed = _check_pending_close(member, tab['pane'], tab['server'], run)
+                if closed is None:
+                    refusal = 'The tab did not close. Nothing to undo.'
+                else:
+                    members.append(closed)
+            if members != action['closed']:
+                action = dict(action, closed=members) if members or action['kept'] else None
+        if action is None:
+            subject = 'session' if kind == 'session.close' else 'tab'
+            refusal = f'The {subject} did not close. Nothing to undo.'
+        else:
+            resolved.append(action)
+    return resolved, refusal
+
+
+def _resolve_pending_closes(found, env, *, only=None):
+    """Check the journal after the writer has finished. Persist outcomes before choosing or applying an inverse."""
+    updates = []
+    for entry in found:
+        if only is not None and entry['id'] != only:
+            continue
+        actions, redo = entry['actions'], entry.get('redo_close')
+        pending = redo and redo['pending']
+        if pending:
+            projection, refusal = _resolve_close_actions(pending['actions'], pending['server'], env.run)
+            if refusal:
+                redo = dict(redo, pending=None) if redo['actions'] else None
+            elif projection != pending['actions']:
+                redo = dict(redo, pending=dict(pending, actions=projection))
+        elif entry['state'] == 'done':
+            actions, refusal = _resolve_close_actions(actions, entry.get('server'), env.run)
+        else:
+            continue
+        status = entry.get('close_checkpoint')
+        if status:
+            # A staged record can outlive the writer. On the first read, settle it or mark its outcome unknown.
+            status = ('unknown' if any(action.get('pending') or
+                                       any(member.get('pending') for member in action.get('closed', ()))
+                                       for action in actions) else None)
+        if (actions, redo, status) != (entry['actions'], entry.get('redo_close'), entry.get('close_checkpoint')):
+            updates.append((entry, actions, redo, status, refusal))
+    if not updates:
+        return found, None
+
+    def save(stored):
+        refused = None
+        for entry, actions, redo, status, refusal in updates:
+            current = undo_store.find(stored, entry['id'])
+            fields = ('state', 'actions', 'redo_close', 'close_checkpoint')
+            if current is None or any(current.get(key) != entry.get(key) for key in fields):
+                continue
+            if not actions:
+                stored.remove(current)
+            else:
+                current['actions'] = actions
+                if redo is None:
+                    current.pop('redo_close', None)
+                else:
+                    current['redo_close'] = redo
+                if status is None:
+                    undo_store.confirm_checkpoint(stored, current)
+                else:
+                    current['close_checkpoint'] = status
+            refused = refusal or refused
+        return refused
+
+    refused = undo_store.edit(save)
+    return undo_store.entries(), refused
+
+
+def _undo_view(entry):
+    """Treat a partial Redo as an Undo of its actual changes, with the original Redo still resumable."""
+    saved = entry.get('redo_close')
+    if not saved:
+        return entry
+    actions = saved['actions']
+    if pending := saved['pending']:
+        actions = pending['actions']
+    return dict(entry, actions=actions, state='done') if actions else entry
+
+
+def view(entry, env=None, check=True, *, found=None):
+    """An entry for the page, after settling pending closes and with the reason a step may refuse."""
+    if found is None and env is not None:
+        with _RUN_LOCK:
+            found, _ = _resolve_pending_closes(undo_store.entries(), env, only=entry['id'])
+        entry = undo_store.find(found, entry['id'])
+        if entry is None:
+            return None
+    entry = _undo_view(entry)
     shown = {key: entry[key] for key in ('id', 'at', 'who', 'label', 'state')}
-    shown['redo'] = entry['state'] == 'undone' and entry.get('redo', True)
+    shown['redo'] = undo_store.redo_available(entry, found if found is not None else [entry])
     shown['undone_at'] = entry.get('undone_at')
     direction = 'undo' if entry['state'] == 'done' else 'redo' if shown['redo'] else None
     if check and env is not None and direction:
@@ -1429,12 +2167,14 @@ def view(entry, env=None, check=True):
     return shown
 
 
-def history(env, check=True):
-    found = undo_store.entries()
-    env.forget()
+def history(env, check=True, *, close_lock=None):
+    # The send lock excludes a first close, and the run lock excludes a Redo while we read its journal.
+    with close_lock or nullcontext(), _RUN_LOCK:
+        env.forget()
+        found, _ = _resolve_pending_closes(undo_store.entries(), env)
     next_undo, next_redo = next_target('undo', found), next_target('redo', found)
     label = lambda entry_id: entry_id and undo_store.find(found, entry_id)['label']  # noqa: E731
-    return {'entries': [view(entry, env, check) for entry in reversed(found)],
+    return {'entries': [view(entry, env, check, found=found) for entry in reversed(found)],
             'next_undo': next_undo, 'next_redo': next_redo,
             'next_undo_label': label(next_undo), 'next_redo_label': label(next_redo)}
 
@@ -1443,8 +2183,9 @@ def next_target(direction, found=None):
     """The entry Cmd+Z (undo) or Cmd+Shift+Z (redo) acts on, or None."""
     found = undo_store.entries() if found is None else found
     if direction == 'undo':
-        return next((entry['id'] for entry in reversed(found) if entry['state'] == 'done'), None)
-    undone = [entry for entry in found if entry['state'] == 'undone' and entry.get('redo', True)]
+        return next((entry['id'] for entry in reversed(found) if _undo_view(entry)['state'] == 'done'), None)
+    undone = [entry for entry in found if undo_store.redo_available(entry, found)
+              and not entry.get('redo_close', {}).get('pending')]
     return max(undone, key=lambda entry: entry.get('undone_at') or 0)['id'] if undone else None
 
 
@@ -1464,31 +2205,75 @@ def run(direction, entry_id, env, confirmed=None):
     and the preference writes (prefs_sync.LOCK), so a step in between cannot slip past the check."""
     if direction not in ('undo', 'redo'):
         raise ValueError('Choose undo or redo.')
-    with _RUN_LOCK, groups.LOCK(), prefs_sync.LOCK:
+    with _RUN_LOCK, groups.LOCK(), helper_tabs.record_lock(), prefs_sync.LOCK:
         return _run(direction, entry_id, env, confirmed)
 
 
 def _run(direction, entry_id, env, confirmed):
     found = undo_store.entries()
+    if direction == 'redo':
+        found, _ = _resolve_pending_closes(found, env)
     known = {entry['id'] for entry in found}
     entry_id = entry_id or next_target(direction, found)
     entry = undo_store.find(found, entry_id) if entry_id else None
     if entry is None:
         raise Refused('Nothing to undo.' if direction == 'undo' else 'Nothing to redo.')
-    if (direction == 'undo') != (entry['state'] == 'done') or direction == 'redo' and not entry.get('redo', True):
+    if direction == 'undo':
+        found, refused = _resolve_pending_closes(found, env, only=entry_id)
+        if refused:
+            raise Refused(refused)
+        entry = undo_store.find(found, entry_id)
+        if entry is None:
+            raise Refused('Nothing to undo.')
+        entry = _undo_view(entry)
+    elif entry.get('redo_close', {}).get('pending'):
+        raise Refused('A tab or session may have closed during Redo. Check Undo in History.')
+    if (direction == 'undo') != (entry['state'] == 'done') or direction == 'redo' and not undo_store.redo_available(entry, found):
         raise Refused('That step is already undone.' if direction == 'undo' else 'That step cannot be redone now.')
-    env.forget()
+    if any(action['kind'] in TASK_TREE_STEPS for action in entry['actions']):
+        env.refresh()
+    else:
+        env.forget()
     _check(entry, direction, env)
     effects = _effects(entry, direction, env)
     if effects and confirmed != token(entry, direction, effects):
         return {'status': 'confirm', 'id': entry['id'], 'label': entry['label'], 'direction': direction,
                 'effects': effects, 'token': token(entry, direction, effects)}
     done, at = 0, time.time()  # the time of this change, under the locks: undo_store orders and ends redo by it
+    warnings, applied = [], []
+
+    def checkpoint(action, *, pending=None):
+        actions = applied + ([action] if action is not None else [])
+        if pending:
+            pending = dict(pending)
+            pending['actions'] = [*applied, pending.pop('action')]
+
+        def update(stored):
+            target = undo_store.find(stored, entry['id'])
+            if target is None:
+                raise undo_store.LockError('Tether could not save Undo for this Redo.')
+            target['actions'] = entry['actions']
+            if actions or pending:
+                target['redo_close'] = {'actions': actions, 'pending': pending}
+            else:
+                target.pop('redo_close', None)
+
+        undo_store.edit(update)
+
     with undo_store.quiet():
         try:
             for action in _ordered(entry, direction):
-                KINDS[action['kind']].apply(action, direction, env)
+                apply = KINDS[action['kind']].apply
+                if direction == 'redo' and action['kind'] in REDO_CLOSE_STEPS:
+                    warning = apply(action, direction, env, checkpoint=checkpoint)
+                else:
+                    warning = apply(action, direction, env)
+                if warning:
+                    warnings.append(warning)
+                applied.append(action)
                 done += 1
+        except _RedoCloseInterrupted:
+            failed = True
         except Refused:
             if not done:
                 raise
@@ -1505,11 +2290,14 @@ def _run(direction, entry_id, env, confirmed):
         target = undo_store.find(stored, entry['id'])
         if target is None:
             return
-        target['actions'] = actions
+        if not failed or not target.get('redo_close'):
+            target['actions'] = actions
         if not failed:
+            target.pop('redo_close', None)
             # A step of the person saved while this ran ended redo (undo_store._save): keep it ended.
             # A step saved late but changed before this undo does not end its redo (undo_store._save).
-            newer = any(e['id'] not in known and e['who'].get('by') == 'user' and e['at'] > at for e in stored)
+            newer = any(e['id'] not in known and e['who'].get('by') == 'user' and e['at'] > at
+                        and not e.get('close_checkpoint') for e in stored)
             target['state'] = 'undone' if direction == 'undo' else 'done'
             target['redo'] = direction == 'undo' and not newer
             target['undone_at'] = at if direction == 'undo' else None
@@ -1517,5 +2305,8 @@ def _run(direction, entry_id, env, confirmed):
     if failed:
         raise Refused(f'Only part of “{entry["label"]}” could be {"undone" if direction == "undo" else "redone"}. '
                       'Check the tabs, then try again from History.')
-    return {'status': 'done', 'id': entry['id'], 'label': entry['label'], 'direction': direction,
-            'state': 'undone' if direction == 'undo' else 'done'}
+    result = {'status': 'done', 'id': entry['id'], 'label': entry['label'], 'direction': direction,
+              'state': 'undone' if direction == 'undo' else 'done'}
+    if warnings:
+        result['warnings'] = warnings
+    return result

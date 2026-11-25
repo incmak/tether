@@ -1,4 +1,5 @@
 """Signaling tests mock the upstream and never touch a terminal or worker."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 import unittest

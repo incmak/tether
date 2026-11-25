@@ -5,11 +5,11 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, shotsDir } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json', '.webmanifest': 'application/manifest+json' }
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-15/phone-bar/shots')
+const SHOTS = shotsDir('phone-bar')
 const pane = (id, name, extra) => ({ id, tmux_session: '$1', label: `project:0.${id.slice(1)}`, pane_name: name, agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: `t${id.slice(1)}`, approval: null, ask: null, ...extra })
 const fixture = {
   sessions: { sessions: [pane('%1', 'Deploy fix'), pane('%2', 'Docs pass')], default_thread: 't1' },
@@ -90,7 +90,8 @@ async function main() {
         if (endpoint.startsWith('chat')) return route.fulfill({ json: fixture.chat })
         if (endpoint === 'undo' && request.method() === 'GET') return route.fulfill({ json: history() })
         if (endpoint === 'undo') { const answer = runUndo(request.postDataJSON()); return route.fulfill({ status: answer.status, json: answer.json }) }
-        if (endpoint === 'prefs' && request.method() === 'POST' && armed) {
+        if (endpoint === 'prefs' && request.method() === 'POST' && armed &&
+            Object.values(request.postDataJSON()?.changes?.drafts ?? {}).some(draft => typeof draft?.text === 'string' && draft.text.length > 0)) {
           armed = false
           // A reorder the server recorded: it names the step in the answer, as undo_api.headers does.
           const step = { id: 'u000000000003', at: now(), who: { by: 'user' }, label: 'Reordered tabs `a` & “b”', state: 'done', redo: false, undone_at: null, why: null }

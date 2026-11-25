@@ -9,6 +9,7 @@ import threading
 import time
 from pathlib import Path
 from urllib.parse import quote, urlsplit
+import injected_prompts
 import paths
 from notification_priority import classify
 
@@ -330,10 +331,11 @@ class Notifier:
 
     MESSAGES = {'done': 'Finished', 'approval': 'Needs approval', 'input': 'Needs your input'}
 
-    def __init__(self, send, watching=lambda session: False, settle=4, minimum_work=5, clock=time.monotonic, muted=lambda: (), reply=lambda entry: '', context=None, levels=lambda: {}, delivery=lambda: DEFAULT_DELIVERY, finished_low=lambda entry: False):
+    def __init__(self, send, watching=lambda session: False, settle=4, minimum_work=5, clock=time.monotonic, muted=lambda: (), reply=lambda entry: '', context=None, levels=lambda: {}, delivery=lambda: DEFAULT_DELIVERY, finished_low=lambda entry: False, quiet=lambda entry: False):
         self.send, self.watching, self.settle, self.minimum_work, self.clock, self.muted = send, watching, settle, minimum_work, clock, muted
         self.reply, self.context, self.levels, self.delivery = reply, context, levels, delivery
         self.finished_low = finished_low
+        self.quiet = quiet
         self.seen = {}
 
     def observe(self, entry, status):
@@ -363,7 +365,7 @@ class Notifier:
             record['worked'] = None
         if self.watching(entry['id']) or entry['id'] in self.muted():
             return
-        reply, records = '', []
+        reply, records, unknown = '', [], False
         attention = status.get('attention') if isinstance(status.get('attention'), dict) else {}
         if kind == 'done' or (kind == 'input' and not (attention.get('question') or attention.get('text'))):
             try:
@@ -371,11 +373,15 @@ class Notifier:
                     reply, records = self.context(entry)
                 else:
                     reply = self.reply(entry)
+            except injected_prompts.ReceiptsUnreadable:
+                unknown = True  # An unreadable prompt source counts as background. The notification is still sent.
             except Exception:  # A broken transcript must not prevent delivery.
                 pass
-        priority, preview = classify(kind, entry.get('agent'), records, reply)
+        priority, preview = classify(kind, entry.get('agent'), records, reply, entry=entry, source_unknown=unknown)
         if kind == 'done' and priority == 'important' and self.finished_low(entry):
             priority = 'low'
+        if priority != 'urgent' and self.quiet(entry):
+            return
         mode = self.delivery().get(priority, DEFAULT_DELIVERY[priority])
         if mode == 'off' or not allows(self.levels().get(entry['id'], 'all'), priority):
             return

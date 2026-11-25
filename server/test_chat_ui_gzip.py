@@ -1,4 +1,5 @@
 """Chat UI compression tests use temporary assets and no sockets or terminals."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import gzip
 import io
 import os

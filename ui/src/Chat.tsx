@@ -1,3 +1,6 @@
+import { TaskChips } from './TaskChips'
+import { TaskNeeds } from './TaskNeeds'
+import { taskChildren, taskOf } from './taskTree'
 import { RetryButton } from './Retry'
 import type { TabPickControls } from './tabSelection'
 import { takeBootChat } from './boot'
@@ -6,15 +9,16 @@ import { terminalText } from './terminalText'
 import { ShellOutput } from './ShellOutput'
 import { ContinueWith } from './ContinueWith'
 import { shellCommand } from './shellCommand'
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useWords } from './words'
-import { ArrowDown, Ban, CalendarClock, Paperclip, Plus, ArrowLeftRight, Blocks, GitFork, Check, ChevronDown, ChevronRight, Clock3, Columns2, CornerDownRight, Gauge, Info, Layers, Maximize2, Menu, MessageSquare, Minimize2, MoreHorizontal, PanelTop, Pencil, Pin, PinOff, Redo2, RefreshCw, RotateCcw, Rows2, Search, Server, Settings2, Shield, ShieldAlert, SquareTerminal, Target, Terminal, TriangleAlert, Undo2, WifiOff, X, Zap } from 'lucide-react'
+import { ArrowDown, Ban, CalendarClock, Paperclip, ArrowLeftRight, Blocks, GitFork, Check, ChevronDown, ChevronRight, Clock3, Columns2, CornerDownRight, Gauge, Info, Layers, Maximize2, Menu, MessageSquare, Minimize2, MoreHorizontal, PanelTop, Pencil, Pin, PinOff, Redo2, RefreshCw, RotateCcw, Rows2, Search, Server, Settings2, Shield, ShieldAlert, SquareTerminal, Target, Terminal, TriangleAlert, Undo2, WifiOff, X, Zap } from 'lucide-react'
 import { requestUndo, useUndoNext } from './undoState'
 import { MineBar, MINE_BAR_SPACE, startedLabel } from './MineBar'
+import { useTetherZone } from './zone'
 import { AssistantRuntimeProvider, ThreadPrimitive, useExternalStoreRuntime } from '@assistant-ui/react'
-import { ApiError, canFork, creditsLabel, cronsLabel, cronSummary, errorText, goalStatusLabel } from './api'
-import type { Api, Approval, AskBridge, Attention, ChatData, ChatMessage, Choice, DialogAction, Footer, Pane, PromptAction } from './api'
+import { ApiError, canFork, chatMessages, cleanChat, creditsLabel, cronsLabel, cronSummary, errorText, goalStatusLabel } from './api'
+import type { AdvisorCall, Api, Approval, AskBridge, Attention, ChatData, ChatMessage, Choice, DialogAction, Footer, Pane, PromptAction } from './api'
 import { usePolling } from './hooks'
 import { useBackStep } from './backNav'
 import type { Anchor } from './hooks'
@@ -47,6 +51,7 @@ import { Elapsed, NoticeStack, formatElapsed } from './Notices'
 import type { NoticeItem, NoticeVariant } from './Notices'
 import { State } from './NewSession'
 import { Linked, Message, convertMessage, SelectionCopy } from './Messages'
+import { INTERRUPTED } from './injectedPrompt'
 import type { WatchRun } from './Messages'
 import { foldWatchCycles } from './watchCycles'
 import { Composer } from './Composer'
@@ -63,6 +68,7 @@ import type { PickKey } from './ChoiceExtras'
 import { LiveTerminal } from './Terminal'
 import { WORKSPACE_QUERY } from './workspace'
 import { useHost } from './host'
+import { OpenedBy } from './HelperFold'
 import { ReviewLinks } from './ReviewLinks'
 import { agentBrowserItems, useAgentBrowser } from './AgentBrowser'
 import { PreviewDrawer } from './PreviewDrawer'
@@ -72,6 +78,7 @@ import { codexRunItems, useCodexRuns } from './CodexRuns'
 import { CodexTrustCard } from './CodexTrust'
 import { useCodexTrust } from './codexTrustState'
 import { HOLD_MS } from './gesture'
+import { foreignQueued } from './queueMatch'
 
 
 interface ChatProps { liveReplyPreview: boolean; /** Desktop: a trackpad swipe over the stack row or tab strip scrolls it, not Back/Forward (Settings). */ headerSwipe?: boolean; pane: Pane; session: Session | undefined; api: Api; onMenu: () => void; onUpdate: () => void; draft: string; setDraft: (text: string) => void; onOpenPane: (pane: Pane) => void; onSessionActions: (at?: Anchor) => void; onPaneActions: (pane: string, at?: Anchor) => void; onSplit: (direction: 'right' | 'down') => void; onFork: () => void; onContinued: (id: string) => void; onReorder: (ids: string[]) => void; micOk: boolean; chime: boolean; readAloud: boolean; handsFree: boolean; slot?: SlotControls; running?: number; sidePin?: SidePinControls; allPanes: Pane[]; headerExtra?: ReactNode; askBar?: ReactNode; groupHooks?: GroupHooks; onDropGroup?: (pane: string, group: string) => void; onBacklogAdd?: (text: string, pane: Pane) => void; /** The × close and multi-select on the tab strip (tabSelection.ts). */ tabPick?: TabPickControls }
@@ -107,18 +114,20 @@ function turnEndsOf(messages: ChatMessage[], working: boolean) {
   for (let at = messages.length - 1; at >= 0; at--) {
     const item = messages[at]
     if (item.role === 'user' && !item.kind) { open = false; continue }
-    if (item.kind === 'notice' || item.kind === 'terminal') continue
+    // An advisor call is not the agent's reply: a reply before it still ends the turn.
+    if (item.kind === 'notice' || item.kind === 'terminal' || item.kind === 'advisor') continue
     if (!open && item.role === 'assistant' && !item.kind) ends.add(item.id)
     open = true
   }
   return ends
 }
-// The tool group the agent is still adding to: the newest one in a running turn. A notice after it does not end it.
-function liveGroupOf(messages: ChatMessage[], working: boolean) {
+// A tool group or advisor call is live while it is the newest work in a running turn. Skip notices.
+function liveWorkOf(messages: ChatMessage[], working: boolean) {
   if (!working) return null
   for (let at = messages.length - 1; at >= 0; at--) {
-    if (messages[at].kind === 'notice') continue
-    return messages[at].kind === 'actions' ? messages[at].id : null
+    const { kind, id } = messages[at]
+    if (kind === 'notice') continue
+    return kind === 'actions' || kind === 'advisor' ? id : null
   }
   return null
 }
@@ -148,8 +157,9 @@ function saveDock(id: string, page: HTMLElement | null) {
 // A still copy of a next-door pane's chat, from the cache. It waits just off screen on its side (side 1 = right,
 // -1 = left), at the place the real chat opens, so a side swipe drags both chats together like photos in a gallery.
 const ChatPeek = memo(function ChatPeek({ id, data, api, side, peekRef }: { id: string; data: ChatData | undefined; api: Api; side: 1 | -1; peekRef: React.RefObject<HTMLDivElement | null> }) {
-  const messages = useMemo(() => data?.messages ?? [], [data?.messages])
+  const messages = useMemo(() => chatMessages(data), [data])
   const ends = useMemo(() => turnEndsOf(messages, data?.state === 'Working'), [messages, data?.state])
+  const liveWork = useMemo(() => liveWorkOf(messages, data?.state === 'Working'), [messages, data?.state])
   const folded = useMemo(() => foldWatchCycles(messages), [messages])
   const runtime = useExternalStoreRuntime({ messages: folded, convertMessage, isRunning: data?.state === 'Working', onNew: async () => {} })
   // Messages render a moment after the data; keep the place the real chat will open at while the content grows.
@@ -167,7 +177,7 @@ const ChatPeek = memo(function ChatPeek({ id, data, api, side, peekRef }: { id: 
     return () => observer.disconnect()
   }, [id, messages])
   return <div className="chat-peek" ref={peekRef} aria-hidden="true" inert style={{ transform: `translateX(${side * 100}%)` }}><div className="thread"><div className="chat-scroll" ref={scroller}><div className="messages">
-    <AssistantRuntimeProvider runtime={runtime}><ThreadPrimitive.Messages>{({ message }) => <Message api={api} session={id} actions={ends.has(message.id)} tools={message.metadata.custom.tools as ToolSummary[] | undefined} id={message.id} role={message.role} kind={message.metadata.custom.kind} title={message.metadata.custom.title ? String(message.metadata.custom.title) : undefined} count={message.metadata.custom.count} text={String(message.metadata.custom.text ?? '')} time={String(message.metadata.custom.time ?? '')} images={message.metadata.custom.images as number | undefined} imageKey={message.metadata.custom.imageKey as string | undefined} watch={message.metadata.custom.watch as WatchRun | undefined} />}</ThreadPrimitive.Messages></AssistantRuntimeProvider>
+    <AssistantRuntimeProvider runtime={runtime}><ThreadPrimitive.Messages>{({ message }) => <Message api={api} session={id} actions={ends.has(message.id)} tools={message.metadata.custom.tools as ToolSummary[] | undefined} advisor={message.metadata.custom.advisor as AdvisorCall | undefined} live={message.metadata.custom.kind === 'advisor' && message.id === liveWork} id={message.id} role={message.role} kind={message.metadata.custom.kind} title={message.metadata.custom.title ? String(message.metadata.custom.title) : undefined} count={message.metadata.custom.count} text={String(message.metadata.custom.text ?? '')} source={message.metadata.custom.source as ChatMessage['source']} legacy={message.metadata.custom.legacy === true ? true : undefined} tabs={message.metadata.custom.tabs as ChatMessage['tabs']} time={String(message.metadata.custom.time ?? '')} images={message.metadata.custom.images as number | undefined} imageKey={message.metadata.custom.imageKey as string | undefined} watch={message.metadata.custom.watch as WatchRun | undefined} />}</ThreadPrimitive.Messages></AssistantRuntimeProvider>
   </div></div></div><div className="chat-peek-dock" ref={dock} /></div>
 })
 // Where each pane was scrolled, so switching panes and coming back lands at the same place.
@@ -179,13 +189,16 @@ const scrollByPane = new Map<string, { top: number; limit: number; bottom: boole
 const MODES: Record<string, string> = { default: 'Manual', accept: 'Accept edits', plan: 'Plan', auto: 'Auto' }
 const modeKey = (mode?: string | null) => (['accept', 'plan', 'auto', 'bypass'].find(key => (mode ?? '').toLowerCase().includes(key)) ?? 'default')
 // What the terminal is waiting for, as a drawer above the message box: the question, then each real option.
-interface Pending { id: number; text: string; key: string; seen: number; imagesSeen?: number; at: number; thread?: string | null; failed?: string; offline?: boolean; recoveredImageText?: boolean }
+interface Pending { id: number; text: string; key: string; seen: number; imagesSeen?: number; at: number; thread?: string | null; failed?: string; offline?: boolean; recoveredImageText?: boolean; terminal?: { lastId: string | null } }
 // Persist queued sends until delivery or 30 minutes, and keep recovered text until the user handles it.
 const PENDING_KEY = 'tether.pending'
-const keepPending = (item: Pending) => item.recoveredImageText || Date.now() - item.at < 1800000
+const PENDING_TTL = 1800000
+const SLASH_CHECK = 3000
+const BTW_TIMEOUT = 10000
+const keepPending = (item: Pending) => (!item.terminal && item.recoveredImageText) || Date.now() - item.at < PENDING_TTL
 function keepPendingOnLoad(item: Pending) {
   if (keepPending(item)) return true
-  if (typeof item.text !== 'string') return false
+  if (item.terminal || typeof item.text !== 'string') return false
   const { paths, rest } = uploadImageParts(item.text)
   return paths.length > 0 && !!rest
 }
@@ -200,6 +213,7 @@ function savePending() {
 }
 const squash = (text: string) => text.replace(/\s+/g, ' ').trim()
 const slashCommand = (text: string) => /^\/[^\s/]+(?:\s|$)/.test(text.trim())
+const commandOf = (text: string) => text.trim().split(/\s+/, 1)[0]
 // Claude stores a shell command "!ls" as "! ls", and "!! ls" as "! ! ls". Compare with the "!" marks joined, so a run command leaves the queue.
 const sameCommand = (text: string) => text.replace(/^(?:!\s*)+/, '!')
 const matches = (messages: ChatMessage[], key: string, images = false) => messages.filter(item => {
@@ -215,7 +229,7 @@ function codexSendEvidence(data: ChatData | undefined, text: string) {
   if (!paths.length) return
   const files = JSON.stringify(paths.sort()), words = squash(rest)
   let complete = 0, imageOnly = 0
-  for (const message of data.messages) {
+  for (const message of chatMessages(data)) {
     if (message.role !== 'user' || message.kind) continue
     const received = uploadImageParts(message.text)
     if (JSON.stringify(received.paths.sort()) !== files) continue
@@ -270,8 +284,10 @@ function useSteadyPreview(text: string | undefined) {
 }
 
 export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api, onMenu, onUpdate, draft, setDraft, onOpenPane, onSessionActions, onPaneActions, onSplit, onFork, onContinued, onReorder, micOk, chime, readAloud, handsFree, slot, running = 0, sidePin, allPanes, headerExtra, askBar, groupHooks, onDropGroup, onBacklogAdd, tabPick }: ChatProps) {
+  useTetherZone()
   const agentBrowser = useAgentBrowser(api)
   const words = useWords()
+  const tabPanelId = useId()
   const browserAsk = agentBrowser?.asks.find(item => item.pane === pane.id) ?? null
   const host = useHost()
   const panelRef = useRef<HTMLElement>(null)
@@ -288,8 +304,11 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     return api<ChatData>(`chat?${chatQuery}${document.visibilityState === 'visible' ? '&watch=1' : ''}`, undefined, signal)
   }, [api, chatQuery])
   const streamPath = useCallback((shown?: ChatData) => `stream?${chatQuery}&delta=1${shown?.version ? `&have=${encodeURIComponent(shown.version)}` : ''}`, [chatQuery])
-  const { data, error, loading, refresh } = usePolling(fetchChat, 1500, streamPath, chatCache.get(pane.id))
-  useEffect(() => { if (data) cacheChat(pane.id, data) }, [pane.id, data])
+  const { data: received, error, loading, refresh } = usePolling(fetchChat, 1500, streamPath, chatCache.get(pane.id))
+  useEffect(() => { if (received) cacheChat(pane.id, received) }, [pane.id, received])
+  // Everything below reads a clean transcript. `transcript` says whether the server sent a list at all.
+  const data = useMemo(() => cleanChat(received), [received])
+  const transcript = Array.isArray(received?.messages)
   const preview = useSteadyPreview(liveReplyPreview ? data?.preview?.text : undefined)
   // Connection state for the banner: the browser's offline flag, plus failed chat reads while a chat is already on screen.
   const [offline, setOffline] = useState(() => !navigator.onLine)
@@ -319,6 +338,12 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   const [term, setTermState] = useState(() => terminalPanes.has(pane.id))
   // The chat box unmounts while the terminal shows. On the way back, go to the saved place (or the bottom) again.
   const setTerm = (on: boolean) => { if (on) { terminalPanes.add(pane.id); restore.current = scrollByPane.get(pane.id) ?? null } else terminalPanes.delete(pane.id); setTermState(on) }
+  // A menu item that closes the menu gives the focus back to the … button, not to the page.
+  const focusKeys = () => keysRef.current?.querySelector<HTMLButtonElement>('button')?.focus()
+  const openTerminal = () => {
+    setTerm(true)
+    requestAnimationFrame(() => panelRef.current?.querySelector<HTMLButtonElement>('.terminal-toggle')?.focus())
+  }
   const [jump, setJump] = useState(false)
   const viewport = useRef<HTMLDivElement>(null)
   const page = useRef<HTMLDivElement>(null)  // everything under the tabs: it slides as one card on a side swipe
@@ -337,7 +362,9 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   // In a session with groups, the strip, the swipe and the prefetch use the open tab's group only.
   const view = useMemo(() => session?.groups?.length ? { ...session, panes: groupPanes(session.panes, session.groups, pane) } : session, [session, pane])
   const grouped = !!session?.groups?.length
-  const groupName = grouped ? placeName(groupOf(pane, session?.groups), session?.groups) : ''
+  const task = taskOf(pane, session?.panes ?? allPanes)
+  const children = taskChildren(task, session?.panes ?? allPanes)
+  const groupName = placeName(groupOf(task, session?.groups), session?.groups)
   const panes = view?.panes ?? []
   const ready = data !== undefined
   const [, setPrefetched] = useState(0)
@@ -682,8 +709,9 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   const { dropping, fileDrop } = useFileDrop(activePane.id, dropRefusal({ agent: activePane.agent, writable: activePane.writable && writable }, draft, !!data), setToast)
   // The name the tab shows: the pane's own name, else the session's (a bare number is not a name).
   const claudeName = pane.pane_name || (session && !/^\d+$/.test(session.name) ? session.name : '')
-  const messages = useMemo(() => data?.messages ?? [], [data?.messages])
-  const sentPrompts = useMemo(() => messages.filter(message => message.role === 'user' && !message.kind).map(message => message.text), [messages])
+  const messages = useMemo(() => chatMessages(data), [data])
+  // Up-arrow recall offers only what the person typed: not the status, review and rules prompts Tether typed in.
+  const sentPrompts = useMemo(() => messages.filter(message => message.role === 'user' && !message.kind && message.source !== 'tether' && !INTERRUPTED.has(message.text.trim())).map(message => message.text), [messages])
   // Read a new reply aloud when its turn ends. Replies already there when the chat opens are not read.
   useEffect(() => readAloud ? keepAudioUnlocked() : undefined, [readAloud])
   // Hands-free: when the reading ends, ask the composer to start the mic.
@@ -692,48 +720,87 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   const readUpTo = useRef<string | null | undefined>(undefined)
   const cachedAtOpen = useRef(chatCache.get(pane.id))
   useEffect(() => {
-    if (!data || data === cachedAtOpen.current) return  // saved data is not "there when the chat opens"; wait for fresh data
+    if (!data || received === cachedAtOpen.current) return  // saved data is not "there when the chat opens"; wait for fresh data
     if (readUpTo.current === undefined || !readAloud) { readUpTo.current = lastReply?.id ?? null; return }
     if (state === 'Working' || !lastReply || lastReply.id === readUpTo.current) return
     readUpTo.current = lastReply.id
     if (document.visibilityState !== 'visible') return
     speak(lastReply.text, lastReply.text, handsFree && micOk && writable ? () => setListenRequest(count => count + 1) : undefined)
-  }, [data, state, lastReply, readAloud, handsFree, micOk, writable])
+  }, [data, received, state, lastReply, readAloud, handsFree, micOk, writable])
   useEffect(() => () => stopSpeaking(), [])
   const [pending, setPendingState] = useState<Pending[]>(() => pendingByPane.get(pane.id) ?? [])
   // A running `!` command shows in the thread with its live output, so its queued bubble is hidden.
   const bang = activePane.agent === 'claude' ? data?.bang : undefined
   const bangKey = bang ? squash(bang.command).slice(0, 40) : ''
   const bangItem = bang ? pending.find(item => !item.failed && item.text.trim().startsWith('!') && squash(item.text.trim().slice(1)).slice(0, 40) === bangKey) : undefined
-  const queued = bangItem ? pending.filter(item => item !== bangItem) : pending
+  const notes = pending.filter(item => item.terminal)
+  const newestNote = notes[notes.length - 1]
+  const queued = pending.filter(item => !item.terminal && item !== bangItem)
   const notSent = queued.filter(item => item.failed).length
   const waiting = queued.length - notSent
-  const queueLabel = [waiting ? `${waiting} queued` : '', notSent ? `${notSent} not sent` : ''].filter(Boolean).join(' · ')
-  const setPending = (update: (list: Pending[]) => Pending[]) => setPendingState(list => { const next = update(list); pendingByPane.set(pane.id, next); savePending(); return next })
+  // Prompts in Claude's own input queue (the server sends them only mid-turn). One this message box sent already shows as its own bubble, so show only the rest:
+  // sends from Friday, another device or the terminal.
+  const otherQueued = foreignQueued(data?.queued ?? [], queued.filter(item => !item.failed))
+  const waitingAll = waiting + otherQueued.length
+  // Claude's "edit queued" pulls back its whole queue. With more than one entry, the cancel button says so, without a
+  // count: the server shows at most 50 entries.
+  const cancelLabel = activePane.agent !== 'claude' ? 'Hide this queued message' : waitingAll > 1 ? 'Cancel all queued messages' : 'Cancel this queued message'
+  const queueLabel = [waitingAll ? `${waitingAll} queued` : '', notSent ? `${notSent} not sent` : ''].filter(Boolean).join(' · ')
+  const setPending = useCallback((update: (list: Pending[]) => Pending[]) => setPendingState(list => { const next = update(list); pendingByPane.set(pane.id, next); savePending(); return next }), [pane.id])
+  const dataReceivedAt = useRef(0)
+  useEffect(() => { dataReceivedAt.current = received && received !== cachedAtOpen.current ? Date.now() : 0 }, [received])
+  const refreshedFor = useRef(new WeakSet<Pending>())
   const [recheck, setRecheck] = useState(0)
   useEffect(() => {
-    if (!data || (data.session && data.session !== pane.id)) return
-    // Claude writes no chat record for some slash commands (/usage opens a panel). Once the pane is not working, it ran them.
-    // Some run at once while Claude works and then show as a card: /btw (a side question), /mcp, /config, /permissions.
-    // /btw never waits in Claude's queue, so its bubble also leaves once its saved answer is in the chat, or after 10 s.
-    const opened = ['side', 'dialog', 'permissions', 'panel'].includes(data.attention?.reason ?? '')
-    const asked = (item: Pending) => /^\/btw\s/.test(item.text.trim()) && (Date.now() - item.at > 10000 || data.messages.some(message => message.kind === 'side' && squash(message.title ?? '') === squash(item.text.trim().slice(4))))
-    const ran = (item: Pending) => slashCommand(item.text) && !item.failed && Date.now() - item.at > 3000 && (data.state !== 'Working' || opened || asked(item))
-    const cached = data === cachedAtOpen.current
-    setPending(list => {
-      const left = list.flatMap(item => {
+    const now = Date.now()
+    let left: Pending[]
+    let needsRefresh = false
+    // Reconcile only against a real transcript. A partial body (an error, an old server) keeps the queue as it is.
+    if (data && (!data.session || data.session === pane.id) && transcript) {
+      const cached = received === cachedAtOpen.current
+      const card = data.attention || data.approval || data.plan
+      const lastId = () => data.messages[data.messages.length - 1]?.id ?? null
+      left = pending.flatMap(item => {
         if (cached && !keepPending(item)) return keepPendingOnLoad(item) ? [item] : []
         const next = afterTranscript(item, data)
-        return next && keepPending(next) && !ran(next) ? [next] : []
+        if (!next || !keepPending(next)) return []
+        // A pane's first prompt starts a thread where there was none; that is a chat effect too.
+        const threadChanged = changedThread(item, data) || (item.thread === null && data.thread != null)
+        if (item.terminal) return card || threadChanged || lastId() !== item.terminal.lastId ? [] : [item]
+        if (next.failed || !slashCommand(next.text) || now - next.at <= SLASH_CHECK) return [next]
+        // These cards open at once, even while the agent works: /btw, /mcp, /config, /permissions. The command ran.
+        if (['side', 'dialog', 'permissions', 'panel'].includes(data.attention?.reason ?? '')) return []
+        // /btw can finish even while the agent works, either with a saved side answer or after its timeout.
+        if (/^\/btw\s/.test(next.text.trim())) {
+          const question = squash(next.text.trim().slice(4))
+          const answered = question && data.messages.some(message => message.kind === 'side' && squash(message.title ?? '') === question)
+          return data.state !== 'Working' || answered || now - next.at > BTW_TIMEOUT ? [] : [next]
+        }
+        if (data.state === 'Working' || next !== item) return [next]
+        // Only a confirmed Idle pane says the command ran with no output. Other states (Unknown, Unavailable, Approval) leave quietly, as before.
+        // A card or a new thread shows its effect in the chat, so leave quietly too.
+        if (data.state !== 'Idle' || card || threadChanged) return []
+        if (dataReceivedAt.current >= item.at + SLASH_CHECK) return [{ ...item, terminal: { lastId: lastId() } }]
+        // An idle stream can report the same version without delivering another data object. Ask for one fresh read.
+        if (!refreshedFor.current.has(item)) { refreshedFor.current.add(item); needsRefresh = true }
+        return [item]
       })
-      return left.length === list.length && left.every((item, index) => item === list[index]) ? list : left
-    })
-    // An idle pane sends no new data, so check a slash command again once its 3 s have passed.
-    const slash = pending.filter(item => slashCommand(item.text) && !item.failed).map(item => item.at + (/^\/btw\s/.test(item.text.trim()) && Date.now() - item.at > 3100 ? 10100 : 3100) - Date.now())
-    if (!slash.length) return
-    const timer = window.setTimeout(() => setRecheck(n => n + 1), Math.max(100, Math.min(...slash)))
+    } else left = pending.filter(item => !item.terminal || keepPending(item))
+    const unchanged = left.length === pending.length && left.every((item, index) => item === pending[index])
+    setPending(list => list !== pending || unchanged ? list : left)
+    if (needsRefresh) void refresh()
+    // Recheck unresolved commands at their deadlines. Notes only need a timer for expiry.
+    const deadline = Math.min(...left.flatMap(item => {
+      if (item.terminal) return [item.at + PENDING_TTL]
+      if (item.failed || !slashCommand(item.text)) return []
+      const deadlines = [item.at + SLASH_CHECK + 1]
+      if (/^\/btw\s/.test(item.text.trim())) deadlines.push(item.at + BTW_TIMEOUT + 1)
+      return deadlines.filter(at => at > now)
+    }))
+    if (!Number.isFinite(deadline)) return
+    const timer = window.setTimeout(() => setRecheck(n => n + 1), Math.max(0, deadline - Date.now()))
     return () => window.clearTimeout(timer)
-  }, [data, recheck, pending.length]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [data, received, transcript, pane.id, pending, recheck, refresh, setPending])
   useEffect(() => {
     if (!toast) return
     const timer = setTimeout(() => setToast(''), 6000)
@@ -745,6 +812,56 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     document.addEventListener('click', dismiss)
     return () => document.removeEventListener('click', dismiss)
   }, [keysOpen])
+  // A workspace slot clips what overflows it, and a short grid row can be under 120px tall. There the … menu opens in
+  // the top layer (popover), under the … button and inside the window, and it moves when the window or slot resizes (B378).
+  useLayoutEffect(() => {
+    const keys = keysRef.current, menu = keys?.querySelector<HTMLElement>('.keys-menu'), panel = panelRef.current
+    if (!keysOpen || !keys || !menu || !panel?.closest('.workspace') || typeof menu.showPopover !== 'function') return
+    menu.popover = 'manual'
+    menu.showPopover()
+    const place = () => {
+      const button = keys.getBoundingClientRect(), gap = 4, edge = 8, scrolled = menu.scrollTop
+      Object.assign(menu.style, { inset: 'auto', margin: '0', maxHeight: 'none', overflowY: 'auto', overscrollBehavior: 'contain' })
+      const width = menu.offsetWidth, below = window.innerHeight - button.bottom - gap - edge, above = button.top - gap - edge
+      const up = below < Math.min(menu.scrollHeight, 240) && above > below
+      menu.style.maxHeight = `${Math.max(0, Math.floor(up ? above : below))}px`
+      menu.style.left = `${Math.max(edge, Math.min(button.right - width, window.innerWidth - width - edge))}px`
+      if (up) menu.style.bottom = `${window.innerHeight - button.top + gap}px`
+      else menu.style.top = `${button.bottom + gap}px`
+      // Keep the reader's place, and keep the focused item in view when the menu gets shorter.
+      menu.scrollTop = scrolled
+      if (menu.contains(document.activeElement)) (document.activeElement as HTMLElement).scrollIntoView({ block: 'nearest' })
+    }
+    place()
+    const observer = new ResizeObserver(place)
+    observer.observe(panel)
+    window.addEventListener('resize', place)
+    return () => { observer.disconnect(); window.removeEventListener('resize', place); if (menu.matches(':popover-open')) menu.hidePopover() }
+  }, [keysOpen])
+  // When a header or menu action hides the focused control (a menu item closes the menu, Back to chat folds the terminal
+  // button, a pin folds), focus moves to the … button, not to the page (WCAG 2.4.3). Only while focus was in this header.
+  // A resize can hide it too: a menu item or header button folds or unfolds at a container breakpoint.
+  // It acts only when the header control that last had focus is gone or hidden: focus the user moved away stays put.
+  const headerFocus = useRef<HTMLElement | null>(null)
+  const rescueFocus = useRef(() => {})
+  useLayoutEffect(() => {
+    rescueFocus.current = () => {
+      const last = headerFocus.current, active = document.activeElement
+      if (!last || (last.isConnected && last.getClientRects().length)) return
+      if (!active || active === document.body || active === last) focusKeys()
+    }
+  })
+  useLayoutEffect(() => rescueFocus.current(), [keysOpen, term, sidePin?.pinned])
+  useEffect(() => {
+    const panel = panelRef.current
+    if (!panel) return
+    const observer = new ResizeObserver(() => rescueFocus.current())
+    observer.observe(panel)
+    // A press outside the header moves the user away, even where it leaves focus on the page (empty chat space).
+    const away = (event: PointerEvent) => { if (!headerRef.current?.contains(event.target as Node)) headerFocus.current = null }
+    document.addEventListener('pointerdown', away, true)
+    return () => { observer.disconnect(); document.removeEventListener('pointerdown', away, true) }
+  }, [])
   useLayoutEffect(() => {
     const view = viewport.current
     if (!view) return
@@ -766,6 +883,8 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
       const element = view.querySelector<HTMLElement>(`[data-msg-id="${CSS.escape(id)}"]`)
       if (!element) return
       target.current = null; sticky.current = false; setJump(true)
+      // A hit inside a fold (a scheduled run, a watch cycle) must show: open each closed fold around it.
+      for (let fold = element.parentElement?.closest('details'); fold; fold = fold.parentElement?.closest('details')) fold.open = true
       element.scrollIntoView({ block: element.offsetHeight > view.clientHeight * .6 ? 'start' : 'center' })  // a tall message starts at the top
       if (element.offsetHeight > view.clientHeight * .6) view.scrollTop -= 16
       hold.current = { top: view.scrollTop, until: Date.now() + 1500 }
@@ -796,14 +915,15 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     try { await api(path, body); await refresh(); onUpdate(); return true }
     catch (error) {
       if (error instanceof ApiError && error.status === 409) {
-        await refresh(); setToast('The thread changed. Review the chat, then try again.')
+        await refresh(); setToast(path === 'pick' ? errorText(error) : 'The thread changed. Review the chat, then try again.')
       } else { lastFailure.current = error; setSendError(errorText(error)); setDraftBlocked(error instanceof ApiError && error.draft) }
       return false
     }
   }
   // Claude: Up pulls every queued message back into its input; Tether clears that input and returns the text to the message box.
   // Codex has no queue to edit, so the × only hides the bubble there.
-  async function unqueue(id: number) {
+  // id null: an entry another sender queued. Claude returns the whole queue, so it lands in the message box the same way.
+  async function unqueue(id: number | null) {
     if (activePane.agent !== 'claude') { setPending(list => list.filter(other => other.id !== id)); return }
     try {
       const { text } = await api<{ text: string }>('unqueue', { session: pane.id, thread: data?.thread ?? null })
@@ -836,14 +956,19 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     } finally { setActing(false) }
   }
   // While Claude asks a question, the message box answers it through its own-answer row (checked on the server).
-  const ownAnswer = !data?.approval && data?.attention?.reason === 'menu' ? data.attention.options?.find(option => option.free) : undefined
+  const menuBlocksComposer = !data?.approval && (data?.attention?.menu_verified === false || data?.attention?.ask_current?.multi === true)
+  const menuRevision = data?.attention?.menu_verified || undefined
+  const ownAnswer = !menuBlocksComposer && !data?.approval && data?.attention?.reason === 'menu' ? data.attention.options?.find(option => option.free) : undefined
   async function send(text: string, retryOf?: Pending) {
     text = terminalText(text)
+    setPending(list => list.some(item => item.terminal) ? list.filter(item => !item.terminal) : list)
     // Claude shows these as a terminal panel that a phone sees only a slice of. Show Tether's own sheet instead, as T3 Code does.
     if (!retryOf && activePane.agent === 'claude' && /^\/(usage|cost|stats|status)$/.test(text.trim())) { setPlanSheet(true); return true }
-    if (ownAnswer && !retryOf) return write('menu', { session: pane.id, thread: data?.thread ?? null, choice: ownAnswer.id, answer: text })
+    if (ownAnswer && !retryOf) return write('menu', { session: pane.id, thread: data?.thread ?? null, choice: ownAnswer.id, answer: text, revision: menuRevision })
     const key = squash(text).slice(0, 80)
-    const images = codexSendEvidence(data, text)
+    // The send must go out even when the delivery check cannot read the chat.
+    let images: ReturnType<typeof codexSendEvidence>
+    try { images = codexSendEvidence(data, text) } catch { images = undefined }
     const seen = retryOf?.seen ?? images?.complete ?? matches(messages, key, imagesOnly(text))
     const thread = retryOf?.thread ?? data?.thread ?? null
     const accepted = await write('message', { session: pane.id, thread, message: text, ...(activePane.agent === 'shell' ? { mode: 'shell' } : {}) })
@@ -856,7 +981,10 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
       const at = retryOf?.at ?? Date.now()
       const item = { ...retryOf, id: retryOf?.id ?? at, text, key, seen, imagesSeen: retryOf?.imagesSeen ?? images?.imageOnly,
         thread, at, failed: lost ? errorText(failure) : undefined, offline: lost && !(failure instanceof ApiError) }
-      setPending(list => retryOf ? list.map(other => other.id === retryOf.id ? item : other) : [...list, item])
+      setPending(list => {
+        const queued = list.filter(other => !other.terminal)
+        return retryOf ? queued.map(other => other.id === retryOf.id ? item : other) : [...queued, item]
+      })
     }
     if (accepted || lost) { sticky.current = true; setJump(false); hold.current = null; requestAnimationFrame(() => requestAnimationFrame(() => viewport.current?.scrollTo({ top: viewport.current.scrollHeight }))) }  // after the bubble renders
     return accepted || (lost && activePane.agent !== 'shell')
@@ -867,10 +995,11 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     if (retrying !== null) return
     setRetrying(item.id)
     try {
-      const fresh = await api<ChatData>(`chat?session=${encodeURIComponent(pane.id)}&limit=${limit}`).catch(() => null)
+      let fresh = await api<ChatData>(`chat?session=${encodeURIComponent(pane.id)}&limit=${limit}`).catch(() => null)
       if (!fresh || !Array.isArray(fresh.messages)) {
         setToast('Could not check delivery. Reconnect and try again.'); return
       }
+      fresh = cleanChat(fresh)!
       if (fresh.session !== pane.id || changedThread(item, fresh)) {
         setToast('The thread changed. Use Edit to recover this message.'); void refresh(); return
       }
@@ -1014,11 +1143,11 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   // A card key that Claude did not take leaves its error under the message box. Clear it when the card changes or closes.
   const card = footer.heads_up ? `${footer.heads_up.state}|${footer.heads_up.text}` : ''
   useEffect(() => { if (cardError.current) { cardError.current = false; setSendError(''); setDraftBlocked(false) } }, [card, pane.id])
-  // A tap on a row of the agent's list: the server moves the cursor there, checks the row, then presses one key.
-  async function pickRow(row: number, labels: string[], then: PickKey) {
+  // A list action names a row or submits the numbered question identified by its revision.
+  async function pickRow(row: number | undefined, labels: string[] | undefined, then: PickKey, revision?: string, ticked?: boolean) {
     if (acting) return false
     setActing(true)
-    try { return await write('pick', { session: pane.id, thread: data?.thread ?? null, row, labels, then, heading: data?.attention ? pickHeading(data.attention) : '' }) } finally { setActing(false) }
+    try { return await write('pick', { session: pane.id, thread: data?.thread ?? null, row, labels, then, heading: data?.attention ? pickHeading(data.attention) : '', revision, ticked }) } finally { setActing(false) }
   }
   async function sendKey(key: string, card = false) {
     if (acting) return false
@@ -1069,14 +1198,14 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     setActing(true)
     try { if (await write('clear-draft', { session: pane.id, thread: data?.thread ?? null })) setToast('Cleared the input box in the terminal.') } finally { setActing(false) }
   }
-  // An approval goes through the checked route (it confirms the cursor before Enter); a plain menu takes the option's number key.
+  // Both routes verify the cursor before sending Enter.
   async function choose(kind: 'approval' | 'menu', option: Choice, approval: Approval | null, feedback?: string) {
     if (acting) return
     setActing(true)
     try {
       if (kind === 'approval' && approval?.id) await write('approval', { session: pane.id, thread: data?.thread ?? null, approval: approval.id, choice: option.id, feedback })
       // Arrows plus Enter, checked on the screen: a digit key types text when the cursor sits on the own-answer row.
-      else await write('menu', { session: pane.id, thread: data?.thread ?? null, choice: option.id, label: option.text })
+      else await write('menu', { session: pane.id, thread: data?.thread ?? null, choice: option.id, label: option.text, revision: menuRevision })
     } finally { setActing(false) }
   }
   async function start(agent: 'claude' | 'codex') {
@@ -1086,7 +1215,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   }
   // Copy, read aloud and share belong to a finished reply: only the last text of each turn gets them, and not while the agent still works.
   const turnEnds = useMemo(() => turnEndsOf(messages, state === 'Working'), [messages, state])
-  const liveGroup = useMemo(() => liveGroupOf(messages, state === 'Working'), [messages, state])
+  const liveWork = useMemo(() => liveWorkOf(messages, state === 'Working'), [messages, state])
   const folded = useMemo(() => foldWatchCycles(messages), [messages])
   const runtime = useExternalStoreRuntime({ messages: folded, convertMessage, isRunning: state === 'Working', onNew: async message => { await send(message.content.filter(part => part.type === 'text').map(part => part.text).join('\n')) } })
   // When this phone first saw the pane working. Claude prints its own timer in the spinner detail.
@@ -1128,29 +1257,31 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   useLayoutEffect(() => { tellRef.current = (text, thread) => thread !== data?.thread || !writable || ownAnswer || data?.approval ? Promise.resolve(false) : send(text) })
   const tell = useCallback((text: string, thread: string) => tellRef.current(text, thread), [])
   const feedback = useReplyFeedback(api, activePane.agent === 'shell' ? null : data?.thread, writable ? tell : undefined)
-  return <AssistantRuntimeProvider runtime={runtime}><MediaOpener.Provider value={openMedia}><TabOpener.Provider value={tabOpener}><FilePane.Provider value={activePane.id}><PreviewOpener.Provider value={previewActions}><ReplyFeedbackProvider value={feedback}><section ref={panelRef} className={activePane.agent === 'shell' && !term ? 'chat-panel shell-page' : 'chat-panel'} aria-label={`Chat with ${pane.label}`} data-pane={activePane.id} {...fileDrop}>
+  return <AssistantRuntimeProvider runtime={runtime}><MediaOpener.Provider value={openMedia}><TabOpener.Provider value={tabOpener}><FilePane.Provider value={activePane.id}><PreviewOpener.Provider value={previewActions}><ReplyFeedbackProvider value={feedback}><section ref={panelRef} className={activePane.agent === 'shell' && !term ? 'chat-panel shell-page' : 'chat-panel'} aria-label={`Chat with ${pane.label}`} data-pane={activePane.id} data-task-tree={children.length ? '' : undefined} {...fileDrop}>
+    <div className="visually-hidden" role="status">{newestNote ? `${commandOf(newestNote.text)} ran in the terminal. It left no chat output.` : ''}</div>
     {dropping !== null && <div className={dropping ? 'chat-drop refused' : 'chat-drop'} aria-hidden="true">{dropping ? <><Ban size={22} />{dropping}</> : <><Paperclip size={22} />Drop to attach to {chatTitle(pane, session)}</>}</div>}
-    <header ref={headerRef} className="chat-header" draggable={!!slot?.onDragStart} onPointerDown={event => { headerFromTouch.current = event.pointerType === 'touch'; headerDragged.current = false }} onDragStart={event => { if (headerFromTouch.current || headerTouch.current) event.preventDefault(); else slot?.onDragStart?.(event) }} onTouchStart={headerStart} onTouchMove={headerMove} onTouchEnd={headerEnd} onTouchCancel={event => headerEnd(event, true)} onClickCapture={event => { if (headerDragged.current && event.detail !== 0) { event.preventDefault(); event.stopPropagation() } }}><button className="icon-button mobile-menu" onClick={onMenu} aria-label={running ? `Open sessions. ${running} agents running or waiting` : 'Open sessions'}><Menu />{running > 0 && <span className="menu-count" aria-hidden="true">{running}</span>}</button>{slot && <kbd className="slot-badge" title={`Focus this slot: Alt+${slot.index + 1}`}>⌥{slot.index + 1}</kbd>}<button ref={headerTitle} type="button" className="chat-title" aria-label="Session details" onClick={() => setInfo(true)}><h1>{chatTitle(pane, session)}</h1><div>{grouped && session && <><bdi className="group-crumb" title={`${session.name} › ${groupName}`}>{session.name} › {groupName}</bdi><span className="header-separator">·</span></>}<AgentIcon agent={activePane.agent} icon={activePane.pane_icon} /><span className="agent-word">{agentNames[activePane.agent]}</span>{activePane.agent === 'codex' && pane.codex_profile && <span className="provider-badge" title={`Runs on codex -p ${pane.codex_profile}`}>{profileName(pane.codex_profile)}</span>}<span className="header-separator agent-word">·</span><State state={state} />{context && <><span className="header-separator">·</span><span className={Number(context) >= 80 ? 'context-high' : ''}>{context}%<span className="context-word"> context</span></span></>}{activePane.worktree && <><span className="header-separator">·</span><WorktreeMark branch={activePane.worktree} /></>}{activePane.dir && !activePane.worktree && <><span className="header-separator">·</span><bdi className="header-folder" dir="ltr" title={activePane.dir} aria-label={`Directory: ${activePane.dir}`}>{activePane.dir.split('/').filter(Boolean).pop() || '/'}</bdi></>}{started && <span className="header-started" title={`Chat started ${started}`} aria-label={`Started ${started}`}><Clock3 size={12} aria-hidden="true" />{started}</span>}{sidePin?.pinned && <PinMark pin={sidePin} />}</div></button>
+    <header ref={headerRef} className="chat-header" onFocus={event => { headerFocus.current = event.target }} onBlur={event => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) headerFocus.current = null }} draggable={!!slot?.onDragStart} onPointerDown={event => { headerFromTouch.current = event.pointerType === 'touch'; headerDragged.current = false }} onDragStart={event => { if (headerFromTouch.current || headerTouch.current) event.preventDefault(); else slot?.onDragStart?.(event) }} onTouchStart={headerStart} onTouchMove={headerMove} onTouchEnd={headerEnd} onTouchCancel={event => headerEnd(event, true)} onClickCapture={event => { if (headerDragged.current && event.detail !== 0) { event.preventDefault(); event.stopPropagation() } }}><button className="icon-button mobile-menu" onClick={onMenu} aria-label={running ? `Open sessions. ${running} agents running or waiting` : 'Open sessions'}><Menu />{running > 0 && <span className="menu-count" aria-hidden="true">{running}</span>}</button>{slot && <kbd className="slot-badge" title={`Focus this slot: Alt+${slot.index + 1}`}>⌥{slot.index + 1}</kbd>}<button ref={headerTitle} type="button" className="chat-title" aria-label="Session details" onClick={() => setInfo(true)}><span className="task-phone-stack">{groupName}</span><h1><span className="task-desktop-title">{chatTitle(pane, session)}</span><span className="task-phone-title">{chatTitle(task, session)}</span></h1><div>{grouped && session && <><bdi className="group-crumb" title={`${session.name} › ${groupName}`}>{session.name} › {groupName}</bdi><span className="header-separator">·</span></>}<AgentIcon agent={activePane.agent} icon={activePane.pane_icon} /><span className="agent-word">{agentNames[activePane.agent]}</span>{activePane.agent === 'codex' && pane.codex_profile && <span className="provider-badge" title={`Runs on codex -p ${pane.codex_profile}`}>{profileName(pane.codex_profile)}</span>}<span className="header-separator agent-word">·</span><State state={state} />{context && <><span className="header-separator">·</span><span className={Number(context) >= 80 ? 'context-high' : ''}>{context}%<span className="context-word"> context</span></span></>}{activePane.worktree && <><span className="header-separator">·</span><WorktreeMark branch={activePane.worktree} /></>}{activePane.dir && !activePane.worktree && <><span className="header-separator">·</span><bdi className="header-folder" dir="ltr" title={activePane.dir} aria-label={`Directory: ${activePane.dir}`}>{activePane.dir.split('/').filter(Boolean).pop() || '/'}</bdi></>}{started && <span className="header-started" title={`Chat started ${started}`} aria-label={`Started ${started}`}><Clock3 size={12} aria-hidden="true" />{started}</span>}{sidePin?.pinned && <PinMark pin={sidePin} />}</div></button>
       {headerExtra}
-      {grouped && panes.length <= 1 && <button type="button" className="icon-button group-new-tab" aria-label={`New tab in ${groupName}`} title={`New tab in ${groupName}`} onClick={() => onSplit('right')}><Plus size={20} /></button>}
       <ReviewLinks api={api} pane={pane} panes={allPanes} onOpen={onOpenPane} onChanged={onUpdate} onToast={setToast} />
-      {sidePin && activePane.agent !== 'shell' && <button type="button" className="icon-button side-pin-toggle" aria-pressed={sidePin.pinned} aria-label={sidePin.pinned ? 'Unpin from side tab' : 'Pin to side tab'} title={sidePin.pinned ? 'Unpin from side tab' : 'Pin to side tab'} onClick={sidePin.onToggle}>{sidePin.pinned ? <PinOff size={20} /> : <Pin size={20} />}</button>}
-      <button type="button" className="icon-button search-toggle" aria-label="Search this chat" title="Search this chat" disabled={!data} onClick={() => setSearching(true)}><Search size={20} /></button>
-      <button type="button" className={term ? 'icon-button terminal-toggle active' : 'icon-button terminal-toggle'} aria-label={term ? 'Back to chat' : 'Open terminal'} aria-pressed={term} title={term ? 'Back to chat' : 'Open terminal'} onClick={() => setTerm(!term)}>{term ? <MessageSquare size={20} /> : <SquareTerminal size={20} />}</button><div className="keys-container" ref={keysRef} onKeyDown={event => { if (event.key === 'Escape') { setKeysOpen(false); keysRef.current?.querySelector('button')?.focus() } }}><button className="icon-button" aria-label={`Session, ${words.pane} and keys`} aria-expanded={keysOpen} disabled={!data} onClick={() => setKeysOpen(!keysOpen)}><MoreHorizontal /></button>{keysOpen && <div className="keys-menu" aria-label="Session and keys"><button onClick={() => { setKeysOpen(false); onSessionActions(menuAnchor()) }}><Settings2 size={16} />Session options</button><button onClick={() => { setKeysOpen(false); onPaneActions(activePane.id, menuAnchor()) }}><PanelTop size={16} />{words.Pane} options</button><MuteItem api={api} pane={activePane.id} />{undoNext.undo && <button className="keys-step" onClick={() => { setKeysOpen(false); requestUndo('undo') }}><Undo2 size={16} aria-hidden="true" /><span>Undo: {undoNext.undo}</span></button>}{undoNext.redo && <button className="keys-step" onClick={() => { setKeysOpen(false); requestUndo('redo') }}><Redo2 size={16} aria-hidden="true" /><span>Redo: {undoNext.redo}</span></button>}{sidePin && activePane.agent !== 'shell' && <button onClick={() => { setKeysOpen(false); sidePin.onToggle() }}>{sidePin.pinned ? <PinOff size={16} /> : <Pin size={16} />}{sidePin.pinned ? 'Unpin from side tab' : 'Pin to side tab'}</button>}{activePane.agent === 'claude' && data && data.claude_name === null && claudeName && <button disabled={!writable || acting} onClick={() => { setKeysOpen(false); void send(`/rename ${claudeName}`) }}><Pencil size={16} />Name Claude “{claudeName}”</button>}{activePane.agent !== 'shell' && <button onClick={() => { setKeysOpen(false); setTools(true) }}><Blocks size={16} />Skills, plugins, MCP</button>}<button onClick={() => { setKeysOpen(false); keysRef.current?.querySelector('button')?.focus(); setPreviewPage(devServersTarget()) }}><Server size={16} />Dev servers</button><button onClick={() => { setKeysOpen(false); onSplit('right') }}><Columns2 size={16} />{words.newRight}{words.tmux && <kbd>%</kbd>}</button><button onClick={() => { setKeysOpen(false); onSplit('down') }}><Rows2 size={16} />{words.newBelow}{words.tmux && <kbd>"</kbd>}</button>{canFork(activePane) && <button onClick={() => { setKeysOpen(false); onFork() }}><GitFork size={16} />New chat from this</button>}<span>Send a key</span>{['Escape', 'C-c', 'Enter', 'Up', 'Down', 'Tab', 'y', 'n'].map(key => <button key={key} disabled={!writable || acting} onClick={() => void sendKey(key)}>{key === 'Escape' ? 'Esc' : key === 'C-c' ? 'Ctrl+C' : key}<kbd>{key === 'Up' ? '↑' : key === 'Down' ? '↓' : key === 'Enter' ? '↵' : key === 'Tab' ? '⇥' : key === 'C-c' ? '^C' : key === 'Escape' ? 'esc' : key}</kbd></button>)}</div>}</div>
-      {slot?.onPick && <button type="button" className="icon-button slot-button" aria-label={`Change what slot ${slot.index + 1} shows`} title="Show another pane or session here" onClick={slot.onPick}><ArrowLeftRight size={16} /></button>}
-      {slot && <button type="button" className="icon-button slot-button" aria-label={slot.zoomed ? 'Show all slots (Alt+Z)' : 'Zoom this slot (Alt+Z)'} title={slot.zoomed ? 'Show all slots (Alt+Z)' : 'Zoom this slot (Alt+Z)'} onClick={slot.onZoom}>{slot.zoomed ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button>}
+      {sidePin && activePane.agent !== 'shell' && <button type="button" className={data ? 'icon-button side-pin-toggle foldable' : 'icon-button side-pin-toggle'} aria-pressed={sidePin.pinned} aria-label={sidePin.pinned ? 'Unpin from side tab' : 'Pin to side tab'} title={sidePin.pinned ? 'Unpin from side tab' : 'Pin to side tab'} onClick={sidePin.onToggle}>{sidePin.pinned ? <PinOff size={20} /> : <Pin size={20} />}</button>}
+      <button type="button" className={data ? 'icon-button search-toggle foldable' : 'icon-button search-toggle'} aria-label="Search this chat" title="Search this chat" disabled={!data} onClick={() => setSearching(true)}><Search size={20} /></button>
+      <button type="button" className={`icon-button terminal-toggle${term ? ' active' : ''}${data ? ' foldable' : ''}`} aria-label={term ? 'Back to chat' : 'Open terminal'} aria-pressed={term} title={term ? 'Back to chat' : 'Open terminal'} onClick={() => setTerm(!term)}>{term ? <MessageSquare size={20} /> : <SquareTerminal size={20} />}</button><div className="keys-container" ref={keysRef} onKeyDown={event => { if (event.key === 'Escape') { setKeysOpen(false); keysRef.current?.querySelector('button')?.focus() } }} onBlur={event => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) setKeysOpen(false) }}><button className="icon-button" aria-label={`Session, ${words.pane} and keys`} aria-expanded={keysOpen} disabled={!data} onClick={() => setKeysOpen(!keysOpen)}><MoreHorizontal /></button>{keysOpen && <div className="keys-menu" aria-label="Session and keys">{/* A narrow workspace pane hides these header buttons (App.css, B378); the menu keeps them in reach. */}<button className="keys-fold" onClick={() => { setKeysOpen(false); focusKeys(); setSearching(true) }}><Search size={16} />Search this chat</button><button className="keys-fold" onClick={() => { setKeysOpen(false); if (term) { focusKeys(); setTerm(false) } else openTerminal() }}>{term ? <MessageSquare size={16} /> : <SquareTerminal size={16} />}{term ? 'Back to chat' : 'Open terminal'}</button>{slot?.onPick && <button className="keys-fold-slot" onClick={() => { setKeysOpen(false); focusKeys(); slot.onPick?.() }}><ArrowLeftRight size={16} />Show another pane here</button>}{slot && <button className="keys-fold-slot" onClick={() => { setKeysOpen(false); focusKeys(); slot.onZoom() }}>{slot.zoomed ? <Minimize2 size={16} /> : <Maximize2 size={16} />}{slot.zoomed ? 'Show all slots' : 'Zoom this slot'}<kbd>Alt+Z</kbd></button>}<button onClick={() => { setKeysOpen(false); onSessionActions(menuAnchor()) }}><Settings2 size={16} />Session options</button><button onClick={() => { setKeysOpen(false); onPaneActions(activePane.id, menuAnchor()) }}><PanelTop size={16} />{words.Pane} options</button><MuteItem api={api} pane={activePane.id} />{undoNext.undo && <button className="keys-step" onClick={() => { setKeysOpen(false); requestUndo('undo') }}><Undo2 size={16} aria-hidden="true" /><span>Undo: {undoNext.undo}</span></button>}{undoNext.redo && <button className="keys-step" onClick={() => { setKeysOpen(false); requestUndo('redo') }}><Redo2 size={16} aria-hidden="true" /><span>Redo: {undoNext.redo}</span></button>}{sidePin && activePane.agent !== 'shell' && <button onClick={() => { setKeysOpen(false); sidePin.onToggle() }}>{sidePin.pinned ? <PinOff size={16} /> : <Pin size={16} />}{sidePin.pinned ? 'Unpin from side tab' : 'Pin to side tab'}</button>}{activePane.agent === 'claude' && data && data.claude_name === null && claudeName && <button disabled={!writable || acting} onClick={() => { setKeysOpen(false); void send(`/rename ${claudeName}`) }}><Pencil size={16} />Name Claude “{claudeName}”</button>}{activePane.agent !== 'shell' && <button onClick={() => { setKeysOpen(false); setTools(true) }}><Blocks size={16} />Skills, plugins, MCP</button>}<button onClick={() => { setKeysOpen(false); keysRef.current?.querySelector('button')?.focus(); setPreviewPage(devServersTarget()) }}><Server size={16} />Dev servers</button><button onClick={() => { setKeysOpen(false); onSplit('right') }}><Columns2 size={16} />{words.newRight}{words.tmux && <kbd>%</kbd>}</button><button onClick={() => { setKeysOpen(false); onSplit('down') }}><Rows2 size={16} />{words.newBelow}{words.tmux && <kbd>"</kbd>}</button>{canFork(activePane) && <button onClick={() => { setKeysOpen(false); onFork() }}><GitFork size={16} />New chat from this</button>}<span>Send a key</span>{['Escape', 'C-c', 'Enter', 'Up', 'Down', 'Tab', 'y', 'n'].map(key => <button key={key} disabled={!writable || acting} onClick={() => void sendKey(key)}>{key === 'Escape' ? 'Esc' : key === 'C-c' ? 'Ctrl+C' : key}<kbd>{key === 'Up' ? '↑' : key === 'Down' ? '↓' : key === 'Enter' ? '↵' : key === 'Tab' ? '⇥' : key === 'C-c' ? '^C' : key === 'Escape' ? 'esc' : key}</kbd></button>)}</div>}</div>
+      {slot?.onPick && <button type="button" className="icon-button slot-button slot-pick" aria-label={`Change what slot ${slot.index + 1} shows`} title="Show another pane or session here" onClick={slot.onPick}><ArrowLeftRight size={16} /></button>}
+      {slot && <button type="button" className="icon-button slot-button slot-zoom" aria-label={slot.zoomed ? 'Show all slots (Alt+Z)' : 'Zoom this slot (Alt+Z)'} title={slot.zoomed ? 'Show all slots (Alt+Z)' : 'Zoom this slot (Alt+Z)'} onClick={slot.onZoom}>{slot.zoomed ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button>}
       {slot?.onClose && <button type="button" className="icon-button slot-button" aria-label="Close this slot (Alt+X)" title="Close this slot (Alt+X)" onClick={slot.onClose}><X size={16} /></button>}
     </header>
     {session && view && (grouped && groupHooks
       ? <GroupBar api={api} session={session} pane={pane} hooks={groupHooks} onOpenPane={onOpenPane} onUpdate={onUpdate}>
-          {panes.length > 1 && <PaneTabs ref={tabs} session={view} pane={pane} onOpenPane={onOpenPane} onPaneActions={onPaneActions} onSplit={onSplit} onReorder={onReorder} onDropGroup={onDropGroup} pick={tabPick} api={api} onUpdate={onUpdate} micOk={micOk} chime={chime} onNotice={setToast} />}
+          <PaneTabs ref={tabs} panelId={term ? undefined : tabPanelId} session={view} pane={task} onOpenPane={onOpenPane} onPaneActions={onPaneActions} onSplit={onSplit} onReorder={onReorder} onDropGroup={onDropGroup} pick={tabPick} api={api} onUpdate={onUpdate} micOk={micOk} chime={chime} onNotice={setToast} />
         </GroupBar>
-      : <PaneTabs ref={tabs} session={session} pane={pane} onOpenPane={onOpenPane} onPaneActions={onPaneActions} onSplit={onSplit} onReorder={onReorder} onDropGroup={onDropGroup} pick={tabPick} api={api} onUpdate={onUpdate} micOk={micOk} chime={chime} onNotice={setToast} />)}
+      : <PaneTabs ref={tabs} panelId={term ? undefined : tabPanelId} session={session} pane={task} onOpenPane={onOpenPane} onPaneActions={onPaneActions} onSplit={onSplit} onReorder={onReorder} onDropGroup={onDropGroup} pick={tabPick} api={api} onUpdate={onUpdate} micOk={micOk} chime={chime} onNotice={setToast} />)}
+    {children.length > 0 && <TaskChips panelId={term ? undefined : tabPanelId} task={task} children={children} pane={pane} onOpen={onOpenPane} onActions={onPaneActions} />}
+    {!pane.task && <OpenedBy pane={pane} panes={allPanes} onOpen={onOpenPane} />}
     {term && data?.attention?.askBridge && <AskBar agent={agentNames[activePane.agent]} disabled={!writable || acting} onOpen={() => setTerm(false)} onTerminal={() => askAnswer(data.attention!.askBridge!, null)} />}
     {term ? <LiveTerminal paneId={activePane.id} onChat={() => setTerm(false)} /> : <>
     {(offline || (error && data)) && <div className="reconnect-banner" role="status"><WifiOff size={15} /><span>{offline ? 'You are offline. Tether reconnects when the network is back.' : `Cannot reach ${host}. Reconnecting…`}</span><RetryButton label="Retry now" className="" onRetry={refresh} /></div>}
     {data && activePane.agent === 'shell' && <div className="start-options"><button disabled={!writable || acting} onClick={() => void start('claude')}>Start Claude<ChevronRight size={16} /></button><button disabled={!writable || acting} onClick={() => void start('codex')}><span>Start Codex<FoundryTag api={api} /></span><ChevronRight size={16} /></button></div>}
-    <div className="chat-pager"><div className="chat-page" ref={page}>
+    <div className="chat-pager" id={tabPanelId} role={session ? 'tabpanel' : undefined} aria-label={session ? chatTitle(pane, session) : undefined}><div className="chat-page" ref={page}>
     <ThreadPrimitive.Root className={opening ? 'thread opening' : 'thread'}><div className="chat-scroll" ref={viewport} onTouchStart={swipeStart} onTouchMove={event => { pullMove(event); swipeMove(event) }} onTouchEnd={swipeEnd} onTouchCancel={swipeCancel} onScroll={() => {
       const view = viewport.current
       if (view && hold.current && Date.now() < hold.current.until && Math.abs(view.scrollTop - hold.current.top) > 2) return
@@ -1171,7 +1302,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
           <button type="button" onClick={() => startWith('/')}><Blocks size={16} />Commands & skills</button>
         </div>}</div>}
 
-      {activePane.agent === 'shell' ? <ShellOutput key={activePane.id} folder={activePane.dir} text={messages.map(message => message.text).join('\n')} /> : <ThreadPrimitive.Messages>{({ message }) => <Message api={api} session={activePane.id} live={message.id === liveGroup} runningShown={!!footer.running} actions={turnEnds.has(message.id)} tools={message.metadata.custom.tools as ToolSummary[] | undefined} id={message.id} role={message.role} kind={message.metadata.custom.kind} title={message.metadata.custom.title ? String(message.metadata.custom.title) : undefined} count={message.metadata.custom.count} text={String(message.metadata.custom.text ?? '')} time={String(message.metadata.custom.time ?? '')} images={message.metadata.custom.images as number | undefined} imageKey={message.metadata.custom.imageKey as string | undefined} watch={message.metadata.custom.watch as WatchRun | undefined} />}</ThreadPrimitive.Messages>}
+      {activePane.agent === 'shell' ? <ShellOutput key={activePane.id} folder={activePane.dir} text={messages.map(message => message.text).join('\n')} /> : <ThreadPrimitive.Messages>{({ message }) => <Message api={api} session={activePane.id} live={message.id === liveWork} runningShown={!!footer.running} actions={turnEnds.has(message.id)} tools={message.metadata.custom.tools as ToolSummary[] | undefined} advisor={message.metadata.custom.advisor as AdvisorCall | undefined} id={message.id} role={message.role} kind={message.metadata.custom.kind} title={message.metadata.custom.title ? String(message.metadata.custom.title) : undefined} count={message.metadata.custom.count} text={String(message.metadata.custom.text ?? '')} source={message.metadata.custom.source as ChatMessage['source']} legacy={message.metadata.custom.legacy === true ? true : undefined} tabs={message.metadata.custom.tabs as ChatMessage['tabs']} time={String(message.metadata.custom.time ?? '')} images={message.metadata.custom.images as number | undefined} imageKey={message.metadata.custom.imageKey as string | undefined} watch={message.metadata.custom.watch as WatchRun | undefined} />}</ThreadPrimitive.Messages>}
       {bang && <><div className="user-message"><span>{bangItem?.text ?? `!${bang.command}`}</span></div>
         <div className="assistant-message bang-run" role="status"><small><Terminal size={12} />Running{bang.seconds != null ? ` · ${bang.seconds}s` : ''}<button type="button" className="bang-stop" aria-label="Stop this command" disabled={!writable || acting} onClick={() => void sendKey('C-c')}><X size={13} />Stop</button></small><pre>{bang.output ? <Linked text={bang.output} /> : 'No output yet'}</pre></div></>}
       {state === 'Working' && preview && <div className="assistant-message reply-preview"><small>typing</small><div>{preview}</div></div>}
@@ -1189,14 +1320,30 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     {state === 'Stopped' && <div className="working-line" role="status"><span className="state-dot" aria-hidden="true" /><span><strong>Stopped by a restart</strong><small>Send a message to continue.</small></span></div>}
     {state === 'Working' && <div className="working-line" role="status"><WorkGlyph /><span><span className="working-head"><strong className="work-verb">{footer.spinner?.verb ?? 'Working…'}<span className="work-glint" aria-hidden="true"><span>{footer.spinner?.verb ?? 'Working…'}</span></span></strong>{footer.spinner?.detail ? <small>{footer.spinner.detail}</small> : workingSince && <Elapsed since={workingSince.at} />}</span>{footer.running && <span className="running-tool"><Terminal size={13} /><span><span className="running-title">{footer.running.title}{footer.running.elapsed && <small> · {footer.running.elapsed}</small>}</span>{footer.running.command && footer.running.command !== footer.running.title && <code>{footer.running.command}</code>}</span></span>}{footer.denied && <button type="button" className="running-tool denied-tool" disabled={!writable || acting} title="Open /permissions, tab Recently blocked" onClick={() => void openPermissions('Recently blocked')}><ShieldAlert size={13} /><span>{footer.denied.text}{footer.denied.reason && <small>{footer.denied.reason}</small>}</span><span className="denied-review">Review</span></button>}</span></div>}
     <StatusStack priorityKey={data?.approval ? `approval:${(data.approval as Approval).id}` : data?.attention ? `attention:${data.attention.id}` : data?.plan ? `plan:${data.plan.id}` : footer.heads_up ? 'heads' : browserAsk ? `browser-ask:${browserAsk.id}` : ''} chips={(footer.goal || !!footer.tasks?.length || !!footer.crons?.length || (footer.suggestion && !draft.trim() && state !== 'Working')) ? <>{(footer.goal || !!footer.tasks?.length || !!footer.crons?.length) ? <div className="live-chips">{footer.goal && <button type="button" className="live-chip" aria-haspopup="dialog" onClick={() => setLiveSheet('goal')}><Target size={14} />{footer.goal_status ? `Goal · ${goalStatusLabel(footer.goal_status)}` : `Goal active${footer.goal !== 'active' ? ` · ${footer.goal}` : ''}`}<ChevronRight size={13} /></button>}{footer.tasks?.map(task => <button type="button" key={task} className="live-chip" aria-haspopup="dialog" onClick={() => setLiveSheet('tasks')}><Layers size={14} /><span className="live-chip-text">{taskLabel(task, footer.task_details)}</span><ChevronRight size={13} /></button>)}{!!footer.crons?.length && <button type="button" className="live-chip" aria-haspopup="dialog" title={cronSummary(footer.crons)} onClick={() => setLiveSheet('crons')}><CalendarClock size={14} /><span className="live-chip-text">{cronsLabel(footer.crons)}</span><ChevronRight size={13} /></button>}</div> : null}{(footer.suggestion && !draft.trim() && state !== 'Working' ? <button type="button" className="prompt-suggestion" title="Use this suggested prompt" onClick={() => setDraft(footer.suggestion ?? '')}><CornerDownRight size={15} /><span>{footer.suggestion}</span></button> : null)}</> : null} items={[
-      { id: 'action', label: data?.plan ? 'Review plan' : data?.approval ? `${agentNames[activePane.agent]} needs permission` : data?.attention?.reason === 'permissions' ? 'Permissions' : data?.attention?.reason === 'side' ? 'Side question' : data?.attention?.reason === 'dialog' ? data.attention.dialog?.title ?? 'Dialog' : data?.attention?.reason === 'panel' || data?.attention?.reason === 'info' ? `${agentNames[activePane.agent]} panel open` : `${agentNames[activePane.agent]} needs attention`, active: !!(data?.approval || data?.attention || data?.plan), content: <>{data && (data.approval != null || data.attention || data.plan) && <ChoiceDock key={(data.approval as Approval | null)?.id ?? data.attention?.id ?? 'choice'} approval={data.approval as Approval | null} attention={data.attention ?? null} plan={data.plan} agent={agentNames[activePane.agent]} disabled={!writable || acting} onChoose={choose} onKey={key => sendKey(key)} permissionsTab={permissionsTab} onAction={action => promptAction(data.attention!, action)} onDialog={action => dialogAction(data.attention!, action)} onPick={pickRow} onAsk={askAnswer} onAskEngage={askEngage} onType={(text, loginUrl) => write('type', { session: activePane.id, thread: data?.thread ?? null, text, enter: true, ...loginUrl ? { login_url: loginUrl } : {} })} />}</> },
+      { id: 'action', label: data?.plan ? 'Review plan' : data?.approval ? `${agentNames[activePane.agent]} needs permission` : data?.attention?.reason === 'permissions' ? 'Permissions' : data?.attention?.reason === 'side' ? 'Side question' : data?.attention?.reason === 'dialog' ? data.attention.dialog?.title ?? 'Dialog' : data?.attention?.reason === 'panel' || data?.attention?.reason === 'info' ? `${agentNames[activePane.agent]} panel open` : `${agentNames[activePane.agent]} needs attention`, active: !!(data?.approval || data?.attention || data?.plan), content: <>{data && (data.approval != null || data.attention || data.plan) && <ChoiceDock key={(data.approval as Approval | null)?.id ?? data.attention?.id ?? 'choice'} approval={data.approval as Approval | null} attention={data.attention ?? null} plan={data.plan} agent={agentNames[activePane.agent]} disabled={!writable || acting} onChoose={choose} onKey={key => sendKey(key)} onOpenTerminal={openTerminal} permissionsTab={permissionsTab} onAction={action => promptAction(data.attention!, action)} onDialog={action => dialogAction(data.attention!, action)} onPick={pickRow} onAsk={askAnswer} onAskEngage={askEngage} onType={(text, loginUrl) => write('type', { session: activePane.id, thread: data?.thread ?? null, text, enter: true, ...loginUrl ? { login_url: loginUrl } : {} })} />}</> },
       { id: 'heads', label: '✦ Heads up', active: !!footer.heads_up, content: <>{footer.heads_up && <HeadsUp card={footer.heads_up} disabled={!writable || acting} onKey={headsUpKey} onChat={note => { setDraft(note); requestAnimationFrame(() => { const box = panelRef.current?.querySelector<HTMLTextAreaElement>('.composer textarea'); box?.focus(); box?.setSelectionRange(box.value.length, box.value.length) }) }} />}</> },
       { id: 'agents', label: `${background.length} agents running`, active: background.length > 0, content: <>{background.length > 0 && <div className="agents-strip"><ul>{background.map((agent, index) => <li key={index}><strong>{agent.name}</strong><span>{agent.task}</span><small>{agent.detail}</small></li>)}</ul></div>}</> },
-      { id: 'queue', label: queueLabel, active: queued.length > 0, content: <>      {queued.map(item => item.failed ? <div key={item.id} className="user-message pending-message failed-message"><span>{item.text}</span><small role="alert">{item.offline ? <><WifiOff size={12} />Not sent</> : <span className="failed-reason">Not sent: {item.failed}</span>}
+      { id: 'queue', label: queueLabel, active: queued.length + otherQueued.length > 0, content: <>      {queued.map(item => item.failed ? <div key={item.id} className="user-message pending-message failed-message"><span>{item.text}</span><small role="alert">{item.offline ? <><WifiOff size={12} />Not sent</> : <span className="failed-reason">Not sent: {item.failed}</span>}
         <button type="button" className="failed-action" disabled={retrying !== null || !writable} onClick={() => void retry(item)}><RotateCcw size={13} />{retrying === item.id ? 'Sending…' : 'Retry'}</button>
         <button type="button" className="failed-action" onClick={() => editFailed(item)}><Pencil size={13} />Edit</button>
         <button type="button" aria-label="Delete this unsent message" onClick={() => setPending(list => list.filter(other => other.id !== item.id))}><X size={12} /></button></small></div>
-      : <div key={item.id} className="user-message pending-message"><SentContent {...sentContent(item.text, activePane.id)} /><small><Clock3 size={12} />{/^\/btw\s/.test(item.text.trim()) ? 'Asking…' : state === 'Working' ? 'Queued' : 'Sending…'}<button type="button" aria-label={activePane.agent === 'claude' ? 'Cancel this queued message' : 'Hide this queued message'} onClick={() => void unqueue(item.id)}><X size={12} /></button></small></div>)}</> },
+      : <div key={item.id} className="user-message pending-message"><SentContent {...sentContent(item.text, activePane.id)} /><small><Clock3 size={12} />{/^\/btw\s/.test(item.text.trim()) ? 'Asking…' : state === 'Working' ? 'Queued' : 'Sending…'}<button type="button" aria-label={cancelLabel} title={cancelLabel} onClick={() => void unqueue(item.id)}><X size={12} /></button></small></div>)}
+        {otherQueued.map((entry, index) => <div key={`queued-${entry.id ?? index}`} className="user-message pending-message"><SentContent {...sentContent(entry.text, activePane.id)} /><small><Clock3 size={12} />Queued<button type="button" aria-label={cancelLabel} title={cancelLabel} onClick={() => void unqueue(null)}><X size={12} /></button></small></div>)}</> },
+      { id: 'terminal-run', label: notes.length === 1 ? `${commandOf(notes[0].text)} ran in the terminal` : `${notes.length} commands ran in the terminal`, active: notes.length > 0, content: notes.map(item => {
+        const command = commandOf(item.text)
+        const dismiss = () => setPending(list => list.filter(other => other.id !== item.id))
+        return <div key={item.id} className="user-message pending-message terminal-note">
+          <SentContent {...sentContent(item.text, activePane.id)} />
+          <small>
+            <span className="terminal-note-text"><SquareTerminal size={12} aria-hidden="true" />Ran in the terminal. No chat output.</span>
+            <button type="button" className="failed-action" aria-label={`Open terminal to see ${command}`} onClick={() => {
+              dismiss()
+              openTerminal()
+            }}><SquareTerminal size={13} aria-hidden="true" />Open terminal</button>
+            <button type="button" aria-label={`Dismiss note: ${command} ran in the terminal`} onClick={dismiss}><X size={12} aria-hidden="true" /></button>
+          </small>
+        </div>
+      }) },
       ...codexRunItems(codexRuns),
       { id: 'codex-trust', label: codexTrust.status?.state === 'untrusted' ? 'Codex read-only' : 'Folder trusted', active: codexTrust.status?.state === 'untrusted' || codexTrust.status?.state === 'restart' || codexTrust.justTrusted, content: <CodexTrustCard trust={codexTrust} running /> },
       ...agentBrowserItems(api, agentBrowser, activePane.id),
@@ -1241,6 +1388,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     {planSheet && <PlanUsage api={api} onClose={() => setPlanSheet(false)} />}
     {continueSheet && <ContinueWith api={api} pane={activePane} thread={data?.thread ?? null} idle={state === 'Idle' || state === 'Stopped'} onClose={() => setContinueSheet(false)} onCreated={id => { setContinueSheet(false); onContinued(id) }} />}
     {modelSheet && <ModelSheet onContinue={() => { setModelSheet(false); setContinueSheet(true) }} api={api} pane={activePane} thread={data?.thread ?? null} currentLabel={model} currentEffort={footer.effort} advisor={footer.advisor} onClose={() => setModelSheet(false)} onDone={message => { setModelSheet(false); setToast(message); readFooter.current() }} />}
+    {pane.id === task.id && <TaskNeeds api={api} task={task} children={children} onOpen={onOpenPane} onUpdate={onUpdate} />}
     <Composer onTerminalEscape={() => void sendKey('Escape')} options={activePane.agent === 'shell' ? undefined : <span className="composer-pills">
       <button type="button" className="pill" aria-label={`Model and effort${advisorAlert ? `. Advisor ${footer.advisor?.name} is not attached` : ''}${tierLabel}`} disabled={!writable || state === 'Working'} onClick={() => setModelSheet(true)}>
         {advisorAlert && <TriangleAlert size={13} className="pill-warning" aria-hidden="true" />}
@@ -1253,7 +1401,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
       {activePane.agent === 'codex' && (footer.context || !!footer.windows?.length || creditsLabel(footer.credits)) && <button type="button" className="pill" aria-label="Usage and credits" aria-haspopup="dialog" onClick={() => setUsageSheet(true)}><Gauge size={13} />Usage</button>}
       {activePane.agent === 'claude' && (footer.observed || footer.status || footer.mode) && <span className="mode-container" onKeyDown={event => { if (modeMenu && event.key === 'Escape') { event.stopPropagation(); setModeMenu(false); modeButton.current?.focus() } }}><button ref={modeButton} type="button" className="pill" aria-label={`Mode: ${MODES[currentMode]}. Change mode`} aria-expanded={modeMenu} disabled={!writable || !!modeBusy} onClick={() => setModeMenu(!modeMenu)}><Gauge size={13} /><span className="pill-text">{modeBusy ? `${MODES[modeBusy]}…` : MODES[currentMode]}</span></button>
         {modeMenu && <div className="attach-menu mode-menu" role="menu">{Object.entries(MODES).map(([key, label]) => <button key={key} role="menuitemradio" aria-checked={key === currentMode} type="button" onClick={() => void chooseMode(key)}>{label}{key === currentMode && <Check size={16} />}</button>)}</div>}</span>}
-    </span>} api={api} pane={activePane} thread={data?.thread ?? null} disabled={!data || !writable} onSend={send} error={sendError} errorAction={draftBlocked ? <button type="button" disabled={acting} onClick={() => void clearAgentInput()}>Clear {agentNames[activePane.agent]}’s input</button> : null} draft={draft} setDraft={setDraft} working={state === 'Working'} onStop={() => void stop()} micOk={micOk} chime={chime} handsFree={handsFree && readAloud} listenRequest={listenRequest} sent={sentPrompts} onTools={() => setTools(true)} hint={ownAnswer ? `Answer ${agentNames[activePane.agent]}’s question` : undefined} />
+    </span>} api={api} pane={activePane} thread={data?.thread ?? null} disabled={!data || !writable || menuBlocksComposer} onSend={send} error={sendError} errorAction={draftBlocked ? <button type="button" disabled={acting} onClick={() => void clearAgentInput()}>Clear {agentNames[activePane.agent]}’s input</button> : null} draft={draft} setDraft={setDraft} working={state === 'Working'} onStop={() => void stop()} micOk={micOk} chime={chime} handsFree={handsFree && readAloud} listenRequest={listenRequest} sent={sentPrompts} onTools={() => setTools(true)} hint={ownAnswer ? `Answer ${agentNames[activePane.agent]}’s question` : undefined} />
     </div>{nextPane && <ChatPeek id={nextPane.id} data={chatCache.get(nextPane.id)} api={api} side={1} peekRef={peekNext} />}{previousPane && <ChatPeek id={previousPane.id} data={chatCache.get(previousPane.id)} api={api} side={-1} peekRef={peekPrevious} />}</div>
     </>}
     <ImageViewer image={opened} close={() => setOpened(null)} onShow={showInFiles(opened && !opened.error ? opened.name : null, () => setOpened(null))} />

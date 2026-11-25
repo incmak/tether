@@ -1,12 +1,12 @@
-// Auto-merge in Settings › Agents (AutoMerge.tsx), against an existing build. Every API request stays in this page's
+// Auto-merge in Settings › Commit & merge (AutoMerge.tsx), against an existing build. Every API request stays in this page's
 // fixtures; no terminal and no repository is touched. Run: cd ui && npm run test:ui (or node test_auto_merge_ui.cjs after a build).
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal, shotsDir } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-18/auto-merge/shots')
+const SHOTS = shotsDir('auto-merge')
 const sizes = [[320, 640], [1280, 900]]
 const now = Math.floor(Date.now() / 1000)
 const ROOT = '/srv/project'
@@ -94,7 +94,7 @@ async function main() {
             posts.push(body)
             if (postFails) return route.fulfill({ status: 500, json: { error: 'Could not save the auto-merge setting.' } })
             // Like the server: Enforce and Restore need a passkey approval; Off and Observe do not.
-            if ((body.mode === 'enforce' || body.restore) && !approved(body)) return route.fulfill({ status: 403, json: hasKey ? { error: 'Approve with your passkey.', approval: 'required' } : { error: 'Add a passkey in Settings › Setup first.', approval: 'no-passkey' } })
+            if ((body.mode === 'enforce' || body.restore) && !approved(body)) return route.fulfill({ status: 403, json: hasKey ? { error: 'Approve with your passkey.', approval: 'required' } : { error: 'Add a passkey in Settings › Autonomy › Setup first.', approval: 'no-passkey' } })
             if (body.mode) state = { ...state, mode: body.mode, since: now, paused: false }
             if (body.restore) state = { ...state, trust: state.trust.map(repo => ({ ...repo, areas: repo.areas.map(item => repo.root === body.restore.root && item.name === body.restore.area ? { ...item, rung: 1, limit: 60 } : item) })) }
             return route.fulfill({ json: state })
@@ -254,7 +254,7 @@ async function main() {
       hasKey = false
       await section.locator('.segmented label', { hasText: 'Enforce' }).click()
       await confirm.getByRole('button', { name: 'Turn on Enforce' }).click()
-      await section.getByRole('alert').getByText('Add a passkey in Settings › Setup first.').waitFor()
+      await section.getByRole('alert').getByText('Add a passkey in Settings › Autonomy › Setup first.').waitFor()
       check(`${at} no passkey: Observe stays`, state.mode === 'observe' && await section.getByRole('radio', { name: 'Observe' }).isChecked() && passkeyAsks.length === 0)
       hasKey = true; posts.length = 0
       await section.locator('.segmented label', { hasText: 'Enforce' }).click()

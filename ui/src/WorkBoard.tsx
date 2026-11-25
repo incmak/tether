@@ -18,6 +18,7 @@ import { BacklogBoardCard, BacklogDrawer } from './WorkBacklog'
 import type { DecisionAnswers } from './WorkItems'
 import './Work.css'
 import { wheelSideways } from './wheelSideways'
+import { fmtDateTime, useTetherZone } from './zone'
 
 // The work page: a Needs you list and the board. The board has one column per stage; a card opens the item's
 // drawer (stage track, question, tabs, Jira flag, links, history). Answers share App's answer state, so a result
@@ -329,13 +330,14 @@ function JiraState({ item, project, link }: { item: WorkItem; project?: WorkProj
   </>
 }
 
-const when = (at: number) => new Date(at * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+const when = (at: number) => fmtDateTime(at * 1000, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 const isUrl = (ref: string) => /^https?:\/\//.test(ref)
 
 function ItemDrawer({ api, item, project, prefix, panes, link, answers, error, onRefresh, onOpen, onClose }: {
   api: Api; item: WorkItem; project?: WorkProject; prefix: string; panes: Pane[]; link?: JiraLink; answers: DecisionAnswers; error: string
   onRefresh: () => unknown; onOpen: (pane: Pane) => void; onClose: () => void
 }) {
+  useTetherZone()
   const modal = useModal(true, onClose)
   const id = useId()
   const [busy, setBusy] = useState(false)

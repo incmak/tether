@@ -1,3 +1,4 @@
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import unittest
 import attach
 import pane_view

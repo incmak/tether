@@ -291,6 +291,7 @@ def parser():
     mode.add_argument('--plan', action='store_true')
     mode.add_argument('--apply', action='store_true')
     result.add_argument('--json', action='store_true', help='Print a deterministic JSON plan')
+    result.add_argument('--verbose', action='store_true', help='Also print the full text of each unit file')
     result.add_argument('--uninstall', action='store_true')
     result.add_argument('--replace-legacy', action='store_true')
     result.add_argument('--port', type=int)
@@ -872,7 +873,20 @@ def apply_plan(plan, home=None):
     temp.replace(state)
 
 
-def print_plan(plan):
+def unit_changes(plan):
+    units_dir = Path(plan['units_dir'])
+    write, keep = set(), set()
+    for name, content in plan['units'].items():
+        try:
+            unchanged = unit_path(units_dir, name).read_text() == content
+        except (OSError, UnicodeDecodeError):
+            unchanged = False
+        (keep if unchanged else write).add(name)
+    return write, keep
+
+
+def print_plan(plan, verbose=False):
+    write, keep = unit_changes(plan)
     print(f'Tether {plan["action"]} plan: {plan["repo"]}')
     if plan['reused_saved_choices']:
         print('Reuse saved choices: ' + ', '.join(plan['reused_saved_choices']))
@@ -886,7 +900,9 @@ def print_plan(plan):
         print(f'Legacy {name}: {plan["legacy_action"]}')
     folder = Path('$PREFIX/var/service' if TERMUX else '~/Library/LaunchAgents' if DARWIN else '~/.config/systemd/user')
     for name, content in sorted(plan['units'].items()):
-        print(f'Write {unit_path(folder, name)}:\n{content}')
+        print(f'{"Keep" if name in keep else "Write"} {unit_path(folder, name)}')
+        if verbose:
+            print(content)
     for name in plan['remove_units']:
         print(f'Remove {folder / runit_name(name) if TERMUX else unit_path(folder, name)}')
     for command in plan['commands']:
@@ -902,6 +918,7 @@ def print_plan(plan):
               'Install the Termux:Boot app to start them after a reboot.' if TERMUX else
               'LaunchAgents run while you are logged in to the Mac desktop.' if DARWIN else
               'loginctl enable-linger $USER keeps services running after logout; it may need admin. This installer does not run it.')
+    return len(write), len(keep)
 
 
 def main(argv=None):
@@ -910,19 +927,36 @@ def main(argv=None):
         plan = make_plan(args)
         if args.json:
             print(json.dumps(plan, sort_keys=True, indent=2))
-        else:
-            print_plan(plan)
+            if args.apply:
+                apply_plan(plan)
+            return 0
+        written, unchanged = print_plan(plan, verbose=args.verbose)
         failed = [item for item in plan['checks'] if not item['ok']]
-        if failed and not args.json:
-            print('Fix required checks:\n' + '\n'.join(
-                f'{index}. {item["fix"]}' for index, item in enumerate(failed, 1)))
-        if args.apply:
-            apply_plan(plan)
-            if not args.json:
-                print('Uninstalled Tether services.' if args.uninstall else f'Installed. URL: {plan["url"]}\nToken: {plan["token_file"]}')
+        if failed:
+            fixes = '\n'.join(f'{index}. {item["fix"]}' for index, item in enumerate(failed, 1))
+            print('Fix required checks:\n' + fixes)
+            if args.apply:
+                print('Required checks failed:\n' + fixes, file=sys.stderr)
+            if not args.defer_restart:  # the caller (tether update) prints the result
+                print(f'Result: FAIL ({len(failed)} required checks failed)')
+            return 1 if args.apply else 0
+        if args.plan:
+            print(f'Result: PASS (plan ready; {written} unit files to write, {unchanged} unchanged)')
+            return 0
+        apply_plan(plan)
+        if args.defer_restart:
+            print(f'Staged: {written} unit files written, {unchanged} unchanged; restart follows.')
+        elif args.uninstall:
+            print('Uninstalled Tether services.')
+            print('Result: PASS (uninstalled)')
+        else:
+            print(f'Installed. URL: {plan["url"]}\nToken: {plan["token_file"]}')
+            print(f'Result: PASS (installed; {written} unit files written, {unchanged} unchanged)')
         return 0
     except (OSError, ValueError, TypeError, subprocess.SubprocessError) as exc:
         print(str(exc), file=sys.stderr)
+        if not args.json and not args.defer_restart:
+            print('Result: FAIL (see the error above)')
         return 1
 
 

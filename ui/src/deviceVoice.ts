@@ -232,7 +232,7 @@ async function loadKokoro(): Promise<KokoroEngine | null> {
 
 export interface VoiceEvents {
   onStart: (turn: number) => void
-  onEnd: (turn: number) => void
+  onEnd: (turn: number, complete: boolean) => void
   onFail: (reason: string) => void
   onKind: (kind: VoiceKind | null) => void
 }
@@ -315,7 +315,7 @@ export class DeviceVoice {
     this.engine?.stop()
     this.turn = -1
     this.started = false
-    if (started) this.events.onEnd(turn)
+    if (started) this.events.onEnd(turn, false)
   }
 
   level() { return this.engine?.level() ?? 0 }
@@ -341,6 +341,6 @@ export class DeviceVoice {
     const { turn, started } = this
     this.turn = -1
     this.started = false
-    if (started) this.events.onEnd(turn)
+    if (started) this.events.onEnd(turn, true)
   }
 }

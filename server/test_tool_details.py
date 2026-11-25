@@ -1,4 +1,5 @@
 """Tool summary and lazy detail contracts for both transcript formats."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import base64
 import json
 from pathlib import Path

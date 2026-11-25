@@ -1,4 +1,5 @@
 """HTML previews: which pages and files a preview link opens, and the headers that keep the page out of Tether's origin."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from pathlib import Path
 import io
 import tempfile

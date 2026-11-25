@@ -1,3 +1,4 @@
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import subprocess
 import tempfile
 import unittest
@@ -185,7 +186,8 @@ class StarterTest(unittest.TestCase):
         for patch in self.patches:
             patch.stop()
 
-    def fake_start(self, anchor, body, folder, run, *, cwd, group):
+    def fake_start(self, anchor, body, folder, run, *, cwd, group, by_user):
+        self.assertIs(by_user, True)
         self.started = (anchor['id'], body, folder, cwd, group)
         return '%50', 'Fix invoices'
 

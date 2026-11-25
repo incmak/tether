@@ -1,3 +1,8 @@
+import { DoneTasks, TaskBranch } from './TaskFold'
+import { helperLabel, TaskDot, TaskFrom } from './TaskChips'
+import { needsMak } from './helperTabs'
+import { canMoveInto, taskChildren, taskRole, taskState, taskStateLabel } from './taskTree'
+import { MoreHorizontal } from 'lucide-react'
 import { BacklogButton } from './Backlog'
 import { RemindersButton } from './Reminders'
 import { WorkButton, WorkMark } from './WorkBoard'
@@ -9,7 +14,7 @@ import { needsYou, isDone } from './paneState'
 import { placesOf, tabFor, topState } from './groups'
 import { Suspense, lazy, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { Archive, CalendarClock, ArchiveRestore, ListFilter, History, Asterisk, BarChart3, BookMarked, BookOpen, Bug, Cpu, Database, FileText, FlaskConical, GitBranch, Globe, LayoutDashboard, MessageSquare, MessagesSquare, Mic, Palette, Rocket, Server, Shield, Sparkles, Wrench, Zap, ChevronRight, ChevronsDownUp, ChevronsUpDown, Code2, GripVertical, Layers, Pin, PinOff, Plus, RefreshCw, RotateCw, Search, Settings, SlidersHorizontal, Terminal, Trash2, X, Factory } from 'lucide-react'
+import { Archive, CalendarClock, ArchiveRestore, ListFilter, History, Asterisk, BarChart3, BookMarked, BookOpen, Bug, Cpu, Database, FileText, FlaskConical, GitBranch, Globe, LayoutDashboard, MessageSquare, MessagesSquare, Mic, Palette, Rocket, Server, Shield, Sparkles, Wrench, Zap, ChevronRight, ChevronsDownUp, ChevronsUpDown, Code2, GripVertical, Layers, Network, Pin, PinOff, Plus, RefreshCw, RotateCw, Search, Settings, SlidersHorizontal, Terminal, Trash2, X, Factory } from 'lucide-react'
 import { KeepChoice, keepNeeded } from './Project'
 import { FolderMenu } from './SelectMenu'
 import type { Keep, ProjectMark, ProjectMarks } from './Project'
@@ -22,7 +27,6 @@ import { useBrand } from './brand'
 import { orderAround, pickMode } from './tabSelection'
 import type { TabPickControls } from './tabSelection'
 import { CodexProviderSwitch } from './CodexProvider'
-import { profileSuffix } from './provider'
 import type { Prefs } from './prefs'
 import { DRAG_CHAT, DRAG_PANE, DRAG_SESSION } from './workspace'
 import { resumeChat, resumeInNewSession, useChatHistory, useRemovedChat } from './ChatPicker'
@@ -42,6 +46,7 @@ import { useNow } from './attention'
 import { HOLD_MS } from './gesture'
 import { field, matchSessions, searchWords } from './search'
 import type { SearchEntry, SessionMatch } from './search'
+import { fmtDateTime, useTetherZone } from './zone'
 
 // The avatars layout variant (layouts.css) shows a round avatar per session and tab: up to two initials, a colour from the name.
 const initials = (name: string) => (name.match(/[\p{L}\p{N}]+/gu) ?? ['?']).slice(0, 2).map(word => [...word][0]).join('').toUpperCase()
@@ -60,6 +65,7 @@ const LucideIcon = lazy(() => import('lucide-react/dynamic').then(module => ({ d
 // A tab with session cron jobs (Claude's CronCreate) shows a clock; its name, schedule and next run are in the tooltip
 // and in the row's accessible name.
 function CronMark({ pane }: { pane: Pane }) {
+  useTetherZone()
   if (!pane.crons?.length) return null
   const text = cronSummary(pane.crons)
   return <span className="cron-mark" title={`Scheduled: ${text}`}><CalendarClock size={12} aria-hidden="true" /><span className="visually-hidden">, scheduled: {text}</span></span>
@@ -244,11 +250,12 @@ function RunningNow({ sessions, selected, onOpen }: { sessions: Session[]; selec
 // Fixed sections, plus g:<id> (your groups) and f:<folder> (folder groups).
 type Section = 'pinned' | 'agents' | 'terminals' | 'shells' | 'archived' | 'past' | 'other' | 'all' | `g:${string}` | `f:${string}`
 // What a sidebar drag carries: a whole session, or one pane of a session with several panes.
-type Carry = { session: string; pane?: string; chat?: PastChat }
+type Carry = { session: string; pane?: string; chat?: PastChat; taskSource?: Pane }
 // The server's answer to a merge: the session that now holds the moved panes, for the rename prompt.
-type Moved = { session: string; name: string; pane: string }
+type Moved = { session: string; name: string; pane: string; warning?: string }
 interface Props {
   onDeck?: () => void
+  now?: number  // the app's clock, so Catch up and the deck agree on when a snooze ends
   review?: ReviewEntry
   /** Due reminders: a row in Needs you, and the count on the Reminders button. */
   reminder?: DueReminders
@@ -269,6 +276,9 @@ interface Props {
   onNew: (at?: Anchor) => void
   onActions: (session: Session, remove?: boolean, at?: Anchor) => void
   onPaneActions: (pane: Pane, at?: Anchor) => void
+  onTaskMove: (pane: Pane, target: Pane) => void
+  /** The actions of one stack (rename, close all, remove). Phones reach the stack menu only here inside a task tree. */
+  onStackActions?: (session: Session, stack: string, at?: Anchor) => void
   /** The × close and multi-select on chat rows (tabSelection.ts). */
   tabPick?: TabPickControls
   archivedTabs: Pane[]
@@ -308,7 +318,7 @@ interface Props {
 // The drawer unmounts on close; the wide sidebar keeps its own scroll.
 let drawerScrollTop = 0
 
-export function Sidebar({ onDeck, review, reminder, reminders, api, sessions, selected, prefs, update, loaded, error, onRetry, onReload, onOpen, onNew, onActions, onPaneActions, onPastChat, onSettings, onUndoHistory, onBacklog, work, onClose, slots, drag, onDropPane, onDropSession, onDropChat, onCommandMenu, onMessageAll, onFactory, marks, onMarks, onOpenShell, onShellsEnded, onAddPane, archivedTabs, onRestoreTab, stacks, tabPick }: Props) {
+export function Sidebar({ onDeck, now: appNow, review, reminder, reminders, api, sessions, selected, prefs, update, loaded, error, onRetry, onReload, onOpen, onNew, onActions, onPaneActions, onTaskMove, onStackActions, onPastChat, onSettings, onUndoHistory, onBacklog, work, onClose, slots, drag, onDropPane, onDropSession, onDropChat, onCommandMenu, onMessageAll, onFactory, marks, onMarks, onOpenShell, onShellsEnded, onAddPane, archivedTabs, onRestoreTab, stacks, tabPick }: Props) {
   const host = useHost()
   const [query, setQuery] = useState('')
   const [reorder, setReorder] = useState<Section | null>(null)
@@ -327,6 +337,7 @@ export function Sidebar({ onDeck, review, reminder, reminders, api, sessions, se
     const single = sessions.find(session => session.id === target)?.panes.length === 1
     api<Moved>('merge', { kind, source, target, ...(keep && { keep }) }).then(moved => {
       if (kind === 'break' ? /^split-\d{6}/.test(moved.name) : single) setRenaming({ moved, before: sessions })
+      if (moved.warning) setMergeError(moved.warning)  // the move happened, but tmux left an extra shell tab
       onRetry()
     }, failure => { setMergeError(errorText(failure)); onMarks?.() })
   }
@@ -482,7 +493,8 @@ export function Sidebar({ onDeck, review, reminder, reminders, api, sessions, se
     return () => { drawerScrollTop = scroll; observer.disconnect(); nav.removeEventListener('scroll', save) }
   }, [drawer, search])
   const manual = prefs.sort === 'manual'
-  const now = useNow()
+  const ownNow = useNow()
+  const now = appNow ?? ownNow
   // Catch up shows what waits on you; Sessions shows the tree. A search always shows the tree.
   const catchUp = prefs.sideMode !== 'sessions' && !search
   const waitingTotal = waitCount(sessions.flatMap(session => session.panes), now, prefs.attention)
@@ -581,7 +593,7 @@ export function Sidebar({ onDeck, review, reminder, reminders, api, sessions, se
           {isOpen(group.key) && group.items.length > 1 && !search && manual && group.key !== 'archived' && <button className="group-edit" onClick={() => setReorder(reorder === group.key ? null : group.key)}>{reorder === group.key ? 'Done' : 'Reorder'}</button>}
         </div>
         {isOpen(group.key) && group.key === 'archived' && !group.items.length ? null : isOpen(group.key) && (group.items.length
-          ? <SessionList workMarks={work?.marks} items={items} now={now} activeOnly={foldQuiet(group.key)} reorder={reorder === group.key} selected={selected} prefs={prefs} update={update} onOpen={onOpen} onActions={onActions} onPaneActions={onPaneActions} onMove={ids => moveWithin(group.items, ids)} pinned={group.key === 'pinned'} slots={slots ?? []} canDrag={!!drag} swipe={!drawer} api={api} carry={carry} onCarry={startCarry} onDrop={dropOn} onHold={holdStart} touchOver={touchOver} renaming={renameRow} onRenamed={renamed} marks={marks} onAddPane={onAddPane} matches={matches} tabPick={tabPick} />
+          ? <SessionList workMarks={work?.marks} items={items} now={now} activeOnly={foldQuiet(group.key)} reorder={reorder === group.key} selected={selected} prefs={prefs} update={update} onOpen={onOpen} onActions={onActions} onPaneActions={onPaneActions} onTaskMove={onTaskMove} onStackActions={onStackActions} onMove={ids => moveWithin(group.items, ids)} pinned={group.key === 'pinned'} slots={slots ?? []} canDrag={!!drag} swipe={!drawer} api={api} carry={carry} onCarry={startCarry} onDrop={dropOn} onHold={holdStart} touchOver={touchOver} renaming={renameRow} onRenamed={renamed} marks={marks} onAddPane={onAddPane} matches={matches} tabPick={tabPick} />
           : !loaded ? !error && <SkeletonRows count={rememberedCount(`sidebar.${group.key}`, 2, 6)} label="Finding sessions…" className="sidebar-skeleton" meta={false} />
           : <p className="group-empty">{search ? 'No sessions or tabs match.' : group.key === 'terminals' ? 'No plain terminals. Create one with New session.' : 'Nothing here yet.'}</p>)}
         {isOpen(group.key) && quiet.length > 0 && <button type="button" className="quiet-more" aria-expanded={showQuiet} onClick={() => setQuietOpen(list => showQuiet ? list.filter(key => key !== group.key) : [...list, group.key])}>{showQuiet ? 'Fold' : 'Show'} {quiet.length} quiet {quiet.length === 1 ? 'session' : 'sessions'}</button>}
@@ -626,7 +638,7 @@ function projectMark(mark: ProjectMark | undefined) {
 // The stack state dot, as in the chat header's stack row (Groups.tsx).
 const STACK_DOT = { needs: 'approval', done: 'done', working: 'working', idle: 'idle' } as const
 
-function SessionList({ now, activeOnly, matches, workMarks, items, reorder, selected, prefs, update, onOpen, onActions, onPaneActions, onMove, pinned, slots, canDrag, swipe, api, carry, onCarry, onDrop, onHold, touchOver, renaming, onRenamed, marks, onAddPane, tabPick }: { tabPick?: TabPickControls; now: number; activeOnly: boolean; workMarks?: WorkLinks['marks']; onAddPane?: Props['onAddPane']; marks?: ProjectMarks; onHold: (event: React.TouchEvent, carried: Carry, label: string, menu: () => void) => void; touchOver: string | null; items: Session[]; reorder: boolean; selected: string | undefined; prefs: Prefs; update: Props['update']; onOpen: Props['onOpen']; onActions: Props['onActions']; onPaneActions: Props['onPaneActions']; onMove: (ids: string[]) => void; pinned: boolean; slots: string[]; canDrag: boolean; swipe: boolean; api: Api; carry: Carry | null; onCarry: (carry: Carry | null) => void; onDrop: (target: Session) => void; renaming: Moved | null; onRenamed: () => void; matches?: Map<string, SessionMatch> | null }) {
+function SessionList({ now, activeOnly, matches, workMarks, items, reorder, selected, prefs, update, onOpen, onActions, onPaneActions, onTaskMove, onStackActions, onMove, pinned, slots, canDrag, swipe, api, carry, onCarry, onDrop, onHold, touchOver, renaming, onRenamed, marks, onAddPane, tabPick }: { tabPick?: TabPickControls; now: number; activeOnly: boolean; workMarks?: WorkLinks['marks']; onAddPane?: Props['onAddPane']; marks?: ProjectMarks; onHold: (event: React.TouchEvent, carried: Carry, label: string, menu: () => void) => void; touchOver: string | null; items: Session[]; reorder: boolean; selected: string | undefined; prefs: Prefs; update: Props['update']; onOpen: Props['onOpen']; onActions: Props['onActions']; onPaneActions: Props['onPaneActions']; onTaskMove: Props['onTaskMove']; onStackActions?: Props['onStackActions']; onMove: (ids: string[]) => void; pinned: boolean; slots: string[]; canDrag: boolean; swipe: boolean; api: Api; carry: Carry | null; onCarry: (carry: Carry | null) => void; onDrop: (target: Session) => void; renaming: Moved | null; onRenamed: () => void; matches?: Map<string, SessionMatch> | null }) {
   const stackListId = useId()
   // A row with focus unmounts when its stack folds again (the selection moved out of it). Focus then goes to that stack's fold button.
   // Only a removed row counts: a blur while the row is still in the page clears the record, so focus the user moved stays put.
@@ -718,7 +730,8 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
   return <ul className={`session-list ${reorder ? 'reordering' : ''}`} ref={list}>
     {/* eslint-disable-next-line react-hooks/refs -- Sample the drag marker on reorder renders; state would add visible updates on pointer down and up. */}
     {(preview ? [...items].sort((a, b) => preview.indexOf(a.id) - preview.indexOf(b.id)) : items).map((session, sessionIndex) => {
-      const multi = session.panes.length > 1
+      const first = session.panes[0]
+      const multi = session.panes.length > 1 || !!session.groups?.length || !!(first.done || first.from)
       const active = session.panes.some(pane => pane.id === selected)
       const state = statusOf(session.panes)
       // During a search each session shows its matching tabs, open, and the session row opens the first match (not the last-used tab).
@@ -732,14 +745,62 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
       const waits = waitCount(session.panes, now, prefs.attention)
       const open = !multi || filtered || (prefs.expanded[session.id] ?? (waits > 0 || active))
       const toggleOpen = () => update(current => ({ expanded: { ...current.expanded, [session.id]: !open } }))
-      const quietTabs = activeOnly && multi && !only ? tabs.filter(pane => isQuiet(pane, prefs.seen, selected, now, prefs.attention)) : []
+      const quietTabs = new Set(activeOnly && multi && !only
+        ? tabs.filter(pane => isQuiet(pane, prefs.seen, selected, now, prefs.attention)).map(pane => pane.id) : [])
+      // An active helper keeps its task row visible as context.
+      for (const pane of tabs) {
+        if (pane.task && !quietTabs.has(pane.id)) quietTabs.delete(pane.task)
+      }
       const showQuiet = quietShown.includes(session.id)
-      const visibleTab = (pane: Pane) => showQuiet || !quietTabs.includes(pane)
+      const visibleTab = (pane: Pane) => showQuiet || !quietTabs.has(pane.id)
+
       const dropping = (over === session.id || touchOver === session.id) && !!carry
       const tag = tagDot(prefs.colors?.[session.id] ?? (session.panes.length === 1 ? prefs.colors?.[session.panes[0].id] : undefined))
-      const paneRow = (pane: Pane) => { const paneState = statusOf([pane]), paneTag = tagDot(prefs.colors?.[pane.id]), picked = !!tabPick?.picked.has(pane.id), name = [paneTitle(pane), shownIndex(pane)].filter(Boolean).join(' '); return <li key={pane.id} data-ui-item className={tabPick ? 'pane-row' : undefined}><button {...dragAs(DRAG_PANE, pane.id, { session: session.id, pane: pane.id })} data-select-pane={pane.id} className={[pane.id === selected ? 'selected' : '', picked ? 'picked' : ''].filter(Boolean).join(' ')} aria-current={pane.id === selected ? 'page' : undefined} onMouseEnter={clipTitle} onTouchStart={event => onHold(event, { session: session.id, pane: pane.id }, paneTitle(pane) || session.name, () => onPaneActions(pane))} onClick={event => pickOr(event, pane.id, () => onOpen(pane))} onContextMenu={event => { event.preventDefault(); onPaneActions(pane, anchorOf(event)) }}>{dot(paneState)}{avatar(paneTitle(pane) || session.name)}<span className="pane-child-name">{name} · {agentNames[pane.agent]}{profileSuffix(pane)}</span><WorkMark mark={workMarks?.[pane.id]} /><CronMark pane={pane} />{paneTag}{slotKey(pane.id)}{picked && <span className="visually-hidden">, selected</span>}</button>
-        {tabPick && !reorder && <button type="button" className="row-close" aria-label={`Close ${name || session.name}`} title={`Close ${words.pane}`} onClick={event => tabPick.onCloseTab(pane.id, anchorOf(event))}><X size={14} aria-hidden="true" /></button>}</li> }
-      const stacked = !only && session.groups?.length ? placesOf(tabs, session.groups).map(place => ({ ...place, shown: place.panes.filter(visibleTab) })).filter(place => place.shown.length) : null
+      const paneRow = (pane: Pane, children: Pane[] = [], controls?: React.ReactNode, describedBy?: string) => {
+        const state = taskState(pane, children)
+        const name = [paneTitle(pane), shownIndex(pane)].filter(Boolean).join(' ')
+        const picked = !!tabPick?.picked.has(pane.id)
+        const from = pane.from ? `, from ${pane.from.name}` : ''
+        const label = pane.task ? helperLabel(pane) : `${name}${from}, Task, ${taskStateLabel[state]}`
+        const named = pane.coordinator ? `${label}, Coordinator` : label
+        const source = carry?.taskSource
+        const drop = !!source && canMoveInto(source, pane, session.panes, session.groups)
+        const actions = (event: React.MouseEvent) => onPaneActions(pane, anchorOf(event))
+        return <li key={pane.id} data-ui-item className={`task-row${tabPick ? ' pane-row' : ''}${pane.task ? ' child' : ''}${needsMak(pane) ? ' needs' : ''}${state === 'done' ? ' done' : ''}${over === pane.id ? ' task-drop' : ''}`}
+          onDragOver={drop ? event => { event.stopPropagation(); event.preventDefault(); event.dataTransfer.dropEffect = 'move'; setOver(pane.id) } : undefined}
+          onDragLeave={drop ? event => { if (!(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) setOver(null) } : undefined}
+          onDrop={drop ? event => { event.stopPropagation(); event.preventDefault(); setOver(null); onCarry(null); onTaskMove(source, pane) } : undefined}>
+          <button type="button" {...dragAs(DRAG_PANE, pane.id, { session: session.id, pane: pane.id, taskSource: pane })}
+            data-select-pane={pane.id} className={`task-row-main${pane.id === selected ? ' selected' : ''}${picked ? ' picked' : ''}`}
+            aria-label={picked ? named + ', selected' : named} aria-describedby={describedBy} aria-current={pane.id === selected ? 'page' : undefined}
+            onMouseEnter={clipTitle} onTouchStart={event => onHold(event, { session: session.id, pane: pane.id }, name, () => onPaneActions(pane))}
+            onClick={event => pickOr(event, pane.id, () => onOpen(pane))}
+            onContextMenu={event => { event.preventDefault(); actions(event) }}>
+            <TaskDot state={state} /><span className="task-row-text"><span className="pane-child-name">{name}</span><TaskFrom pane={pane} /></span>
+            {pane.task && <span className="task-role">{taskRole(pane)}</span>}{pane.coordinator && <Network size={13} className="side-coordinator" aria-hidden="true" />}
+            <WorkMark mark={workMarks?.[pane.id]} /><CronMark pane={pane} />{tagDot(prefs.colors?.[pane.id])}{slotKey(pane.id)}
+          </button>
+          {controls}
+          <button type="button" className="task-row-control task-row-actions" aria-label={`Actions for ${name}`} aria-haspopup="dialog" onClick={actions}><MoreHorizontal size={15} aria-hidden="true" /></button>
+          {tabPick && <button type="button" className="row-close" aria-label={`Close ${name}`} title={`Close ${words.pane}`} onClick={event => tabPick.onCloseTab(pane.id, anchorOf(event))}><X size={14} aria-hidden="true" /></button>}
+        </li>
+      }
+      const rows = (list: Pane[]) => {
+        const matchIds = new Set(tabs.map(pane => pane.id))
+        const roots = list.filter(pane => !pane.task && visibleTab(pane))
+        const branches = roots.flatMap(task => {
+          const children = taskChildren(task, list).filter(visibleTab)
+          const matching = children.filter(child => matchIds.has(child.id))
+          if (!matchIds.has(task.id) && !matching.length) return []
+          return [{ task, children: !only || matchIds.has(task.id) ? children : matching }]
+        })
+        const branch = ({ task, children }: typeof branches[number]) => <TaskBranch key={task.id} task={task} children={children} selected={selected} search={!!only} row={paneRow} />
+        const done = branches.filter(({ task, children }) => taskState(task, children) === 'done')
+        return <>{branches.filter(item => !done.includes(item)).map(branch)}
+          {done.length > 0 && <DoneTasks count={done.length} openForSelection={!!only || done.some(({ task }) => task.id === selected)}>{done.map(branch)}</DoneTasks>}
+        </>
+      }
+      const stacked = !only && session.groups?.length ? placesOf(tabs, session.groups).filter(place => place.panes.some(visibleTab)) : null
       return <li key={session.id} data-id={session.id} className={`${dragging.current === session.id ? 'dragging' : ''} ${dropping ? 'drop-over' : ''} ${carry && !carry.pane && carry.session === session.id ? 'carried' : ''}`} {...dropTarget(session)}>
         <div className={`swipe-row ${swiped === session.id ? 'swiped' : ''}`}
           onPointerDownCapture={() => { suppressClick.current = false }}
@@ -816,12 +877,13 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
             {multi && !filtered && <ChevronRight size={14} className="chevron" aria-hidden="true" />}
             {!multi && dot(state)}
             {!multi && avatar(session.name)}
-            <span className="session-text"><span className="session-title">{session.name}{tag}{pinned ? null : prefs.pinned.includes(session.id) && <Pin size={11} aria-label="Pinned" />}{projectMark(marks?.[session.id])}{!multi && <><WorkMark mark={workMarks?.[session.panes[0].id]} /><CronMark pane={session.panes[0]} /></>}</span>{prefs.showPaths && <span className="session-folder"><bdi dir="ltr">{session.dir}</bdi></span>}</span>
+            <span className="session-text"><span className="session-title">{session.name}{tag}{pinned ? null : prefs.pinned.includes(session.id) && <Pin size={11} aria-label="Pinned" />}{projectMark(marks?.[session.id])}{!multi && <>{session.panes[0].coordinator && <Network size={13} className="side-coordinator" role="img" aria-label="Coordinator" />}<WorkMark mark={workMarks?.[session.panes[0].id]} /><CronMark pane={session.panes[0]} /></>}</span>{prefs.showPaths && <span className="session-folder"><bdi dir="ltr">{session.dir}</bdi></span>}</span>
             {!multi && slotKey(session.panes[0].id)}
             {multi && (waits > 0 ? <span className="rollup">{waits}<span className="visually-hidden"> need you</span></span> : !open && state.kind !== 'idle' && dot(state))}
             {!multi && tabPick?.picked.has(session.panes[0].id) && <span className="visually-hidden">, selected</span>}
           </button>}
           {onAddPane && !reorder && !dropping && renaming?.session !== session.id && <button type="button" className="session-add" aria-label={`${words.newRight} in ${session.name}`} title={words.newRight} aria-haspopup="dialog" onClick={event => { const box = event.currentTarget.getBoundingClientRect(); onAddPane(session, { x: box.left, y: box.bottom + 6 }) }}><Plus size={15} aria-hidden="true" /></button>}
+          {!multi && first.agent !== 'shell' && !reorder && !dropping && <button type="button" className="task-row-control task-row-actions" aria-label={`Actions for ${paneTitle(first)}`} aria-haspopup="dialog" onClick={event => onPaneActions(first, anchorOf(event))}><MoreHorizontal size={15} aria-hidden="true" /></button>}
           {tabPick && !multi && !reorder && !dropping && renaming?.session !== session.id && <button type="button" className="row-close" aria-label={`Close ${session.name}`} title={`Close ${words.pane}`} onClick={event => tabPick.onCloseTab(session.panes[0].id, anchorOf(event))}><X size={14} aria-hidden="true" /></button>}
           {dropping && <span className="merge-hint" aria-hidden="true">{carry.pane ? 'Move here' : carry.chat ? 'Open here' : 'Merge here'}</span>}
           {reorder && <span className="grip" aria-label={`Drag to move ${session.name}`} onPointerDown={event => { dragging.current = session.id; order.current = null; event.currentTarget.setPointerCapture(event.pointerId) }} onPointerMove={drag} onPointerUp={() => { if (order.current) onMove(order.current); dragging.current = null; order.current = null; setPreview(null) }} onPointerCancel={() => { dragging.current = null; order.current = null; setPreview(null) }}><GripVertical size={18} /></span>}
@@ -843,21 +905,24 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
                   <button type="button" className={`pane-stack-head${containsSelected ? ' current' : ''}`}
                     aria-label={`Stack ${place.name}, ${place.panes.length} ${place.panes.length === 1 ? 'tab' : 'tabs'}${placeWaits ? `, ${placeWaits} need you` : ''}. Open it`}
                     onClick={() => { const pane = tabFor(session.id, place); if (pane) onOpen(pane) }}>
-                    <span className={`state-dot ${STACK_DOT[topState(place.panes, prefs.seen, selected)]}`} aria-hidden="true" />
-                    <span className="pane-child-name">{place.name}</span>{placeWaits > 0 && <span className="rollup" aria-hidden="true">{placeWaits}</span>}<span className="group-count" aria-hidden="true">{place.panes.length}</span>
+                    <span className={`state-dot ${placeWaits ? STACK_DOT.needs : STACK_DOT[topState(place.panes, prefs.seen, selected)]}`} aria-hidden="true" />
+                    <span className="pane-child-name">{place.name}</span><span className="group-count" aria-hidden="true">{place.panes.length}</span>
                   </button>
                   <button type="button" className="pane-stack-fold" aria-expanded={stackOpen} aria-controls={tabsId}
                     aria-disabled={containsSelected || undefined} aria-label={foldLabel} title={foldLabel}
                     onClick={() => { if (!containsSelected) update(current => ({ expanded: { ...current.expanded, [key]: !stackOpen } })) }}>
                     <ChevronRight size={14} className="chevron" aria-hidden="true" />
                   </button>
+                  {place.id && onStackActions && <button type="button" className="pane-stack-actions" aria-haspopup="dialog"
+                    aria-label={`Actions for stack ${place.name}`} title={`Actions for stack ${place.name}`}
+                    onClick={event => onStackActions(session, place.id, anchorOf(event))}><MoreHorizontal size={14} aria-hidden="true" /></button>}
                 </div>
                 {/* The folded list stays as an empty hidden node, so aria-controls always names an element. */}
-                <ul id={tabsId} className="pane-stack-tabs" hidden={!stackOpen}>{stackOpen && place.shown.map(paneRow)}</ul>
+                <ul id={tabsId} className="pane-stack-tabs" hidden={!stackOpen}>{stackOpen && rows(place.panes)}</ul>
               </li>
             })
-          : tabs.filter(visibleTab).map(paneRow)}
-          {quietTabs.length > 0 && <li><button type="button" className="quiet-more" aria-expanded={showQuiet} onClick={() => setQuietShown(list => showQuiet ? list.filter(id => id !== session.id) : [...list, session.id])}>{showQuiet ? 'Fold' : 'Show'} {quietTabs.length} quiet {quietTabs.length === 1 ? 'tab' : 'tabs'}</button></li>}</ul>}
+          : rows(session.panes)}
+          {quietTabs.size > 0 && <li><button type="button" className="quiet-more" aria-expanded={showQuiet} onClick={() => setQuietShown(list => showQuiet ? list.filter(id => id !== session.id) : [...list, session.id])}>{showQuiet ? 'Fold' : 'Show'} {quietTabs.size} quiet {quietTabs.size === 1 ? 'tab' : 'tabs'}</button></li>}</ul>}
       </li>
     })}
   </ul>
@@ -983,7 +1048,7 @@ export function PlanUsage({ api, onClose }: { api: Api; onClose: () => void }) {
 }
 
 const WINDOW_NAMES: Record<string, string> = { '5h': '5-hour limit', '7d': 'Weekly limit' }
-const when = (seconds: number) => new Date(seconds * 1000).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })
+const when = (seconds: number) => fmtDateTime(seconds * 1000, { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })
 function MergeConfirm({ source, target, marks, onMerge, onCancel }: { source: Session; target: Session; marks?: ProjectMarks; onMerge: (keep?: Keep) => void; onCancel: () => void }) {
   const modal = useModal(true, onCancel)
   const [keep, setKeep] = useState<Keep | null>(null)
@@ -1005,6 +1070,7 @@ function reportedAgo(value: string | number | null) {
 }
 
 function UsageSheet({ data, api, onDone, onClose }: { data: UsageData; api: Api; onDone: () => Promise<void> | void; onClose: () => void }) {
+  useTetherZone()
   const modal = useModal(true, onClose)
   const [loading, setLoading] = useState(false)
   // Refresh asks the server for a live Codex check (at most 30 s old), then redraws the meters from it.

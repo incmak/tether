@@ -3,10 +3,10 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser } = require('../browser_test_helper.cjs')
+const { getBrowser, shotsDir, prefsStore } = require('../browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.resolve(__dirname, '../dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../../.release-work/2026-11-16/responsive/tools/shots')
+const SHOTS = shotsDir('responsive/tools')
 const now = Math.floor(Date.now() / 1000)
 const ask = (pane, extra) => ({ pane, thread: null, since: now - 600, next: '', kind: 'reply', opened: false, snoozed_until: null, urgent: false, ...extra })
 const paneA = { id: '%1', tmux_session: '$1', label: 'project:0.0', pane_name: 'Deploy fix', agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: 't1', approval: null,
@@ -78,13 +78,14 @@ async function main() {
     const page=await context.newPage(); page.setDefaultTimeout(10000)
     page.on('pageerror',e=>errors.push(e.message))
     await page.routeWebSocket('**/*',socket=>socket.close())
+    const prefs = prefsStore(fixture.prefs)
     await page.route('**/*',async route=>{
       const u=new URL(route.request().url())
       if(u.pathname.includes('/api/')){
         const endpoint=u.pathname.split('/api/')[1]
+        if (endpoint === 'prefs') return route.fulfill({ json: route.request().method() === 'GET' ? prefs.get() : prefs.post(route.request().postDataJSON()) })
         if(endpoint==='stream')return route.fulfill({status:204,body:''})
         if(endpoint.startsWith('chat'))return route.fulfill({json:fixture.chat})
-        if(endpoint==='prefs'&&route.request().method()!=='GET')return route.fulfill({json:{prefs:{},version:1}})
         const result=fixture[endpoint]
         return result?route.fulfill({json:result}):route.fulfill({status:503,json:{error:`Fixture unavailable: ${long}`}})
       }

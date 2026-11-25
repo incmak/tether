@@ -9,7 +9,7 @@ function load(file) {
   const exports = {}
   runInNewContext(transpile(readFileSync(file, 'utf8')), {
     exports,
-    require: name => name === './paneState' ? load('src/paneState.ts') : name === 'react' ? { lazy: () => null, forwardRef: component => component } : {},
+    require: name => name === './paneState' ? load('src/paneState.ts') : name === 'react' ? { lazy: () => null, forwardRef: component => component, createContext: value => ({ value }) } : {},
   })
   return exports
 }
@@ -158,6 +158,17 @@ assert.equal(hiddenSession.prefs.archived.work, undefined, 'Restore of the only 
 const multi = fixture([other, a, b], { selected: 'other', archivedTabs: { a: entry(a) }, archived: { work: 'Work' } })
 multi.render().restoreTab(a)
 assert.equal(multi.prefs.archived.work, 'Work', 'Restore preserves session archive when other tabs show')
+// B446: selecting a child of an archived task reveals both tabs.
+const child = pane('child', { task: 'a' })
+const archivedTask = fixture([a, b, child], { archivedTabs: { a: entry(a) } })
+const hiddenTaskView = archivedTask.render()
+assert.deepEqual(ids(hiddenTaskView.sessions.flatMap(session => session.panes)), ['b'], 'Archiving a task hides its child')
+assert.equal(hiddenTaskView.live.has(child.id), false, 'The hidden child leaves desktop slots')
+assert.deepEqual(ids(hiddenTaskView.archivedTabs), ['a'], 'Only the task has its own archive entry')
+archivedTask.update(() => ({ selected: child.id }))
+const selectedChildView = archivedTask.render()
+assert.deepEqual(ids(selectedChildView.sessions.flatMap(session => session.panes)), ['a', 'b', 'child'], 'Selecting the child reveals its archived task')
+assert(selectedChildView.live.has(child.id), 'The selected child can use a desktop slot')
 const empty = fixture([], { selected: null })
 assert.equal(empty.render().live.size, 0)
 console.log('Tab archive: App atomic selection, current prefs, selected exception, slots, last-tab/session restore and empty polling pass')

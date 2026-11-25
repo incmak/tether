@@ -3,10 +3,10 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser } = require('../browser_test_helper.cjs')
+const { getBrowser, shotsDir, prefsStore } = require('../browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, '../dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../../.release-work/2026-11-16/responsive/tools/shots')
+const SHOTS = shotsDir('responsive/tools')
 const NOW = Math.floor(Date.now() / 1000)
 const ask = (pane, ago, extra = {}) => ({ pane, thread: null, since: NOW - ago, next: `Next for ${pane}`, kind: 'reply', opened: false, snoozed_until: null, ...extra })
 const pane = (id, session, name, label, extra) => ({ id, tmux_session: session, label, pane_name: name, agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: `t${id.slice(1)}`, approval: null, ask: null, ...extra })
@@ -30,7 +30,7 @@ const fixture = {
   chat: { messages: [], busy: false, thread: 't3', agent: 'claude', writable: true, session: '%3', earlier: 0, limit: 100, state: 'Idle', approval: null },
   footer: { observed: true, model: 'Opus 5.5', mode: 'default', notices: [] },
   subagents: { main: { model: null, context: null, title: null }, agents: [], tasks: [] },
-  prefs: { prefs: {}, version: 1 }, 'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
+  'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
   update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Test server', office: false },
   catalog: { commands: [], plugins: [], mcp: [], note: '' }, stream: {}, 'codex-runs': { pane: '%3', running: 0, runs: [] },
   'browser/agents': { enabled: false, available: false, reason: 'off', agents: [], asks: [] },
@@ -76,11 +76,13 @@ async function main() {
     page.setDefaultTimeout(10000)
     page.on('pageerror', error => check('page error', false, error.message))
     await page.routeWebSocket('**/*', socket => socket.close())
+    const prefs = prefsStore()
     await page.route('**/*', async route => {
       const url = new URL(route.request().url())
       if (url.pathname.endsWith('/sw.js')) return route.fulfill({status:404,body:''})
       if (url.pathname.startsWith('/mobile/api/')) {
         const endpoint = url.pathname.slice('/mobile/api/'.length)
+        if (endpoint === 'prefs') return route.fulfill({ json: route.request().method() === 'GET' ? prefs.get() : prefs.post(route.request().postDataJSON()) })
         if (endpoint === 'stream' || endpoint.includes('/stream')) return route.fulfill({ status: 204, body: '' })
         if (endpoint.startsWith('chat')) return route.fulfill({ json: fixture.chat })
         if (endpoint === 'sessions') return route.fulfill({ json: sessions })
@@ -103,7 +105,7 @@ async function main() {
       class FixtureSource extends EventTarget {
         static CLOSED=2
         readyState=1
-        constructor(url) { super(); if(url.includes('/browser/stream')||url.includes('/browser/window')) setTimeout(()=>this.dispatchEvent(new MessageEvent('frame',{data:JSON.stringify({seq:1,width:320,height:240,jpeg})})),40) }
+        constructor(url) { super(); if(url.includes('/browser/stream')) setTimeout(()=>this.dispatchEvent(new MessageEvent('frame',{data:JSON.stringify({seq:1,width:320,height:240,jpeg})})),40) }
         close() { this.readyState=2 }
       }
       window.EventSource=FixtureSource

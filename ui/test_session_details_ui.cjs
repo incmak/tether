@@ -3,10 +3,10 @@
 // Run: npm run build -- --outDir <dir>, then DIST=<dir> node test_session_details_ui.cjs. Request routes serve the build.
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, shotsDir, prefsStore } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-15/session-brief/shots')
+const SHOTS = shotsDir('session-brief')
 const now = () => Math.floor(Date.now() / 1000)
 const pane = { id: '%1', tmux_session: '$fixture', label: 'work:0.1', pane_name: 'Files search', agent: 'claude', state: 'Idle', dir: '/srv/fixture/app', thread: 'thread-1', writable: true }
 const AI = { name: 'Files search', description: 'Adds a search box to the Files panel and ranks matches by path.', description_by: 'ai', state: 'done' }
@@ -19,7 +19,7 @@ function fixture(endpoint, url) {
     sessions: { sessions: [{ ...pane, agent, thread: state.thread, finished: now() - 300, brief: state.brief }], default_thread: state.thread },
     chat: { messages: [], earlier: 0, limit: 40, session: pane.id, thread: state.thread, agent, state: 'Idle', writable: true, footer: agent === 'codex' ? footer : undefined },
     footer,
-    prefs: { prefs: {}, version: 1 }, host: { name: 'Fixture' }, 'projects/marks': {}, 'side-shells': { shells: [] },
+    host: { name: 'Fixture' }, 'projects/marks': {}, 'side-shells': { shells: [] },
     'projects/backlog': { text: '## tether\n- [ ] Add search to Files (claude · pane %1 · chat thread-1) #B4\n', version: 'v1', limit: 50000 },
     catalog: { commands: [], plugins: [], mcp: [] }, usage: { claude: null, codex: null }, subagents: { main: {}, agents: [], tasks: [] }, 'codex-runs': { runs: [] },
     'browser/agents': { enabled: false, agents: [], asks: [] }, 'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] },
@@ -55,11 +55,13 @@ async function main() {
     page.on('console', message => { if (message.type() === 'error' && !/status of (404|500)/.test(message.text())) errors.push(message.text().slice(0, 300)) })
     await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'light' })
     await page.routeWebSocket('**/*', socket => socket.close())
+    const prefs = prefsStore()
     await page.route('**/*', async route => {
       const request = route.request(), url = new URL(request.url())
       if (url.pathname.endsWith('/sw.js')) return route.fulfill({ status: 404, body: '' })
       if (url.pathname.includes('/api/')) {
         const endpoint = url.pathname.split('/api/')[1]
+        if (endpoint === 'prefs') return route.fulfill({ json: request.method() === 'GET' ? prefs.get() : prefs.post(request.postDataJSON()) })
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
         if (request.method() === 'POST') {
           const body = request.postDataJSON() || {}
@@ -172,12 +174,13 @@ async function main() {
       await open()
       await drawer.getByRole('button', { name: /^Plan usage/ }).click()
       await drawer.waitFor({ state: 'detached' })
-      check('plan usage opens its sheet', await page.getByRole('dialog').filter({ hasText: /usage/i }).count() > 0)
+      // The sheet renders after its usage request, and useModal opens a dialog in an effect: wait on the open sheet (B305).
+      check('plan usage opens its sheet', await page.getByRole('dialog', { name: 'Plan usage' }).waitFor().then(() => true, () => false))
       await page.keyboard.press('Escape')
       await open()
       await drawer.getByRole('button', { name: /^Goal/ }).click()
       await drawer.waitFor({ state: 'detached' })
-      check('goal opens the goal sheet', await page.locator('dialog.live-sheet').isVisible())
+      check('goal opens the goal sheet', await page.locator('dialog.live-sheet[open]').waitFor().then(() => true, () => false))
       await page.keyboard.press('Escape')
       await open()
       await drawer.getByRole('button', { name: /^Model and effort/ }).click()

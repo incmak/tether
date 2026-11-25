@@ -1,4 +1,5 @@
 """Isolated encoder tests; only the explicit ffmpeg test starts a real process."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import os
 import queue

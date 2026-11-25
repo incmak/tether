@@ -10,6 +10,7 @@ import { usePolling } from './hooks'
 import { NoteBone, SettingSkeleton, SwitchBone } from './SettingBones'
 import { SelectMenu } from './SelectMenu'
 import './AutonomySetup.css'
+import { fmtDate, useTetherZone } from './zone'
 
 type HookState = { state: 'ok' | 'missing' | 'none' | 'manual'; path: string; entry: Record<string, unknown>; reason?: string }
 type PingState = {
@@ -22,7 +23,7 @@ export interface SavedAnswer { id: string; date: string; question: string; answe
 // 'dm' is the BriskBot approver's 1:1 chat with the bot. The others are team channels.
 const SPACES = [{ value: 'dm', label: 'Direct chat' }, ...['team', 'qa', 'release', 'bots'].map(value => ({ value, label: value }))]
 
-/** Settings › Agents: the two setup steps autonomy needs, each applied only after approval. */
+/** Settings › Autonomy › Setup: the two setup steps autonomy needs, each applied only after approval. */
 export function AutonomySetup({ api }: { api: Api }) {
   const fetcher = useCallback((signal: AbortSignal) => api<SetupState>('autonomy/setup', undefined, signal), [api])
   const { data, error: loadError, refresh } = usePolling(fetcher, 30000)
@@ -139,11 +140,12 @@ function PingStep({ ping, busy, ready, apply }: { ping: PingState; busy: boolean
 function deviceName() {
   const phone = /Android|iPhone|iPad|Mobi/i.test(navigator.userAgent)
   const where = /iPhone|iPad/.test(navigator.userAgent) ? 'iPhone' : /Android/.test(navigator.userAgent) ? 'Android' : /Mac/.test(navigator.userAgent) ? 'Mac' : /Windows/.test(navigator.userAgent) ? 'Windows' : phone ? 'Phone' : 'Computer'
-  return `${where} · ${new Date().toLocaleDateString()}`
+  return `${where} · ${fmtDate(Date.now())}`
 }
 
 /** The passkeys that approve changes. Agents can use Tether's token; they cannot pass Face ID, a fingerprint or a PIN. */
 function PasskeyStep({ keys, busy, onAdd, onRemove }: { keys: ApprovalStatus; busy: boolean; onAdd: () => void; onRemove: (id: string) => void }) {
+  useTetherZone()
   const works = passkeysWork()
   const note = !works ? 'This browser cannot use passkeys here. Open Tether over HTTPS.'
     : keys.here ? `${keys.here} ${keys.here === 1 ? 'passkey approves' : 'passkeys approve'} changes on this address.`
@@ -155,7 +157,7 @@ function PasskeyStep({ keys, busy, onAdd, onRemove }: { keys: ApprovalStatus; bu
       {works && (keys.here > 0 || !keys.passkeys.length) && <button type="button" className="secondary" disabled={busy} onClick={onAdd}>{keys.here ? 'Add another' : 'Add passkey'}</button>}
     </div>
     {!!keys.passkeys.length && <ul className="project-list setup-keys">{keys.passkeys.map(item => <li key={item.id}>
-      <span className="project-item"><strong>{item.name}</strong><small>Added {new Date(item.created).toLocaleDateString()}{item.last_used ? ` · last used ${new Date(item.last_used).toLocaleDateString()}` : ''}</small></span>
+      <span className="project-item"><strong>{item.name}</strong><small>Added {fmtDate(Date.parse(item.created))}{item.last_used ? ` · last used ${fmtDate(Date.parse(item.last_used))}` : ''}</small></span>
       <button type="button" className="icon-button" aria-label={`Remove the passkey ${item.name}`} disabled={busy || !works} onClick={() => onRemove(item.id)}><Trash2 size={16} aria-hidden="true" /></button>
     </li>)}</ul>}
   </div>

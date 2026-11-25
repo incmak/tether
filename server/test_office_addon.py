@@ -1,4 +1,5 @@
 """Office integration against isolated files, mocked Docker and local HTTP servers."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import hashlib
 import hmac
 import http.client

@@ -1,4 +1,5 @@
 """Speech tests use fake models and HTTP replies, never an agent terminal."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from concurrent.futures import ThreadPoolExecutor
 import io
 import json

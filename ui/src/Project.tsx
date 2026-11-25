@@ -10,17 +10,19 @@ import { ProjectCodexLevel } from './CodexLevel'
 import { ProjectCommitGate } from './CommitGate'
 import { ProjectClaudeAdvisor } from './ClaudeAdvisor'
 import { ProjectAutonomy } from './Autonomy'
+import { LevelUndoProvider } from './LevelUndo'
 import type { Session } from './Sidebar'
 import { AdvisorDecision, AdvisorLog, useAdvisorLog } from './AdvisorLog'
 import type { AdvisorRow } from './AdvisorLog'
+import { fmtDateTime, useTetherZone } from './zone'
 
 // The session's project (server: projects.py). Agents that start in the session get its text: Claude through a
-// SessionStart hook, Codex through developer_instructions. An empty project gives them only the short Notes part.
+// SessionStart hook, Codex through developer_instructions. All projects include the built-in guidance.
 interface Pinned { name: string; kind: 'copy' | 'link'; path: string; size: number | null; missing: boolean }
 interface Note { name: string; title: string; size: number; mtime: number; new: boolean }
 export interface ProjectState {
-  id: string; name: string; revision: number; budget: number; budget_min: number; budget_max: number
-  instructions: string; pins: Pinned[]; notes: Note[]; preview: string; chars: number; folder: string; session_name?: string
+  id: string; name: string; revision: number; budget: number; budget_min: number; budget_max: number; usable_budget_max: number
+  instructions: string; pins: Pinned[]; notes: Note[]; preview: string; chars: number; fixed_chars: number; folder: string; session_name?: string
 }
 /** One session in GET projects/marks: does it give agents context, and which panes started with an older version. */
 export interface ProjectMark { project: string; revision: number; context: boolean; stale: string[] }
@@ -61,6 +63,7 @@ export function useProjectMarks(api: Api, ready: boolean) {
 
 // With `group`, the sheet edits that group's own context (server/groups.py), which agents get after the session's.
 export function ProjectSheet({ api, session, group, mark, pin, onChanged, onClose }: { api: Api; session: Session; group?: GroupInfo; mark?: ProjectMark; pin?: string; onChanged: () => void; onClose: () => void }) {
+  useTetherZone()
   const modal = useModal(true, onClose)
   const [project, setProject] = useState<ProjectState | null>(null)
   const [text, setText] = useState('')
@@ -112,7 +115,12 @@ export function ProjectSheet({ api, session, group, mark, pin, onChanged, onClos
 
   const dirty = !!project && text.trim() !== project.instructions.trim()
   const fresh = project?.notes.filter(item => item.new).length ?? 0
-  const level = project ? project.chars / project.budget : 0
+  const contentLimit = project ? Math.min(project.budget, project.usable_budget_max) : 0
+  const budgetSizes = project
+    ? [...new Set([...SIZES.filter(size => size <= project.usable_budget_max), contentLimit, project.usable_budget_max])].sort((a, b) => a - b)
+    : []
+  const level = project && contentLimit > 0 ? project.chars / contentLimit : 0
+  const contentSize = project && `${project.chars.toLocaleString()} / ${contentLimit.toLocaleString()} characters`
   // The session mark lists stale tabs by pane. A group sheet counts only the tabs in its group.
   const staleCount = !mark || !project ? 0
     : group ? mark.stale.filter(id => session.panes.some(item => item.id === id && item.group === group.id)).length
@@ -120,11 +128,12 @@ export function ProjectSheet({ api, session, group, mark, pin, onChanged, onClos
   const pinName = pinPath?.split('/').pop()
 
   return <dialog {...modal} className="sheet settings-sheet project-sheet" aria-labelledby="project-title">
+    <LevelUndoProvider>
     <div className="sheet-heading">
       <h2 id="project-title">{note ? note.name : decision ? 'Advisor decision' : group ? 'Stack context' : 'Project'}</h2>
       <button type="button" className="icon-button" aria-label="Close" disabled={pending} onClick={onClose}><X /></button>
     </div>
-    <p className="sheet-sub">{group ? `${session.name} › ${group.name}` : session.name}{project && ` · ${project.chars.toLocaleString()} / ${project.budget.toLocaleString()} characters`}</p>
+    <p className="sheet-sub">{group ? `${session.name} › ${group.name}` : session.name}</p>
     {!project && !error && <Skeleton label="Loading project"><div aria-hidden="true">{['Instructions', 'Pinned files', 'Notes from agents'].map((name, index) => <section key={name} className="settings-group"><h3>{name}</h3>{index ? <p className="hint"><Bone w={index === 1 ? '72%' : '54%'} /></p> : <Bone h={128} className="project-text" />}</section>)}</div></Skeleton>}
     {error && <p className="error" role="alert">{error}{stale && <> <button type="button" className="link-button" onClick={() => { setError(''); setStale(false); void load() }}>Reload</button></>}</p>}
 
@@ -176,7 +185,7 @@ export function ProjectSheet({ api, session, group, mark, pin, onChanged, onClos
       <section className="settings-group" aria-labelledby="project-notes"><h3 id="project-notes">Notes from agents{fresh > 0 && <span className="project-new">{fresh} new</span>}</h3>
         {project.notes.length ? <ul className="project-list">{project.notes.map(item => <li key={item.name}>
           <button type="button" className="project-open" disabled={pending} onClick={() => void openNote(item.name)}>
-            <span className="project-item"><strong>{item.title}{item.new && <span className="project-dot" aria-label="New" />}</strong><small>{item.name} · {new Date(item.mtime).toLocaleString()}</small></span>
+            <span className="project-item"><strong>{item.title}{item.new && <span className="project-dot" aria-label="New" />}</strong><small>{item.name} · {fmtDateTime(item.mtime)}</small></span>
           </button>
         </li>)}</ul> : <p className="hint">No notes yet. Agents save project facts here, and you review them.</p>}
         {fresh > 0 && <div className="sheet-buttons project-row-end"><button type="button" className="secondary" disabled={pending} onClick={() => void post('seen', {})}>Mark all as read</button></div>}
@@ -192,16 +201,18 @@ export function ProjectSheet({ api, session, group, mark, pin, onChanged, onClos
 
       {!group && <ProjectCommitGate api={api} project={project.id} />}
 
-      <section className="settings-group" aria-labelledby="project-size"><h3 id="project-size">Size</h3>
-        <div className={`meter-bar ${level > .95 ? 'high' : level > .8 ? 'warn' : ''}`} role="meter" aria-label="Project text size" aria-valuenow={project.chars} aria-valuemin={0} aria-valuemax={project.budget}><span style={{ width: `${Math.min(100, level * 100)}%` }} /></div>
+      <section className="settings-group" aria-labelledby="project-size"><h3 id="project-size">Project content</h3>
+        <p className="setting-note">{contentSize}</p>
+        <div className={`meter-bar ${level > .95 ? 'high' : level > .8 ? 'warn' : ''}`} role="meter" aria-label="Project content size" aria-valuetext={contentSize || undefined} aria-valuenow={project.chars} aria-valuemin={0} aria-valuemax={contentLimit}><span style={{ width: `${Math.min(100, level * 100)}%` }} /></div>
         <div className="project-size-row">
           <label htmlFor="project-budget">Limit</label>
-          <SelectMenu id="project-budget" value={String(project.budget)} disabled={pending} onChange={size => void post('budget', { chars: Number(size) })} options={[...new Set([...SIZES, project.budget])].sort((a, b) => a - b).map(size => ({ value: String(size), label: `${size.toLocaleString()} characters` }))} />
+          <SelectMenu id="project-budget" label="Content limit" value={String(contentLimit)} disabled={pending} onChange={size => void post('budget', { chars: Number(size) })} options={budgetSizes.map(size => ({ value: String(size), label: `${size.toLocaleString()} characters` }))} />
           <button type="button" className="secondary" disabled={!project.preview} aria-expanded={preview} onClick={() => setPreview(!preview)}>{preview ? <EyeOff size={16} /> : <Eye size={16} />}{preview ? 'Hide' : 'Preview'}</button>
         </div>
-        <p className="setting-note">Agents get this text when they start, resume, clear or compact. A smaller limit keeps more room for the chat.</p>
+        <p className="setting-note">Tether adds {project.fixed_chars.toLocaleString()} characters of built-in guidance. The full preview has a {project.budget_max.toLocaleString()}-character limit.</p>
         {preview && project.preview && <pre className="project-preview" tabIndex={0} aria-label="What agents get">{project.preview}</pre>}
       </section>
     </>}
+    </LevelUndoProvider>
   </dialog>
 }

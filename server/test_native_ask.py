@@ -1,4 +1,5 @@
 """Native Claude 2.1.318 captures with synthetic questions; no real terminal writes."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 from pathlib import Path
@@ -81,12 +82,11 @@ class NativeAskTests(unittest.TestCase):
                     attention = terminal.attention(config, plain, False, now=4, styled_screen=styled)
                     status.return_value = {'state': 'Input needed', 'approval': None, 'attention': attention}
                     payload = server.chat_payload(config)['attention']
+                    self.assertEqual(payload['ask'], ask)
                     if name == 'clipped':
-                        self.assertEqual(payload['ask'], ask)
                         self.assertNotIn('ask_current', payload)
                     else:
                         self.assertEqual(payload['ask_current']['index'], 0)
-                        self.assertNotIn('ask', payload)
 
 
 class NativeAskKeyRouteTests(unittest.TestCase):
@@ -128,3 +128,58 @@ class NativeAskKeyRouteTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class GutterAskTests(unittest.TestCase):
+    """Claude 2.1.330 draws a dim "│" gutter left of a question that wraps (live captures at 120 and 44 columns)."""
+    DIR = Path(__file__).parent / 'fixtures/claude_2.1.330_ask_gutter'
+
+    def setUp(self):
+        import tempfile
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.asks = json.loads((self.DIR / 'asks.json').read_text())
+
+    def entry(self, name):
+        transcript = Path(self.temp.name) / f'{name}.jsonl'
+        record = {'type': 'assistant', 'message': {'role': 'assistant', 'content': [
+            {'type': 'tool_use', 'id': f'tool-{name}', 'name': 'AskUserQuestion', 'input': self.asks[name]}]}}
+        transcript.write_text(json.dumps(record) + '\n')
+        return {'id': '%gutter', 'agent': 'claude', 'transcript': str(transcript)}
+
+    def test_wrapped_question_verifies_without_the_gutter(self):
+        for name, width in (('long', 120), ('long', 44), ('two', 120), ('short', 120)):
+            with self.subTest(name=name, width=width):
+                frame = (self.DIR / f'{name}-{width}.ansi').read_text()
+                expected = self.asks[name]['questions'][0]
+                self.assertEqual(choice_state.ask_current(frame)['question'], ' '.join(expected['question'].split()))
+                menu = terminal.verified_numbered_menu(self.entry(name), frame)
+                self.assertIsNotNone(menu)
+                self.assertEqual(menu['question'], expected['question'])
+                self.assertEqual([option['text'] for option in menu['options'][:2]],
+                                 [option['label'] for option in expected['options']])
+                self.assertTrue(terminal.menu_digest(menu))
+
+    def test_a_gutter_on_only_some_rows_is_refused(self):
+        frame = (self.DIR / 'long-120.ansi').read_text()
+        lines = frame.split('\n')
+        at = next(i for i, line in enumerate(lines) if '│' in line and 'exist on the main branch' in line)
+        lines[at] = terminal.ANSI_SGR.sub('', lines[at]).replace('│', ' ', 1)
+        self.assertIsNone(terminal.verified_numbered_menu(self.entry('long'), '\n'.join(lines)))
+
+    def test_a_bar_that_is_question_text_is_kept(self):
+        # A bold bar is text, not Claude's dim gutter: the screen no longer matches the transcript.
+        short = (self.DIR / 'short-120.ansi').read_text()
+        row = '\x1b[1m\x1b[38;5;231mShip it now?\x1b[0m'
+        self.assertIn(row, short)
+        bold = short.replace(row, '\x1b[1m\x1b[38;5;231m│ Ship it now?\x1b[0m')
+        self.assertIsNone(terminal.verified_numbered_menu(self.entry('short'), bold))
+        # The same for a wrapped question whose gutter is not dim, or is not in column 0.
+        long = (self.DIR / 'long-120.ansi').read_text()
+        for name, frame in (('not dim', long.replace('\x1b[2m│', '\x1b[1m│').replace('\x1b[0;2m│', '\x1b[0;1m│')),
+                            ('bold and dim', long.replace('\x1b[2m│', '\x1b[1;2m│').replace('\x1b[0;2m│', '\x1b[0;1;2m│')),
+                            ('indented', long.replace('\x1b[2m│', ' \x1b[2m│').replace('\x1b[0;2m│', ' \x1b[0;2m│')),
+                            ('unstyled', terminal.ANSI_SGR.sub('', long))):
+            with self.subTest(name=name):
+                self.assertNotEqual(frame, long)
+                self.assertIsNone(terminal.verified_numbered_menu(self.entry('long'), frame))

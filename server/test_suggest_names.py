@@ -1,4 +1,5 @@
 """Tests for name suggestions: request checks, cleaning, the agent → local model → words order, and the route."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 import subprocess

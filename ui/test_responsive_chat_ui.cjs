@@ -6,7 +6,7 @@ const http = require('node:http')
 const os = require('node:os')
 const esbuild = require('esbuild')
 const { existsSync } = require('node:fs')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, shotsDir, prefsStore } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json', '.webmanifest': 'application/manifest+json' }
@@ -16,7 +16,7 @@ const fixture = {
   chat: { messages: [], busy: false, thread: 't2', agent: 'claude', writable: true, session: '%2', earlier: 0, limit: 100, state: 'Idle', approval: null },
   footer: { observed: true, model: 'Opus 5.5', mode: 'default', notices: [] },
   subagents: { main: { model: null, context: null, title: null }, agents: [], tasks: [] },
-  prefs: { prefs: {}, version: 1 }, 'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
+  'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
   update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Test server', office: false },
   catalog: { commands: [], plugins: [], mcp: [], note: '' }, stream: {}, 'codex-runs': { pane: '%2', running: 0, runs: [] },
   'browser/agents': { enabled: false, available: false, reason: 'off', agents: [], asks: [] },
@@ -26,7 +26,8 @@ const fixture = {
 }
 
 
-const SHOTS = path.resolve(__dirname, '../.release-work/2026-11-16/responsive/chat/shots', (process.env.PHASE || 'after') + (process.env.COARSE ? '-touch' : ''))
+const PHASE_SUB = (process.env.PHASE || 'after') + (process.env.COARSE ? '-touch' : '')
+const SHOTS = shotsDir('responsive/chat', PHASE_SUB)
 const LONG = 'long_name_'.repeat(9).slice(0, 80)
 const ALT = '界'.repeat(80)
 const part = process.env.PART || 'all'
@@ -82,11 +83,13 @@ async function main() {
     page.setDefaultTimeout(7000)
     page.on('pageerror', e => errors.push(e.stack))
     await context.routeWebSocket('**/*', socket => socket.close())
+    const prefs = prefsStore()
     await context.route('**/*', async route => {
       const url = new URL(route.request().url())
       if (url.pathname.endsWith('/sw.js')) return route.fulfill({ status: 404, body: '' })
       if (url.pathname.startsWith('/mobile/api/')) {
         const endpoint = url.pathname.slice('/mobile/api/'.length).split('?')[0]
+        if (endpoint === 'prefs') return route.fulfill({ json: route.request().method() === 'GET' ? prefs.get() : prefs.post(route.request().postDataJSON()) })
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
         if (endpoint === 'test-image') return route.fulfill({ contentType: 'image/svg+xml', body: SVG })
         if (endpoint === 'upload') return route.fulfill({ json: { path: '/uploaded/file.txt', name: LONG + '.txt' } })
@@ -320,9 +323,11 @@ async function main() {
           items: [{ text: LONG, selected: true }, { text: ALT, selected: false }],
           options: kind === 'menu' ? [{ id: 1, text: LONG, detail: ALT, selected: true }, { id: 2, text: ALT, detail: LONG }] : undefined,
           choice: { selection: 'multi', focus: 0, filter: LONG, tabs: [{ label: LONG, active: true }], items: [{ id: 1, text: LONG, detail: ALT, selected: true, checked: true }], more_above: 123, more_below: 99, hints: [] } }
+        if (kind === 'menu') fixture.chat.attention.menu_verified = 'a'.repeat(64)
         if (kind === 'bridge') fixture.chat.attention.askBridge = { id: 'live-ask', nonce: 'fixture', expires: Math.floor(Date.now() / 1000) + 3600, questions: [{ header: LONG, question: ALT, options: [{ label: LONG, description: ALT }, { label: ALT, description: LONG }] }] }
         await open(w, h)
         await page.locator('.status-content:not([hidden]) .choice-dock').waitFor()
+        if (kind === 'menu') check(`${w}: live menu shows verified controls`, await page.getByRole('button', { name: 'Done (Enter)', exact: true }).isVisible())
         await audit(`${w}: live ${kind} dock fits`, '.status-stack')
         await controls(`${w}: status controls keep separate hit targets`, '.status-stack')
         if (process.env.COARSE && h <= 500) check(`${w}: status resize target remains44px`, await page.locator('.status-grip').evaluate(el => el.clientHeight >= 44 && el.clientWidth >= 44))
@@ -371,7 +376,7 @@ async function main() {
           const bodySelectors = { choice: '.choice-head, .choice-tabs, .choice-options button', ask: '.ask-form, .ask-form-question legend', deck: '.action-deck', image: '.viewer-head', preview: '.preview-head', notices: '.notice-card', pins: '.side-pin-bubble', toast: '[data-fixture-action="toast-tab"]', attention: '.waiting-box', picker: '.choice-head, .picker-card', 'app-toast': '.app-toast', 'pane-menu': '.sheet-heading h2, .sheet-sub, .action-list', 'pane-popover': '.sheet-heading h2, .sheet-sub, .action-list', 'session-menu': '.sheet-heading h2, .sheet-sub, .action-list', organize: '.organize-body' }
           await audit(`${w}: ${surface} content fits`, bodySelectors[surface], { bounds: !['choice', 'ask', 'notices', 'attention', 'picker', 'pane-menu', 'pane-popover', 'session-menu', 'organize'].includes(surface), scroll: surface !== 'pins' })
           await controls(`${w}: ${surface} controls have room`, '[data-fixture-surface]')
-          if (surface === 'choice') check(`${w}: choice rows contain their text`, await page.locator('.choice-options button').evaluateAll(buttons => buttons.every(button => button.scrollHeight <= button.clientHeight + 1)))
+          if (surface === 'choice') check(`${w}: choice rows contain their text`, await page.locator('.choice-options button').evaluateAll(buttons => buttons.length === 2 && buttons.every(button => button.scrollHeight <= button.clientHeight + 1)))
           if (surface === 'image') {
             await page.getByRole('button', { name: 'Zoom in', exact: true }).click()
             await shot(`${w}-image-zoom`)

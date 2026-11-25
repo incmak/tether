@@ -3,10 +3,10 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal, shotsDir, prefsStore } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-11/agent-map/shots')
+const SHOTS = shotsDir('agent-map')
 const sizes = [[320, 640], [390, 844], [1280, 900]]
 const now = Date.now()
 const iso = seconds => new Date(now - seconds * 1000).toISOString()
@@ -39,7 +39,7 @@ const fixture = {
   footer: { observed: true, model: 'Opus 5.5', mode: 'default', notices: [] },
   subagents: { main: { model: 'claude-opus-5-5', context: 91452, title: 'Build the agent map' }, agents, tasks },
   'subagent-tool': { id: 't1', name: 'Bash', title: 'ls server', is_error: false, status: 'complete', detail: '$ ls server\nserver.py\nsubagents.py', format: 'text', truncated: false, images: 0 },
-  prefs: { prefs: {}, version: 1 }, 'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
+  'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
   update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Test server', office: false },
   catalog: { commands: [], plugins: [], mcp: [], note: '' }, stream: {}, 'codex-runs': { pane: '%1', running: 0, runs: [] }, 'autonomy/review': { due: false, reason: null, new: 0, disputed: 0, total: 0, last_review: 0, snoozed_until: 0, groups: [] },
   'browser/agents': { enabled: false, available: false, reason: 'off', agents: [], asks: [] },
@@ -74,11 +74,13 @@ async function main() {
     page.on('pageerror', error => pageErrors.push(error.message))
     await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'light' })
     await page.routeWebSocket('**/*', socket => socket.close())
+    const prefs = prefsStore()
     await page.route('**/*', async route => {
       const request = route.request(), url = new URL(request.url())
       if (url.pathname.endsWith('/sw.js')) return route.fulfill({ status: 404, body: '' })
       if (url.pathname.includes('/api/')) {
         const endpoint = url.pathname.split('/api/')[1]
+        if (endpoint === 'prefs') return route.fulfill({ json: request.method() === 'GET' ? prefs.get() : prefs.post(request.postDataJSON()) })
         if (request.method() !== 'GET') { posts.push({ endpoint, body: request.postDataJSON() }); return route.fulfill({ json: { ok: true, state: 'stopped' } }) }
         if (endpoint === 'subagent-task') return route.fulfill({ json: taskOutput(url.searchParams.get('id')) })
         if (endpoint === 'subagent') return route.fulfill({ json: detail(url.searchParams.get('id')) })

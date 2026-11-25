@@ -1,4 +1,5 @@
 """API response compression tests use a mocked handler: no sockets, no terminals."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import gzip
 import io
 import json

@@ -1,4 +1,5 @@
 """task_process against a fake process table; no real process is signalled."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import os
 from pathlib import Path

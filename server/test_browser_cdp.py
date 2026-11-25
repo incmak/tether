@@ -1,4 +1,5 @@
 """Agent CDP contract tests. Terminal writes and browser transport use isolated fakes."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import errno
 import json

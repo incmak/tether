@@ -343,7 +343,7 @@ def process_kind(pid, root='/proc', own_pid=None):
     return 'agent'
 
 
-def socket_holders(inodes, uid, root='/proc', limit=50000):
+def socket_holders(inodes, uid, root='/proc', limit=50000, only=None):
     """({inode: [pid, ...]}, complete): this user's processes that hold each socket (Linux). A socket may have several
     holders, for example a reloader and its worker. complete is False when the scan stopped early or could not read a
     process of this user: a holder may be missing then, so the caller must not trust the result.
@@ -354,7 +354,8 @@ def socket_holders(inodes, uid, root='/proc', limit=50000):
     So a dev server leaves the list while ssh (non-dumpable) runs in its terminal session. Not covered: a process
     that left the session (setsid) after it inherited the socket, and a descriptor sent over a Unix socket to an
     unrelated non-dumpable process (SCM_RIGHTS). Same-uid programs can do that on purpose only; this rule guards
-    against mistakes, not against this user's own programs (see process_kind)."""
+    against mistakes, not against this user's own programs (see process_kind).
+    `only` (pid -> bool), when given, limits the scan to those processes, as holders and as hidden ones (tests)."""
     wanted = {'socket:[%d]' % inode: inode for inode in inodes if inode}
     found = {}
     if not wanted:
@@ -365,6 +366,8 @@ def socket_holders(inodes, uid, root='/proc', limit=50000):
         return found, False
     looked, hidden = 0, []
     for pid in pids:
+        if only is not None and not only(pid):
+            continue
         base = '%s/%d' % (root, pid)
         try:
             if os.stat(base).st_uid != uid:
@@ -436,12 +439,13 @@ def holds(pid, inode, root='/proc'):
     return False
 
 
-def process_names(inodes, uid, root='/proc', own_pid=None, *, kind=None):
+def process_names(inodes, uid, root='/proc', own_pid=None, *, kind=None, holders=None):
     """{inode: {'name', 'folder', 'pids', 'kind'}} for this user's listening sockets (Linux): the command, its folder's
     name, the processes that hold the socket and their kind (process_kind). The kind is 'dev' only when every holder
-    is a dev server and the scan saw every process. A socket without a visible holder is left out."""
+    is a dev server and the scan saw every process. A socket without a visible holder is left out.
+    `holders` replaces socket_holders (tests)."""
     classify = kind if kind is not None else lambda pid: process_kind(pid, root, own_pid)
-    holders, complete = socket_holders(inodes, uid, root)
+    holders, complete = (holders or socket_holders)(inodes, uid, root)
     found = {}
     for inode, pids in holders.items():
         kinds = {classify(pid) for pid in pids}
@@ -508,7 +512,7 @@ class DevPreviews:
 
     def __init__(self, ports=(), denied=(), clock=time.time, listeners=read_listeners, uid=None, names=process_names,
                  peer_uid=connection_uid if sys.platform.startswith('linux') else None, store=None, signal=None, kind=None,
-                 peer_inode=connection_inode):
+                 peer_inode=connection_inode, holders=None):
         self.peer_uid = peer_uid  # None: no socket table on this system. Nothing is forwarded then (verify, open).
         self.store = store        # the file that keeps the assignments; None keeps them in memory (tests)
         self.assigned = None      # pool port -> dev port, read from the file at first use
@@ -519,6 +523,7 @@ class DevPreviews:
         self.uid = os.getuid() if uid is None else uid
         self.names = names        # (inodes, uid) -> {inode: {'name', 'folder', 'pids', 'kind'}}: process_names
         self.peer_inode = peer_inode  # sock -> the dev server's end of this connection, once accepted (0: not yet)
+        self.holders = holders    # (inodes, uid) -> socket_holders result; None: socket_holders (tests replace it)
         self.kind = kind or process_kind  # pid -> 'dev', 'tether', 'service', 'agent' or 'unknown'
         # (pid, inode, force) -> 'sent', 'gone' or 'refused': stop_process
         self.signal = signal or (lambda pid, inode, force: stop_process(pid, inode, force, kind=self.kind))
@@ -630,7 +635,7 @@ class DevPreviews:
         """True when the processes that hold the dev server's end of a connection (socket `inode`) are dev servers.
         This names the very connection: a listener that closed and a new one on the port cannot stand in for it.
         A socket without a visible holder, or with a hidden one (see socket_holders), or an incomplete scan, is refused."""
-        holders, complete = socket_holders([inode], self.uid)  # every holder, so no cached one stands in (~35 ms)
+        holders, complete = (self.holders or socket_holders)([inode], self.uid)  # every holder, so no cached one stands in (~35 ms)
         live = holders.get(inode, []) if complete else []
         return bool(live) and all(self.kind(pid) == 'dev' for pid in live)
 

@@ -3,7 +3,7 @@
 Claude Code's SessionStart hook.
 
   project_launch.py claude [args...]   run claude, with the project folder and the hook when the session has a project
-  project_launch.py codex [args...]    run codex, with the backlog folder and the project text as developer_instructions
+  project_launch.py codex [args...]    run codex, with standing rules, project text, and the backlog folder
   project_launch.py hook <id>          Claude Code SessionStart hook: print the project text as additionalContext
 
 ~/.local/bin/tether-claude and tether-codex call this. Any failure runs the plain agent with the same args, and the
@@ -157,15 +157,6 @@ def claude_plain_args(args):
     return ['--settings', json.dumps(entry), *args] if entry else args
 
 
-def codex_has_own_instructions():
-    import paths
-    try:
-        text = (Path(os.environ.get('CODEX_HOME') or paths.CODEX) / 'config.toml').read_text(errors='replace')
-    except OSError:
-        return False
-    return re.search(r'^\s*developer_instructions\s*=', text, re.M) is not None
-
-
 SUBCOMMANDS = {'resume', 'fork', 'exec', 'e', 'review'}
 SANDBOX_PREFIXES = ('-s', '--sandbox', '-c', '--config', '-p', '--profile', '--approve-for-me', '-a', '--ask-for-approval')
 WRITE_FLAGS = {'--dangerously-bypass-approvals-and-sandbox', '--yolo'}
@@ -175,18 +166,20 @@ UNMODELLED_FLAGS = {'--worktree', '--ignore-user-config'}
 UNSURE = object()
 
 
-def _option(args, short, long):
-    """Every value of an option, in order: `-s X`, `-sX`, `--sandbox X` and `--sandbox=X`."""
-    values = []
+def _option_locations(args, short, long):
+    """Yield the argument index and prefix of each option value, in order."""
     for i, arg in enumerate(args):
         if arg in (short, long) and i + 1 < len(args):
-            values.append(args[i + 1])
+            yield i + 1, ''
         elif long and arg.startswith(long + '='):
-            values.append(arg[len(long) + 1:])
+            yield i, long + '='
         elif short and arg.startswith(short) and len(arg) > len(short) and not arg.startswith('--'):
-            value = arg[len(short):]
-            values.append(value[1:] if value.startswith('=') else value)  # clap reads -c=X as -c X
-    return values
+            yield i, short + '=' if arg.startswith(short + '=') else short
+
+
+def _option(args, short, long):
+    """Every value of an option, in order: `-s X`, `-sX`, `--sandbox X` and `--sandbox=X`."""
+    return [args[i][len(prefix):] for i, prefix in _option_locations(args, short, long)]
 
 
 def _mode(value):
@@ -265,15 +258,16 @@ def _gitdir(dot_git):
     return _join(dot_git.parent, target)
 
 
-def _repo_root(cwd):
+def _repo_root(cwd, *, logical=False):
     """The trust root Codex uses: the main checkout of a repository, also for a linked worktree.
-    A port of git-utils/src/trust.rs resolve_root (same in Codex 0.166 and 0.169); git itself is not run.
+    A port of git-utils/src/trust.rs resolve_root (same in Codex 0.166 through 0.170); git itself is not run.
     Find the nearest folder with a .git entry, skipping .git folders without HEAD. A .git folder is its own root.
     A .git file counts only for a registered linked worktree: its gitdir is <common>/worktrees/<name>,
     whose gitdir and commondir files point back to this checkout and to <common>, and the main checkout
     owns <common>. A submodule or a --separate-git-dir checkout gives no root. Where this port may differ
     from Codex (a symlinked .git), it gives no root, so Tether starts Codex without --add-dir."""
-    base = _canon(cwd)  # Codex gets its cwd from the kernel, with symlinks resolved
+    # The process cwd is canonical, but Codex can preserve nested symlinks passed to --cd.
+    base = str(cwd) if logical else _canon(cwd)
     if base is None:
         return None
     if not os.path.isdir(base):
@@ -331,7 +325,9 @@ def _repo_root(cwd):
     return main_root
 
 
-SYSTEM_FILES = ('/etc/codex/config.toml', '/etc/codex/requirements.toml', '/etc/codex/managed_config.toml')
+SYSTEM_CONFIG = '/etc/codex/config.toml'
+MANAGED_CONFIG = '/etc/codex/managed_config.toml'
+SYSTEM_FILES = (SYSTEM_CONFIG, '/etc/codex/requirements.toml', MANAGED_CONFIG)
 MANAGED_PREFERENCES = '/Library/Managed Preferences'
 
 
@@ -339,8 +335,11 @@ def _managed():
     """True when Codex can load system or administrator config: /etc/codex files, or on macOS forced (MDM)
     preferences for com.openai.codex (config/src/loader/macos.rs), stored for all users or for one user.
     Other systems (Windows) are not modelled, so they count as managed."""
-    if any(os.path.exists(path) for path in SYSTEM_FILES):
-        return True
+    return any(os.path.exists(path) for path in SYSTEM_FILES) or _unmodelled_managed_config()
+
+
+def _unmodelled_managed_config():
+    """Detect macOS MDM preferences (config/src/loader/macos.rs) or an unsupported platform."""
     if sys.platform == 'darwin':
         name = 'com.openai.codex.plist'
         try:
@@ -459,12 +458,172 @@ def codex_folders(args=()):
     return out
 
 
-def codex_args(pid, args, group=None):
-    if any(arg in CODEX_PLAIN for arg in args):
+def _cli_discovery_layer(options):
+    """Build the discovery fields of the CLI layer as config/src/overrides.rs apply_toml_override does."""
+    layer = {}
+    for arg in _option(options, '-c', '--config'):
+        key, sep, value = arg.partition('=')
+        parts = key.strip().split('.')
+        if not sep:
+            continue
+        if parts == ['profile']:
+            return None
+        if parts[0] not in ('projects', 'project_root_markers'):
+            continue
+        table = layer
+        for part in parts[:-1]:
+            if not isinstance(table.get(part), dict):
+                table[part] = {}
+            table = table[part]
+        table[parts[-1]] = _override(value)
+    return layer
+
+
+def _merge_tables(base, overlay):
+    """Merge the discovery tables like config/src/merge.rs merge_toml_values."""
+    merged = {**base, **overlay}
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            merged[key] = _merge_tables(base[key], value)
+    return merged
+
+
+def _has_project_marker(folder, marker):
+    path = _join(folder, marker)
+    return path is not None and os.path.exists(path) and (
+        marker != '.git' or not os.path.isdir(path) or os.path.exists(os.path.join(path, 'HEAD')))
+
+
+def _trust_keys(path):
+    if path is not None:
+        raw = str(path)
+        real = _canon(raw)
+        if real and real != raw:
+            yield real
+        yield raw
+
+
+def _project_trust(config):
+    """Read typed trust decisions as config/src/loader/mod.rs project_trust_context does."""
+    entries = config.get('projects', {})
+    if not isinstance(entries, dict) or any(
+        not isinstance(entry, dict) or ('trust_level' in entry and entry['trust_level'] not in ('trusted', 'untrusted'))
+        for entry in entries.values()
+    ):
+        return None
+    return {key: entry['trust_level'] for key, entry in entries.items() if 'trust_level' in entry}
+
+
+def _trusted_project_configs(cwd, home, markers, trust):
+    """Port config/src/loader/mod.rs discover_project_root, decision_for_dir and discover_project_layers.
+    Resolve trust for every layer before the caller reads any project config."""
+    folders = [cwd, *cwd.parents]
+    root_index = next((i for i, folder in enumerate(folders)
+                       if any(_has_project_marker(folder, marker) for marker in markers)), 0)
+    inherited = [*_trust_keys(folders[root_index]), *_trust_keys(_repo_root(cwd, logical=True))]
+    home_real = _canon(home)
+    for folder in reversed(folders[:root_index + 1]):
+        level = next((trust[key] for key in [*_trust_keys(folder), *inherited] if key in trust), None)
+        if level != 'trusted':
+            continue
+        layer = folder / '.codex'
+        if os.path.isdir(layer) and layer != home and not (home_real and _canon(layer) == home_real):
+            yield layer / 'config.toml'
+
+
+def _instruction_cwd(options, cwd):
+    """Resolve --cd like utils/absolute-path/src/lib.rs canonicalize_existing_preserving_symlinks."""
+    base = (_canon(cwd) or cwd) if cwd is not None else os.getcwd()
+    cd = (_option(options, '-C', '--cd') or [''])[-1]
+    logical = _join(base, cd)
+    real = _canon(os.path.join(base, cd))
+    if not logical or not real:
+        return None
+    folder = Path(logical)
+    if logical != real and any(parent.is_symlink() for parent in [folder, *folder.parents][:-2]):
+        return folder  # Keep nested symlinks; canonicalize top-level aliases such as macOS /tmp.
+    return Path(real)
+
+
+def _instruction_config(options, cwd):
+    """Select local instructions using config/src/loader/mod.rs load_config_layers_state.
+    Enterprise cloud config bundles are not readable locally and are not modelled."""
+    import paths
+    home = Path(os.environ.get('CODEX_HOME') or paths.CODEX).absolute()
+    system, managed = _toml(SYSTEM_CONFIG), _toml(MANAGED_CONFIG)
+    if system is None or managed is None or 'developer_instructions' in managed:
+        return None
+    user, profile = {}, {}
+    if '--ignore-user-config' not in options:
+        user = _toml(home / 'config.toml')
+        if user is None or isinstance(user.get('profile'), str):
+            return None
+        name = (_option(options, '-p', '--profile') or [''])[-1]
+        if name:
+            # ProfileV2Name (protocol/src/config_types.rs) accepts plain ASCII names only.
+            if not re.fullmatch(r'[A-Za-z0-9_-]+', name):
+                return None
+            profile = _toml(home / f'{name}.config.toml')
+            if profile is None:
+                return None
+
+    cli = _cli_discovery_layer(options)
+    if cli is None:
+        return None
+    discovery = {}
+    for layer in (system, user, profile, cli, managed):
+        discovery = _merge_tables(discovery, {k: layer[k] for k in ('projects', 'project_root_markers') if k in layer})
+    markers = discovery.get('project_root_markers', ['.git'])
+    if not isinstance(markers, list) or not all(isinstance(marker, str) for marker in markers):
+        return None
+
+    config = {**system, **user, **profile}
+    if _unmodelled_managed_config() or '--worktree' in options:
+        return config  # The final checkout of --worktree is chosen by Codex after startup.
+    trust = _project_trust(discovery)
+    if trust is None:
+        return None  # project_trust_context cannot deserialize the projects table.
+    start = _instruction_cwd(options, cwd)
+    if start is None:
+        return config
+    for path in list(_trusted_project_configs(start, home, markers, trust)):
+        layer = _toml(path)
+        if layer is None:
+            return None
+        if 'developer_instructions' in layer:
+            config['developer_instructions'] = layer['developer_instructions']
+    return config
+
+
+def codex_args(pid, args, group=None, cwd=None):
+    options = args[:args.index('--')] if '--' in args else args
+    if any(arg in CODEX_PLAIN for arg in options):
         return args
+    import autonomy
+    import codex_level
+    # Children inherit the root developer_instructions, and Codex rebuilds them after compaction. Do not set
+    # features.multi_agent_v2.subagent_developer_instructions: it would replace what children inherit.
+    block = autonomy.codex_standing_rules(autonomy.resolve(pid), codex_level.resolve(pid))
     folder_args = codex_folders(args) if pid else []
-    if any('developer_instructions' in arg for arg in args) or codex_has_own_instructions():
+
+    # Replace the last CLI instruction in place so its scope and precedence are preserved on resume/fork.
+    for i, prefix in reversed(list(_option_locations(options, '-c', '--config'))):
+        key, sep, value = options[i][len(prefix):].partition('=')
+        if sep and key.strip() == 'developer_instructions':
+            user = _override(value)
+            if isinstance(user, str):
+                args = list(args)
+                args[i] = prefix + 'developer_instructions=' + toml_string(user + '\n\n' + block)
+            return [*folder_args, *args]
+
+    config = _instruction_config(options, cwd)
+    if config is None:
         return [*folder_args, *args]
+    if 'developer_instructions' in config:
+        user = config['developer_instructions']
+        root_args = ['-c', 'developer_instructions=' + toml_string(user + '\n\n' + block)] if isinstance(user, str) else []
+        return [*root_args, *folder_args, *args]
+
     text = ''
     if pid:
         import backlog
@@ -475,7 +634,8 @@ def codex_args(pid, args, group=None):
         from agent_browser_cli import note
         text = text + '\n\n' + note() if text else note()
         args = [*codex_browser_env_args(), *args]
-    return ['-c', 'developer_instructions=' + toml_string(text), *folder_args, *args] if text else args
+    text = text + '\n\n' + block if text else block
+    return ['-c', 'developer_instructions=' + toml_string(text), *folder_args, *args]
 
 
 def codex_browser_env_args():
@@ -536,6 +696,20 @@ def launch(agent, args):
     os.execv(real, [agent, *final])
 
 
+MOVED_NOTE = ('This tab moved here from another project. Until it restarts, it may not have file access to this '
+              'project folder.')
+
+
+def live_project(pid):
+    """The project of the session the pane is in now, else pid (outside tmux, or any failure). The hook command holds
+    the project the tab started in; a pane moved to another session (tmux_merge.py) must get the new project's notes
+    at its next start, clear or compact (B326)."""
+    try:
+        return current_project() or pid
+    except Exception:  # noqa: BLE001 - a tmux failure keeps the project the tab started with
+        return pid
+
+
 def hook(pid):
     try:
         sys.stdin.read()
@@ -545,9 +719,14 @@ def hook(pid):
         sys.path.insert(0, str(HERE))
         import backlog
         import projects
+        live = live_project(pid)
         group = current_group()
-        text = projects.render(pid, 'claude', group=group, backlog_project=backlog.project_name())
-        record_revision(pid, group)
+        text = projects.render(live, 'claude', group=group, backlog_project=backlog.project_name())
+        if live == pid:
+            record_revision(pid, group)
+        elif text:
+            # The stale mark stays (projects.marks): file access still holds the old project folder until a restart.
+            text += '\n\n' + MOVED_NOTE
     except Exception:  # noqa: BLE001 - a hook must never stop a session
         return
     if text:

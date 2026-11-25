@@ -16,6 +16,11 @@ A lost Web Push answer (read timeout, the service closed the connection) also co
 browser. Only errors that prove the request never left retry (push.NOT_SENT: connect timeout, refused, DNS, TLS).
 After eight failures the channel stops retrying and is listed in `failed`. Deleted reminders keep their full
 delivery state for restore by ID for 30 days.
+
+A repeat rule moves to the next copy on Done. Its anchor keeps the scheduled wall time even after a snooze.
+Catch-up makes a single future copy. Deleting the open copy stops the series until restore.
+Monthly and yearly rules keep their day. A day the month lacks moves to the last day of that month.
+
 Times are UTC epoch seconds.
 """
 import contextlib
@@ -28,14 +33,22 @@ import sys
 import tempfile
 import threading
 import time
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+from calendar import monthrange
+from collections import defaultdict
+from datetime import date, datetime, timedelta
+from math import inf
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import paths
+try:
+    from . import paths, tether_zone
+except ImportError:
+    import paths
+    import tether_zone
 
 PREFIX = '/mobile/api/reminders'
 ACTIONS = ('add', 'edit', 'done', 'reopen', 'snooze', 'delete', 'restore')
-ZONE = ZoneInfo(os.environ.get('TETHER_REMINDER_ZONE') or 'Asia/Kolkata')
+RULES = ('day', 'weekday', 'week', 'month', 'year')
+INTERVAL_LIMITS = {'day': 365, 'weekday': 1, 'week': 52, 'month': 60, 'year': 5}
 TEXT_LIMIT = 500
 LATE = 120  # fired this many seconds after its time (server down or busy): the notice says late
 DONE_KEPT = 50  # finished reminders kept; older ones are dropped
@@ -96,6 +109,17 @@ def _clean_link(link):
     return out or None
 
 
+def _clean_source(source):
+    if source is None:
+        return None
+    if (not isinstance(source, dict) or source.keys() != {'key', 'label'}
+            or not all(isinstance(source[k], str) and source[k].isprintable()
+                       and source[k] == source[k].strip() and 0 < len(source[k]) <= limit
+                       for k, limit in (('key', 1024), ('label', 200)))):
+        raise ReminderError('The reminder source needs a valid key and label.')
+    return dict(source)
+
+
 def _valid(record):
     return (isinstance(record, dict) and isinstance(record.get('id'), str) and ID.fullmatch(record['id'])
             and isinstance(record.get('text'), str) and record['text'].strip()
@@ -106,6 +130,36 @@ def _valid(record):
 def _recently_deleted(records, now):
     return sorted((r for r in records if r['deleted_at'] > now - DELETED_AGE),
                   key=lambda r: r['deleted_at'], reverse=True)
+
+
+# Stored rule times must convert to dates with room for a few years of steps; 1e20 passes a finiteness check but not this.
+TIME_LIMIT = 253402300799 - 10 * 366 * 86400  # 9999-12-31 less ten years
+
+
+def _usable_time(value):
+    return type(value) in (int, float) and 0 <= value <= TIME_LIMIT
+
+
+def _int_between(value, low, high):
+    return type(value) is int and low <= value <= high
+
+
+def _valid_repeat(rule):
+    if not isinstance(rule, dict):
+        return False
+    every = rule.get('every')
+    if every not in RULES or not _int_between(rule.get('interval', 1), 1, INTERVAL_LIMITS[every]):
+        return False
+    if not isinstance(rule.get('zone'), str):
+        return False
+    anchor = rule.get('anchor')
+    if not _usable_time(anchor):
+        return False
+    if every in ('month', 'year'):
+        day = rule.get('day')
+        if type(day) is not int or (day != -1 and not 1 <= day <= 31):
+            return False
+    return every != 'year' or _int_between(rule.get('month'), 1, 12)
 
 
 def _load(now, *, prune_deleted=True):
@@ -130,8 +184,15 @@ def _load(now, *, prune_deleted=True):
         record.setdefault('retry_at', {})
         record.setdefault('sending', {})
         record.setdefault('failed', [])
+        repeat = record.get('repeat')
+        if isinstance(repeat, dict) and 'origin' in repeat and not _usable_time(repeat['origin']):
+            repeat.pop('origin')  # a bad origin falls back to the anchor's wall time; the rule stays
+        if not _valid_repeat(repeat):
+            record['repeat'] = None
+        elif repeat.get('interval') == 1:
+            repeat.pop('interval')
     nxt = data.get('next') if isinstance(data.get('next'), int) and data.get('next') > top else top + 1
-    return {'version': 1, 'next': nxt, 'reminders': items, 'deleted': deleted}
+    return {'version': 2, 'next': nxt, 'reminders': items, 'deleted': deleted}
 
 
 def _save(data, restored_id=None):
@@ -161,12 +222,12 @@ def _text(text):
     return text
 
 
-def _due(value, now):
-    if not isinstance(value, (int, float)) or isinstance(value, bool) or value != value:
+def _due(value, now, *, sourced=False):
+    if type(value) not in (int, float) or not -inf < value < inf:
         raise ReminderError('Pick a time.')
     if value <= now:
         raise ReminderError('Pick a time in the future.')
-    if value > now + MAX_AHEAD:
+    if not sourced and value > now + MAX_AHEAD:
         raise ReminderError('Pick a time within five years.')
     return float(value)
 
@@ -182,7 +243,7 @@ def _find(records, rid):
 
 
 def _schedule(record, due):
-    record.update(due=due, state='scheduled', fired_at=None, late=False, occ=record['occ'] + 1, sent=[],
+    record.update(due=due, state='scheduled', done_at=None, fired_at=None, late=False, occ=record['occ'] + 1, sent=[],
                   tries={}, retry_at={}, sending={}, failed=[])
     record.pop('push', None)
 
@@ -198,22 +259,202 @@ def listing(now=None):
 
 def public(record):
     keys = ('id', 'text', 'due', 'created', 'by', 'state', 'fired_at', 'late', 'snoozes', 'done_at', 'link',
-            'occ', 'failed')
-    return {key: record.get(key) for key in keys}
+            'occ', 'failed', 'repeat', 'next_id')
+    result = {key: record.get(key) for key in keys}
+    if record.get('source'):
+        result['source'] = record['source']
+    return result
 
 
-def add(text, due, by='you', link=None, now=None):
-    now = time.time() if now is None else now
-    record = {'text': _text(text), 'due': _due(due, now), 'created': now, 'by': str(by or 'you')[:200],
+def repeat_zone(rule):
+    try:
+        return ZoneInfo(rule['zone'])
+    except (ZoneInfoNotFoundError, ValueError):
+        return tether_zone.zone()
+
+
+def _repeat_date(rule, last_day):
+    every = rule['every']
+    if every in ('month', 'year'):
+        anchor = datetime.fromtimestamp(rule['anchor'], repeat_zone(rule))
+        rule['day'] = -1 if last_day else anchor.day
+        if every == 'year':
+            rule['month'] = anchor.month
+
+
+def _clean_repeat(repeat, due, previous=None):
+    if repeat is None:
+        return None
+    options = repeat if isinstance(repeat, dict) else {'every': repeat}
+    every, interval, last_day = options.get('every'), options.get('interval', 1), options.get('last_day', False)
+    if every not in RULES:
+        raise ReminderError('Pick a repeat: never, day, weekday, week, month or year.')
+    if options.keys() - {'every', 'interval', 'last_day'}:
+        raise ReminderError('Use only every, interval and last_day for a repeat.')
+    limit = INTERVAL_LIMITS[every]
+    if not _int_between(interval, 1, limit):
+        if every == 'weekday':
+            raise ReminderError('Weekday reminders repeat every weekday.')
+        raise ReminderError(f'Repeat every 1 to {limit} {every}s.')
+    if type(last_day) is not bool:
+        raise ReminderError('Use true or false for last_day.')
+    if last_day and every != 'month':
+        raise ReminderError('Use last_day only with a monthly repeat.')
+    # A rule-only edit keeps the series zone: its day and wall time belong to that zone.
+    rule = {'every': every, 'anchor': previous['anchor'] if previous else due,
+            'zone': previous['zone'] if previous else tether_zone.name()}
+    if interval > 1:
+        rule['interval'] = interval
+    if previous and 'origin' in previous:
+        rule['origin'] = previous['origin']
+    if (every in ('month', 'year') and previous and every == previous['every']
+            and last_day == (previous['day'] == -1)):
+        rule['day'] = previous['day']
+        if every == 'year':
+            rule['month'] = previous['month']
+    else:
+        _repeat_date(rule, last_day)
+    return rule
+
+
+def _next_month(anchor, today, wall_time, step, wanted, after):
+    months = (today.year - anchor.year) * 12 + today.month - anchor.month
+    index = anchor.month - 1 + max(1, months // step) * step
+    while True:
+        years, offset = divmod(index, 12)
+        year, month = anchor.year + years, offset + 1
+        last = monthrange(year, month)[1]
+        day = last if wanted == -1 else min(wanted, last)
+        due = datetime.combine(date(year, month, day), wall_time, tzinfo=anchor.tzinfo).timestamp()
+        if due > after:
+            return due
+        index += step
+
+
+def next_due(rule, now):
+    """The first future occurrence after the anchor, at the series wall time.
+
+    The origin keeps its wall time when a later copy lands in a skipped daylight-saving hour.
+    """
+    zone = repeat_zone(rule)
+    anchor = datetime.fromtimestamp(rule['anchor'], zone)
+    today = datetime.fromtimestamp(now, zone).date()
+    wall_time = datetime.fromtimestamp(rule.get('origin', rule['anchor']), zone).time()
+    every, interval = rule['every'], rule.get('interval', 1)
+    after = max(rule['anchor'], now)
+    if every in ('month', 'year'):
+        step = interval * (12 if every == 'year' else 1)
+        return _next_month(anchor, today, wall_time, step, rule['day'], after)
+    step = interval * (7 if every == 'week' else 1)
+    # Jump near today in whole steps to keep the phase.
+    count = max(1, (today - anchor.date()).days // step)
+    day = anchor.date() + timedelta(days=count * step)
+    while True:
+        if every != 'weekday' or day.weekday() < 5:
+            due = datetime.combine(day, wall_time, tzinfo=zone).timestamp()
+            if due > after:
+                return due
+        day += timedelta(days=step)
+
+
+def _new(text, due, by, link, now, repeat, source):
+    text = _text(text)
+    source = _clean_source(source)
+    due = _due(due, now, sourced=bool(source))
+    if source and repeat is not None:
+        raise ReminderError('A linked reminder cannot repeat.')
+    record = {'text': text, 'due': due, 'created': now, 'by': str(by or 'you')[:200],
               'state': 'scheduled', 'fired_at': None, 'late': False, 'snoozes': 0, 'done_at': None,
-              'link': _clean_link(link), 'occ': 1, 'sent': [], 'tries': {}, 'retry_at': {}, 'sending': {}, 'failed': []}
+              'link': _clean_link(link), 'occ': 1, 'sent': [], 'tries': {}, 'retry_at': {}, 'sending': {}, 'failed': [],
+              'repeat': _clean_repeat(repeat, due)}
+    if source:
+        record.update(source=source, source_at=due)
+    return record
+
+
+def _append(data, record):
+    record['id'] = f'R{data["next"]}'
+    data['next'] += 1
+    data['reminders'].append(record)
+
+
+def _check_open_source(records, record):
+    source = record.get('source')
+    if not isinstance(source, dict) or not isinstance(source.get('key'), str):
+        return
+    for other in records:
+        other_source = other.get('source')
+        if (other['id'] != record.get('id') and other['state'] != 'done'
+                and isinstance(other_source, dict) and other_source.get('key') == source['key']
+                and other.get('source_account') == record.get('source_account')):
+            raise ReminderError('This task already has an open reminder.', 409)
+
+
+def add(text, due, by='you', link=None, now=None, repeat=None, *, source=None):
+    now = time.time() if now is None else now
+    record = _new(text, due, by, link, now, repeat, source)
     with _locked():
         data = _load(now)
-        record['id'] = f'R{data["next"]}'
-        data['next'] += 1
-        data['reminders'].append(record)
+        _check_open_source(data['reminders'], record)
+        _append(data, record)
         _save(data)
     return public(record)
+
+
+def sync_source(label, account, links, present, now):
+    """Reconcile a complete source read in one reminder save. Return links with their upstream times.
+
+    Keep the upstream time even when it is past or off. Keep it on older records too, so restoring one
+    preserves its schedule and still lets the next poll detect a change. The store can recover the link
+    if the mirror write fails.
+    """
+    links = links.copy()
+    with _locked():
+        data = _load(now)
+        history = defaultdict(list)
+        changed = False
+        for deleted, records in ((False, data['reminders']), (True, data['deleted'])):
+            for record in records:
+                source = record.get('source')
+                if (not isinstance(source, dict) or source.get('label') != label or 'source_at' not in record
+                        or not isinstance(source.get('key'), str) or record.get('source_account') != account):
+                    continue
+                key = source['key']
+                opened = not deleted and record['state'] != 'done'
+                if key in present:
+                    # Pick the reminder for this key: the open one (at most one), else a live record over a
+                    # deleted one, else the saved link, else the newest. The saved link outranks creation time,
+                    # so closing a restored reminder keeps its link. A live record outranks the link, so a link
+                    # left stale by a failed mirror write never points at a deleted reminder.
+                    order = (opened, not deleted, record['id'] == links.get(key, {}).get('id'),
+                             record.get('created', 0))
+                    history[key].append((record, deleted, order))
+                elif opened:
+                    record.update(state='done', done_at=now)
+                    changed = True
+        for key, row in present.items():
+            at = row['reminderAt']
+            records = history.get(key, [])
+            record, deleted, _ = max(records, key=lambda item: item[2], default=(None, False, ()))
+            previous = links.get(key, {})
+            observed = record['source_at'] if record is not None else previous.get('at')
+            if at is not None and at > now and at != observed:
+                if record is None or deleted:
+                    record = _new(row['title'], at, label, None, now, None, {'key': key, 'label': label})
+                    record['source_account'] = account
+                    _append(data, record)
+                else:
+                    _schedule(record, _due(at, now, sourced=True))
+                changed = True
+            for earlier, _, _ in records:
+                if earlier['source_at'] != at:
+                    earlier['source_at'] = at
+                    changed = True
+            if record is not None or previous:
+                links[key] = {'id': record['id'] if record is not None else previous['id'], 'at': at}
+        if changed:
+            _save(data)
+    return links
 
 
 def change(rid, action, body=None, now=None, *, by_id=False):
@@ -234,17 +475,45 @@ def change(rid, action, body=None, now=None, *, by_id=False):
         if occ is not None and occ != record['occ']:
             raise ReminderError('This reminder changed after that notice. Open Reminders to see it.', 409)
         if action == 'edit':
+            if 'repeat' in body and record['state'] == 'done':
+                raise ReminderError('That reminder is done. Reopen it first.', 409)
             if 'text' in body:
                 record['text'] = _text(body['text'])
             if 'link' in body:
                 record['link'] = _clean_link(body['link'])
-            if 'due' in body and body['due'] != record['due']:
+            due_changed = 'due' in body and body['due'] != record['due']
+            if due_changed:
+                _check_open_source(data['reminders'], record)
                 _schedule(record, _due(body['due'], now))
+            rule = record['repeat']
+            if 'repeat' in body:
+                repeat = _clean_repeat(body['repeat'], record['due'], None if due_changed else rule)
+                if repeat is not None and record.get('source'):
+                    raise ReminderError('A linked reminder cannot repeat.')
+                record['repeat'] = repeat
+            elif due_changed and rule:
+                # A new time moves the series to the current Tether zone, as with a new rule.
+                rule.update(anchor=record['due'], zone=tether_zone.name())
+                rule.pop('origin', None)
+                _repeat_date(rule, rule.get('day') == -1)
         elif action == 'done':
+            if record['state'] == 'done':
+                return public(record)
             record.update(state='done', done_at=now)
+            rule = record['repeat']
+            if rule:
+                due = next_due(rule, now)
+                next_id = f'R{data["next"]}'
+                upcoming = {'id': next_id, 'text': record['text'], 'link': record.get('link'), 'by': record.get('by'),
+                            'created': now, 'occ': 0, 'snoozes': 0, 'done_at': None, 'repeat': dict(rule, anchor=due, origin=rule.get('origin', rule['anchor']))}
+                _schedule(upcoming, due)
+                data['next'] += 1
+                data['reminders'].append(upcoming)
+                record.update(repeat=None, next_id=next_id)
         elif action == 'reopen':
             if record['state'] != 'done':
                 return public(record)
+            _check_open_source(data['reminders'], record)
             record['done_at'] = None
             if record['due'] > now:
                 _schedule(record, record['due'])
@@ -276,7 +545,7 @@ def change(rid, action, body=None, now=None, *, by_id=False):
 
 
 def restore(rid, now=None):
-    """Move a recently deleted reminder back, preserving its schedule and delivery state."""
+    """Restore the schedule and delivery state. Return 409 if this would open a second reminder for the task."""
     now = time.time() if now is None else now
     rid = _id(rid)
     with _locked():
@@ -287,6 +556,8 @@ def restore(rid, now=None):
         record = _find(data['deleted'], rid)
         if record is None:
             raise ReminderError('That reminder is no longer in Recently deleted.', 404)
+        if record['state'] != 'done':
+            _check_open_source(data['reminders'], record)
         data['deleted'].remove(record)
         del record['deleted_at']
         data['reminders'].append(record)
@@ -355,7 +626,8 @@ def tick(channels, now=None):
         if changed:
             _save(data)
         pending = [(r['id'], r['occ'], channel) for r in data['reminders'] if r['state'] == 'due'
-                   for channel in channels if channel not in r['sent'] and r['retry_at'].get(channel, 0) <= started]
+                   for channel in channels if (channel != 'ping' or not r.get('source'))
+                   and channel not in r['sent'] and r['retry_at'].get(channel, 0) <= started]
     sent = []
     for rid, occ, channel in pending:
         with _locked():
@@ -408,10 +680,11 @@ def tick(channels, now=None):
 
 
 def when_text(at, now=None):
-    """'10:00', 'tomorrow 10:00' or 'Wed 19 Nov 10:00', in ZONE."""
+    """'10:00', 'tomorrow 10:00' or 'Wed 19 Nov 10:00', in the Tether time zone."""
     now = time.time() if now is None else now
-    day = datetime.fromtimestamp(at, ZONE)
-    today = datetime.fromtimestamp(now, ZONE).date()
+    zone = tether_zone.zone()
+    day = datetime.fromtimestamp(at, zone)
+    today = datetime.fromtimestamp(now, zone).date()
     clock = day.strftime('%H:%M')
     if day.date() == today:
         return clock
@@ -428,34 +701,38 @@ def payload(reminder, silent=False, now=None):
             'reminder': reminder['id'], 'occ': reminder['occ']}
 
 
-# Times the CLI understands: "2026-11-19 10:00", "2026-11-19T10:00+05:30", "10:00" (next), "tomorrow 10:00",
-# "tomorrow", "in 90m", "in 2h", "in 1d". A time without an offset is in ZONE.
+# Times the CLI understands: "2026-11-19 10:00", "2026-11-19" (10:00), "2026-11-19T10:00+05:30", "10:00" (next), "tomorrow 10:00",
+# "tomorrow", "in 90m", "in 2h", "in 1d". A time without an offset is in the Tether time zone.
 RELATIVE = re.compile(r'in\s+(\d{1,5})\s*(m|min|mins|minutes?|h|hr|hrs|hours?|d|days?)', re.I)
 CLOCK = re.compile(r'(\d{1,2}):(\d{2})')
+DATE = re.compile(r'\d{4}-\d{2}-\d{2}')
 
 
 def parse_when(text, now=None):
     now = time.time() if now is None else now
     text = ' '.join(str(text or '').split())
-    base = datetime.fromtimestamp(now, ZONE)
+    base = tether_zone.now(now)
     match = RELATIVE.fullmatch(text)
     if match:
         amount, unit = int(match[1]), match[2][0].lower()
         return now + amount * {'m': 60, 'h': 3600, 'd': 86400}[unit]
     try:
         lower = text.lower()
-        if lower == 'tomorrow' or lower.startswith('tomorrow '):
-            clock = CLOCK.fullmatch(text[8:].strip() or '09:00')
-            if clock is None:
-                raise ValueError
-            day = base + timedelta(days=1)
-            return day.replace(hour=int(clock[1]), minute=int(clock[2]), second=0, microsecond=0).timestamp()
-        clock = CLOCK.fullmatch(text)
+        tomorrow = lower == 'tomorrow' or lower.startswith('tomorrow ')
+        clock = CLOCK.fullmatch((text[8:].strip() or '09:00') if tomorrow else text)
+        if tomorrow and not clock:
+            raise ValueError
         if clock:
-            at = base.replace(hour=int(clock[1]), minute=int(clock[2]), second=0, microsecond=0)
-            return (at if at.timestamp() > now else at + timedelta(days=1)).timestamp()
+            wall = base.replace(tzinfo=None, hour=int(clock[1]), minute=int(clock[2]), second=0, microsecond=0)
+            if not tomorrow:
+                for at in tether_zone.wall_times(wall, base.tzinfo):
+                    if at > now:
+                        return at
+            return tether_zone.wall_times(wall + timedelta(days=1), base.tzinfo)[0]
         at = datetime.fromisoformat(text.replace(' ', 'T', 1) if 'T' not in text else text)
-        return (at if at.tzinfo is not None else at.replace(tzinfo=ZONE)).timestamp()
+        if DATE.fullmatch(text):
+            at = at.replace(hour=10)
+        return (at if at.tzinfo is not None else at.replace(tzinfo=base.tzinfo)).timestamp()
     except (ValueError, OverflowError, OSError):
         raise ReminderError(f'Cannot read the time "{text}". Use "2026-11-19 10:00", "tomorrow 10:00" or "in 2h".') from None
 
@@ -475,11 +752,16 @@ def get(handler):
 
 
 def serve(handler, body):
-    """POST /mobile/api/reminders/add {text, due, link?}, /{edit,done,reopen,snooze,delete,restore} {id, ...}."""
+    """POST /mobile/api/reminders/add {text, due or when, link?, repeat?}, or /{action} {id, ...}."""
     action = handler.path.split('?', 1)[0][len(PREFIX) + 1:]
     try:
         if action == 'add':
-            result = add(body.get('text'), body.get('due'), 'you', body.get('link'))
+            now = time.time()
+            due = body.get('due')
+            when = body.get('when')
+            if 'due' not in body and isinstance(when, str):
+                due = parse_when(when, now)
+            result = add(body.get('text'), due, 'you', body.get('link'), now=now, repeat=body.get('repeat'))
         elif action == 'restore':
             result = restore(body.get('id'))
         elif action in ACTIONS:

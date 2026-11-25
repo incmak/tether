@@ -6,10 +6,10 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, shotsDir } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-15/header-scroll/shots')
+const SHOTS = shotsDir('header-scroll')
 const pane = (id, name, extra) => ({ id, tmux_session: '$1', label: `project:0.${id.slice(1)}`, pane_name: name, agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: `t${id.slice(1)}`, approval: null, ask: null, ...extra })
 // Many tabs with long names in ten stacks: both strips overflow at 1280 px. %1 to %12 are in "Ship"; the rest spread.
 const names = ['Deploy fix', 'Docs pass for the release notes', 'Review the parser change', 'Automation tether', 'BriskBot daily', 'Voice worker on CPU', 'Backlog detail pane', 'Header strips scroll', 'Sidebar fuzzy search', 'Release notes draft', 'Usage limits page', 'Agent map layout']
@@ -205,7 +205,7 @@ async function main() {
     check('setting off: at the strip end the swipe passes (Back/Forward)', none(wheels) && await selected() === '%2', JSON.stringify(wheels))
     wheels = await swipe(1, { x, y: tabs.y + tabs.height + 8 })
     check('setting off: the band passes too', none(wheels), JSON.stringify(wheels))
-    // 9. The setting: on by default, a labelled switch in Settings › Sessions & chat that works with the keyboard at 320 px.
+    // 9. The setting: on by default, a labelled switch in Settings › Sidebar & chat that works with the keyboard at 320 px.
     await open(1280)
     await page.locator('button[aria-label="Settings"]').first().click()
     await page.getByLabel('Search settings').fill('swipe')

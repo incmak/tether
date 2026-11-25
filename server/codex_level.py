@@ -25,8 +25,10 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
+import audit  # noqa: E402
 import paths  # noqa: E402
 import procinfo  # noqa: E402
+import projects  # noqa: E402
 import prompt_context  # noqa: E402
 
 LEVELS = (
@@ -59,6 +61,7 @@ COMMON = (
     'Do not change the level. The user sets it in Tether.',
 )
 PROJECT_ID = re.compile(r'[0-9a-f]{12}')
+_SETTINGS_LOCK = threading.Lock()
 
 
 class LevelError(Exception):
@@ -102,7 +105,11 @@ def read_project(pid):
     return {'override': data['override'], 'level': data['level']}
 
 
+_WRITES = {}  # path → writes by this process: two quick writes can share an inode and a coarse file time
+
+
 def _write(path, text):
+    _WRITES[str(path)] = _WRITES.get(str(path), 0) + 1
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temp = path.with_name(f'.{path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
     try:
@@ -437,6 +444,41 @@ def get(handler):
         handler.respond(exc.status, {'error': str(exc)})
 
 
+def _override_value(value, override):
+    return f'{value} (override {"on" if override else "off"})'
+
+
+def _record_setting(kind, label, old, new, *, pid=None, undo=False):
+    project = projects.audit_name(pid) if pid is not None else None
+    if pid is not None:
+        label = f'{label} for {project}:' if project else f'{label} for project:'
+    prefix = 'Undo: ' if undo else ''
+    audit.record(kind, f'{prefix}{label} {old} → {new}', old=old, new=new, project=project, undo=undo)
+
+
+STALE_UNDO = 'The level changed after this change. Undo would overwrite the newer value, so Tether did not change it.'
+
+
+def revision(path):
+    """Changes on every write: _write replaces the file, so another process's write gives a new inode and time, and
+    this process also counts its own writes (the file time is coarse and a freed inode can come back at once)."""
+    try:
+        info = path.stat()
+    except OSError:
+        return f'none-{_WRITES.get(str(path), 0)}'
+    return f'{info.st_ino}-{info.st_mtime_ns}-{_WRITES.get(str(path), 0)}'
+
+
+def stale_undo(body, path):
+    """Undo sends the revision its change made. True when any write came after it, even one that set the same value
+    again (1 → 2 → 1), so an old Undo never overwrites a newer change (B56 review)."""
+    return body.get('undo') is True and body.get('revision') != revision(path)
+
+
+def _run_value(run):
+    return f'{run["model"]} · {run["effort"]} · fast {"on" if run["fast"] else "off"}'
+
+
 def post(handler):
     """{level} sets the global level. {project, override, level} sets a project override. {run} sets the Codex options."""
     try:
@@ -446,14 +488,39 @@ def post(handler):
         body = json.loads(handler.rfile.read(size))
         if not isinstance(body, dict):
             raise LevelError(400, 'Invalid request.')
+        undo = body.get('undo', False)
+        if not isinstance(undo, bool):
+            raise LevelError(400, 'Undo must be true or false.')
         pid = body.get('project')
-        if 'run' in body:
-            set_run(body['run'])
-        elif pid is None:
-            set_global(body.get('level'))
-        else:
-            set_project(pid, body.get('override'), body.get('level'))
-        handler.respond(200, state(pid))
+        change = None
+        with _SETTINGS_LOCK:
+            if 'run' in body:
+                old_run = read_run()
+                set_run(body['run'])
+                _record_setting('setting.codex_run', 'Codex run:', _run_value(old_run), _run_value(body['run']),
+                                undo=undo)
+            elif pid is None:
+                old = read_global()
+                if stale_undo(body, global_path()):
+                    raise LevelError(409, STALE_UNDO)
+                level = body.get('level')
+                set_global(level)
+                # The value this write replaced and its revision: the UI's Undo restores exactly this change.
+                change = {'old': old, 'new': level, 'revision': revision(global_path())}
+                _record_setting('setting.codex_level', 'Codex level', old, level, undo=undo)
+            else:
+                current = resolve(pid)
+                previous = current['project'] or {'level': current['global'], 'override': False}
+                if stale_undo(body, project_path(pid)):
+                    raise LevelError(409, STALE_UNDO)
+                level, override = body.get('level'), body.get('override')
+                set_project(pid, override, level)
+                change = {'old': {'level': previous['level'], 'override': previous['override']},
+                          'new': {'level': level, 'override': override}, 'revision': revision(project_path(pid))}
+                _record_setting('setting.codex_level', 'Codex level',
+                                _override_value(previous['level'], previous['override']),
+                                _override_value(level, override), pid=pid, undo=undo)
+        handler.respond(200, dict(state(pid), change=change) if change else state(pid))
     except LevelError as exc:
         handler.respond(exc.status, {'error': str(exc)})
     except (ValueError, UnicodeError):

@@ -1,4 +1,5 @@
 """New session routes honor the shared folder without changing resume or split routes."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 from pathlib import Path
@@ -243,10 +244,10 @@ class WorktreeDiscovery(unittest.TestCase):
     def test_role_field_marks_advisor_tabs_and_keeps_zoom(self):
         with tempfile.TemporaryDirectory() as folder:
             lines = '\n'.join([
-                '%1\t$1\trepo\t1.0\t101\t/work\t123\tAdvisor: Fix\tlightbulb\t\t\t\tadvisor',
+                '%1\t$1\trepo\t1.0\t101\t/work\t123\tAdvisor: Fix\tlightbulb\t\t\t\tadvisor\t0',
                 '%2\t$1\trepo\t2.0\t102\t/work\t123\tAdvisor 2: Fix\tlightbulb\t\t\t\tsecond-advisor',
                 '%3\t$1\trepo\t3.0\t103\t/work\t123\tTab\tbug\t\t\t\tboss',
-                '%4\t$1\trepo\t4.0\t104\t/work\t\t\t\t\t\t%1\tadvisor',
+                '%4\t$1\trepo\t4.0\t104\t/work\t\t\t\t\t\t%1\tadvisor\t0',
                 '%5\t$1\trepo\t5.0\t105\t/work\t123\tOld\tbug\t\t\t',
                 '%6\t$1\trepo\t6.0\t106\t/work\t123\tReview: Fix\teye\t\t\t\treviewer'])
             run = Mock(return_value=subprocess.CompletedProcess([], 0, lines, ''))
@@ -261,7 +262,26 @@ class WorktreeDiscovery(unittest.TestCase):
                           ('%3', None, 'Tab', '/work'), ('%5', None, 'Old', '/work'), ('%6', None, 'Review: Fix', '/work')])
         # A reviewer is a helper (quick_tab.py skips it) but keeps no role, so tab_brief.py still names it.
         self.assertEqual([entry.get('helper') for entry in entries], [None, None, None, None, 'reviewer'])
-        self.assertTrue(run.call_args.args[0][-1].endswith('#{@zoom_for}\t#{@tether_role}'))
+        self.assertEqual(entries[0]['position'], '4.0')
+        self.assertTrue(run.call_args.args[0][-1].endswith('#{@zoom_for}\t#{@tether_role}\t#{pane_dead}'))
+
+    def test_role_field_marks_the_coordinator_and_its_report_setting(self):
+        with tempfile.TemporaryDirectory() as folder:
+            lines = '\n'.join([
+                '%1\t$1\trepo\t1.0\t101\t/work\t123\tLead\tbug\t\t\t\tcoordinator',
+                '%2\t$2\trepo\t2.0\t102\t/work\t123\tLead 2\tbug\t\t\t\tcoordinator-needs',
+                '%3\t$3\trepo\t3.0\t103\t/work\t123\tLead 3\tbug\t\t\t\tcoordinator-off',
+                '%4\t$1\trepo\t4.0\t104\t/work\t123\tTab\tbug\t\t\t\tcoordinator-loud'])
+            run = Mock(return_value=subprocess.CompletedProcess([], 0, lines, ''))
+            with patch.object(agents, 'HOME', Path(folder)), \
+                    patch.object(agents.pane_view, 'zoom_repair_all'), \
+                    patch.object(agents.procinfo, 'table', return_value={}), \
+                    patch.object(agents, 'process_start', return_value='1'), \
+                    patch.object(agents, 'codex_database'):
+                entries = agents.discover({}, run)
+        self.assertEqual([(entry['id'], entry.get('coordinator'), entry.get('role'), entry.get('helper')) for entry in entries],
+                         [('%1', 'all', None, None), ('%2', 'needs', None, None), ('%3', 'off', None, None),
+                          ('%4', None, None, None)])
 
     def test_group_field_is_read_and_old_lines_have_none(self):
         with tempfile.TemporaryDirectory() as folder:

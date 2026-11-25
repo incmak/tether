@@ -237,8 +237,9 @@ def transcript_newer(path, reported):
         for line in stream:
             try:
                 record = json.loads(line)
-                if record.get('isSidechain') or record.get('isMeta'):
-                    continue
+                if (record.get('isSidechain') or record.get('isMeta') or record.get('isCompactSummary')
+                        or record.get('isAutoCompactSummary')):
+                    continue  # a compact summary continues the running turn
                 message = record.get('message') or {}
                 content = message.get('content')
                 prompt = record.get('type') == 'user' and (isinstance(content, str) or

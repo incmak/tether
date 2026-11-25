@@ -26,13 +26,16 @@ export interface AgentEvent { id: string; chat: string; kind: 'approval' | 'ques
 // Kept small: the state goes into the LLM prompt on most turns (about 7 ms per token on this CPU).
 export interface AgentChats { target: string; busy: string[]; needs: { chat: string; needs: string }[]; idle: number }
 export interface AgentChatList { target: string; chats: string[]; sessions: string[] }
+export interface AgentShowDraft { id: string; rev: number }
 
 export interface AgentEvents {
   onTurn: (turn: AgentTurn) => void
   onUserText: (text: string, final: boolean) => void
-  onBotText: (text: string) => void
+  /** fresh: the text starts a new reply, not a longer version of the last one. */
+  onBotText: (text: string, fresh: boolean) => void
   onMetrics?: (metrics: AgentMetrics) => void
   onVoice?: (kind: VoiceKind | null) => void
+  onShowDraft?: (draft: AgentShowDraft) => void
   onClosed: (reason: string) => void
   tools: Record<string, ToolHandler>
 }
@@ -72,7 +75,7 @@ export class FridayAgent {
     // The device speaks when it can; the server voice (Pocket) is the fallback.
     this.voice = new DeviceVoice({
       onStart: turn => { this.send('spoken', { turn, state: 'start' }); this.setTurn('speaking'); this.gate(this.voice.kind === 'system') },
-      onEnd: turn => { this.gate(false); this.send('spoken', { turn, state: 'end' }); this.setTurn('listening') },
+      onEnd: (turn, complete) => { this.gate(false); this.send('spoken', { turn, state: 'end', complete }); this.setTurn('listening') },
       // The reply so far was never heard: the server voice speaks it, and speaks the rest of the turn itself.
       onFail: reason => { console.warn('Friday device voice failed', reason); this.gate(false); this.voice.close(); this.mode(null, this.bot) },
       onKind: kind => this.mode(kind),
@@ -145,13 +148,15 @@ export class FridayAgent {
           if (this.voice.kind) return  // The device shows each sentence as it gets it (say).
           // Pipecat reports a sentence before and after it speaks it, with one segment_id: keep it once.
           const progress = data.spoken_progress
+          const fresh = this.botSegments.size === 0
           this.botSegments.set(data.segment_id ?? `text-${this.botSegments.size}`, progress ? `${progress.accumulated_text}${progress.remaining_text}` : data.text)
-          this.bot = [...this.botSegments.values()].join(' ').trim(); this.events.onBotText(this.bot)
+          this.bot = [...this.botSegments.values()].join(' ').trim(); this.events.onBotText(this.bot, fresh)
         },
         onServerMessage: (message: { t?: string; d?: unknown }) => {
           if (message?.t === 'metrics') this.events.onMetrics?.(message.d as AgentMetrics)
+          else if (message?.t === 'show_draft') this.events.onShowDraft?.(message.d as AgentShowDraft)
           else if (message?.t === 'ready') { if (this.voice.kind) this.mode(this.voice.kind) }
-          else if (message?.t === 'say') { const d = message.d as { turn: number; seq: number; text: string }; this.bot = d.seq ? `${this.bot} ${d.text}` : d.text; this.events.onBotText(this.bot); this.voice.say(d.turn, d.seq, d.text) }
+          else if (message?.t === 'say') { const d = message.d as { turn: number; seq: number; text: string }; this.bot = d.seq ? `${this.bot} ${d.text}` : d.text; this.events.onBotText(this.bot, !d.seq); this.voice.say(d.turn, d.seq, d.text) }
           else if (message?.t === 'say_end') { const d = message.d as { turn: number; count: number }; this.voice.end(d.turn, d.count) }
           else if (message?.t === 'stop') this.voice.stop()
           // The server heard no words (noise, echo, or a short overlap): no reply comes, so stop showing thinking.

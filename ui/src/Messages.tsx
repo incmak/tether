@@ -1,20 +1,26 @@
 import { terminalText } from './terminalText'
+import { parseReview, type Review } from './reviewText'
+import { parseStatus } from './statusText'
+import { StatusCard } from './StatusCard'
+import { COORDINATOR_RULES, INTERRUPTED } from './injectedPrompt'
 import { shellCommand } from './shellCommand'
 import { copyText } from './clipboard'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Blocks, CalendarClock, RefreshCw, Clock3, Layers, Check, Copy, Share, ChevronRight, X, MessageSquare, MessageSquareReply, MessageCircleQuestion, Info, ShieldAlert, Square, Play, Eye, ClipboardPlus } from 'lucide-react'
+import { Blocks, CalendarClock, RefreshCw, Clock3, Layers, Check, Copy, Share, ChevronRight, X, MessageSquare, MessageSquareReply, MessageCircleQuestion, Info, ShieldAlert, Square, Play, Eye, ClipboardPlus, Radio } from 'lucide-react'
 import { MessagePrimitive } from '@assistant-ui/react'
 import type { ThreadMessageLike } from '@assistant-ui/react'
 import { MarkdownTextPrimitive } from '@assistant-ui/react-markdown'
 import remarkGfm from 'remark-gfm'
-import type { Api, ChatMessage } from './api'
+import type { AdvisorCall, Api, ChatMessage, ToolSummary } from './api'
+import { AdvisorRow } from './AdvisorRow'
+import { stamp } from './messageTime'
+import { useTetherZone } from './zone'
 import { ToolGroup } from './ToolGroup'
 import { SentContent, sentContent } from './SentImages'
 import { InlineCode, Link, remarkPaths } from './MediaLink'
 import { remarkTabs } from './tabLinks'
-import { canReadAloud, speak, stopSpeaking, useSpeaking } from './speech'
+import { canReadAloud, speak, stopSpeaking, useReadAloudHeld, useSpeaking } from './speech'
 import { RateButtons } from './ReplyFeedback'
-import type { ToolSummary } from './api'
 
 
 
@@ -95,6 +101,7 @@ function TerminalSnapshot({ text, shell }: { text: string; shell: boolean }) {
 export type WatchRun = { members: ChatMessage[]; watches: string[]; cycles: number; rearmed: boolean; schedule?: boolean; reported?: boolean; result?: string }
 const watchName = (label: string) => label.split(':')[0].trim() || label
 function WatchGroup({ id, run, time, api, session }: { id: string; run: WatchRun; time?: string; api: Api; session: string }) {
+  useTetherZone()
   const names = [...new Set(run.watches.map(watchName))]
   const what = run.schedule
     // A scheduled run can act, so its line shows what the run said, never a claim that nothing happened.
@@ -104,12 +111,15 @@ function WatchGroup({ id, run, time, api, session }: { id: string; run: WatchRun
   return <details className="watch-row" data-msg-id={id}>
     <summary>{run.schedule ? <CalendarClock size={13} aria-hidden="true" /> : <RefreshCw size={13} aria-hidden="true" />}<span className="watch-what" title={what}>{what}</span>{when && <time dateTime={time}>{run.cycles > 1 ? `last ${when}` : when}</time>}<ChevronRight className="chevron" size={14} aria-hidden="true" /></summary>
     <div className="watch-members">{run.members.map(item => item.kind
-      ? <Message key={item.id} api={api} session={session} actions={false} id={item.id} role={item.role} kind={item.kind} title={item.title} text={item.text} count={item.count} time={item.time} tools={item.tools} />
+      ? <Message key={item.id} api={api} session={session} actions={false} id={item.id} role={item.role} kind={item.kind} title={item.title} text={item.text} count={item.count} time={item.time} tools={item.tools} advisor={item.advisor} />
       : <div key={item.id} className="watch-reply" data-msg-id={item.id}>{item.text.split(/\n\s*\n/).map((part, at) => <p key={at}><Linked text={part.trim()} /></p>)}<MessageActions text={item.text} time={item.time} /></div>)}</div>
   </details>
 }
-export function Message({ id, role, kind, title, text, count, time, tools, api, session, actions = true, images, imageKey, live, runningShown, watch }: { watch?: WatchRun; live?: boolean; runningShown?: boolean; images?: number; imageKey?: string; actions?: boolean; id: string; role: string; kind?: unknown; title?: string; text: string; count?: unknown; time?: string; tools?: ToolSummary[]; api: Api; session: string }) {
+export function Message({ id, role, kind, title, text, source, legacy, tabs, count, time, tools, api, session, actions = true, images, imageKey, live, runningShown, watch, advisor }: { watch?: WatchRun; live?: boolean; runningShown?: boolean; images?: number; imageKey?: string; actions?: boolean; id: string; role: string; kind?: unknown; title?: string; text: string; source?: ChatMessage['source']; legacy?: ChatMessage['legacy']; tabs?: ChatMessage['tabs']; count?: unknown; time?: string; tools?: ToolSummary[]; advisor?: AdvisorCall; api: Api; session: string }) {
   if (kind === 'watch' && watch) return <WatchGroup id={id} run={watch} time={time} api={api} session={session} />
+  if (kind === 'advisor') return advisor
+    ? <AdvisorRow id={id} advisor={advisor} time={time} live={live} />
+    : <p className="notice-line" data-msg-id={id}><span>{text}</span></p>
   // A line Claude Code prints between turns: a hook that blocked it, a "while you were away" recap, a notice.
   if (kind === 'notice' && title) {
     const icon = title.endsWith('hook blocked') ? <ShieldAlert size={15} /> : title === 'While you were away' ? <Clock3 size={15} /> : title === 'Scheduled run' ? <CalendarClock size={15} /> : <Info size={15} />
@@ -148,9 +158,22 @@ export function Message({ id, role, kind, title, text, count, time, tools, api, 
   // A "!" line the person sent: the agent ran it in its terminal. Show it as the prompt line of the output below it.
   const command = role === 'user' && !kind ? /^!\s*(\S[\s\S]*)$/.exec(text) : null
   if (command) return <div className="shell-command" data-msg-id={id} role="group" aria-label="Shell command"><span className="shell-sigil" aria-hidden="true">$</span><code>{command[1]}</code></div>
-  // Tether's review loop types these into a tab: a review request to the reviewer, or its feedback to the worker.
-  const review = role === 'user' && !kind ? parseReview(text) : null
-  if (review) return <ReviewCard id={id} review={review} />
+  if (role === 'user' && !kind && (source === 'tether' || legacy)) {
+    const review = parseReview(text)
+    if (review && (source === 'tether' || review.kind === 'request' || review.kind === 'feedback')) {
+      return <ReviewCard id={id} review={review} />
+    }
+  }
+  if (role === 'user' && !kind && source === 'tether') {
+    const status = parseStatus(text)
+    if (status) return <StatusCard id={id} status={status} time={time} tabs={tabs} />
+    if (text.startsWith(COORDINATOR_RULES)) {
+      return <details className="tool-row compact-row" data-msg-id={id}><summary><Radio size={15} />Coordinator rules<ChevronRight size={15} /></summary><pre>{text.slice(COORDINATOR_RULES.length)}</pre></details>
+    }
+  }
+  // Claude Code writes these when you stop a turn: a quiet line, not a bubble with your name.
+  const stopped = role === 'user' && !kind ? INTERRUPTED.get(text.trim()) : undefined
+  if (stopped) return <p className="notice-line" data-msg-id={id}><Square size={13} aria-hidden="true" /><span>{stopped}</span></p>
   // Claude puts the whole summary in a user message after /compact or an auto-compact. Fold it like a tool row.
   if (role === 'user' && text.startsWith('This session is being continued from a previous conversation')) {
     return <details className="tool-row compact-row" data-msg-id={id}><summary><Layers size={15} />Conversation compacted<ChevronRight size={15} /></summary><pre>{text}</pre></details>
@@ -164,23 +187,33 @@ export function Message({ id, role, kind, title, text, count, time, tools, api, 
     {role === 'user' ? <MessagePrimitive.Parts /> : <><MessagePrimitive.Parts components={{ Text: Markdown }} />{actions && <MessageActions id={id} text={text} time={time} />}</>}
   </MessagePrimitive.Root>
 }
-type Review = { feedback: boolean; tab: string; agent?: string; name?: string; reply: string; transcript?: string; last?: boolean }
-const REVIEW_REQUEST = /^\[Tether review\] The (\S+) tab “([^”]*)” \((%\d+)\) finished a turn\.[\s\S]*?Its last reply:\s*([\s\S]*?)\s*Transcript: (\S*)( This is the last round: your reply stays here\.)?\s*$/
-const REVIEW_FEEDBACK = /^\[Tether review\] Feedback from the reviewer tab \((%\d+)\):\s*([\s\S]*?)\s*Fix what it raises, then stop and wait\.\s*$/
-function parseReview(text: string): Review | null {
-  const request = REVIEW_REQUEST.exec(text)
-  if (request) return { feedback: false, agent: request[1], name: request[2], tab: request[3], reply: request[4], transcript: request[5], last: !!request[6] }
-  const feedback = REVIEW_FEEDBACK.exec(text)
-  return feedback ? { feedback: true, tab: feedback[1], reply: feedback[2] } : null
-}
 // A request starts folded: its body is the other tab's reply, which that tab already shows. Feedback starts open: it is what this tab acts on.
+// An approval starts folded: its one line says what it approves. The other relays from the review loop start open.
+function reviewHead(review: Review): { title: string; meta: React.ReactNode; open: boolean } {
+  const short = review.commit?.slice(0, 12)
+  const rounds = `${review.rounds} review round${review.rounds === 1 ? '' : 's'}`
+  switch (review.kind) {
+    case 'approved': return { title: short ? `Review approved · ${short}` : 'Review approved', open: false,
+      meta: review.uncommitted ? 'The reviewer tab approved the uncommitted changes. Commit them; Tether asks the reviewer to confirm that commit.'
+        : short ? <>The reviewer tab approved commit <code>{short}</code> only.</> : 'The reviewer tab approved this work.' }
+    case 'stopped': return { title: `Review stopped after ${rounds}`, open: true, meta: 'The reviewer tab still finds blocking problems. Mak decides the next step.' }
+    case 'summary': return { title: `Review blocked after ${rounds}`, open: true, meta: 'The reviewer still finds blocking problems. The parent tab decides the next step.' }
+    case 'notice': return { title: `Review blocked · ${review.name}`, open: true, meta: `This helper tab still has blocking findings after ${rounds}. Send it the next step, or hand it to Mak.` }
+    case 'correction': return { title: 'Review correction', open: true, meta: 'Do not act on the approval above.' }
+    case 'feedback': return { title: `Review from ${review.tab}`, open: true, meta: 'Tether sent the reviewer tab’s reply here. This tab fixes what it raises.' }
+    default: return { title: `Review request · ${review.name || review.tab}`, open: false, meta: review.commit
+      ? <>The {review.agent} tab {review.tab} finished a turn. Reply <code>APPROVED {review.commit}</code> (the full hash), or list what is wrong. Tether sends your reply to that tab.</>
+      : `The ${review.agent} tab ${review.tab} finished a turn. Reply APPROVED, or list what is wrong. Tether sends your reply to that tab.` }
+  }
+}
 function ReviewCard({ id, review }: { id: string; review: Review }) {
   const preview = review.reply.split('\n').find(line => line.trim())?.replace(/^#+\s*/, '')
-  return <details className="peer-message review-message" data-msg-id={id} open={review.feedback}>
-    <summary><Eye size={15} /><strong>{review.feedback ? `Review from ${review.tab}` : `Review request · ${review.name || review.tab}`}</strong>{review.last && <span className="badge">Last round</span>}<span className="peer-preview">{preview}</span><ChevronRight size={15} /></summary>
-    <p className="review-meta">{review.feedback
-      ? 'Tether sent the reviewer tab’s reply here. This tab fixes what it raises.'
-      : `The ${review.agent} tab ${review.tab} finished a turn. Reply APPROVED, or list what is wrong. Tether sends your reply to that tab.`}</p>
+  const { title, meta, open } = reviewHead(review)
+  const Icon = review.kind === 'approved' ? Check : Eye
+  return <details className={`peer-message review-message review-${review.kind}`} data-msg-id={id} open={open}>
+    <summary><Icon size={15} /><strong>{title}</strong>{review.last && <span className="badge">Last round</span>}<span className="peer-preview">{preview}</span><ChevronRight size={15} /></summary>
+    <p className="review-meta">{meta}</p>
+    {review.terms && <p className="review-meta review-terms">{review.terms.map((part, index) => part.code ? <code key={index}>{part.text}</code> : part.text)}</p>}
     <div className="review-quote"><Linked text={review.reply} /></div>
     {review.transcript && <p className="review-meta review-path" title={review.transcript}>{review.transcript}</p>}
   </details>
@@ -264,16 +297,8 @@ export function CopyButton({ text, label, className = 'icon-button', wide = fals
     {done === 'ok' ? <Check size={16} /> : <Copy size={16} />}{className !== 'icon-button' && <span>{done === 'ok' ? 'Copied' : done === 'fail' ? 'Failed' : wide ? shown ?? label : 'Copy'}</span>}
   </button>
 }
-// Time of the reply, as the CLI shows it: "9:36 PM" today, "Fri 9:36 PM" this week, else the date.
-function stamp(value?: string) {
-  const at = value ? new Date(value) : null
-  if (!at || Number.isNaN(at.getTime())) return ''
-  const days = (Date.now() - at.getTime()) / 86400000
-  const clock = at.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
-  if (at.toDateString() === new Date().toDateString()) return clock
-  return days < 6 ? `${at.toLocaleDateString(undefined, { weekday: 'short' })} ${clock}` : `${at.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} ${clock}`
-}
 function MessageActions({ id, text, time }: { id?: string; text: string; time?: string }) {
+  useTetherZone()
   const when = stamp(time)
   return <div className="message-actions">
     <CopyButton text={text} label="Copy message" />
@@ -295,8 +320,10 @@ function ShareButton({ text }: { text: string }) {
 function SpeakButton({ text }: { text: string }) {
   // The text is the key, so the button also shows a reply that is read aloud by itself at the end of a turn.
   const reading = useSpeaking() === text
+  const disabled = useReadAloudHeld() && !reading
   if (!canReadAloud) return null
-  return <button type="button" className="icon-button" aria-label={reading ? 'Stop reading' : 'Read aloud'} title={reading ? 'Stop reading' : 'Read aloud'} aria-pressed={reading} onClick={() => reading ? stopSpeaking() : speak(text, text)}>{reading ? <Square size={14} /> : <Play size={16} />}</button>
+  const label = disabled ? 'Read aloud is off during Live mode' : reading ? 'Stop reading' : 'Read aloud'
+  return <button type="button" className="icon-button" disabled={disabled} aria-label={label} title={label} aria-pressed={reading} onClick={() => reading ? stopSpeaking() : speak(text, text)}>{reading ? <Square size={14} /> : <Play size={16} />}</button>
 }
 function CodeHeader({ language, code }: { language: string | undefined; code: string }) {
   return <div className="code-header"><span>{language || 'code'}</span><CopyButton text={code} label="Copy code" className="code-copy" /></div>
@@ -319,7 +346,7 @@ function QuoteBlock(props: React.ComponentProps<'blockquote'>) {
 export function Markdown() { return <MarkdownTextPrimitive remarkPlugins={[remarkGfm, remarkPaths, remarkTabs]} smooth={false} components={{ CodeHeader, code: InlineCode, a: Link, blockquote: QuoteBlock }} /> }
 export const convertMessage = (message: ChatMessage): ThreadMessageLike => ({
   id: message.id, role: message.role, content: message.text,
-  metadata: { custom: { kind: message.kind, title: message.title, count: message.count, tools: message.tools, text: message.text, time: message.time, images: message.images, imageKey: message.image_key,
+  metadata: { custom: { kind: message.kind, title: message.title, count: message.count, tools: message.tools, advisor: message.advisor, text: message.text, source: message.source, legacy: message.legacy, tabs: message.tabs, time: message.time, images: message.images, imageKey: message.image_key,
     watch: message.kind === 'watch' ? { members: message.members ?? [], watches: message.watches ?? [], cycles: message.cycles ?? 1, rearmed: !!message.rearmed, schedule: !!message.schedule, reported: !!message.reported, result: message.result } : undefined } },
 })
 

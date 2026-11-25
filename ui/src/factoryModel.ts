@@ -1,9 +1,12 @@
 // The Factory view's model: every agent tab and backlog item as a task that moves through phases.
 // Pure functions only, so the phase rules can be tested without a browser (ui/test_factory_model.cjs).
 //
+// Direct backlog links come first. Parent links group the remaining tabs under their root unless their backlog
+// refs differ. Reviewers follow the tab they review even when a parent link points elsewhere.
+//
 // Phase rules, first match wins. Each task carries `why`: the evidence the phase was guessed from.
 //   Done    a backlog item checked off (or named on a DEPLOYED.md line) in the last 24 h,
-//           or a tab with no item whose last turn ended in the last 24 h.
+//           or an idle task with no item whose latest activity was in the last 24 h.
 //   Inbox   an open backlog item that no open tab works on.
 //   Deploy  an open item that a DEPLOYED.md line of the last 24 h names, or a tab whose latest steps run a deploy.
 //   Review  a reviewer tab of the task is working, or the worker's latest step waits on a review (codex-lane, wait).
@@ -13,20 +16,21 @@
 import type { Pane } from './api'
 import type { Item, Row } from './backlogItems'
 import { needsYou } from './paneState'
+import { dayParts, fmtDate, fmtDay, fmtTime, zonedTime, zonedTimeLatest } from './zone'
 
 export const PHASES = ['inbox', 'spec', 'build', 'review', 'verify', 'deploy', 'done'] as const
 export type Phase = typeof PHASES[number]
 export const PHASE_NAMES: Record<Phase, string> = { inbox: 'Inbox', spec: 'Spec', build: 'Build', review: 'Review', verify: 'Verify', deploy: 'Deploy', done: 'Done' }
 
 export interface FactoryTool { name: string; title: string; at?: string | number | null; error?: boolean; done?: boolean }
-export interface Deploy { at: number; timed: boolean; commit: string | null; text: string; refs: string[] }
+export interface Deploy { at: number; day?: string; timed: boolean; commit: string | null; text: string; refs: string[] }
 export interface Commit { hash: string; at: number; subject: string; refs: string[]; repo: string }
 /** One finding of the 30-minute worktree sweep (server/sweep.py): the tab's branch is behind main, its checks fail, or the tab is idle. */
 export type SweepKind = 'behind' | 'checks' | 'idle'
 export interface SweepLine { pane: string; name: string; branch: string; kind: SweepKind; text: string }
 export interface Sweep { at: number; every: number; lines: SweepLine[] }
 export const SWEEP_NAMES: Record<SweepKind, string> = { behind: 'Behind main', checks: 'Checks fail', idle: 'Idle worktree' }
-export interface FactoryData { now: number; tools: Record<string, FactoryTool[]>; deployed: Deploy[]; commits: Commit[]; sweep?: Sweep }
+export interface FactoryData { now: number; tools: Record<string, FactoryTool[]>; deployed: Deploy[]; commits: Commit[]; sweep?: Sweep; history: History }
 
 export type Role = 'main' | 'worker' | 'reviewer' | 'advisor'
 /** working: the agent runs a turn. prompt: a permission, question or plan on screen waits for Mak. waits: the turn ended with a question for Mak. idle: nothing. */
@@ -75,7 +79,7 @@ export const paneName = (pane: Pane) => pane.pane_name || pane.brief?.name || pa
 export function agentState(pane: Pane): AgentState {
   if (needsYou(pane.state)) return 'prompt'
   if (pane.state === 'Working') return 'working'
-  if (pane.ask && !(pane.ask.snoozed_until && pane.ask.snoozed_until * 1000 > Date.now())) return 'waits'
+  if (pane.ask && !pane.ask.later && !(pane.ask.snoozed_until && pane.ask.snoozed_until * 1000 > Date.now())) return 'waits'
   return 'idle'
 }
 export const STATE_NAMES: Record<AgentState, string> = { working: 'Working', prompt: 'Waits for you', waits: 'Waits for you', idle: 'Idle' }
@@ -109,11 +113,29 @@ export function phaseOfTools(tools: FactoryTool[]): { phase: Phase; why: string 
 }
 const short = (tool: FactoryTool) => { const text = tool.title ? `${tool.name} ${tool.title}` : tool.name; return text.length > 70 ? `${text.slice(0, 69)}…` : text }
 
-/** When a backlog item was checked off: the date on its "Done:" line, in ms (local time), or 0. */
-export function doneAt(item: Item) {
-  const found = item.status?.kind === 'done' ? item.status.text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2}))?/) : null
-  if (!found) return 0
-  return new Date(+found[1], +found[2] - 1, +found[3], +(found[4] ?? 0), +(found[5] ?? 0)).getTime()
+/** When an item was checked off, in ms, or 0. A bare stamp uses the later instant in the Tether zone. */
+export function doneAt(item: Item, zone?: string) {
+  const stamp = item.status?.stamp
+  if (!stamp) return 0
+  const time = stamp.time ?? '00:00'
+  if (stamp.offset) {
+    const offset = stamp.offset.replace(/^([+-]\d{2})(\d{2})$/, '$1:$2')
+    return Date.parse(`${stamp.day}T${time.padStart(5, '0')}${offset}`) || 0
+  }
+  const [year, month, day] = stamp.day.split('-').map(Number)
+  const [hour, minute] = time.split(':').map(Number)
+  return zonedTimeLatest(year, month - 1, day, hour, minute, zone)
+}
+
+function deployAt(line: Deploy, zone?: string) {
+  const day = line.timed ? undefined : dayParts(line.day)
+  if (!day) return line.at * 1000
+  return zonedTime(day.year, day.month, day.date + 1, 0, 0, zone) - 1
+}
+
+export function deployLabel(line: Deploy) {
+  if (line.timed) return clock(line.at * 1000)
+  return line.day ? fmtDay(line.day) : fmtDate(line.at * 1000)
 }
 
 interface Input {
@@ -122,84 +144,174 @@ interface Input {
   data: FactoryData | null
   groupName?: (pane: Pane) => string | undefined   // the tab's stack name
   now: number                       // ms
+  zone?: string
 }
 
-/** Every task on the floor. Tabs with no item that ended over 24 h ago and wait for nothing are "parked": counted, not shown. */
-export function buildFloor({ panes, rows, data, groupName, now }: Input): Floor {
-  const agents = panes.filter(pane => pane.agent !== 'shell')
-  const byId = new Map(agents.map(pane => [pane.id, pane]))
+interface Links { ref?: string; agents: Agent[]; reasons: string[] }
+const withLinks = (why: string, reasons: string[]) => reasons.length ? `${why} · linked: ${reasons.join('; ')}` : why
+
+/** Tasks with no item and no activity in the past 24 h count as parked while all members are idle. */
+export function buildFloor({ panes, rows, data, groupName, now, zone }: Input): Floor {
+  const byId = new Map(panes.filter(pane => pane.agent !== 'shell').map(pane => [pane.id, pane]))
+  const agents = [...byId.values()]
   const toolsOf = (pane: Pane) => data?.tools[pane.id] ?? []
   const lastOf = (pane: Pane) => Math.max(toolMs(toolsOf(pane)), toMs(pane.finished ?? 0), pane.state === 'Working' ? now : 0)
-  const reviewerOf = new Map<string, string>()   // reviewer pane -> the pane it reviews
-  for (const pane of agents) for (const reviewer of [...(pane.reviewers ?? []), ...(pane.reviewers_paused ?? [])]) if (!reviewerOf.has(reviewer)) reviewerOf.set(reviewer, pane.id)
+  const reviewerOf = new Map<Pane, Pane>()   // reviewer pane -> the pane it reviews
+  for (const pane of agents) {
+    for (const id of [...(pane.reviewers ?? []), ...(pane.reviewers_paused ?? [])]) {
+      const reviewer = byId.get(id)
+      if (reviewer && reviewer !== pane && !reviewerOf.has(reviewer)) reviewerOf.set(reviewer, pane)
+    }
+  }
   const agent = (pane: Pane, role: Role): Agent => ({ pane, name: paneName(pane), role, state: agentState(pane), step: stepOf(pane, toolsOf(pane)), tools: toolsOf(pane), last: lastOf(pane), sweep: (data?.sweep?.lines ?? []).filter(line => line.pane === pane.id) })
 
+  // Resolve reviews before parent links. In --review-it, the new tab's parent is its reviewer.
+  const reviewRoots = new Map<Pane, Pane>()
+  for (const pane of agents) {
+    const visited = new Set<Pane>()
+    let root = pane
+    while (!reviewRoots.has(root) && !visited.has(root)) {
+      visited.add(root)
+      const reviewed = reviewerOf.get(root)
+      if (!reviewed) break
+      root = reviewed
+    }
+    root = reviewRoots.get(root) ?? root
+    for (const member of visited) reviewRoots.set(member, root)
+  }
+  const reviewRoot = (pane: Pane) => reviewRoots.get(pane)!
+  const roleOf = (pane: Pane, role: Role = 'worker'): Role =>
+    pane.role === 'advisor' ? 'advisor' : reviewRoot(pane) === pane ? role : 'reviewer'
+
   // Backlog items, with the project heading each sits under.
-  const items: { item: Item; project: string }[] = []
+  const items: { item: Item; project: string; links: Links }[] = []
   let project = ''
   for (const row of rows) {
     if (row.kind === 'note' && row.heading) project = row.text
-    else if (row.kind === 'item' && row.ref) items.push({ item: row, project })
+    else if (row.kind === 'item' && row.ref) items.push({ item: row, project, links: { ref: row.ref, agents: [], reasons: [] } })
   }
   const deploysOf = (ref?: string) => ref ? (data?.deployed ?? []).filter(line => line.refs.includes(ref)) : []
   const commitsOf = (ref?: string) => ref ? (data?.commits ?? []).filter(commit => commit.refs.includes(ref)) : []
 
   // Which tabs work on which item: the item's "Doing:" tab, and tabs whose name carries the item's number or that the
   // item's notes name ("Worker tab: Factory View").
-  const claimed = new Set<string>()
-  const tasks: Task[] = []
-  for (const { item, project } of items) {
-    const ref = item.ref!
-    const recentDone = item.done ? Math.max(doneAt(item), ...deploysOf(ref).map(line => line.at * 1000)) : 0
-    if (item.done && now - recentDone > DAY) continue
-    const linked: Agent[] = []
-    const reasons: string[] = []
+  const direct = new Map<Pane, { links: Links; role: Role; reason: string }>()
+  for (const { item, links } of items) {
+    if (item.done) continue
+    const ref = links.ref
     const add = (pane: Pane | undefined, role: Role, reason: string) => {
-      if (!pane || linked.some(entry => entry.pane.id === pane.id)) return
-      linked.push(agent(pane, role)); claimed.add(pane.id); reasons.push(reason)
+      if (pane && !direct.has(pane)) direct.set(pane, { links, role: roleOf(pane, role), reason })
     }
     const named = agents.filter(pane => pane.id !== item.status?.source?.pane && pane.role !== 'advisor'
       && (refOf(pane.pane_name) === ref || refOf(pane.brief?.name) === ref
         || item.details.some(detail => !!pane.pane_name && detail.text.toLowerCase().includes(`tab: ${pane.pane_name.toLowerCase()}`))))
     const doing = item.status?.kind === 'doing' ? byId.get(item.status.source?.pane ?? '') : undefined
-    if (!item.done) {
-      add(doing, named.length ? 'main' : 'worker', `the item's Doing line names ${doing ? paneName(doing) : ''}`)
-      for (const pane of named) add(pane, reviewerOf.has(pane.id) ? 'reviewer' : 'worker', refOf(pane.pane_name) === ref || refOf(pane.brief?.name) === ref ? `tab name ${paneName(pane)} carries ${ref}` : `the item's notes name tab ${paneName(pane)}`)
-      for (const entry of [...linked]) for (const [reviewer, of] of reviewerOf) {
-        const pane = byId.get(reviewer)
-        if (of === entry.pane.id && pane) add(pane, 'reviewer', `${paneName(pane)} reviews ${entry.name}`)
+    if (doing) add(doing, named.length ? 'main' : 'worker', `the item's Doing line names ${paneName(doing)}`)
+    for (const pane of named) add(pane, 'worker', refOf(pane.pane_name) === ref || refOf(pane.brief?.name) === ref ? `tab name ${paneName(pane)} carries ${ref}` : `the item's notes name tab ${paneName(pane)}`)
+  }
+
+  // A review group follows the reviewed tab's direct link, or inherits a reviewer's link if it has none.
+  const assigned = new Map<Pane, Links>()
+  for (const [pane, claim] of direct) {
+    const root = reviewRoot(pane)
+    if (root === pane || !assigned.has(root)) assigned.set(root, claim.links)
+  }
+  const standalone = new Map<Pane, Links>()
+  const startTask = (pane: Pane) => {
+    const links = { ref: refOf(pane.pane_name) ?? refOf(pane.brief?.name), agents: [agent(pane, roleOf(pane))], reasons: [] }
+    assigned.set(pane, links)
+    standalone.set(pane, links)
+  }
+  const startedBy = new Map<Pane, Pane>()
+  for (const pane of agents) {
+    const chain = new Map<Pane, Pane>()
+    let root = reviewRoot(pane)
+    while (!assigned.has(root) && !chain.has(root)) {
+      const parent = byId.get(root.parent ?? '')
+      if (!parent) break
+      chain.set(root, parent)
+      root = reviewRoot(parent)
+    }
+    if (!assigned.has(root)) startTask(root)
+    // Walk back toward the child so a ref conflict becomes a new root for its descendants.
+    for (const [child, parent] of [...chain].reverse()) {
+      if (assigned.has(child)) continue
+      const links = assigned.get(reviewRoot(parent))!
+      const refs = [refOf(child.pane_name), refOf(child.brief?.name)]
+      if (refs.some(ref => ref && ref !== links.ref)) startTask(child)
+      else {
+        assigned.set(child, links)
+        startedBy.set(child, parent)
       }
     }
+  }
+
+  // Keep the direct members first, then append the remaining members to their one assigned task.
+  const added = new Set<Pane>(standalone.keys())
+  for (const [pane, claim] of direct) {
+    if (assigned.get(reviewRoot(pane)) !== claim.links) continue
+    claim.links.agents.push(agent(pane, claim.role))
+    claim.links.reasons.push(claim.reason)
+    added.add(pane)
+  }
+  for (const pane of agents) {
+    if (added.has(pane)) continue
+    const links = assigned.get(reviewRoot(pane))!
+    links.agents.push(agent(pane, roleOf(pane)))
+    const reviewed = reviewerOf.get(pane)
+    const parent = startedBy.get(pane)
+    if (reviewed && reviewRoot(pane) !== pane) links.reasons.push(`${paneName(pane)} reviews ${paneName(reviewed)}`)
+    else if (parent) links.reasons.push(`${paneName(pane)} was started by ${paneName(parent)}`)
+  }
+
+  // The lead tab of a task is "main" when it has started a worker there.
+  const promote = (linked: Agent[]) => {
+    const head = linked[0]
+    if (head?.role === 'worker' && linked.some(entry => entry !== head && entry.role === 'worker' && startedBy.has(entry.pane))) head.role = 'main'
+  }
+  const tasks: Task[] = []
+  for (const { item, project, links } of items) {
+    const ref = item.ref!
     const deploys = deploysOf(ref)
+    const checkedOff = doneAt(item, zone)
+    const recentDone = item.done ? Math.max(checkedOff, ...deploys.map(line => deployAt(line, zone))) : 0
+    if (item.done && now - recentDone > DAY) continue
+    const { agents: linked, reasons } = links
+    promote(linked)
     let phase: Phase
     let why: string
-    if (item.done) { phase = 'done'; why = doneAt(item) ? `checked off ${clock(doneAt(item))}` : `checked off; DEPLOYED.md names ${ref}` }
+    if (item.done) { phase = 'done'; why = checkedOff ? `checked off ${clock(checkedOff)}` : `checked off; DEPLOYED.md names ${ref}` }
     else if (!linked.length) {
       phase = 'inbox'
       why = item.status?.kind === 'doing' ? `open item; its Doing tab ${item.status.source?.pane ?? ''} is closed` : 'open item, no tab works on it'
-    } else if (deploys.some(line => now - line.at * 1000 <= DAY)) {
-      phase = 'deploy'; why = `DEPLOYED.md line ${clock(deploys[0].at * 1000)} names ${ref}; the item is still open`
-    } else ({ phase, why } = phaseOfLinked(linked))
+    } else {
+      const recent = deploys.find(line => now - deployAt(line, zone) <= DAY)
+      if (recent) {
+        phase = 'deploy'; why = `DEPLOYED.md line ${deployLabel(recent)} names ${ref}; the item is still open`
+      } else ({ phase, why } = phaseOfLinked(linked))
+    }
     const last = Math.max(0, ...linked.map(entry => entry.last), recentDone)
-    tasks.push(finish({ id: ref, ref, title: item.text, group: project || 'Inbox', phase, why: reasons.length && phase !== 'inbox' ? `${why} · linked: ${reasons.join('; ')}` : why, agents: linked, item, last, deploys, commits: commitsOf(ref) }, now))
+    tasks.push(finish({ id: ref, ref, title: item.text, group: project || 'Inbox', phase, why: withLinks(why, reasons), agents: linked, item, last, deploys, commits: commitsOf(ref) }, now))
   }
 
-  // Tabs with no item are tasks of their own. Reviewers and advisors join the task of the tab they serve.
+  // Each unclaimed root and its members make one task. A quiet task with old activity is parked.
   let parked = 0
   for (const pane of agents) {
-    if (claimed.has(pane.id) || reviewerOf.has(pane.id)) continue
-    const own = agent(pane, pane.role === 'advisor' ? 'advisor' : 'worker')
-    const helpers = agents.filter(other => !claimed.has(other.id) && reviewerOf.get(other.id) === pane.id).map(other => agent(other, 'reviewer'))
-    const linked = [own, ...helpers]
-    const ref = refOf(pane.pane_name) ?? refOf(pane.brief?.name)
+    const links = standalone.get(pane)
+    if (!links) continue
+    const { agents: linked, ref, reasons } = links
+    const own = linked[0]
+    promote(linked)
     const busy = linked.some(entry => entry.state !== 'idle')
+    const last = Math.max(...linked.map(entry => entry.last))
     let phase: Phase
     let why: string
     if (!busy) {
-      if (now - own.last > DAY || !own.last) { parked += 1; continue }
-      phase = 'done'; why = `tab idle; its last turn ended ${clock(own.last)}; no backlog item`
+      if (now - last > DAY || !last) { parked += 1; continue }
+      phase = 'done'
+      why = linked.length === 1 ? `tab idle; its last turn ended ${clock(last)}; no backlog item` : `tabs idle; last activity ${clock(last)}; no backlog item`
     } else ({ phase, why } = phaseOfLinked(linked))
-    tasks.push(finish({ id: pane.id, ref, title: own.name, group: groupName?.(pane) || folderName(pane.dir), phase, why, agents: linked, last: Math.max(...linked.map(entry => entry.last)), deploys: deploysOf(ref), commits: commitsOf(ref) }, now))
+    tasks.push(finish({ id: pane.id, ref, title: own.name, group: groupName?.(pane) || folderName(pane.dir), phase, why: withLinks(why, reasons), agents: linked, last, deploys: deploysOf(ref), commits: commitsOf(ref) }, now))
   }
   return { tasks, parked }
 }
@@ -209,10 +321,11 @@ function phaseOfLinked(linked: Agent[]): { phase: Phase; why: string } {
   if (reviewer) return { phase: 'review', why: `reviewer ${reviewer.name} is working` }
   const doers = linked.filter(entry => entry.role === 'worker').concat(linked.filter(entry => entry.role === 'main'))
   // The newest steps of the doer that moved last decide.
+  // A task with no worker (an advisor whose parent closed) reads its own steps.
   const lead = [...doers].sort((a, b) => toolMs(b.tools) - toolMs(a.tools) || b.last - a.last)[0] ?? linked[0]
   const found = phaseOfTools(lead.tools)
   if (found) return { phase: found.phase, why: `${lead.name}: ${found.why}` }
-  return { phase: 'build', why: `guessed: ${lead.name} is open, no step read${lead.pane.agent === 'antigravity' ? ' (Tether reads no Antigravity steps)' : ''}` }
+  return { phase: 'build', why: `guessed: ${lead.name} is open, no step read` }
 }
 
 function finish(task: Omit<Task, 'waits' | 'stuck' | 'sweep'>, now: number): Task {
@@ -225,7 +338,7 @@ function finish(task: Omit<Task, 'waits' | 'stuck' | 'sweep'>, now: number): Tas
 
 const toolMs = (tools: FactoryTool[]) => Math.max(0, ...tools.map(tool => toMs(tool.at)))
 const folderName = (dir: string) => (dir || '~').split('/').filter(Boolean).pop() || '~'
-export const clock = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+export const clock = (ms: number) => fmtTime(ms, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
 
 /** Tasks that need Mak first, then the stuck ones, then the newest. */
 export function attentionOrder(a: Task, b: Task) {
@@ -239,26 +352,38 @@ export function groupsOf(tasks: Task[]) {
   return [...groups].map(([name, list]) => ({ name, tasks: list })).sort((a, b) => attentionOrder(a.tasks[0], b.tasks[0]) || b.tasks.length - a.tasks.length)
 }
 
-// Phase history, kept by this screen: the first time it saw each task in each phase. Nothing on the server records
-// phase changes, so the history starts when the screen first loads and says so.
 export type History = Record<string, { phase: Phase; at: number }[]>
-// Tasks that leave the floor keep their history for a week, so an empty or failed poll does not erase it.
-const HISTORY_DAYS = 7
-export function recordHistory(history: History, tasks: Task[], now: number, keep = 40): { history: History; moved: Task[] } {
-  const next: History = {}
-  const moved: Task[] = []
-  for (const [id, seen] of Object.entries(history)) if (seen.length && now - seen[seen.length - 1].at < HISTORY_DAYS * DAY) next[id] = seen
-  for (const task of tasks) {
-    const seen = history[task.id] ?? []
-    const last = seen[seen.length - 1]
-    if (!last) next[task.id] = [{ phase: task.phase, at: now }]
-    else if (last.phase !== task.phase) { next[task.id] = [...seen, { phase: task.phase, at: now }].slice(-keep); moved.push(task) }
-    else next[task.id] = seen
-  }
-  return { history: next, moved }
+const CATCH_UP_MS = 60_000
+const lastPhase = (history: History, id: string) => {
+  const entries = history[id]
+  return entries?.[entries.length - 1]
 }
-/** How long the task has been in its phase, as far as this screen saw. */
-export const phaseSince = (history: History, task: Task) => history[task.id]?.[history[task.id].length - 1]?.at ?? 0
+
+/** A different server phase needs a local move, a first observation, or a one-time catch-up. */
+export function historyMoves(
+  history: History,
+  serverNowMs: number,
+  previous: ReadonlyMap<string, Phase> | null,
+  seen: ReadonlySet<string>,
+  tasks: readonly Pick<Task, 'id' | 'phase'>[],
+  pending: ReadonlyMap<string, Phase>,
+) {
+  const next = new Map<string, Phase>()
+  for (const { id, phase } of tasks) {
+    const last = lastPhase(history, id)
+    if (last?.phase === phase) continue
+    const before = previous?.get(id)
+    const changed = before !== undefined && before !== phase
+    const catchUp = last && !seen.has(id) && serverNowMs - last.at > CATCH_UP_MS
+    if (!last || changed || catchUp || pending.get(id) === phase) next.set(id, phase)
+  }
+  return { moves: Array.from(next, ([task, phase]) => ({ task, phase })), pending: next }
+}
+/** When the server first recorded the current phase. */
+export function phaseSince(history: History, task: Task) {
+  const last = lastPhase(history, task.id)
+  return last?.phase === task.phase ? last.at : 0
+}
 
 // Spatial focus for arrow keys and TV remotes: the nearest target in the pressed direction. Rows count first, so
 // Down from a station goes to the item under it, not to a far one beside it.

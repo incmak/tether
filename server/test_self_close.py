@@ -1,8 +1,12 @@
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
+from pathlib import Path
+import tempfile
 import threading
 import unittest
 from unittest.mock import Mock, patch
 
 import agent_tab_cli
+import audit
 import self_close
 
 
@@ -82,6 +86,27 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len(jobs), 1)
         self_close._pending.discard('%12')
+
+    def test_scheduled_close_records_the_request_actor_after_the_pane_closes(self):
+        clock, jobs = Clock(), []
+        current = dict(self.entry, pane_name='Audit Log')
+        with tempfile.TemporaryDirectory() as folder, patch.object(audit.paths, 'CONFIG', Path(folder)), \
+                patch.object(audit, '_tab_name', return_value=('Audit Log', 'codex')) as tab_name, \
+                patch.object(self_close.helper_close, 'close_pane') as close:
+            with audit.acting('agent-cli', pane='%12'):
+                for _ in range(2):
+                    self_close.schedule(current, 'run', lambda entry: {'state': 'Idle'}, sessions=lambda: [current],
+                                        lock=threading.Lock(), fresh=lambda entry: {'state': 'Idle'}, start=jobs.append,
+                                        sleep=clock.sleep, now=clock.now)
+            self.addCleanup(self_close._pending.discard, '%12')
+            job, = jobs
+            self.assertEqual(audit.query()['entries'], [])
+            self.assertEqual(job(), 'closed')
+            close.assert_called_once_with('%12', 'run')
+            tab_name.assert_called_once_with('%12')
+            entry, = audit.query()['entries']
+            self.assertEqual((entry['kind'], entry['summary']), ('tab.close', 'Closed tab Audit Log'))
+            self.assertEqual(entry['actor'], {'source': 'agent-cli', 'pane': '%12', 'tab': 'Audit Log', 'agent': 'codex'})
 
 
 class CliTests(unittest.TestCase):

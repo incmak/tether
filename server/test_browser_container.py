@@ -1,3 +1,4 @@
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import base64
 import socket
 import tempfile
@@ -140,6 +141,21 @@ class ContainerTests(unittest.TestCase):
             self.container.start()
         self.assertIsNone(self.container.web_auth())
 
+    def test_start_waits_for_docker_to_release_the_container_name(self):
+        def removing(args, timeout):
+            if args[:2] == ['docker', 'run'] and not self.runner.ran('run'):
+                self.runner.calls.append(args)
+                return SimpleNamespace(returncode=125, stderr=(
+                    f'Conflict. The container name "/{self.container.name}" is already in use'))
+            return self.runner(args, timeout=timeout)
+
+        self.container.runner = removing
+        with mock.patch.object(browser_container.time, 'sleep'):
+            self.container.start()
+        first, second = self.runner.ran('run')
+        self.assertEqual(first, second)
+        self.assertIsNotNone(self.container.web_auth())
+
     def test_persistent_container_mounts_its_profile(self):
         container = browser_container.Container('s', root=Path(self.tmp.name) / 's', runner=self.runner, persistent=True)
         container.start()
@@ -184,6 +200,25 @@ class ContainerTests(unittest.TestCase):
         with mock.patch.object(browser_container, 'docker_path', return_value=None):
             self.assertIsNone(browser_container.default('test'))
 
+    def test_signed_default_has_its_own_port_and_private_persistent_config(self):
+        root = Path(self.tmp.name)
+        with mock.patch.object(browser_container.paths, 'CACHE', root), \
+                mock.patch.object(browser_container, '_run', self.runner), \
+                mock.patch.dict('os.environ', MOBILE_TMUX_BROWSER_SELKIES='1'):
+            signed = browser_container.default('signed')
+            test = browser_container.default('test')
+        self.assertNotEqual(signed.live_port, test.live_port)
+        self.assertEqual(signed.live_port, browser_container.SIGNED_LIVE_PORT)
+        self.assertEqual(test.live_port, browser_container.LIVE_PORT)
+        signed.runner = test.runner = self.runner
+        test.start()
+        signed.start()
+        config = root / 'selkies' / 'signed' / 'config'
+        self.assertEqual(config.stat().st_mode & 0o777, 0o700)
+        test_args, signed_args = self.runner.ran('run')
+        self.assertIn(f'{config}:/config', signed_args)
+        self.assertFalse(any(arg.endswith(':/config') for arg in test_args))
+
 
     def test_import_starts_no_process_and_the_server_start_picks_the_container(self):
         # The UI fixture servers import server.py under an audit hook that forbids subprocesses (test_cold_load.cjs).
@@ -213,15 +248,30 @@ class ContainerTests(unittest.TestCase):
         chrome.pid = None
 
 class WindowChrome(FakeChrome):
+    window_state = 'normal'
+
     def answer(self, message):
         if message['method'] == 'Browser.getWindowForTarget':
-            return {'windowId': 7}
+            return {'windowId': 7, 'bounds': {'windowState': self.window_state}}
+        if message['method'] == 'Browser.setWindowBounds':
+            self.window_state = message['params']['bounds']['windowState']
+        if message['method'] == 'Page.captureScreenshot':
+            return {'data': 'jpeg'}
         return super().answer(message)
+
+    def emit(self, message):
+        super().emit(message)
+        last = self.commands[-1] if self.commands else {}
+        if last.get('method') == 'Browser.close' and last['id'] == message.get('id'):
+            self.close()
 
 
 class FakeContainer:
-    def __init__(self, fake):
+    def __init__(self, fake, *, persistent=False):
         self.fake, self.stopped = fake, 0
+        self.live_port = browser_container.LIVE_PORT
+        self.run_id = 'fixture-run'
+        self.persistent = persistent
 
     def launch(self, *_args, **_kwargs):
         return self.fake.launcher(None, None)
@@ -249,11 +299,48 @@ class BrowserInContainerTests(unittest.TestCase):
         self.assertTrue(self.fake.sent('Emulation.clearDeviceMetricsOverride'))
         self.assertFalse([c for c in self.fake.sent('Emulation.setDeviceMetricsOverride') if not c['params'].get('mobile')])
 
-    def test_phone_preset_still_emulates(self):
+    def test_live_presets_keep_exact_layout_width_and_emulate_touch(self):
         self.browser.list_tabs()
         target = self.browser.order[-1]
-        self.browser.set_device(target, 'phone')
-        self.assertTrue([c for c in self.fake.sent('Emulation.setDeviceMetricsOverride') if c['params'].get('mobile')])
+        for preset, width, height, dpr in (('phone', 412, 915, 2.625), ('iphone', 393, 852, 3), ('tablet', 820, 1180, 2)):
+            with self.subTest(preset=preset):
+                row = self.browser.set_device(target, preset)
+                self.assertEqual((row['width'], row['height'], row['touch']), (width, height, True))
+                metrics = self.fake.sent('Emulation.setDeviceMetricsOverride')[-1]
+                self.assertEqual(metrics['params'], {
+                    'width': width, 'height': height, 'deviceScaleFactor': dpr, 'mobile': False,
+                    'screenWidth': width, 'screenHeight': height})
+                self.assertEqual(self.fake.sent('Emulation.setEmitTouchEventsForMouse')[-1]['params'],
+                                 {'enabled': True, 'configuration': 'mobile'})
+                scrollbar = self.fake.sent('Emulation.setScrollbarsHidden')[-1]
+                self.assertEqual(scrollbar['params'], {'hidden': True})
+                self.assertLess(scrollbar['id'], metrics['id'])
+        self.browser.set_device(target, 'desktop')
+        clears = self.fake.sent('Emulation.clearDeviceMetricsOverride')
+        self.assertEqual(len(clears), 2)
+        self.assertEqual(self.fake.sent('Emulation.setEmitTouchEventsForMouse')[-1]['params'], {'enabled': False})
+        scrollbar = self.fake.sent('Emulation.setScrollbarsHidden')[-1]
+        self.assertEqual(scrollbar['params'], {'hidden': False})
+        self.assertLess(scrollbar['id'], clears[-1]['id'])
+
+    def test_signed_container_reports_its_port_and_uses_saved_tabs(self):
+        fake = WindowChrome()
+        self.addCleanup(fake.close)
+        container = FakeContainer(fake, persistent=True)
+        container.live_port = browser_container.SIGNED_LIVE_PORT
+        container.run_id = 'signed-run'
+        signed = browser.Browser(signed=True, container=container)
+        state = signed.list_tabs()
+        try:
+            self.assertEqual((state['live_port'], state['live_run']), (browser_container.SIGNED_LIVE_PORT, 'signed-run'))
+            test = self.browser.list_tabs()
+            self.assertEqual((test['live_port'], test['live_run']), (browser_container.LIVE_PORT, 'fixture-run'))
+            self.assertEqual(state['tabs'][0]['mode'], 'saved')
+            self.assertFalse(fake.sent('Target.createBrowserContext'))
+            self.assertEqual(fake.sent('Browser.setDownloadBehavior')[0]['params'], {'behavior': 'deny'})
+        finally:
+            signed.stop()
+        self.assertTrue(fake.sent('Browser.close'))
 
     def test_show_brings_the_tab_to_the_front(self):
         self.browser.list_tabs()

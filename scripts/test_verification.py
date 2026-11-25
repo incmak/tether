@@ -1,4 +1,5 @@
 """B189: verification stamps on DEPLOYED.md lines and commit trailers. Real git in temp folders."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from datetime import date, datetime, timedelta, timezone
 import io
 import os
@@ -50,7 +51,7 @@ class StampTest(unittest.TestCase):
     def test_line_has_time_commit_text_and_stamp(self):
         now = datetime(2026, 11, 17, 14, 5, tzinfo=timezone(timedelta(hours=5, minutes=30), 'IST'))
         self.assertEqual(verification.line(' Backend  restart\n for B189 ', 'tests(server ok)', 'abc1234', now),
-                         '- 2026-11-17 14:05 IST · abc1234 Backend restart for B189 · Verified: tests(server ok)')
+                         '- 2026-11-17 14:05 +0530 · abc1234 Backend restart for B189 · Verified: tests(server ok)')
         with self.assertRaisesRegex(ValueError, 'Say what'):
             verification.line(' ', 'none', now=now)
         with self.assertRaisesRegex(ValueError, '--verified'):
@@ -61,7 +62,7 @@ class StampTest(unittest.TestCase):
     def test_line_with_shots_keeps_the_stamp_last(self):
         now = datetime(2026, 11, 18, 5, 30, tzinfo=timezone.utc)
         line = verification.line('UI deploy', 'tests(ui ok)', 'abc1234', now, shots='proof/b207')
-        self.assertEqual(line, '- 2026-11-18 05:30 UTC · abc1234 UI deploy · Shots: proof/b207 '
+        self.assertEqual(line, '- 2026-11-18 05:30 +0000 · abc1234 UI deploy · Shots: proof/b207 '
                                '· Verified: tests(ui ok)')
         self.assertEqual(verification.status(line), 'verified')
         for invalid in ('Verified: proof', 'two · parts', 'two\nlines', 'ending\r'):
@@ -89,10 +90,12 @@ class FileTest(unittest.TestCase):
             '- 2026-11-16 09:00 IST · aaa1111 hand line',
             '2026-11-16 · bbb2222 · Verified: tests(ok)',
             '- 2026-11-17 10:00 IST · ccc3333 UI · Verified: none (copy)',
+            '- 2026-11-17 21:00 -0500 · ddd4444 · Verified: none (follow-up)',
+            '- 2026-11-17 22:00 -05:00 · eee5555 hand line',
             '- 2026-13-40 · bad date',
             'not dated · Verified: none')))
         found = verification.unverified_deploys(self.log, date(2026, 11, 15))
-        self.assertEqual([kind for _, kind in found], ['missing', 'none'])
+        self.assertEqual([kind for _, kind in found], ['missing', 'none', 'none', 'missing'])
         self.assertTrue(found[0][0].startswith('- 2026-11-16 09:00 IST · aaa1111'))
         self.assertEqual(verification.unverified_deploys(self.root / 'absent.md', date(2026, 1, 1)), [])
 

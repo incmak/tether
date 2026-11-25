@@ -1,6 +1,6 @@
 """Groups (groups.py, groups_api.py) and the places that carry @group. The store runs against a real tmux server in
 its own socket folder (TMUX_TMPDIR), never the user's tmux. No test sends input to a terminal."""
-import functools
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 import os
@@ -26,6 +26,7 @@ import server
 import terminal_input
 import tmux_merge
 from own_time import own_time
+from test_tmux_isolation import private_tmux
 
 PID = 'a1b2c3d4e5f6'
 
@@ -57,6 +58,27 @@ class Bundles(unittest.TestCase):
 
 
 class NameAndParseTests(unittest.TestCase):
+    def test_arrange_follows_placement_owner_and_treats_own_tab_as_root(self):
+        thread = '11111111-1111-4111-8111-111111111111'
+        now = '22222222-2222-4222-8222-222222222222'
+        legacy = {'owner_pane': '%1', 'sent_at': 1.0}
+        records = {
+            '%2': dict(legacy, kind='own', home_pane=None),
+            '%3': dict(legacy, kind='helper', home_pane='%2', home_thread=now),
+            '%4': dict(legacy, kind='helper', home_pane='%2', home_thread=thread),
+            '%5': legacy,
+        }
+        output = '%1\t\t\n' + ''.join(f'{pane}\t\t{json.dumps(record)}\n' for pane, record in records.items())
+        run = mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout=output))
+        stacks = [{'id': 'gabcdef12', 'name': 'Opener'}, {'id': 'gabcdef13', 'name': 'Task'}]
+        plan = [{'name': 'Opener', 'panes': ['%1']}, {'name': 'Task', 'panes': ['%2']}]
+        with mock.patch.object(groups, 'LOCK', mock.MagicMock()), \
+                mock.patch.object(groups, 'read', return_value=stacks), \
+                mock.patch.object(groups, '_label') as label:
+            groups.arrange('$1', plan, run, thread_of={'%2': now}.get)
+        self.assertEqual({call.args[0]: call.args[1] for call in label.call_args_list},
+                         {'%1': 'gabcdef12', '%5': 'gabcdef12', '%2': 'gabcdef13', '%3': 'gabcdef13'})
+
     def test_name_rules(self):
         self.assertEqual(groups.clean_name('  Home dashboard  '), 'Home dashboard')
         self.assertEqual(groups.clean_name('x' * 40), 'x' * 40)
@@ -113,16 +135,14 @@ class RenderTests(Bundles):
     GPID = 'b1b2b3b4b5b6'
 
     def test_group_part_comes_after_the_session_part_and_names_its_notes_folder(self):
-        # The rendered text holds CLI paths of this checkout; the largest budget keeps a long worktree path from cutting the notes.
-        projects.set_budget(PID, projects.BUDGET_MAX, 0)
-        projects.set_instructions(PID, 'Use pnpm.', 1)
+        projects.set_instructions(PID, 'Use pnpm.', 0)
         projects.write_note(PID, 'setup.md', '# Setup\nRun make.')
         projects.set_instructions(self.GPID, 'Only touch the dashboard.', 0)
         projects.write_note(self.GPID, 'chart.md', '# Chart\nUse the bar chart.')
         with mock.patch('backlog.summary', return_value=(['B1 Check the dashboard'], 1)):
             text = projects.render(PID, 'claude', self.home, group={'pid': self.GPID, 'name': 'Home dashboard'},
                                    backlog_project='tether')
-        self.assertLessEqual(len(text), projects.meta(PID)['budget'])
+        self.assertLessEqual(len(text), projects.BUDGET_MAX)
         self.assertTrue(text.startswith('# Tether project'))
         self.assertLess(text.index('Use pnpm.'), text.index('## Stack: Home dashboard'))
         self.assertLess(text.index('## Stack: Home dashboard'), text.index('Only touch the dashboard.'))
@@ -130,9 +150,23 @@ class RenderTests(Bundles):
         self.assertLess(text.index('Only touch the dashboard.'), text.index('## Tab icon'))
         self.assertLess(text.index('## Backlog'), text.index('### Open backlog items (1)'))
         self.assertLess(text.index('### Open backlog items (1)'), text.index('### Project notes'))
-        self.assertLess(text.index('### Project notes\n- setup.md: Setup'), text.index('### Stack notes\n- chart.md: Chart'))
-        self.assertLess(text.index('### Stack notes'), text.index('### setup.md'))
-        self.assertIn('#### chart.md\n# Chart\nUse the bar chart.', text)
+        self.assertLess(text.index('\n### Project notes\n\n#### setup.md\n# Setup\nRun make.'),
+                        text.index('\n### Stack notes\n\n#### chart.md\n# Chart\nUse the bar chart.'))
+        self.assertNotIn('\nOlder notes:\n', text)
+
+    def test_default_budget_fits_the_newest_excerpts_across_project_and_stack(self):
+        for at in range(10):
+            pid = PID if at % 2 == 0 else self.GPID
+            projects.write_note(pid, f'n{at}.md', f'# Note {at}\n' + f'body {at} ' * 100)
+            mtime = 1700000000 + at
+            os.utime(projects.bundle(pid) / f'notes/n{at}.md', (mtime, mtime))
+        text = projects.render(PID, home=self.home, group={'pid': self.GPID, 'name': 'Docs'})
+        for at in range(6, 10):
+            self.assertIn(f'\n#### n{at}.md\n# Note {at}\nbody {at} ', text)
+        self.assertNotIn('\n#### n0.md\n', text)
+        self.assertLess(text.index('\n### Project notes\n\n#### n8.md\n'),
+                        text.index('\n### Stack notes\n\n#### n9.md\n'))
+        self.assertNotIn('\nOlder notes:\n', text)
 
     def test_group_text_is_cut_to_the_session_budget_and_keeps_the_session_part(self):
         projects.set_budget(PID, projects.BUDGET_MIN, 0)
@@ -141,8 +175,11 @@ class RenderTests(Bundles):
         for number in range(8):
             projects.write_note(self.GPID, f'n{number}.md', f'# Note {number}\n' + 'word ' * 300)
         text = projects.render(PID, 'codex', self.home, group={'pid': self.GPID, 'name': 'Big'})
-        self.assertLessEqual(len(text), projects.BUDGET_MIN)
+        fixed_chars = projects.state(PID, self.home)['fixed_chars']
+        self.assertLessEqual(len(text) - fixed_chars, projects.BUDGET_MIN)
         self.assertIn('Session rule.', text)
+        self.assertIn('## Stack: Big', text)
+        self.assertNotIn('Group rule. ' * 1500, text)  # the stack guidance is cut, its identity is not
         self.assertIn('[Cut to fit', text)
 
     def test_no_group_is_unchanged(self):
@@ -152,8 +189,8 @@ class RenderTests(Bundles):
         self.assertEqual(projects.render(PID, 'claude', self.home, group=None), text)
         self.assertNotIn('Stack', text.replace('--stack GOAL', ''))
         self.assertIn('\n## Notes\n', text)
-        self.assertIn('\n### Project notes\n- setup.md: Setup\n', text)  # the list has its own heading: Notes comes first now
-        self.assertIn("`--stack GOAL` (1–3 words; names the new tab. It opens in this tab's stack, or in none; `--stack Unstacked` = none)", text)
+        self.assertIn('\n### Project notes\n\n#### setup.md\n# Setup\nRun make.\n', text)
+        self.assertIn("`--stack GOAL` (1–3 words; names the new tab. A helper opens in its owner's stack; `--stack Unstacked` = none)", text)
 
     def test_marks_cover_the_group_revision(self):
         projects.set_instructions(PID, 'Use pnpm.', 0)
@@ -196,10 +233,12 @@ class LaunchTests(Bundles):
                 projects.set_budget(PID, budget, projects.meta(PID)['revision'])
                 args = project_launch.codex_args(PID, [], self.group)
                 text = tomllib.loads(args[1])['developer_instructions']
-                self.assertIn('## Stack: Docs\n', text)
-                self.assertIn(f'Stack folder: {projects.bundle(self.GPID)}\n', text)
-                self.assertIn('Docs rule.', text)
-                self.assertLessEqual(len(text), budget)
+                project, _, standing = text.rpartition('\n\n')
+                self.assertTrue(standing.startswith('Autonomy level '))
+                self.assertIn('## Stack: Docs\n', project)
+                self.assertIn(f'Stack folder: {projects.bundle(self.GPID)}\n', project)
+                self.assertIn('Docs rule.', project)
+                self.assertLessEqual(len(project) - projects.state(PID, self.home)['fixed_chars'], budget)
 
     def test_current_group_reads_the_pane_and_makes_the_bundle(self):
         with mock.patch.object(groups, 'group_of_pane', return_value=('$1', {'id': 'gaaaaaaaa', 'name': 'Docs', 'project': ''})), \
@@ -222,17 +261,22 @@ class LaunchTests(Bundles):
                 text = json.loads(output.getvalue())['hookSpecificOutput']['additionalContext']
                 self.assertIn('## Stack: Docs\n', text)
                 self.assertIn(f'Stack folder: {projects.bundle(self.GPID)}\n', text)
-                self.assertLessEqual(len(text), budget)
+                self.assertLessEqual(len(text) - projects.state(PID, self.home)['fixed_chars'], budget)
 
 
 @unittest.skipUnless(shutil.which(paths.TMUX) or os.path.exists(paths.TMUX), 'tmux is not installed')
 class TmuxTests(Bundles):
+    worker_tmux = """\
+import subprocess, sys
+def run(argv, **kwargs):
+    return subprocess.run([argv[0], '-N', '-S', sys.argv[1], '-f', '/dev/null', *argv[1:]], **kwargs)
+"""
+
     def setUp(self):
         super().setUp()
-        self.socket_dir = tempfile.mkdtemp(prefix='tgr', dir='/tmp')  # short: long socket paths fail
-        env = {key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE')}
-        env['TMUX_TMPDIR'] = self.socket_dir
-        self.run_tmux = functools.partial(subprocess.run, env=env)
+        self.private = private_tmux(self, 'tgr')
+        self.run_tmux = self.private.run
+        self.tmux = self.private.tmux
         scope = mock.patch.object(paths, 'SCOPE_TMUX', False)
         scope.start()
         self.addCleanup(scope.stop)
@@ -241,13 +285,6 @@ class TmuxTests(Bundles):
         self.b = self.new('beta')
         self.a1, self.a2 = self.panes(self.a)
         self.b1, = self.panes(self.b)
-
-    def tearDown(self):
-        self.tmux('kill-server')
-        shutil.rmtree(self.socket_dir, ignore_errors=True)
-
-    def tmux(self, *args):
-        return self.run_tmux([paths.TMUX, *args], capture_output=True, text=True, timeout=5)
 
     def new(self, name):
         self.tmux('new-session', '-d', '-s', name, '-x', '120', '-y', '40')
@@ -437,13 +474,14 @@ class TmuxTests(Bundles):
 
     def test_writers_in_other_processes_lose_no_group(self):
         # The server and agent launchers are separate processes. Each read-modify-write holds a file lock.
-        env = {key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE')}
-        env.update(TMUX_TMPDIR=self.socket_dir, MOBILE_TMUX_CACHE=str(paths.CACHE), TETHER_HOME=str(paths.TETHER))
-        code = ('import sys, groups\n'
-                'for i in range(15):\n'
-                '    groups.create(sys.argv[1], sys.argv[2] + str(i))\n')
-        workers = [subprocess.Popen([os.sys.executable, '-c', code, self.a, prefix], cwd=Path(__file__).parent, env=env,
-                                    stderr=subprocess.PIPE, text=True) for prefix in ('A', 'B', 'C')]
+        env = dict(self.private.env, MOBILE_TMUX_CACHE=str(paths.CACHE), TETHER_HOME=str(paths.TETHER))
+        code = self.worker_tmux + (
+            'import groups\n'
+            'for i in range(15):\n'
+            '    groups.create(sys.argv[2], sys.argv[3] + str(i), run=run)\n')
+        workers = [subprocess.Popen([os.sys.executable, '-c', code, self.private.socket, self.a, prefix],
+                                    cwd=Path(__file__).parent, env=env, stderr=subprocess.PIPE, text=True)
+                   for prefix in ('A', 'B', 'C')]
         for worker in workers:
             self.assertEqual(worker.wait(timeout=60), 0, worker.stderr.read())
             worker.stderr.close()
@@ -468,7 +506,7 @@ class TmuxTests(Bundles):
         self.assertEqual([self.label(p) for p in (inherited, main, chosen, plain)], [docs['id'], '', api['id'], ''])
 
     def start_group(self, body, caller, entries=(), **kwargs):
-        with agent_tabs._start_group(body, caller, self.run_tmux, entries, **kwargs) as (group, root, name):
+        with agent_tabs._start_group(body, caller, self.run_tmux, entries, **kwargs) as (group, name, owner):
             return group
 
     def names(self, session):
@@ -504,9 +542,9 @@ class TmuxTests(Bundles):
         self.helper(self.a2, self.a1)
         self.helper(third, self.a2)
         with agent_tabs._start_group({}, {'id': third, 'pane_name': 'Deep'}, run,
-                                     [{'id': self.a1, 'pane_name': 'Billing fix'}]) as (group, root, name):
+                                     [{'id': self.a1, 'pane_name': 'Billing fix'}]) as (group, name, owner):
             pass
-        self.assertEqual((group, root), ('', self.a1))
+        self.assertEqual((group, owner['root_pane']), ('', self.a1))
         self.assertEqual(([self.label(p) for p in (self.a1, self.a2, third)], self.names(self.a)), (['', '', ''], []),
                          'nothing moves')
         one = '11111111-1111-4111-8111-111111111111'
@@ -647,7 +685,7 @@ class TmuxTests(Bundles):
         run = self.run_tmux
         caller = {'id': self.a1, 'pane_name': 'Billing'}
         made = self.auto_stack(self.a, 'Billing', self.a1)  # root-only: its last helper closed
-        with agent_tabs._start_group({}, caller, run) as (group, root, name):
+        with agent_tabs._start_group({}, caller, run) as (group, name, owner):
             self.assertEqual(group, made, "the helper opens in its caller's stack")
             self.assertEqual(groups.panes_in(self.a, group, run), [self.a1], 'root-only while the tab launches')
             self.assertEqual(groups.drop_lone_auto(run), [])
@@ -659,7 +697,7 @@ class TmuxTests(Bundles):
                          'the marker goes when the start ends')
         # A later helper of the same root, while the first helper closes: the stack stays for the new one.
         self.helper(new, self.a1)
-        with agent_tabs._start_group({}, caller, run) as (again, root, name):
+        with agent_tabs._start_group({}, caller, run) as (again, name, owner):
             self.assertEqual(again, group)
             self.tmux('kill-pane', '-t', new)
             self.assertEqual(groups.drop_lone_auto(run), [])
@@ -668,12 +706,11 @@ class TmuxTests(Bundles):
 
     def test_another_process_sees_a_start_in_flight(self):  # rule 4 across processes, and the expiry
         run = self.run_tmux
-        env = {key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE')}
-        env.update(TMUX_TMPDIR=self.socket_dir, MOBILE_TMUX_CACHE=str(paths.CACHE), TETHER_HOME=str(paths.TETHER))
-        sweep = ['import groups', 'print(groups.drop_lone_auto())']
+        env = dict(self.private.env, MOBILE_TMUX_CACHE=str(paths.CACHE), TETHER_HOME=str(paths.TETHER))
+        sweep = self.worker_tmux + 'import groups\nprint(groups.drop_lone_auto(run=run))'
         self.auto_stack(self.a, 'Billing', self.a1)
-        with agent_tabs._start_group({}, {'id': self.a1, 'pane_name': 'Billing'}, run) as (group, root, name):
-            out = subprocess.run([os.sys.executable, '-c', '\n'.join(sweep)], cwd=Path(__file__).parent, env=env,
+        with agent_tabs._start_group({}, {'id': self.a1, 'pane_name': 'Billing'}, run) as (group, name, owner):
+            out = subprocess.run([os.sys.executable, '-c', sweep, self.private.socket], cwd=Path(__file__).parent, env=env,
                                  capture_output=True, text=True, timeout=60)
             self.assertEqual((out.returncode, out.stdout.strip()), (0, '[]'), out.stderr)
             with own_time(groups, time=mock.Mock(return_value=10 ** 12)):  # a marker its process never ended
@@ -685,7 +722,7 @@ class TmuxTests(Bundles):
         made = self.family()
         self.tmux('kill-pane', '-t', self.a2)
         with self.assertRaises(RuntimeError):
-            with agent_tabs._start_group({}, {'id': self.a1, 'pane_name': 'Billing'}, run) as (group, root, name):
+            with agent_tabs._start_group({}, {'id': self.a1, 'pane_name': 'Billing'}, run) as (group, name, owner):
                 self.assertEqual(group, made)
                 raise RuntimeError('launch failed')
         self.assertEqual(groups.drop_lone_auto(run), [(self.a, 'Billing')])
@@ -702,7 +739,7 @@ class TmuxTests(Bundles):
 
             def start():
                 barrier.wait()
-                with agent_tabs._start_group({}, {'id': self.a1, 'pane_name': 'Billing'}, run) as (group, root, name):
+                with agent_tabs._start_group({}, {'id': self.a1, 'pane_name': 'Billing'}, run) as (group, name, owner):
                     new.append(terminal_input.new_window_after(self.a1, run, group=group))
 
             def sweep():
@@ -802,8 +839,11 @@ class TmuxTests(Bundles):
         changed = {self.a1: one, self.a2: three}.get  # A now holds another chat
         self.assertEqual({auto_stacks.root_of(p, changed, run) for p in (third, fourth)}, {third})
         self.assertEqual(auto_stacks.root_of(fourth, {self.a1: one, self.a2: two}.get, run), self.a1)
-        self.assertEqual(agent_tabs._owner({'id': self.a2, 'thread': one}, self.a1, [{'id': self.a1, 'thread': two}])
-                         ['root_thread'], two)
+        caller = {'id': self.a2, 'thread': one}
+        home = {'id': self.a1, 'thread': two}
+        read_root = mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout=f'{self.a1}\t\n'))
+        owner = agent_tabs._owner(caller, home, [caller, home], read_root)
+        self.assertEqual((owner['root_pane'], owner['root_thread']), (self.a1, two))
 
     def cleanup_snapshot(self, entries=()):
         import auto_stacks_cleanup
@@ -1000,17 +1040,18 @@ class CliAndServerTests(unittest.TestCase):
         self.assertTrue(groups_api.WRITES <= server.TMUX_WRITES)
         self.assertIn('/mobile/api/groups/move', server.TMUX_WRITES)
 
-    def test_split_checks_the_group_and_passes_it_on(self):
+    def test_split_checks_the_group_and_marks_each_placement_as_user_placed(self):
         with mock.patch.object(server, 'choose'), \
                 mock.patch.object(server, 'new_window_after', return_value='%9') as opened, \
                 mock.patch.object(server.groups, 'find_in_session_of', side_effect=[{}, groups.GroupError(404, groups.GONE_GROUP)]):
             self.assertEqual(self.request('/mobile/api/split', {'session': '%1', 'direction': 'right', 'group': 'gaaaaaaaa'}), (201, {'pane': '%9'}))
-            self.assertEqual(opened.call_args.kwargs, {'group': 'gaaaaaaaa'})
+            opened.assert_called_once_with('%1', server.subprocess.run, group='gaaaaaaaa', by_user=True)
             self.assertEqual(self.request('/mobile/api/split', {'session': '%1', 'direction': 'right', 'group': 'gbbbbbbbb'})[0], 404)
+            self.assertEqual(opened.call_count, 1)
             self.assertEqual(self.request('/mobile/api/split', {'session': '%1', 'direction': 'right', 'group': ''}), (201, {'pane': '%9'}))
-            self.assertEqual(opened.call_args.kwargs, {'group': ''})
+            opened.assert_called_with('%1', server.subprocess.run, group='', by_user=True)
             self.assertEqual(self.request('/mobile/api/split', {'session': '%1', 'direction': 'right'}), (201, {'pane': '%9'}))
-            self.assertEqual(opened.call_args.kwargs, {'group': None})
+            opened.assert_called_with('%1', server.subprocess.run, group=None, by_user=True)
 
     def test_sessions_response_has_groups_and_the_pane_group(self):
         found = {'$1': [{'id': 'gaaaaaaaa', 'name': 'Docs', 'project': ''}]}

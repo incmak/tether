@@ -1,4 +1,5 @@
 """Auto stack names (rules 4 and 5) and the empty-stack timer. The stack rules against a real tmux are in test_groups.py."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import unittest
 from unittest import mock
 
@@ -82,6 +83,19 @@ class TabNameTests(unittest.TestCase):  # rule 5
 
 
 class RootTests(unittest.TestCase):  # rule 1, any depth
+    def test_follows_home_to_own_root_and_stops_on_stale_home(self):
+        thread = '11111111-1111-4111-8111-111111111111'
+        records = {'%2': {'kind': 'own', 'owner_pane': '%1', 'home_pane': None},
+                   '%3': {'kind': 'helper', 'owner_pane': '%1', 'home_pane': '%2', 'home_thread': thread},
+                   '%4': {'owner_pane': '%3'}}
+        with mock.patch.object(auto_stacks.helper_tabs, 'load', lambda pane, run: (True, records.get(pane))):
+            self.assertEqual(auto_stacks.root_of('%2', {'%2': thread}.get, None), '%2')
+            self.assertEqual(auto_stacks.root_of('%4', {'%2': thread}.get, None), '%2')
+            stale = '22222222-2222-4222-8222-222222222222'
+            self.assertEqual(auto_stacks.root_of('%4', {'%2': stale}.get, None), '%3')
+            records['%3'].update(home_pane='%4', home_thread=None)
+            self.assertEqual(auto_stacks.root_of('%4', {}.get, None), '%3')
+
     def test_a_long_chain_reaches_the_main_session(self):
         records = {f'%{n}': {'owner_pane': f'%{n - 1}', 'sent_at': 1.0} for n in range(2, 20)}
         with mock.patch.object(auto_stacks.helper_tabs, 'load', lambda pane, run: (True, records.get(pane))):

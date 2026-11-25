@@ -3,10 +3,10 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal, shotsDir } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-15/advisor-log/shots')
+const SHOTS = shotsDir('advisor-log')
 const sizes = [[320, 640], [1280, 900]]
 const PID = 'a1b2c3d4e5f6'
 const now = Math.floor(Date.now() / 1000)
@@ -28,7 +28,12 @@ const entries = {
   // Null and missing detail fields (an older or damaged server answer): the detail must still open.
   aaaaaaaaaaa5: { ...rows[4], cut: null, confidence: null, evidence: null, error: null, advisors: null },
 }
-const project = { id: PID, name: 'web', revision: 1, budget: 4000, budget_min: 1000, budget_max: 10000, instructions: '', pins: [], notes: [], preview: '', chars: 120, folder: '/srv/projects/' + PID, session_name: 'web' }
+const guidance = 'Built-in guidance.\n'.repeat(204)
+const content = '\n## Instructions\nUse pnpm.\n'
+const usableBudgetMax = 10000 - guidance.length
+const project = { id: PID, name: 'web', revision: 1, budget: 10000, budget_min: 1000, budget_max: 10000,
+  usable_budget_max: usableBudgetMax, instructions: 'Use pnpm.\n', pins: [], notes: [], preview: guidance + content,
+  chars: content.length, fixed_chars: guidance.length, folder: '/srv/projects/' + PID, session_name: 'web' }
 const levels = [0, 1, 2, 3, 4].map(level => ({ level, name: `Level ${level}`, summary: 'Rules for this level.' }))
 const pane = { id: '%1', tmux_session: '$1', label: 'Advisor log test', agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: 'adv-thread', approval: null }
 const fixture = {
@@ -164,6 +169,23 @@ async function main() {
       }
       await section.locator('.advisor-row').first().waitFor()
       check(`${at} asks for this project`, asked.at(-1) === PID, String(asked.at(-1)))
+      const meter = sheet.getByRole('meter', { name: 'Project content size' })
+      check(`${at} meter uses the project content count and available space`,
+        Number(await meter.getAttribute('aria-valuenow')) === project.chars &&
+        Number(await meter.getAttribute('aria-valuemax')) === usableBudgetMax)
+      const limitText = `${usableBudgetMax.toLocaleString('en-US')} characters`
+      const budget = sheet.getByRole('button', { name: `Content limit: ${limitText}` })
+      check(`${at} saved budget above the maximum shows the usable limit`, await budget.isVisible())
+      await budget.press('Enter')
+      const choices = page.getByRole('listbox', { name: 'Content limit' })
+      check(`${at} budget choices end at the usable limit`,
+        (await choices.getByRole('option').allTextContents()).join(',') ===
+        ['1,000 characters', '2,000 characters', '4,000 characters', '6,000 characters', limitText].join(','))
+      check(`${at} usable limit is selected`, await choices.getByRole('option', { selected: true }).innerText() === limitText)
+      await choices.press('Escape')
+      check(`${at} budget menu returns focus to its button`, await budget.evaluate(node => node === document.activeElement))
+      check(`${at} built-in guidance has its own character count`,
+        await sheet.getByText(`Tether adds ${project.fixed_chars.toLocaleString('en-US')} characters of built-in guidance.`, { exact: false }).isVisible())
 
       // The list: newest first, a word and an icon for each status, distinct colors.
       const words = await section.locator('.advisor-row .advisor-word').allInnerTexts()

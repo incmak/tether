@@ -143,6 +143,19 @@ def moved(pane):
     return (folder, state['moved_at'], state.get('agent_at_move'), state.get('moved_process')) if folder and state.get('moved_at') and os.path.isdir(folder) else None
 
 
+_FOLDER_NOTE = '[Working directory changed to %s. Run commands and resolve relative paths there.] '
+
+
+def strip_folder_note(text):
+    """Remove the preamble from a prompt sent after a shell folder change."""
+    prefix, suffix = _FOLDER_NOTE.split('%s')
+    if text.startswith(prefix):
+        _, separator, prompt = text.partition(suffix)
+        if separator:
+            return prompt
+    return text
+
+
 def folder_note(pane, agent_folder):
     """Once per `!cd`, a line telling the agent where the tab now works (it never sees `!` commands); '' if nothing to say."""
     state = load(pane)
@@ -150,7 +163,7 @@ def folder_note(pane, agent_folder):
     if not folder or not when or not os.path.isdir(folder) or folder == agent_folder or state.get('told_at') == when:
         return ''
     _save(pane, dict(state, told_at=when))
-    return '[Working directory changed to %s. Run commands and resolve relative paths there.] ' % folder
+    return _FOLDER_NOTE % folder
 
 
 def current(pane, start=None):

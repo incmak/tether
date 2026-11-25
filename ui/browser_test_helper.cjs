@@ -59,17 +59,44 @@ async function getBrowser({ local = false } = {}) {
 // Fetch a request to the test's local server from this process instead, so tests work in every browser.
 // Redirects cannot work: the browser does not route the request that follows a fulfilled 3xx, and a followed one
 // would serve the final body at the first URL, so relative links break. Fail clearly instead.
+function pageClosed(route) {
+  try { return route.request().frame().page().isClosed() } catch { return false }  // a service worker request has no page
+}
+
+// Each fetch closes its socket. Playwright shares one keep-alive agent across all contexts, and Node's http server
+// closes idle sockets after keepAliveTimeout (5 s). A fetch sent on a socket as the server closes it got ECONNRESET
+// with the page still open (B285). The headers are route.fetch's default, plus Connection: close.
 async function serveLocal(route) {
   let response
   try {
-    response = await route.fetch()
+    response = await route.fetch({ headers: { ...route.request().headers(), connection: 'close' } })
   } catch (error) {
     // Closing the browser context can cancel an in-flight asset fetch after the page closes.
-    if (!/^route\.fetch: Request context disposed\.(?:\n|$)/.test(error?.message)) throw error
-    return route.abort()
+    if (/^route\.fetch: Request context disposed\.(?:\n|$)/.test(error?.message)) return route.abort()
+    // Teardown closes the page, then the test's server resets open sockets. A fetch still in flight (often a
+    // prefetch) then fails after the test is over: that is teardown, not a failure. An open page still fails.
+    if (pageClosed(route)) return route.abort().catch(() => {})
+    throw error
   }
   if (response.url() !== route.request().url()) throw new Error(`serveLocal: ${route.request().url()} redirects to ${response.url()}; serve the final URL directly`)
   return route.fulfill({ response })
 }
 
-module.exports = { getBrowser, sharedEndpoint, serveLocal }
+// Screenshot folder. SHOTS wins exactly as given. Otherwise a scratch folder, never a dated .release-work folder.
+function shotsDir(name, ...sub) {
+  if (process.env.SHOTS) return path.resolve(process.env.SHOTS)
+  return path.join(os.tmpdir(), 'tether-ui-shots', name, ...sub)
+}
+
+// Mirror the stored copy returned by the prefs API. Create one store for each page or case.
+function prefsStore({ prefs = {}, version = 1, zone = 'UTC' } = {}) {
+  const get = () => ({ prefs, version, zone: prefs.timeZone ?? zone })
+  const post = ({ changes }) => {
+    prefs = { ...prefs, ...changes }
+    version += 1
+    return get()
+  }
+  return { get, post }
+}
+
+module.exports = { getBrowser, sharedEndpoint, serveLocal, shotsDir, prefsStore }

@@ -124,9 +124,30 @@ export function usePolling<T>(fetcher: (signal: AbortSignal) => Promise<T>, inte
 }
 
 /** step.view: a name that lets Forward open this dialog again after Back closed it (backNav.ts setViewOpener). */
+const openers = new WeakMap<HTMLDialogElement, HTMLElement[]>()   // the controls that opened each sheet, nearest first
+// The last few focused elements, newest first. A control that opened a sheet can go away as the sheet opens (an item
+// of a small menu that closes), so focus goes back to the newest earlier control that is still on the page.
+const focusHistory: HTMLElement[] = []
+let tracking = false
+/** Start the focus history. main.tsx calls it once; tests that do not call it get the plain opener only. */
+export function trackFocus() {
+  if (tracking) return
+  tracking = true
+  document.addEventListener('focusin', event => {
+    if (!(event.target instanceof HTMLElement)) return
+    focusHistory.unshift(event.target)
+    focusHistory.length = Math.min(focusHistory.length, 8)
+  }, true)
+}
+
 export function useModal(open: boolean, close: () => void, drawer?: { onInterrupt: () => void }, step?: StepOptions) {
   useBackStep(open, close, step)
   const ref = useRef<HTMLDialogElement>(null)
+  // The control that had focus when the sheet opened. Read during the render that opens the sheet: the DOM is not
+  // changed yet, so a sheet's autoFocus has not moved focus away (React: "adjust state when a prop changes").
+  const [openedFrom, setOpenedFrom] = useState(() => ({ open, from: open ? document.activeElement : null }))
+  if (openedFrom.open !== open) setOpenedFrom({ open, from: open ? document.activeElement : null })
+  const from = openedFrom.from
   const opened = useRef(0)
   const horizontal = !!drawer
   const latest = useRef({ close, interrupt: drawer?.onInterrupt })
@@ -182,6 +203,25 @@ export function useModal(open: boolean, close: () => void, drawer?: { onInterrup
     if (ms) timer.current = setTimeout(done, ms)
     else done()
   }, [horizontal, move, position, reset])
+  // A parent closes most sheets by unmounting them, so the browser does not return focus. Return it to the control
+  // that opened the sheet, unless focus already moved on. When that control was in a sheet that is gone too, use the
+  // control that opened that sheet. Not a text field: on a phone that opens the keyboard.
+  useEffect(() => {
+    const dialog = ref.current
+    if (!open || !dialog) return
+    // No opener (a tap on iOS does not focus a button): return focus nowhere, not to an older control.
+    const real = from instanceof HTMLElement && from !== document.body ? from : null
+    const opener = !real ? null : real.isConnected ? (dialog.contains(real) ? null : real)
+      : focusHistory.find(item => item !== document.body && item.isConnected && !dialog.contains(item)) ?? null
+    const host = opener?.closest('dialog')
+    const chain = [...(opener && !opener.matches('input, textarea, [contenteditable]') ? [opener] : []), ...(host && openers.get(host) || [])]
+    openers.set(dialog, chain)
+    return () => {
+      const active = document.activeElement
+      if (active && active !== document.body && active.isConnected && !dialog.contains(active)) return
+      chain.find(item => item.isConnected && item.closest('dialog:not([open])') === null)?.focus({ preventScroll: true })
+    }
+  }, [open, from])
   useEffect(() => {
     const dialog = ref.current
     if (!dialog) return
@@ -271,8 +311,8 @@ export function useModal(open: boolean, close: () => void, drawer?: { onInterrup
 
 /** A screen point a menu opens from: the pointer for a right-click, or the button that opened it. */
 export type Anchor = { x: number; y: number }
-export const anchorOf = (event: React.MouseEvent): Anchor => {
-  if (event.clientX || event.clientY) return { x: event.clientX, y: event.clientY }
+export const anchorOf = (event: React.MouseEvent | React.KeyboardEvent): Anchor => {
+  if ('clientX' in event && (event.clientX || event.clientY)) return { x: event.clientX, y: event.clientY }
   const box = event.currentTarget.getBoundingClientRect()  // keyboard: no pointer position
   return { x: box.left, y: box.bottom + 4 }
 }
@@ -287,8 +327,11 @@ export function usePopover(ref: RefObject<HTMLDialogElement | null>, at: Anchor 
     if (!box || !at) return
     const place = () => {
       const width = box.offsetWidth, height = box.offsetHeight
-      box.style.left = `${Math.max(8, Math.min(at.x, innerWidth - width - 8))}px`
-      box.style.top = `${at.y + height > innerHeight - 8 ? Math.max(8, at.y - height) : at.y}px`
+      const left = Math.max(8, Math.min(at.x, innerWidth - width - 8))
+      const top = at.y + height > innerHeight - 8 ? Math.max(8, at.y - height) : at.y
+      box.style.left = `${left}px`
+      box.style.top = `${top}px`
+      box.style.transformOrigin = `${Math.max(0, Math.min(width, at.x - left))}px ${Math.max(0, Math.min(height, at.y - top))}px`
     }
     place()
     const observer = new ResizeObserver(place)

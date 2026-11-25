@@ -1,4 +1,5 @@
 """Release tests use temporary homes, fake systemctl, and random HTTP ports."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import contextlib
 import hashlib
 import http.client
@@ -156,7 +157,7 @@ const code = ts.transpileModule(source, {compilerOptions: {
   module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX
 }}).outputText;
 async function scenario(payloads, expectedCalls, disabledStorage = false) {
-  let calls = 0, subscribe, snapshot;
+  let calls = 0, reloadCalls = 0, subscribe, snapshot;
   const timers = [], listeners = [];
   const storage = new Map();
   const context = {exports: {}, setTimeout: (fn, ms) => {
@@ -176,6 +177,7 @@ async function scenario(payloads, expectedCalls, disabledStorage = false) {
     if (name === 'react/jsx-runtime') return {jsx: (type, props) => ({type, props}), jsxs: (type, props) => ({type, props})};
     if (name === 'lucide-react') return {X: 'X'};
     if (name === './Skeleton') return {Spinner: 'Spinner'};
+    if (name === './backNav') return {reloadPage: () => { reloadCalls++; }};
     throw Error(name);
   }};
   vm.runInNewContext(code, context);
@@ -198,6 +200,7 @@ async function scenario(payloads, expectedCalls, disabledStorage = false) {
   }
   unsubscribe(); subscribe(() => {}); await flush();
   assert.equal(calls, expectedCalls); // Resubscription never restarts discovery.
+  assert.equal(reloadCalls, 0);
 }
 const pending = {latest: null, available: false, url: '', mode: 'notify', checking: true};
 const complete = {latest: 'v0.2.0', available: true, url: 'https://example.invalid', mode: 'notify', checking: false};
@@ -573,13 +576,14 @@ const find = (node, name) => {
 };
 const idle = {current: '0.1.0', latest: 'v0.2.0', available: true, url: 'https://example.invalid', mode: 'notify', checking: false, can_update: true, run: null};
 async function scenario(replies, postError) {
-  let snapshot, subscribe; const timers = [], posts = [];
+  let snapshot, subscribe; const timers = [], posts = [], reloads = [];
   const context = {exports: {}, Date, setTimeout: fn => timers.push(fn), localStorage: {getItem: () => null, setItem() {}},
     require: name => {
       if (name === 'react') return {useSyncExternalStore: (sub, get) => { subscribe = sub; snapshot = get; return get(); }};
       if (name === 'react/jsx-runtime') return {jsx: (type, props) => ({type, props}), jsxs: (type, props) => ({type, props})};
       if (name === 'lucide-react') return {X: 'X'};
-    if (name === './Skeleton') return {Spinner: 'Spinner'};
+      if (name === './Skeleton') return {Spinner: 'Spinner'};
+      if (name === './backNav') return {reloadPage: () => { reloads.push('reload'); }};
       if (name === './api') return {errorText: error => error.message, request: async (path, body) => {
         if (body) { posts.push(body); if (postError) throw Error(postError); return {}; }
         const reply = replies.length > 1 ? replies.shift() : replies[0];
@@ -592,7 +596,7 @@ async function scenario(replies, postError) {
   const banner = context.exports.UpdateBanner;
   banner(); subscribe(() => {}); await flush();
   const tick = async () => { timers.shift()(); await flush(); };
-  return {banner, tick, posts, timers};
+  return {banner, tick, posts, timers, reloads};
 }
 (async () => {
   let run = await scenario([idle]);
@@ -604,7 +608,12 @@ async function scenario(replies, postError) {
   find(run.banner(), 'Update now').props.onClick(); await flush();
   await run.tick(); assert.match(text(run.banner()), /Updating/); // A failed request during the restart keeps waiting.
   await run.tick(); assert.match(text(run.banner()), /Updating/);
-  await run.tick(); assert.ok(find(run.banner(), 'Reload')); assert.equal(run.timers.length, 0);
+  await run.tick(); assert.equal(run.timers.length, 0);
+  const reload = find(run.banner(), 'Reload');
+  assert.ok(reload);
+  assert.equal(run.reloads.length, 0);
+  reload.props.onClick();
+  assert.equal(run.reloads.length, 1);
   run = await scenario([idle, {...idle, run: {state: 'failed', target: '0.2.0', error: 'Went back.'}}]);
   find(run.banner(), 'Update now').props.onClick(); await flush();
   await run.tick(); assert.match(text(run.banner()), /Update failed\. Went back\./); assert.ok(find(run.banner(), 'Try again'));
@@ -692,8 +701,45 @@ class ReleaseTests(unittest.TestCase):
 
     def update(self, *args):
         with mock.patch.object(updates, 'fetch_release', return_value=self.release), \
-                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            return cli.main(['update', '--yes', *args])
+                contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:
+            result = cli.main(['update', '--yes', *args])
+        self.output, self.errors = output.getvalue(), errors.getvalue()
+        return result
+
+    def test_activate_verbose_requires_requested_flag_and_installer_support(self):
+        self.prepare()
+        target = self.releases / '0.2.0'
+        target.mkdir()
+        script = target / 'install.py'
+        state = json.loads(self.state.read_text())
+        for requested, supported in ((False, True), (True, True), (True, False), (False, False)):
+            script.write_text('supports --verbose' if supported else 'old installer')
+            with self.subTest(requested=requested, supported=supported), \
+                    mock.patch.object(cli, 'run') as run, mock.patch.object(cli, 'switch'), \
+                    mock.patch.object(cli, 'restart'), mock.patch.object(cli, 'healthy', return_value=True), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                cli.activate(self.root, target, self.state, state, verbose=requested)
+            self.assertEqual('--verbose' in run.call_args.args[0], requested and supported)
+            note = 'Note: v0.2.0 install.py has no --verbose; showing its default output.\n'
+            self.assertEqual(output.getvalue(), note if requested and not supported else '')
+
+    def test_quiet_run_only_prints_failed_check_names_for_json_plans(self):
+        checks = [dict(name='first', ok=False, fix='private details'), dict(name='passed', ok=True),
+                  dict(name='second', ok=False)]
+        units = {'tether.service': '[Unit]\nFull unit text'}
+        command = ['installer', '--apply', '--json']
+        for stdout, expected in ((json.dumps(dict(checks=checks, units=units)), 'FAIL: first\nFAIL: second\n'),
+                                 (json.dumps(dict(checks=checks[1:2], units=units)), ''),
+                                 ('plain output\n', 'plain output\n'), ('[1, 2]\n', '[1, 2]\n'),
+                                 ('{"checks": null}\n', '{"checks": null}\n')):
+            result = subprocess.CompletedProcess(command, 1, stdout=stdout)
+            with self.subTest(stdout=stdout), mock.patch.object(cli.subprocess, 'run', return_value=result), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                with self.assertRaises(subprocess.CalledProcessError) as error:
+                    cli.run(command, quiet=True)
+            self.assertEqual(error.exception.returncode, 1)
+            self.assertEqual(error.exception.cmd, command)
+            self.assertEqual(output.getvalue(), expected)
 
     def prepare_report(self):
         self.prepare()
@@ -753,9 +799,12 @@ class ReleaseTests(unittest.TestCase):
         self.prepare('auto')
         (self.releases / '0.0.1').mkdir()
         (self.releases / '0.0.1/VERSION').write_text('0.0.1\n')
-        with mock.patch.object(cli, 'healthy', return_value=True) as health:
-            self.assertEqual(self.update(), 0)
+        with mock.patch.object(cli, 'healthy', return_value=True) as health, \
+                mock.patch.object(cli, 'activate', wraps=cli.activate) as activate:
+            self.assertEqual(self.update('--verbose'), 0)
             health.assert_called_once_with(self.port, host='127.0.0.1')
+            self.assertTrue(activate.call_args.kwargs['verbose'])
+        self.assertEqual(self.output.splitlines()[-1], 'Result: PASS (updated to v0.2.0)')
         self.assertEqual(self.link.resolve(), self.releases / '0.2.0')
         self.assertEqual(sorted(p.name for p in self.releases.iterdir()), ['0.1.0', '0.2.0'])
         state = json.loads(self.state.read_text())
@@ -764,8 +813,11 @@ class ReleaseTests(unittest.TestCase):
         unit = (self.home / '.config/systemd/user/tether.service').read_text()
         self.assertIn(str(self.link / 'server/server.py'), unit)
         self.assertIn(['systemctl', '--user', 'restart', 'tether.service'], self.calls())
-        with mock.patch.object(cli, 'healthy', return_value=True), contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(cli.main(['rollback']), 0)
+        with mock.patch.object(cli, 'healthy', return_value=True), \
+                mock.patch.object(cli, 'activate', wraps=cli.activate) as activate, contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(cli.main(['rollback', '--verbose']), 0)
+            self.assertTrue(activate.call_args.kwargs['verbose'])
+        self.assertEqual(output.getvalue().splitlines()[-1], 'Result: PASS (rolled back to v0.1.0)')
         self.assertEqual(self.link.resolve(), self.old)
 
     def test_cleanup_deletes_only_owned_releases(self):
@@ -840,6 +892,8 @@ class ReleaseTests(unittest.TestCase):
         backup = cli.snapshot(self.state)
         with mock.patch.object(cli, 'healthy', return_value=False):
             self.assertEqual(self.update(), 1)
+        self.assertEqual(self.errors.splitlines()[-1], 'Health check failed; rolled back to 0.1.0')
+        self.assertEqual(self.output.splitlines()[-1], 'Result: FAIL (see the error above)')
         self.assertEqual(self.link.resolve(), self.old)
         self.assertEqual(cli.snapshot(self.state), backup)
         self.assertFalse((self.releases / '0.2.0').exists())
@@ -897,6 +951,7 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(self.update('--check', '--to', 'v0.2.0'), 0)
             download.assert_not_called()
             run.assert_not_called()
+        self.assertNotIn('Result:', self.output)
 
     def test_auto_respects_saved_mode(self):
         self.prepare()

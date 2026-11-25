@@ -2,7 +2,7 @@
 const { strict: assert } = require('node:assert')
 const { mkdirSync } = require('node:fs')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, prefsStore } = require('./browser_test_helper.cjs')
 
 const origin = 'http://127.0.0.1:5142'
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
@@ -17,18 +17,23 @@ async function main() {
     page.setDefaultTimeout(15000)
     page.on('pageerror', error => errors.push(error.message))
     await page.routeWebSocket('**/*', socket => socket.close())
+    const prefs = prefsStore()
     await page.route('**/*', route => {
       const request = route.request(), url = new URL(request.url())
       if (url.pathname.endsWith('/sw.js')) return route.fulfill({ status: 404, body: '' })
       if (url.pathname.includes('/api/')) {
         const endpoint = url.pathname.split('/api/')[1]
-        if (request.method() !== 'GET') { writes.push(endpoint); return route.fulfill({ json: { ok: true } }) }
+        if (request.method() !== 'GET') {
+          writes.push(endpoint)
+          return route.fulfill({ json: endpoint === 'prefs' ? prefs.post(request.postDataJSON()) : { ok: true } })
+        }
+        if (endpoint === 'prefs') return route.fulfill({ json: prefs.get() })
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
         const pane = panes.find(item => item.id === url.searchParams.get('session')) || panes[0]
         const fixtures = {
           sessions: { sessions: panes, default_thread: panes[0].thread },
           chat: { messages: [], earlier: 0, limit: 40, session: pane.id, thread: pane.thread, agent: pane.agent, state: 'Idle', writable: true },
-          footer: { observed: true }, prefs: { prefs: {}, version: 1 }, host: { name: 'Fixture' },
+          footer: { observed: true }, host: { name: 'Fixture' },
           'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
           catalog: { commands: [], plugins: [], mcp: [] }, usage: { claude: null, codex: null },
           subagents: { main: {}, agents: [], tasks: [] }, 'codex-runs': { runs: [] },
@@ -76,7 +81,7 @@ async function main() {
       return { x: box.x + box.width / 2, y: box.y + box.height / 2 }
     }
     const title = index => `.slot[data-slot="${index}"] .chat-title`
-    const labels = () => page.locator('.slot .chat-title h1').allTextContents()
+    const labels = () => page.locator('.slot .chat-title h1').allInnerTexts()
     const shot = async name => {
       if (!process.env.SHOTS) return
       mkdirSync(process.env.SHOTS, { recursive: true })
@@ -105,7 +110,7 @@ async function main() {
     assert(Math.abs(position.x - to.x) < 1 && Math.abs(position.y - to.y) < 1, 'Ghost tracks the finger')
     await shot('wide-carry')
     await input('touchEnd')
-    await page.waitForFunction(first => document.querySelector('.slot .chat-title h1').textContent !== first, before[0])
+    await page.waitForFunction(first => document.querySelector('.slot .chat-title h1').innerText !== first, before[0])
     assert.deepEqual(await labels(), [before[1], before[0], before[2]])
     await clean()
     assert.equal(await page.locator('dialog[open]').count(), 0, 'Release does not open details')
@@ -143,21 +148,25 @@ async function main() {
     await page.setViewportSize({ width: 1024, height: 768 })
     await lift(); await input('touchMove', [await point('.slot[data-slot="1"]')]); await shot('tablet-carry'); await input('touchCancel'); await clean()
     await lift(); await page.setViewportSize({ width: 390, height: 844 }); await clean(); await input('touchCancel')
-    const phoneTitle = await point('.chat-header .chat-title')
-    await input('touchStart', [phoneTitle])
-    await input('touchMove', [{ x: phoneTitle.x - 160, y: phoneTitle.y }]); await input('touchEnd')
-    await clean()
-    await page.waitForFunction(() => document.querySelector('.chat-title h1').textContent === 'Alpha')
+    for (const [dx, label] of [[-160, 'Alpha'], [160, 'Beta']]) {
+      const phoneTitle = await point('.chat-header .chat-title')
+      await input('touchStart', [phoneTitle])
+      await input('touchMove', [{ x: phoneTitle.x + dx, y: phoneTitle.y }])
+      await input('touchEnd')
+      await clean()
+      await page.waitForFunction(label => document.querySelector('.chat-title h1').innerText === label, label)
+    }
     console.log('Touch: reduced motion, tablet size, unmount cleanup and pinned-header swipe pass')
 
     await page.setViewportSize({ width: 1280, height: 900 })
     await page.locator('.slot').nth(2).waitFor()
     const mouseBefore = await labels()
     await page.locator(title(0)).dragTo(page.locator('.slot[data-slot="1"] .chat-page .chat-scroll'))
-    await page.waitForFunction(first => document.querySelector('.slot .chat-title h1').textContent !== first, mouseBefore[0])
+    await page.waitForFunction(first => document.querySelector('.slot .chat-title h1').innerText !== first, mouseBefore[0])
     assert.deepEqual(await labels(), [mouseBefore[1], mouseBefore[0], mouseBefore[2]])
     await page.locator(title(0)).focus(); await page.keyboard.press('Enter')
     await page.locator('dialog[open]').waitFor()
+    // Prefs saves and usage batches are background writes.
     assert.equal(writes.some(endpoint => endpoint !== 'prefs' && endpoint !== 'ui-usage'), false, `Unexpected write: ${writes}`)
     assert.deepEqual(errors, [])
     console.log('Mouse slot drag and keyboard details pass; no terminal writes or page errors')

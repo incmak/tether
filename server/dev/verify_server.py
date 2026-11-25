@@ -3,8 +3,9 @@
 
     python3 server/dev/verify_server.py --dist BUILD_DIR
 
-The launcher owns the fixture root and the private tmux. The child serves the real
-handler behind the route and program allowlists and the private tmux wrapper.
+The launcher usually owns the fixture root and private tmux. With --root, the test
+watcher owns them. The child serves the real handler behind the route and program
+allowlists and the private tmux wrapper.
 The audit hook is a safety net for Tether's own code. It provides no sandbox for
 hostile code in the server process (https://docs.python.org/3.12/library/sys.html#sys.addaudithook).
 Production workers do not start.
@@ -55,13 +56,95 @@ ALLOWED = {
         'update', 'prefs', 'layouts', 'app-identity', 'push/config', 'shortcuts',
         'browser/agents', 'browser/signed/access', 'ui-usage',
     },
-    # Edits to the fixture's preferences, backlog and UI usage log.
-    'POST': {'prefs', 'projects/backlog', 'ui-usage'},
+    # Edits to the fixture's preferences, backlog, Factory history and UI usage log.
+    'POST': {'prefs', 'projects/backlog', 'factory/history', 'ui-usage'},
 }
+def factory_fixture(_pane):
+    import factory_history
+    return {'now': int(time.time()), 'tools': {}, 'deployed': [], 'commits': [], 'history': factory_history.history()}
+
+
 FIXTURES = {
     'codex-runs': lambda pane: {'pane': pane, 'running': 0, 'runs': []},
     'host': lambda _pane: {'name': 'Fixture', 'resources': False, 'terminal': False, 'office': False},
     'reminders': lambda _pane: {'reminders': [], 'deleted': [], 'now': time.time()},
+    # No task app is connected in the fixture. A recipe stubs the listing to show tasks.
+    'tasks': lambda _pane: {'sources': [], 'tasks': []},
+    'factory': factory_fixture,
+}
+# The UI calls these routes, but the fixture server leaves them off. This list
+# documents the decision for the source scan. The request gate stays default-deny.
+# {} marks an ID in a reviewed path shape. It never grants runtime access.
+REFUSED = {
+    'GET': {
+        # These inspect host services, credentials, processes, or live account data.
+        'accounts', 'browser/extension/devices', 'browser/extension/download',
+        'browser/live', 'browser/snapshot', 'browser/stream', 'browser/tabs',
+        'dev-preview', 'foundry-spend', 'friday-notes', 'host-stats', 'live/agent', 'live/brief',
+        'login/state', 'passkeys', 'upkeep/ops', 'upkeep/ops/note', 'upkeep/prune', 'usage?live=1',
+        # These browse or expose files outside the fixture chat transcript.
+        'file', 'files', 'files/list', 'files/places', 'files/preview', 'files/raw',
+        'files/search', 'files/size', 'files/stat', 'files/zip', 'office/copy',
+        'repo/changes', 'repo/diff', 'repo/tree', 'worktree-info',
+        # The fixture has no Share store, generated assets, or attached media.
+        'app-identity/generate', 'app-identity/preview/art.png', 'app-identity/preview/draft.png',
+        'backgrounds', 'backgrounds/generate', 'icon/{}.svg', 'layouts/generate', 'message-image',
+        'share/list', 'share/raw/{}', 'share/thumb/{}', 'share/uploads', 'share/uploads/{}', 'tool-image',
+        # Optional panels and detail views have no fixture contract. The verify
+        # browser relay answers the chat stream with 204 so the UI polls instead.
+        'activity', 'activity/export', 'attention', 'attention/log', 'audit', 'auto-merge', 'autonomy', 'autonomy/setup',
+        'claude-advisor', 'codex-level', 'codex-provider', 'commit-gate', 'groups/context',
+        'history', 'history/hidden', 'live', 'projects/advisor-entry', 'projects/advisor-log',
+        'projects/note', 'search', 'side-shells', 'stream', 'subagent', 'subagent-task', 'subagent-tool', 'tool',
+        'task-tree/close-plan',
+    },
+    # These can close a pane or session.
+    'DELETE': {'session', 'tmux-sessions'},
+    # WebRTC signaling connects to the live voice worker.
+    'PATCH': {'live/offer'},
+    'POST': {
+        # These can type into, start, stop, or reconfigure a terminal or agent.
+        'approval', 'ask-answer', 'ask-engage', 'attention/back', 'attention/digest', 'attention/handled',
+        'attention/later', 'attention/opened', 'attention/rules', 'attention/snooze', 'auto-resume', 'broadcast', 'clear-draft',
+        'continue', 'continue-preview', 'coordinator-role', 'delegate', 'dialog', 'fork', 'groups/close', 'key',
+        'live/summary',
+        'menu', 'merge', 'message', 'mode', 'model', 'model-options', 'pane-icon', 'pane-icon/draw',
+        'pane-name', 'pick', 'projects/backlog-start', 'prompt-action', 'quick-tab/move',
+        'quick-tab/route', 'quick-tab/start', 'rename', 'restart-tab', 'resume', 'review-link', 'review-stop',
+        'side-shell', 'side-shell/end', 'split', 'start', 'stop-task', 'subagent-stop',
+        'suggest-groups', 'suggest-name', 'tab-brief', 'task-models', 'tmux-sessions', 'type', 'unqueue',
+        'task-tree/answer', 'task-tree/close', 'task-tree/done', 'task-tree/move',
+        # These access live browsers, host services, login flows, or external workers.
+        'accounts/refresh', 'accounts/switch', 'browser/ack', 'browser/agents', 'browser/agents/setup',
+        'browser/ask/dismiss', 'browser/close', 'browser/device', 'browser/extension/pair',
+        'browser/extension/revoke', 'browser/history', 'browser/input', 'browser/navigate',
+        'browser/new', 'browser/show', 'browser/signed/allow', 'browser/signed/deny',
+        'browser/signed/dismiss', 'browser/signed/end', 'browser/window-view',
+        'dev-preview', 'dev-preview/release', 'dev-preview/stop', 'live/offer', 'login/cancel',
+        'login/code', 'login/start', 'preview', 'push/level', 'push/settings', 'push/subscribe',
+        'push/test', 'push/unsubscribe', 'transcribe', 'tts', 'update', 'upkeep/ops', 'upkeep/prune',
+        # These act on files, uploads, or generated assets with no fixture.
+        'app-identity', 'app-identity/generate', 'app-identity/upload', 'backgrounds/delete',
+        'backgrounds/generate', 'backgrounds/upload', 'file-check', 'files/copy', 'files/delete',
+        'files/duplicate', 'files/mkdir', 'files/move', 'files/rename', 'files/save', 'files/secrets',
+        'files/upload', 'layouts/delete', 'layouts/generate', 'layouts/save', 'office/open',
+        'share/delete', 'share/rename', 'share/restore', 'share/thumb/{}', 'share/to-chat',
+        'share/upload', 'share/uploads', 'share/uploads/{}', 'share/uploads/{}/cancel', 'upload',
+        # These change state outside the small set of fixture writes in ALLOWED.
+        'activity', 'activity/publish', 'auto-merge', 'autonomy', 'autonomy/decisions', 'autonomy/lessons',
+        'autonomy/review', 'autonomy/setup', 'claude-advisor', 'codex-level', 'codex-provider',
+        'codex-trust', 'commit-gate', 'feedback', 'friday-notes/hold', 'friday-notes/drop',
+        'friday-notes/draft', 'friday-notes/draft-edit', 'friday-notes/draft-send',
+        'friday-notes/draft-close', 'friday-notes/draft-asked',
+        'groups/arrange', 'groups/create', 'groups/move',
+        'groups/remove', 'groups/rename', 'groups/reorder', 'groups/ungroup', 'history/hide', 'passkeys',
+        'projects/backlog-add', 'projects/budget', 'projects/instructions', 'projects/note',
+        'projects/note-delete', 'projects/pin', 'projects/seen', 'projects/unpin',
+        'reminders/add', 'reminders/delete', 'reminders/done', 'reminders/edit', 'reminders/reopen',
+        'reminders/restore', 'reminders/snooze', 'tasks/backlog', 'tasks/settings', 'tasks/sync',
+        'ui-usage/clear', 'undo', 'voice-log',
+        'work/answer', 'work/fix', 'work/item', 'work/jira', 'work/project', 'work/qa', 'work/stage', 'work/triage',
+    },
 }
 STATIC_PREFIX = '/chat/'
 API_PREFIX = '/mobile/api/'
@@ -141,15 +224,40 @@ def inside(path, root):
     return path == root or root in path.parents
 
 
-def check_root(root, marker):
-    root = Path(root).resolve()
+def check_root_location(root, option):
     if (root == REAL_HOME or root in REAL_HOME.parents or root.parent != TEMP
             or not root.name.startswith('tv-') or len(str(root)) > 60):
-        raise SystemExit("verify_server: --serve needs the launcher's private temporary root.")
+        raise SystemExit(f"verify_server: {option} needs the launcher's private temporary root.")
+
+
+def check_root(root, marker):
+    root = Path(root).resolve()
+    check_root_location(root, '--serve')
     saved = root / MARKER
     if not marker or saved.is_symlink() or not saved.is_file() or not compare_digest(saved.read_bytes(), marker.encode()):
         raise SystemExit("verify_server: --serve needs the launcher's matching root marker.")
     return root
+
+
+def check_supplied_root(root):
+    root = Path(root)
+    check_root_location(root, '--root')
+    try:
+        info = root.lstat()
+        if (stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700
+                and info.st_uid == os.getuid()):
+            # The watcher's foreground server binds its socket before the launcher starts.
+            entries = {entry.name for entry in root.iterdir()}
+            if not entries:
+                return root
+            if entries == {'tmux.sock'}:
+                socket_info = (root / 'tmux.sock').lstat()
+                if stat.S_ISSOCK(socket_info.st_mode) and socket_info.st_uid == info.st_uid:
+                    return root
+    except OSError:
+        pass
+    raise SystemExit('verify_server: --root needs a private 0700 directory owned by this user, '
+                     'empty except for the prestarted tmux socket.')
 
 
 def isolation_errors(root, env=None):
@@ -224,16 +332,16 @@ if not allowed(args):
     with open(LOG, 'a') as log:
         log.write(f'tmux {command}\n')
     sys.exit(f'verify_server: tmux wrapper refused {command}; only fixture reads and named metadata writes are allowed')
-os.execv(REAL_TMUX, [REAL_TMUX, '-S', SOCKET, '-f', '/dev/null', *args])
+os.execv(REAL_TMUX, [REAL_TMUX, *CLIENT_OPTIONS, '-S', SOCKET, '-f', '/dev/null', *args])
 """
 
 
-def write_wrapper(root, tmux):
+def write_wrapper(root, tmux, *, client_options=()):
     wrapper = root / 'bin/tmux'
     wrapper.parent.mkdir()
     # A shell trampoline also works when the Python install path has spaces (including on macOS).
     import shlex
-    source = (f'REAL_TMUX = {tmux!r}\nSOCKET = {str(root / "tmux.sock")!r}\n'
+    source = (f'REAL_TMUX = {tmux!r}\nCLIENT_OPTIONS = {client_options!r}\nSOCKET = {str(root / "tmux.sock")!r}\n'
               f'LOG = {str(root / "blocked.log")!r}\n' + TMUX_WRAPPER)
     wrapper.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -I -B -c {shlex.quote(source)} "$@"\n')
     wrapper.chmod(0o700)
@@ -387,9 +495,14 @@ def guard(root, dist):
     sys.addaudithook(hook)
 
 
-def seed(root, pane, pane_pid):
+REVIEW_COMMIT = '3f9c2a7b41d6e8f05a1c9b2d7e4f6a8c0b1d2e3f'
+
+
+def seed(root, pane, pane_pid, session):
     """Fixture data, written with the server's own modules: one Claude chat on the fixture pane and a backlog."""
     import backlog
+    import factory_history
+    import injected_prompts
     import paths
     work = str(Path(root) / 'work')
     registry = paths.CLAUDE / 'sessions' / f'{pane_pid}.json'
@@ -399,21 +512,41 @@ def seed(root, pane, pane_pid):
                                     'name': 'Fixture chat', 'nameSource': 'user', 'nameSince': 1}))
     transcript = paths.CLAUDE / 'projects' / ''.join(c if c.isalnum() else '-' for c in work) / f'{SESSION}.jsonl'
     transcript.parent.mkdir(parents=True, exist_ok=True)
-    turns = [('user', 'Check the Settings page at phone width.'),
-             ('assistant', 'The Settings page fits a 320 px screen. Each control keeps a 44 px touch target.'),
-             ('user', 'Where does this conversation go?'),
-             ('assistant', CHAT_LINE)]
-    with open(transcript, 'w') as stream:
+    # A review request as server/review_links.py sends it to a reviewer tab (the chat-review surface).
+    review = ("[Tether review] The Codex tab \u201cFixture worker\u201d (%7) finished a turn. "
+              "Review its work: check the changes and the claims, then list what is wrong or missing. "
+              "Start your reply with APPROVED if nothing is. Tether sends your reply to that tab. Review id: 5e1f0c2a. "
+              f"Commit under review: {REVIEW_COMMIT} in /work/tether. "
+              "Read the review rules first: `git -C /work/tether show origin/main:REVIEW.md`. "
+              f"An approval counts only for this commit: start it with `APPROVED {REVIEW_COMMIT}` (the full hash). "
+              "This diff changes the UI (1 file(s), for example ui/src/Messages.tsx). Do not approve without before and "
+              "after screenshots at 320 px and 1280 px for each changed screen: the worker's reply must name the folder "
+              "that holds them. Open the screenshots and check them against the claims. "
+              "Its last reply:\n\nThe review card now shows the commit and the reply format.\n\n"
+              "Transcript: /work/.codex/sessions/fixture.jsonl")
+    entry = {'agent': 'claude', 'transcript': transcript}
+    with injected_prompts.track_send(entry, review, 'review') as delivery, transcript.open('w') as stream:
+        turns = [('user', delivery),
+                 ('user', 'Check the Settings page at phone width.'),
+                 ('assistant', 'The Settings page fits a 320 px screen. Each control keeps a 44 px touch target.'),
+                 ('user', 'Where does this conversation go?'),
+                 ('assistant', CHAT_LINE)]
         for index, (role, text) in enumerate(turns):
             stream.write(json.dumps({'type': role, 'uuid': f'00000000-0000-4000-8000-{index:012d}', 'sessionId': SESSION, 'cwd': work,
                                      'timestamp': f'2026-01-05T09:{index:02d}:00.000Z',
                                      'message': {'role': role, 'content': text if role == 'user' else [{'type': 'text', 'text': text}],
                                                  **({'model': 'claude-fixture', 'stop_reason': 'end_turn'} if role == 'assistant' else {})}}) + '\n')
+        advisor = SERVER / 'fixtures' / 'claude_2.1.327_advisor'
+        for name in ('answered.jsonl', 'error.jsonl'):
+            stream.write((advisor / name).read_text().rstrip('\n') + '\n')
     backlog.add('Write the release notes')
-    backlog.add('Fix the flaky share test', source='codex', project='tether', details=['The teardown races the HTTP worker'])
-    backlog.add('Add backlog search', source='claude', project='tether')
+    inbox = backlog.add('Fix the flaky share test', source='codex', project='tether', details=['The teardown races the HTTP worker'])
+    done = backlog.add('Add backlog search', source='claude', project='tether')
     backlog.add('Draw the new icon set with a very long title that must wrap on a narrow phone screen without a sideways scroll', project='design')
     backlog.mark_done('Add backlog search', project='tether', result='Search added')
+    inbox_id, done_id = (line.rsplit('#', 1)[1] for line in (inbox, done))
+    factory_history.record({'moves': [{'task': inbox_id, 'phase': 'inbox'},
+                                      {'task': done_id, 'phase': 'build'}, {'task': done_id, 'phase': 'done'}]})
 
 
 def use_fixture_folders(root):
@@ -445,7 +578,12 @@ def use_fixture_folders(root):
         for name in wanted[len(root):].split(os.sep):
             if name:
                 part = os.path.join(part, name)
-                if os.path.islink(part) or not os.path.isdir(part):
+                # One lstat per part: a separate islink and isdir could follow a link swapped in between them.
+                try:
+                    is_folder = stat.S_ISDIR(os.lstat(part).st_mode)
+                except OSError:
+                    is_folder = False
+                if not is_folder:
                     raise ValueError('The default session folder is unavailable. Choose an existing folder in the fixture root.')
         return wanted
 
@@ -485,7 +623,7 @@ def serve(root, dist):
     listed = subprocess.run([wrapper, 'list-panes', '-a', '-F', '#{pane_id}\t#{pane_pid}\t#{session_id}'],
                             capture_output=True, text=True, timeout=10, check=True)
     pane, pane_pid, session = listed.stdout.splitlines()[0].split('\t')
-    seed(root, pane, int(pane_pid))
+    seed(root, pane, int(pane_pid), session)
     use_fixture_processes(int(pane_pid))
     use_fixture_folders(root)
     import auth
@@ -507,8 +645,8 @@ def serve(root, dist):
         http.serve_forever()
 
 
-def tmux_command(tmux, root, env, *args):
-    return subprocess.run([tmux, '-S', str(root / 'tmux.sock'), '-f', '/dev/null', *args],
+def tmux_command(tmux, root, env, *args, client_options=()):
+    return subprocess.run([tmux, *client_options, '-S', str(root / 'tmux.sock'), '-f', '/dev/null', *args],
                           env=env, capture_output=True, text=True, timeout=5, start_new_session=True)
 
 
@@ -556,6 +694,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--dist', help='the built UI to serve at /chat/ (npm run build -- --outDir DIR)')
     parser.add_argument('--until-stdin-closes', action='store_true', help='stop when stdin closes')
+    parser.add_argument('--root', type=Path, help='use a private fixture root and tmux server owned by the test watcher')
     parser.add_argument('--serve', metavar='ROOT', help=argparse.SUPPRESS)
     args = parser.parse_args()
     dist = Path(args.dist or SERVER.parent / 'ui/dist')
@@ -584,26 +723,28 @@ def main():
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     root = child = env = None
+    owns_root = args.root is None
     tmux_started = False
     try:
-        root = Path(tempfile.mkdtemp(prefix='tv-', dir=TEMP))
+        root = Path(tempfile.mkdtemp(prefix='tv-', dir=TEMP)) if owns_root else check_supplied_root(args.root)
+        client_options = () if owns_root else ('-N',)
         marker = secrets.token_hex(32)
         (root / MARKER).write_text(marker)
         check_root(root, marker)
         env = clean_env(root, dist)
-        write_wrapper(root, tmux)
+        write_wrapper(root, tmux, client_options=client_options)
         for folder in ('work', 'tmp', 'home/.config/tether'):
             (root / folder).mkdir(parents=True)
         # The normal GET update route may schedule an external release check.
         (root / 'home/.config/tether/install.json').write_text('{"updates":"off"}\n')
         if cancelled:
             return 0
-        tmux_started = True  # the command may create the socket even if startup fails
+        tmux_started = owns_root  # Only the standalone launcher can start a server.
         started = tmux_command(tmux, root, env, 'new-session', '-d', '-s', 'Fixture', '-x', '120', '-y', '40',
                                '-c', str(root / 'work'), 'exec sleep 86400', ';',
                                'set-option', '-w', 'window-size', 'manual', ';',
                                'set-option', '-w', '@tether_window_size', '1', ';',
-                               'resize-window', '-x', '120', '-y', '40')
+                               'resize-window', '-x', '120', '-y', '40', client_options=client_options)
         if started.returncode:
             raise SystemExit('verify_server: tmux did not start: ' + started.stderr.strip())
         if cancelled:
@@ -637,7 +778,7 @@ def main():
             errors.append(f'could not stop server child: {exc}')
         if tmux_started:
             errors.extend(stop_tmux(tmux, root, env))
-        if root is not None:
+        if root is not None and owns_root:
             try:
                 shutil.rmtree(root)
             except OSError as exc:

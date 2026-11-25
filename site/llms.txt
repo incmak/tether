@@ -33,7 +33,7 @@ Report what is missing and how to install it. Ask before you install anything.
 
 ## Step 2: Download a verified release
 
-    curl -fL https://raw.githubusercontent.com/incmak/tether/v0.1.14/integrations/claude/tether/skills/setup/bootstrap.py -o tether-bootstrap.py
+    curl -fL https://raw.githubusercontent.com/incmak/tether/v0.1.16/integrations/claude/tether/skills/setup/bootstrap.py -o tether-bootstrap.py
     python3 tether-bootstrap.py
 
 Tell the person what this writes before you run it: the script in the current folder, and the release files under `~/.local/share/tether`.

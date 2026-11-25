@@ -23,7 +23,12 @@ const outcome = (members: ChatMessage[]) => {
 // One scheduled run from its notice at `start`: the notice, then finished tools and short replies.
 function scheduledRun(messages: ChatMessage[], start: number) {
   let end = start + 1
-  while (end < messages.length && (toolsDone(messages[end]) || isReply(messages[end]))) end++
+  while (end < messages.length) {
+    const message = messages[end]
+    const advisorDone = message.kind === 'advisor' && message.advisor?.status === 'answered'
+    if (!advisorDone && !toolsDone(message) && !isReply(message)) break
+    end++
+  }
   const members = messages.slice(start, end)
   return { members, end, result: outcome(members) }
 }

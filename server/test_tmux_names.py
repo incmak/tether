@@ -1,40 +1,26 @@
-"""tmux_names hooks against a real tmux server on its own socket (-L, in its own TMUX_TMPDIR), never the user's tmux."""
+"""tmux_names hooks against a real tmux server on a private socket."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import os
 import shutil
-import subprocess
-import tempfile
 import time
 import unittest
 
 import agents
 import paths
 import tmux_names
+from test_tmux_isolation import private_tmux
 
 
 @unittest.skipUnless(shutil.which(paths.TMUX) or os.path.exists(paths.TMUX), 'tmux is not installed')
 class TmuxNameHookTests(unittest.TestCase):
     def setUp(self):
-        self.socket_dir = tempfile.mkdtemp(prefix='tnh', dir='/tmp')  # short: long socket paths fail
-        self.env = {key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE')}
-        self.env['TMUX_TMPDIR'] = self.socket_dir
         # A plain /bin/sh, never the user's shell: an interactive zsh reads ~/.zshrc and locks the real
         # ~/.zsh_history before it runs a typed line, and a held lock delayed that past the waits below (B148).
-        self.env['SHELL'] = '/bin/sh'
+        self.private = private_tmux(self, 'tnh', {'SHELL': '/bin/sh'})
+        self.run_tmux = self.private.run
+        self.tmux = self.private.tmux
         self.tmux('new-session', '-d', '-s', 'work', 'exec /bin/sh')  # exec: no outer sh -c keeps the foreground
         self.pane = self.tmux('display-message', '-p', '-t', '=work:', '#{pane_id}').stdout.strip()
-
-    def tearDown(self):
-        self.tmux('kill-server')  # only this test socket's server
-        shutil.rmtree(self.socket_dir, ignore_errors=True)
-
-    def run_tmux(self, command, **kwargs):
-        """subprocess.run for code under test: every tmux call goes to the test socket."""
-        if command and command[0] == paths.TMUX:
-            command = [paths.TMUX, '-L', 'tether-test', '-f', '/dev/null', *command[1:]]  # no ~/.tmux.conf, no plugins
-        return subprocess.run(command, env=self.env, **kwargs)
-
-    def tmux(self, *args):
-        return self.run_tmux([paths.TMUX, *args], capture_output=True, text=True, timeout=5)
 
     def option(self, name, pane=None):
         return self.tmux('display-message', '-p', '-t', pane or self.pane, '#{' + name + '}').stdout.strip()
@@ -70,17 +56,22 @@ class TmuxNameHookTests(unittest.TestCase):
         self.assertGreaterEqual(entry['pane_named_at'], before)
 
     def test_automatic_rename_never_overwrites_the_name(self):
-        tmux_names.install(run=self.run_tmux)
+        self.assertTrue(tmux_names.install(run=self.run_tmux))
         self.tether_names('logs')
-        self.tmux('set-option', '-w', '-t', self.pane, '-u', 'automatic-rename')  # Tether clears a name like this
-        self.assertTrue(self.wait_for(lambda: self.option('window_name') != 'logs'))  # tmux now shows the program
-        self.settle()
-        self.assertEqual((self.option('@chat_name'), self.option('@chat_name_at')), ('logs', '123'))
-        # A new program that writes output (tmux checks the name on pane output): tmux renames again.
-        self.tmux('send-keys', '-t', self.pane, 'exec python3 -uc "import itertools, time; [print(1) or time.sleep(.2) for _ in itertools.count()]"', 'Enter')
-        self.assertTrue(self.wait_for(lambda: self.option('window_name') == 'python3', seconds=6))
-        self.settle()
-        self.assertEqual((self.option('@chat_name'), self.option('@chat_name_at')), ('logs', '123'))
+        # Record the event after Tether's hook has handled it.
+        hook = self.tmux('set-hook', '-ag', 'window-renamed',
+                         "set-option -p -F @test_renamed '#{hook_window_name}'")
+        self.assertEqual(hook.returncode, 0, hook.stderr)
+        for name in ('shell', 'worker'):
+            with self.subTest(window_name=name):
+                # Setting automatic-rename on makes tmux recheck the active pane without pane output.
+                rename = self.tmux('set-option', '-w', '-t', self.pane, 'automatic-rename-format', name,
+                                   ';', 'set-option', '-w', '-t', self.pane, 'automatic-rename', 'on')
+                self.assertEqual(rename.returncode, 0, rename.stderr)
+                self.assertTrue(self.wait_for(lambda: self.option('@test_renamed') == name),
+                                f'window-renamed hook did not run for {name!r}')
+                self.assertEqual(self.option('window_name'), name)
+                self.assertEqual((self.option('@chat_name'), self.option('@chat_name_at')), ('logs', '123'))
 
     def test_tethers_own_rename_is_not_imported_again(self):
         tmux_names.install(run=self.run_tmux)

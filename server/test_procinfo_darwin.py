@@ -1,4 +1,5 @@
 """Recorded Darwin process samples and forced-Darwin callers; no Mac I/O."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import ctypes
 import errno
 import json
@@ -107,6 +108,14 @@ class DarwinTests(DarwinFixtures):
             self.ps.assert_called_once()
             clock.return_value = 11
             procinfo.pids()
+            self.assertEqual(self.ps.call_count, 2)
+
+    def test_fresh_table_reads_ps_again_inside_the_cache_second(self):
+        with own_time(procinfo, monotonic=Mock(return_value=10)):
+            procinfo.table()
+            procinfo.table()
+            self.ps.assert_called_once()
+            procinfo.table(fresh=True)
             self.assertEqual(self.ps.call_count, 2)
 
     def test_missing_pid_refreshes_cached_snapshot_once(self):

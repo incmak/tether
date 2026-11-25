@@ -3,6 +3,7 @@
 Only the CDP wire and clock are mocked. Browser, stream, device, and grant
 methods below are the production methods. No worker or timer is started.
 """
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 from pathlib import Path

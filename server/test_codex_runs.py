@@ -1,4 +1,5 @@
 """Pane-scoped run discovery and HTTP routing, using fixture files and fake processes only."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 import os

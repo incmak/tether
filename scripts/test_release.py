@@ -1,4 +1,5 @@
 """A failed release run leaves nothing that stops the next run. Real git in temp folders; the slow checks are skipped."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import importlib.util
 import io
 import json

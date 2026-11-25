@@ -1,5 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react'
 import { copyText } from './clipboard'
+import { reloadPage } from './backNav'
 
 // The last line of defence. Without it, any render error unmounts the whole app and leaves a blank page
 // with no way out but a manual reload. This shows what broke, with Reload and Copy details.
@@ -37,7 +38,7 @@ export class CrashScreen extends Component<{ children: ReactNode }, State> {
       <h1>Tether stopped</h1>
       <p>Part of the page failed to load. Your sessions keep running on the server.<br />Reload to open Tether again.</p>
       <div className="crash-actions">
-        <button type="button" className="primary" onClick={() => location.reload()}>Reload</button>
+        <button type="button" className="primary" onClick={reloadPage}>Reload</button>
         <button type="button" className="secondary" onClick={() => void this.copy()}>{copied ? 'Copied' : 'Copy details'}</button>
       </div>
       <details className="crash-details">

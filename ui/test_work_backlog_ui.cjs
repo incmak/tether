@@ -5,14 +5,14 @@
 const { strict: assert } = require('node:assert')
 const fs = require('node:fs')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, prefsStore } = require('./browser_test_helper.cjs')
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = process.env.SHOTS
 const ORIGIN = 'http://tether.test'
 const NOW = Date.now() / 1000
 const fixtures = {
   sessions: { sessions: [], default_thread: '' },
-  prefs: { prefs: {}, version: 1 }, 'projects/marks': {}, 'projects/backlog': { text: '- [ ] First backlog item #B1\n', version: 'v', limit: 200000, next_id: 2 },
+  'projects/marks': {}, 'projects/backlog': { text: '- [ ] First backlog item #B1\n', version: 'v', limit: 200000, next_id: 2 },
   'side-shells': { shells: [] }, update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Test server', office: false },
   catalog: { commands: [], plugins: [], mcp: [], note: '' }, usage: { claude: null, codex: null },
   'browser/agents': { enabled: false, available: false, reason: 'off', agents: [], asks: [] },
@@ -34,12 +34,14 @@ const types = { '.js': 'text/javascript', '.css': 'text/css', '.html': 'text/htm
 
 async function open(browser, viewport, options = {}) {
   const context = await browser.newContext({ viewport, serviceWorkers: 'block' })
-  const posts = [], gets = [], errors = []
+  const posts = [], errors = []
+  const prefs = prefsStore()
   await context.route(`${ORIGIN}/**`, route => {
     const request = route.request()
     const url = new URL(request.url())
     if (url.pathname.startsWith('/mobile/api/')) {
       const name = url.pathname.slice('/mobile/api/'.length)
+      if (name === 'prefs') return route.fulfill({ json: request.method() === 'GET' ? prefs.get() : prefs.post(request.postDataJSON()) })
       if (request.method() === 'POST') {
         const body = request.postDataJSON()
         if (name !== 'work/stage') return route.fulfill({ json: {} })
@@ -47,7 +49,6 @@ async function open(browser, viewport, options = {}) {
         if (options.conflict) return route.fulfill({ status: 409, json: { error: 'B1 changed since you loaded it. Reload and try again.' } })
         return route.fulfill({ json: { item: card(Number(body.item.slice(1)), body.stage, { version: 5 }) } })
       }
-      gets.push(name)
       if (name === 'work/board') {
         const json = board(options.error, options.bare, options.hold)
         // vanish: after the first move, B1 leaves the backlog (moved to DONE.md, or deleted)
@@ -65,7 +66,7 @@ async function open(browser, viewport, options = {}) {
   page.on('pageerror', error => errors.push(error.message))
   await page.goto(`${ORIGIN}/chat/${options.home ? '' : '?go=board'}`)
   if (!options.home) await page.locator('.work-sheet').waitFor()
-  return { context, page, posts, gets, errors }
+  return { context, page, posts, errors }
 }
 
 const column = (page, name) => page.locator('.work-col').filter({ has: page.getByRole('heading', { name: new RegExp(`^${name}`) }) })
@@ -184,7 +185,7 @@ async function main() {
       await context.close()
     })
     await check('drawer moves an item and opens the Backlog', async () => {
-      const { context, page, posts, gets } = await open(browser, { width: 400, height: 860 })
+      const { context, page, posts } = await open(browser, { width: 400, height: 860 })
       await page.locator('[data-item="B1"]').click()
       const drawer = page.locator('.work-drawer')
       await drawer.getByRole('heading', { name: /Backlog item number 1/ }).waitFor()
@@ -194,10 +195,13 @@ async function main() {
       await drawer.getByRole('button', { name: 'Mark done' }).click()
       await drawer.getByText('B1 is Done.').waitFor()
       assert.deepEqual(posts[0], { name: 'work/stage', body: { item: 'B1', stage: 'done', version: 1001 } })
-      await drawer.getByRole('button', { name: 'Open in Backlog' }).click()
+      const [backlog] = await Promise.all([
+        page.waitForResponse(response => response.request().method() === 'GET' && new URL(response.url()).pathname.endsWith('/api/projects/backlog')),
+        drawer.getByRole('button', { name: 'Open in Backlog' }).click(),
+      ])
       await page.locator('.work-sheet').waitFor({ state: 'detached' })
       await page.waitForFunction(() => document.querySelector('dialog[open]'))
-      assert.ok(gets.includes('projects/backlog'), 'the Backlog page loads')
+      assert.ok(backlog.ok(), 'the Backlog page loads')
       await context.close()
     })
     await check('a changed item locks the drawer', async () => {

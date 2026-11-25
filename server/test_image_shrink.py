@@ -1,4 +1,5 @@
 """image_shrink: header parsing, encoder order and real encodes when an encoder is installed."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import base64
 import io
 import struct

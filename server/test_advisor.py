@@ -1,4 +1,5 @@
 """Advisor settings and CLI contracts, with isolated files and mocked tmux/tab processes."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import contextlib
 import copy
 import io
@@ -15,11 +16,13 @@ from unittest.mock import patch
 import advisor
 import advisor_log
 import agent_advisor_cli as cli
+import audit
 import autonomy
 import codex_level
 import delegate
 import model_catalog
 import paths
+import projects
 
 PID = 'abcdef012345'
 MODELS = [{'slug': 'new-model', 'name': 'Newest Model', 'efforts': ['high', 'ultra']},
@@ -252,6 +255,10 @@ class Cli(Base):
         self.calls.append((command, options))
         if command[0] == paths.TMUX:
             value = command[-1]
+            if value == '#{@chat_name}':
+                return SimpleNamespace(returncode=0, stdout='Build\n')
+            if value == '#{@chat_name}\t#{pane_current_command}':
+                return SimpleNamespace(returncode=0, stdout='Build\tcodex\n')
             if value == '#{@project}':
                 return SimpleNamespace(returncode=0, stdout=self.project)
             if value == '#{session_id}':
@@ -302,6 +309,43 @@ class Cli(Base):
         self.assertRegex(log.read_text(), r'^- \d{4}-\d\d-\d\d \d\d:\d\d \[decided\] Q: Which option\? '
                                          r'-> A: Use the tested option\. \(claude fable\)\n$')
         self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+
+    def test_audit_ask_goal_over_forty_characters_ends_with_an_ellipsis(self):
+        self.enterContext(patch.object(audit, '_TABS', {}))
+        projects.bundle(PID).mkdir(parents=True)
+        self.assertEqual(self.invoke(['ask', '--stack', 'Internationalization accessibility review', 'Which?'])[0], 0)
+        summary = audit.query()['entries'][0]['summary']
+        self.assertEqual(summary, 'Asked advisor: Internationalization accessibility…')
+
+    def test_audit_ask_records_one_preview_for_both_advisors(self):
+        self.enterContext(patch.object(audit, '_TABS', {}))
+        projects.bundle(PID).mkdir(parents=True)
+        projects.set_name(PID, 'Example')
+        question = 'Use token sk-test-0123456789 here?\n' + 'a' * 210 + ' private suffix'
+        self.assertEqual(self.invoke(['ask', '--critical', '--stack', 'Audit  log  review extra', question])[0], 0)
+        result = audit.query()
+        self.assertEqual(len(result['entries']), 1)
+        entry = result['entries'][0]
+        self.assertEqual(entry['kind'], 'advisor.ask')
+        self.assertEqual(entry['detail'], {'status': 'decided', 'critical': True})
+        self.assertEqual(entry['actor'], {'source': 'agent-cli', 'pane': '%1', 'tab': 'Build', 'agent': 'codex'})
+        self.assertEqual(entry['project'], 'Example')
+        # Only the goal: a cut excerpt of the question could still hold a token (B56 review).
+        self.assertEqual(entry['summary'], 'Asked advisor: Audit log review…')  # B316: a cut shows
+        self.assertNotIn('sk-test', json.dumps(entry))
+        self.assertNotIn('private suffix', json.dumps(entry))
+
+    def test_audit_ask_excludes_the_full_question_even_when_off(self):
+        advisor.write(OFF)
+        question = 'Which option?'
+        with patch.dict(os.environ, {'TMUX_PANE': ''}):
+            self.assertEqual(self.invoke(['ask', question]), (8, {'status': 'off'}))
+        entry, = audit.query()['entries']
+        self.assertEqual(entry['kind'], 'advisor.ask')
+        self.assertEqual(entry['actor'], {'source': 'cli'})
+        self.assertEqual(entry['detail'], {'status': 'off', 'critical': False})
+        self.assertEqual(entry['summary'], 'Asked advisor')
+        self.assertNotIn(question, json.dumps(entry))
 
     def test_stack_goal_goes_to_each_new_advisor_tab(self):
         self.enterContext(patch.object(advisor, 'second_opinion', return_value={'agent': 'codex', 'model': 'gpt', 'effort': 'high'}))

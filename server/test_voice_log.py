@@ -1,4 +1,5 @@
 """Voice reports use fake HTTP handlers and never access a terminal."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 import unittest

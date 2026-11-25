@@ -1,4 +1,5 @@
 """prune.py: the clean-up list of stale lessons and notes (B211). Nothing goes without the person's tap."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import os
 import tempfile

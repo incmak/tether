@@ -15,6 +15,22 @@
 .reminder-parsed { margin: 0; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
 .reminder-parsed.bad { color: var(--error); }
 .reminder-picks { display: flex; flex-wrap: wrap; gap: 6px; }
+.reminder-repeat-field { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 4px; }
+.reminder-field-label { font-size: 13px; font-weight: 600; }
+/* Custom repeat: "Every [N] [unit]" on its own line, the rule in words under it. */
+.reminder-every { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; flex-basis: 100%; font-size: 14px; }
+.reminder-every input {
+  width: 4.5em; min-height: 44px; box-sizing: border-box; padding: 4px 8px; border: 1px solid var(--reminder-field-line);
+  border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font: inherit; font-size: 16px; font-variant-numeric: tabular-nums;
+}
+.reminder-every input:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -1px; border-color: var(--accent); }
+.reminder-every input[aria-invalid="true"] { border-color: var(--error); }
+.sm-trigger.reminder-unit-select { width: auto; flex: 1 1 8em; max-width: 12em; }
+.reminder-every-hint, .reminder-every-last { flex-basis: 100%; }
+.reminder-repeat-select { min-width: 0; }
+.reminder-stop-repeat { justify-self: start; min-height: 24px; font-size: 13px; }
+.reminder-repeat { display: inline-flex; align-items: center; gap: 4px; }
+.reminders-sheet .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .reminder-link-tab { display: flex; align-items: center; gap: 8px; min-height: 32px; font-size: 13px; overflow-wrap: anywhere; }
 .reminder-link-tab input { width: 18px; height: 18px; flex: none; margin: 0; }
 .reminder-submit { justify-self: start; min-height: var(--control-lg); margin-top: 4px; padding: 0 14px; gap: 6px; }
@@ -22,6 +38,9 @@
 .reminder-lists { margin-top: 18px; display: grid; gap: 16px; }
 .reminder-section h3 { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; font-size: 12px; font-weight: 600; letter-spacing: .02em; text-transform: uppercase; color: var(--muted); }
 .reminder-count { font-variant-numeric: tabular-nums; font-weight: 500; }
+.reminder-fold-icon { transition: transform .15s; }
+.reminder-fold[aria-expanded="true"] .reminder-fold-icon { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .reminder-fold-icon { transition: none; } }
 .reminder-fold { display: inline-flex; align-items: center; gap: 6px; min-height: var(--control-sm); padding: 0 6px; margin-left: -6px; border-radius: var(--radius-sm); color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; }
 .reminder-section ul, .reminder-skeleton { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
 .reminder-row { display: flex; align-items: flex-start; gap: 8px; padding: 8px 4px 8px 10px; border-radius: var(--radius); }
@@ -29,7 +48,7 @@
 .reminder-row:is(.done, .deleted) .reminder-text { color: var(--muted); text-decoration: line-through; }
 .reminder-row.editing { display: block; padding: 10px; border: 1px solid var(--line); }
 .reminder-row.editing form { display: grid; gap: 6px; }
-.reminder-keep { margin: 0; min-height: 0; color: var(--muted); font-size: 12.5px; }
+.reminders-sheet .reminder-keep { margin: 0; min-height: 0; color: var(--muted); font-size: 12.5px; }
 .reminder-keep:empty { display: none; }
 .reminder-main { flex: 1; min-width: 0; }
 .reminder-text { margin: 0; font-size: 14px; line-height: 1.4; overflow-wrap: anywhere; white-space: pre-wrap; }

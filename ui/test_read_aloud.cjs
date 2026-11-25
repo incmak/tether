@@ -49,6 +49,7 @@ function silenceWav() {
   const page = await context.newPage()
   const requests = []
   const wav = silenceWav()
+  let holder
   let gate, failureAt = -1, failure
   const hold = () => {
     let release, receive
@@ -68,8 +69,8 @@ function silenceWav() {
   const check = (name, action) => { action(); passed++; console.log(`ok ${name}`) }
   try {
     page.setDefaultTimeout(5000)
-    await page.routeWebSocket('**/*', socket => socket.close())
-    await page.route('**/*', async route => {
+    await context.routeWebSocket('**/*', socket => socket.close())
+    await context.route('**/*', async route => {
       const url = new URL(route.request().url())
       if (url.pathname.endsWith('/sw.js')) return route.fulfill({ status: 404, body: '' })
       if (url.pathname.startsWith('/mobile/api/')) {
@@ -90,6 +91,11 @@ function silenceWav() {
           })
         }
         if (ep === 'stream') return route.fulfill({ status: 204, body: '' })
+        // Keep Friday's own briefing pending so this case measures chat read-aloud only.
+        if (ep === 'live/brief') return
+        if (ep === 'chat' && route.request().frame().page() === holder) {
+          return route.fulfill({ json: { ...fixture.chat, messages: fixture.chat.messages.slice(0, 2) } })
+        }
         return route.fulfill({ json: fixture[ep] || {} })
       }
       if (url.pathname.startsWith('/chat/')) {
@@ -98,12 +104,47 @@ function silenceWav() {
       }
       return route.abort()
     })
-    await page.addInitScript(() => {
+    await context.addInitScript(() => {
+      const params = new URLSearchParams(location.search)
+      const autoRead = params.has('auto-read')
       localStorage.clear()
       localStorage.setItem('tmux-chat.prefs.synced', '1')
-      localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'system', voiceOff: true, voiceSound: false }))
-      window.__voice = { events: [], utterances: [], primes: 0, unlocked: false }
+      localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'system', voiceOff: !autoRead, voiceSound: false, readAloud: autoRead, handsFree: autoRead && !params.has('no-hands-free') }))
+      window.__voice = { events: [], utterances: [], primes: 0, unlocked: false, micOpens: [] }
       const { events, utterances } = window.__voice
+      const voice = window.__voice
+      const now = () => performance.timeOrigin + performance.now()
+      addEventListener('focus', () => { voice.focuses = (voice.focuses ?? 0) + 1 })
+      const Channel = BroadcastChannel
+      window.BroadcastChannel = class extends Channel {
+        set onmessage(listener) {
+          super.onmessage = event => {
+            if (this.name === 'tether-read-aloud' && event.data?.t === 'release') voice.releases = (voice.releases ?? 0) + 1
+            if (this.name === 'tether-read-aloud' && event.data?.t === 'hold' && voice.deferHold) {
+              voice.deliverHold = () => listener(event)
+            } else listener(event)
+          }
+        }
+      }
+      const request = navigator.locks.request.bind(navigator.locks)
+      navigator.locks.request = (name, options, callback) => {
+        if (name === 'tether-read-aloud-play' && options.mode === 'exclusive') { voice.playWaitAt = now(); voice.playWaitPerf = performance.now() }
+        if (name === 'tether-read-aloud-play' && options.mode === 'exclusive' && voice.rejectPlay) return Promise.reject(new DOMException('Fixture rejects the play lock', 'NotSupportedError'))
+        return request(name, options, callback)
+      }
+      const query = navigator.locks.query.bind(navigator.locks)
+      let mic
+      navigator.mediaDevices.getUserMedia = async () => {
+        const at = now()
+        const { held } = await query()
+        voice.micOpens.push({
+          at,
+          playWaitAt: voice.playWaitAt,
+          held: held.some(lock => lock.name.startsWith('tether-read-aloud-hold:') && lock.mode === 'exclusive'),
+          reading: held.some(lock => lock.name === 'tether-read-aloud-play' && lock.mode === 'shared'),
+        })
+        return (mic ??= new AudioContext()).createMediaStreamDestination().stream
+      }
       const fetch = window.fetch
       window.fetch = (input, init) => {
         if (input === '/mobile/api/tts') {
@@ -115,7 +156,8 @@ function silenceWav() {
       const start = AudioBufferSourceNode.prototype.start
       AudioBufferSourceNode.prototype.start = function (...args) {
         events.push('start')
-        this.addEventListener('ended', () => events.push('end'), { once: true })
+        if (window.__voice.loopClip) this.loop = true
+        this.addEventListener('ended', () => { events.push('end'); voice.endedAt = now() }, { once: true })
         return start.apply(this, args)
       }
       Object.defineProperty(window, 'speechSynthesis', { value: {
@@ -141,11 +183,14 @@ function silenceWav() {
     })
 
     const actions = page.locator('.chat-page .assistant-message .message-actions').last()
-    const read = actions.getByRole('button', { name: 'Read aloud' })
+    const read = actions.getByRole('button', { name: 'Read aloud', exact: true })
     const stop = actions.getByRole('button', { name: 'Stop reading' })
-    const load = async (text = reply) => {
+    const heldLabel = 'Read aloud is off during Live mode'
+    const disabled = actions.getByRole('button', { name: heldLabel })
+    const load = async (text = reply, autoRead = false, handsFree = autoRead) => {
+      fixture.chat.messages.splice(2)
       fixture.chat.messages[1].text = text
-      await page.goto(`${origin}/chat/?session=%251`)
+      await page.goto(`${origin}/chat/?session=%251${autoRead ? '&auto-read' : ''}${handsFree ? '' : '&no-hands-free'}`)
       await read.waitFor()
       await page.evaluate(() => { window.__voice.events.length = 0 })
     }
@@ -200,7 +245,6 @@ function silenceWav() {
     await read.waitFor()
     await aborted
     stoppedClip.release()
-    await page.waitForTimeout(300) // Give a stale clip enough time to start and end.
     const stopped = await voice()
     check('Stop aborts the held request and late audio cannot play or fetch another clip', () => {
       assert.equal(requests.length, 1)
@@ -262,6 +306,265 @@ function silenceWav() {
       assert.equal(requests.length, 3)
       assert.equal(refused.utterances.length, repeated.utterances.length + 1)
     })
+
+    let replyNumber = 1
+    const addReply = async text => {
+      fixture.chat.messages.push({ id: `a${++replyNumber}`, role: 'assistant', text, time: new Date().toISOString() })
+      await page.getByText(text, { exact: true }).waitFor()
+    }
+    const checkHeldButton = async () => {
+      await disabled.waitFor()
+      assert.equal(await disabled.getAttribute('title'), heldLabel)
+      assert.equal(await disabled.evaluate(button => {
+        button.focus()
+        return button.disabled && document.activeElement !== button
+          && getComputedStyle(button).cursor === 'not-allowed' && Number(getComputedStyle(button).opacity) < 1
+      }), true)
+    }
+
+    const openLive = async tab => {
+      await tab.getByRole('button', { name: /^More/ }).click()
+      await tab.getByRole('menuitem', { name: /Friday/ }).click()
+      await tab.getByRole('dialog', { name: 'Friday Live mode' }).waitFor()
+    }
+    const closeLive = async tab => {
+      const live = tab.getByRole('dialog', { name: 'Friday Live mode' })
+      await live.getByRole('button', { name: 'End Live mode' }).click()
+      await live.waitFor({ state: 'detached' })
+    }
+    const waitForMic = (tab, count) => tab.waitForFunction(count => window.__voice.micOpens.length === count, count, { timeout: 5000 })
+    holder = await context.newPage()
+    holder.setDefaultTimeout(5000)
+    await holder.goto(`${origin}/chat/?session=%251&auto-read&no-hands-free`)
+    await page.setViewportSize({ width: 1280, height: 844 })
+    await load('The chat is open.', true, false)
+    await page.bringToFront()
+    requests.length = 0
+    failureAt = -1
+    await page.keyboard.press('Tab') // Unlock audio as a keyboard user would.
+    await page.evaluate(() => { window.__voice.loopClip = true; window.__voice.deferHold = true })
+    const beforeHold = 'This reply starts before the other tab opens Live.'
+    await addReply(beforeHold)
+    await page.waitForFunction(() => window.__voice.events.includes('start'))
+    await stop.waitFor()
+    await openLive(holder)
+    await page.waitForFunction(() => !!window.__voice.deliverHold, null, { timeout: 5000 })
+    const beforeDelivery = await holder.waitForFunction(async () => {
+      const { held, pending } = await navigator.locks.query()
+      const play = lock => lock.name === 'tether-read-aloud-play'
+      const waiting = pending.some(lock => play(lock) && lock.mode === 'exclusive')
+      const micOpens = window.__voice.micOpens.length
+      if (waiting || micOpens) return { waiting, reading: held.some(lock => play(lock) && lock.mode === 'shared'), micOpens }
+    }, null, { timeout: 5000 }).then(handle => handle.jsonValue())
+    check('the exclusive play request queues before the Live microphone opens', () => {
+      assert.deepEqual(beforeDelivery, { waiting: true, reading: true, micOpens: 0 })
+    })
+    // The old 1500 ms limit opened the mic here. Hold the message past it and check the mic stays closed.
+    const pastLimit = await holder.waitForFunction(() => performance.timeOrigin + performance.now() - window.__voice.playWaitAt > 2000 && { micOpens: window.__voice.micOpens.length }, null, { timeout: 5000, polling: 100 }).then(handle => handle.jsonValue())
+    check('the Live microphone stays closed past 1500 ms while another tab plays', () => {
+      assert.deepEqual(pastLimit, { micOpens: 0 })
+    })
+    await page.evaluate(() => window.__voice.deliverHold())
+    await page.bringToFront()
+    await page.waitForFunction(() => window.__voice.events.includes('end'))
+    await waitForMic(holder, 1)
+    const [firstMic] = await holder.evaluate(() => window.__voice.micOpens)
+    await checkHeldButton()
+    const remoteBaseline = await voice()
+    check('Live waits for a playing tab to stop when the hold message is delayed', () => {
+      assert.equal(firstMic.held, true)
+      assert.equal(firstMic.reading, false)
+      assert.ok(remoteBaseline.endedAt <= firstMic.at)
+    })
+    check('another tab stops the current clip and disables the button on desktop', () => {
+      assert.deepEqual(requests.map(request => request.text), [beforeHold])
+      assert.deepEqual(remoteBaseline.micOpens, [])
+    })
+    const remoteSkipped = 'This reply arrives while the other tab holds read-aloud.'
+    await addReply(remoteSkipped)
+    await checkHeldButton()
+    await page.evaluate(() => { window.__voice.loopClip = false })
+    await closeLive(holder)
+    await page.bringToFront()
+    await page.waitForFunction(() => !document.querySelector('button[aria-label="Read aloud is off during Live mode"]'))
+    assert.equal(await read.isEnabled(), true)
+    const remoteResumed = 'The next reply is read after the other tab closes Live.'
+    await addReply(remoteResumed)
+    await waitForFetches(2)
+    await read.waitFor()
+    const remoteVoice = await voice()
+    check('another tab suppresses a new reply and the next reply is read after release', () => {
+      assert.deepEqual(requests.map(request => request.text), [beforeHold, remoteResumed])
+      assert.deepEqual(remoteVoice.utterances, [])
+      assert.equal(remoteVoice.primes, remoteBaseline.primes)
+    })
+
+    const warnings = []
+    holder.on('console', message => { if (message.type() === 'warning' && message.text().includes('Read aloud')) warnings.push(message.text()) })
+    const beforeStale = await voice()
+    await page.evaluate(() => { delete window.__voice.deliverHold })
+    const staleClip = hold()
+    await read.click()
+    // A TTS request means the first hold check already passed.
+    await staleClip.wait()
+    await stop.waitFor()
+    const staleLocks = await page.evaluate(async () => (await navigator.locks.query()).held.map(lock => lock.name))
+    assert.ok(staleLocks.includes('tether-read-aloud-play'))
+    assert.ok(staleLocks.every(name => !name.startsWith('tether-read-aloud-hold:')))
+    await openLive(holder)
+    await page.waitForFunction(() => !!window.__voice.deliverHold, null, { timeout: 5000 })
+    const staleWait = await holder.waitForFunction(() => performance.timeOrigin + performance.now() - window.__voice.playWaitAt > 2000 && { micOpens: window.__voice.micOpens.length }, null, { timeout: 5000, polling: 100 }).then(handle => handle.jsonValue())
+    await page.bringToFront()
+    staleClip.release()
+    await waitForMic(holder, 2)
+    const staleMic = await holder.evaluate(() => window.__voice.micOpens[1])
+    await page.waitForFunction(async () => {
+      const { held, pending } = await navigator.locks.query()
+      return ![...held, ...pending].some(lock => lock.name === 'tether-read-aloud-play')
+    }, null, { timeout: 5000 })
+    await checkHeldButton()
+    const stale = await voice()
+    check('a loading clip keeps the mic closed, and a stale snapshot cannot start a clip or device voice', () => {
+      assert.deepEqual(staleWait, { micOpens: 1 })
+      assert.equal(staleMic.held, true)
+      assert.equal(staleMic.reading, false)
+      assert.equal(warnings.length, 0)
+      assert.equal(stale.events.filter(event => event === 'start').length, beforeStale.events.filter(event => event === 'start').length)
+      assert.deepEqual(stale.utterances, beforeStale.utterances)
+    })
+    await page.evaluate(() => window.__voice.deliverHold?.())
+
+    const focusState = () => page.evaluate(() => ({ focused: document.hasFocus(), events: window.__voice.focuses, releases: window.__voice.releases }))
+    const beforeDeath = await focusState()
+    assert.equal(beforeDeath.focused, true)
+    await holder.close()
+    await read.waitFor()
+    assert.equal(await read.isEnabled(), true)
+    const afterDeath = await focusState()
+    const deadResumed = 'The focused chat reads the next reply after the holder tab closes.'
+    const fetches = stale.events.filter(event => event === 'fetch').length
+    await addReply(deadResumed)
+    await waitForFetches(fetches + 1)
+    await read.waitFor()
+    check('a dead holder re-enables the focused tab and the next reply plays', () => {
+      assert.deepEqual(afterDeath, beforeDeath)
+      assert.equal(requests.at(-1).text, deadResumed)
+    })
+
+    await page.setViewportSize({ width: 320, height: 844 })
+    await load('The phone chat is open.', true)
+    requests.length = 0
+    const briefing = page.waitForRequest(request => request.url().endsWith('/mobile/api/live/brief'))
+    await openLive(page)
+    await briefing
+    await checkHeldButton()
+    const localBaseline = await voice()
+    const localSkipped = 'This reply arrives while this tab has the Live microphone.'
+    await addReply(localSkipped)
+    await checkHeldButton()
+    await closeLive(page)
+    await read.waitFor()
+    assert.equal(await read.isEnabled(), true)
+    const afterLive = await voice()
+    check('Live holds read-aloud before the fixture mic opens and skips the hands-free callback on phone', () => {
+      assert.deepEqual(localBaseline.micOpens.map(({ held, reading }) => ({ held, reading })), [{ held: true, reading: false }])
+      assert.deepEqual(afterLive.micOpens, localBaseline.micOpens)
+      assert.deepEqual(requests, [])
+      assert.deepEqual(afterLive.utterances, [])
+      assert.equal(afterLive.primes, localBaseline.primes)
+    })
+    const localResumed = 'The phone reads the next reply after Live mode ends.'
+    await addReply(localResumed)
+    await waitForFetches(1)
+    await read.waitFor()
+    check('ending Live re-enables the control and the next reply plays automatically', () => {
+      assert.deepEqual(requests.map(request => request.text), [localResumed])
+    })
+
+    // A reader that never stops: the hold message never arrives and its play lock is never released.
+    await page.evaluate(() => {
+      window.__voice.deferHold = true
+      navigator.locks.request('tether-read-aloud-play', { mode: 'shared' }, () => new Promise(resolve => { window.__unstick = resolve }))
+    })
+    const starter = await context.newPage()
+    starter.setDefaultTimeout(5000)
+    await starter.clock.install()
+    await starter.goto(`${origin}/chat/?session=%251&auto-read&no-hands-free`)
+    await starter.getByText('The phone reads the next reply after Live mode ends.').first().waitFor()
+    // Stop the page clock before Live starts. The target is 60 s ahead, so the real time that passes before the call
+    // cannot reach it. Then move the clock in 100 ms steps until the hold waits for the play lock.
+    await starter.clock.pauseAt(await starter.evaluate(() => Date.now() + 60000))
+    const opened = openLive(starter)
+    for (let step = 0; step < 100 && !(await starter.evaluate(() => !!window.__voice.playWaitPerf)); step++) await starter.clock.runFor(100)
+    await opened
+    const live = starter.getByRole('dialog', { name: 'Friday Live mode' })
+    // The deadline timer starts in the same task as the play lock request, on the same paused clock.
+    const left = await starter.evaluate(() => window.__voice.playWaitPerf + 5000 - performance.now())
+    await starter.clock.runFor(Math.max(0, Math.floor(left) - 50))
+    const waiting = await starter.evaluate(async () => ({
+      micOpens: window.__voice.micOpens.length,
+      alert: !!document.querySelector('.live-problem'),
+      playWaits: (await navigator.locks.query()).pending.filter(lock => lock.name === 'tether-read-aloud-play' && lock.mode === 'exclusive').length,
+    }))
+    await starter.clock.runFor(100)
+    const alert = live.getByRole('alert')
+    await alert.waitFor()
+    const startAgain = live.getByRole('button', { name: 'Start again' })
+    const stoppedState = async () => ({
+      text: await alert.textContent(),
+      micOpens: await starter.evaluate(() => window.__voice.micOpens.length),
+      holds: await page.evaluate(async () => (await navigator.locks.query()).held.filter(lock => lock.name.startsWith('tether-read-aloud-hold:')).length),
+      startEnabled: await startAgain.isEnabled(),
+      status: await live.locator('.live-status').textContent(),
+      pauseEnabled: await live.getByRole('button', { name: 'Pause listening' }).isEnabled(),
+      playWaits: await page.evaluate(async () => (await navigator.locks.query()).pending.filter(lock => lock.name === 'tether-read-aloud-play' && lock.mode === 'exclusive').length),
+    })
+    const gaveUp = await stoppedState()
+    // Nothing that the start left behind may open the mic or change the message later.
+    await starter.clock.runFor(60000)
+    const later = await stoppedState()
+    check('a reader that never stops: Live gives up at the deadline, keeps the mic closed, releases its hold and says what to do', () => {
+      assert.deepEqual(waiting, { micOpens: 0, alert: false, playWaits: 1 })
+      assert.deepEqual(gaveUp, {
+        text: 'Another Tether tab is still playing audio. Stop it there, then press Start again.',
+        micOpens: 0, holds: 0, startEnabled: true, status: 'Not started', pauseEnabled: false, playWaits: 0,
+      })
+      assert.deepEqual(later, gaveUp)
+    })
+    await page.evaluate(() => window.__unstick())
+    await starter.clock.resume()
+    await startAgain.focus()
+    await starter.keyboard.press('Space')
+    await starter.waitForFunction(() => window.__voice.micOpens.length === 1, null, { polling: 100 })
+    const restarted = { alert: await live.getByRole('alert').count(), mic: await starter.evaluate(() => window.__voice.micOpens[0]) }
+    check('Space on Start again opens the mic after the other reader stops', () => {
+      assert.equal(restarted.alert, 0)
+      assert.deepEqual({ held: restarted.mic.held, reading: restarted.mic.reading }, { held: true, reading: false })
+    })
+    await closeLive(starter)
+
+    // The browser rejects the play lock request: Live must not wait for a deadline that was cleared.
+    await starter.evaluate(() => { window.__voice.rejectPlay = true })
+    await openLive(starter)
+    await live.getByRole('alert').waitFor()
+    const rejected = {
+      text: await live.getByRole('alert').textContent(),
+      status: await live.locator('.live-status').textContent(),
+      startEnabled: await startAgain.isEnabled(),
+      micOpens: await starter.evaluate(() => window.__voice.micOpens.length),
+      holds: await page.evaluate(async () => (await navigator.locks.query()).held.filter(lock => lock.name.startsWith('tether-read-aloud-hold:')).length),
+    }
+    await starter.evaluate(() => { window.__voice.rejectPlay = false })
+    await startAgain.click()
+    await starter.waitForFunction(() => window.__voice.micOpens.length === 2, null, { polling: 100 })
+    check('a rejected play lock request stops the start at once, releases the hold, and Start again works', () => {
+      assert.deepEqual(rejected, {
+        text: 'Live could not check for audio in other Tether tabs. Press Start again.',
+        status: 'Not started', startEnabled: true, micOpens: 1, holds: 0,
+      })
+    })
+    await closeLive(starter)
+    await starter.close()
   } finally { await context.close(); server.close() }
   console.log(`read aloud: all ${passed} checks pass`)
   process.exit(0)

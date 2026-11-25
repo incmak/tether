@@ -4,10 +4,12 @@ import { Bone, Loading, Skeleton } from './Skeleton'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, Bot, Check, ChevronsRight, Download, ExternalLink, File, FileText, Film, Image as ImageIcon, MessageSquarePlus, Music, Pencil, Plus, RotateCcw, Search, Trash2, TriangleAlert, Upload, X } from 'lucide-react'
 import { errorText } from './api'
+import { useNow } from './attention'
 import { ImageViewer, type Media } from './ImageViewer'
 import { backfillThumb, cancelUpload, CHUNK, inspect, listShare, listUploads, putThumb, rawUrl, renameShare, restoreShare, sameFile, shareToChat, textPreview, thumbUrl, trashShare, uploadResumable, uploadShare, type ShareFile, type ShareFilter, type ShareKind, type ShareUpload, type ShareUsage, type Wait } from './shareApi'
 import './Share.css'
 import { wheelSideways } from './wheelSideways'
+import { fmtDate, useTetherZone, zonedTime, zoneParts } from './zone'
 
 const PdfView = lazy(() => import('./SharePdfView').then(m => ({ default: m.PdfView })))
 
@@ -17,10 +19,9 @@ const size = (n: number) => n < 1e3 ? `${n} B` : n < 1e6 ? `${(n / 1e3).toFixed(
 const clock = (s?: number) => s == null ? '' : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`
 const ago = (t: number) => {
   const m = Math.round((Date.now() - t) / 60e3)
-  return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : new Date(t).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
+  return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : fmtDate(t, { weekday: 'short', day: 'numeric', month: 'short' })
 }
-const startOfToday = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime() }
-const dayLabel = (t: number, today: number) => t >= today ? 'Today' : t >= today - DAY ? 'Yesterday' : t >= today - 6 * DAY ? 'This week' : 'Earlier'
+const dayLabel = (t: number, today: number, yesterday: number, week: number) => t >= today ? 'Today' : t >= yesterday ? 'Yesterday' : t >= week ? 'This week' : 'Earlier'
 const ext = (name: string) => name.includes('.') ? (name.split('.').pop() ?? '').toUpperCase().slice(0, 4) : ''
 const agentName = (file: ShareFile) => file.source.startsWith('agent:') ? file.source.slice(6) : ''
 const KIND_ICON: Record<ShareKind, typeof File> = { image: ImageIcon, video: Film, audio: Music, pdf: FileText, text: FileText, other: File }
@@ -183,6 +184,7 @@ function drops(files: ShareFile[]) {
 }
 
 export function Share({ wide, onAddToMessage }: { wide: boolean; onAddToMessage?: (paths: string[]) => void }) {
+  const zone = useTetherZone()
   const [view, setView] = useState<View>('all')
   const [query, setQuery] = useState('')
   const [q, setQ] = useState('')
@@ -335,12 +337,16 @@ export function Share({ wide, onAddToMessage }: { wide: boolean; onAddToMessage?
   const mediaFor = (file: ShareFile): Media => ({ name: file.name, url: rawUrl(file.id), downloadUrl: rawUrl(file.id, true), thumbnailUrl: file.has_thumb ? thumbUrl(file) : undefined, kind: file.kind === 'video' || file.kind === 'audio' ? file.kind : 'image' })
   const openFull = (file: ShareFile) => setViewing(mediaFor(file))
 
-  const today = startOfToday()
+  const now = useNow()
+  const { year, month, date } = zoneParts(now * 1000, zone)
+  const [today, yesterday, week] = useMemo(() =>
+    [0, 1, 6].map(daysAgo => zonedTime(year, month, date - daysAgo, 0, 0, zone)),
+  [year, month, date, zone])
   const groups = useMemo(() => {
     const map = new Map<string, ShareFile[]>()
-    for (const file of files) { const label = dayLabel(time(file), today); map.set(label, [...(map.get(label) ?? []), file]) }
+    for (const file of files) { const label = dayLabel(time(file), today, yesterday, week); map.set(label, [...(map.get(label) ?? []), file]) }
     return [...map]
-  }, [files, today])
+  }, [files, today, yesterday, week])
   const agentDrops = useMemo(() => drops(agentFiles), [agentFiles])
   // Keep the pane open when the file is in the agents strip but not in the loaded grid page.
   const current = files.find(f => f.id === openId) ?? agentFiles.find(f => f.id === openId) ?? (opened?.id === openId ? opened : null)

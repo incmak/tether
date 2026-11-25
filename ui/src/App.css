@@ -41,8 +41,8 @@
 .agent-bubble { position: fixed; left: 0; top: 0; z-index: 40; width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; padding: 0;
   background: var(--surface); color: var(--text); border: 1px solid var(--line);
   box-shadow: 0 1px 2px rgb(0 0 0 / .08), 0 6px 18px rgb(0 0 0 / .14); touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab;
-  --spring: cubic-bezier(.32, .72, 0, 1);
-  transition: transform .22s var(--spring), width .28s var(--spring), height .28s var(--spring), border-radius .28s var(--spring),
+  --spring: var(--motion-drawer);
+  transition: translate .22s var(--spring), width .28s var(--spring), height .28s var(--spring), border-radius .28s var(--spring),
     background-color .2s ease, color .2s ease, border-color .2s ease, box-shadow .2s ease, scale .15s ease; }
 /* Docked: a D-shaped tab, flat side on the screen edge. The ::before widens the touch area to 44px. */
 .agent-bubble.docked { box-shadow: 0 1px 2px rgb(0 0 0 / .06), 0 4px 12px rgb(0 0 0 / .12); }
@@ -57,8 +57,10 @@
 .agent-bubble.docked.working .agent-bubble-count { color: var(--accent-ink); }
 .agent-bubble.docked.attention { background: var(--attention); border-color: var(--attention); }
 /* The call pulse: a copy of the tab grows and fades behind it (transform and opacity only, no repaint). */
-.agent-bubble.docked.attention::after { content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; background: var(--attention); pointer-events: none; animation: tab-call 2.2s cubic-bezier(.23, 1, .32, 1) infinite; }
+.agent-bubble.docked.attention::after { content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; background: var(--attention); pointer-events: none; animation: tab-call 2.2s var(--motion-out) infinite; }
 .agent-bubble.docked.attention .agent-bubble-count { color: var(--surface); }
+/* Open: the tab stays where it is and shows the open state in its colours, not in its shape. */
+.agent-bubble.docked.open:not(.attention) { background: color-mix(in oklab, var(--accent) 14%, var(--surface)); border-color: var(--accent); color: var(--accent-ink); }
 @keyframes tab-call { 0% { opacity: .5; transform: scale(1); } 70%, 100% { opacity: 0; transform: scale(1.3, 1.25); } }
 .agent-bubble.dragging { transition: width .2s var(--spring), height .2s var(--spring), border-radius .2s var(--spring), box-shadow .2s ease, scale .15s ease; cursor: grabbing; scale: 1.08; box-shadow: 0 2px 4px rgb(0 0 0 / .1), 0 14px 32px rgb(0 0 0 / .22); }
 .agent-bubble:active:not(.dragging) { scale: .94; }
@@ -69,11 +71,11 @@
 .agent-bubble.idle { color: var(--muted); }
 .agent-bubble.working .agent-bubble-ring { border-color: var(--accent); border-right-color: transparent; animation: spin 1.4s linear infinite; }
 .agent-bubble.attention .agent-bubble-ring { border-color: var(--attention); }
-.agent-bubble.attention .agent-bubble-ring::after { content: ''; position: absolute; inset: -3px; border-radius: 50%; border: 2px solid var(--attention); animation: bubble-call 1.8s cubic-bezier(.23, 1, .32, 1) infinite; }
+.agent-bubble.attention .agent-bubble-ring::after { content: ''; position: absolute; inset: -3px; border-radius: 50%; border: 2px solid var(--attention); animation: bubble-call 1.8s var(--motion-out) infinite; }
 @keyframes bubble-call { 0% { opacity: .45; transform: scale(1); } 100% { opacity: 0; transform: scale(1.45); } }
 .agent-pop { position: fixed; z-index: 41; display: flex; flex-direction: column; overflow: hidden; border-radius: var(--radius-lg); background: var(--surface); border: 1px solid var(--line);
-  box-shadow: 0 2px 6px rgb(0 0 0 / .08), 0 18px 48px rgb(0 0 0 / .22); animation: pop-in .2s cubic-bezier(.23, 1, .32, 1) .06s backwards; outline: none; }
-.agent-pop.closing { animation: pop-out .14s cubic-bezier(.23, 1, .32, 1) forwards; }
+  box-shadow: 0 2px 6px rgb(0 0 0 / .08), 0 18px 48px rgb(0 0 0 / .22); animation: pop-in .2s var(--motion-out) .06s backwards; outline: none; }
+.agent-pop.closing { animation: pop-out .14s var(--motion-out) forwards; }
 @keyframes pop-in { from { opacity: 0; transform: scale(.95); } to { opacity: 1; transform: scale(1); } }
 @keyframes pop-out { to { opacity: 0; transform: scale(.94); } }
 .agent-pop-head { display: flex; align-items: center; gap: 8px; padding: 10px 6px 6px 14px; }
@@ -154,7 +156,7 @@ label.broadcast-row:hover { background: var(--hover); }
 .broadcast-send { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
 .via-button { max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .broadcast-results { margin-top: 10px; }
-.broadcast .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .via-check { display: inline-flex; width: 16px; flex: none; color: var(--accent-ink); }
 .via-menu .action-label { white-space: normal; }
 .via-none { margin: 4px 8px 8px; }
@@ -233,18 +235,19 @@ label.broadcast-row:hover { background: var(--hover); }
 .archived-tab-restore { flex: none; color: var(--muted); }
 /* A session with stacks: each stack heading, then its tabs one step in (as in the chat header's stack row). */
 .pane-stack-row { display: flex; align-items: center; margin-top: 2px; }
-.pane-children .pane-stack-head { flex: 1; min-width: 0; gap: 8px; min-height: 28px; font-size: 12px; font-weight: 600; color: var(--muted); }
-.pane-children .pane-stack-head.current { color: var(--text); }
+/* Stack headings (concept D): one style, small grey text with one plain count. */
+.pane-children .pane-stack-head { flex: 1; min-width: 0; gap: 8px; min-height: 28px; font-size: 12px; font-weight: 400; color: var(--muted); }
 .pane-children .pane-stack-head .group-count { margin-left: auto; font-weight: 400; font-variant-numeric: tabular-nums; }
-.pane-children .pane-stack-fold { flex: none; display: grid; place-items: center; width: var(--control-sm); height: var(--control-sm); min-height: 0; padding: 0; border-radius: var(--radius-sm, 6px); color: var(--muted); }
-.pane-children .pane-stack-fold:hover { background: var(--hover); }
-.pane-children .pane-stack-fold:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.pane-children :is(.pane-stack-fold, .pane-stack-actions) { flex: none; display: grid; place-items: center; width: var(--control-sm); height: var(--control-sm); min-height: 0; padding: 0; border-radius: var(--radius-sm, 6px); color: var(--muted); }
+.pane-children :is(.pane-stack-fold, .pane-stack-actions):hover { background: var(--hover); }
+.pane-children :is(.pane-stack-fold, .pane-stack-actions):focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .pane-children .pane-stack-fold[aria-disabled="true"] { opacity: .45; cursor: default; }
 .pane-children .pane-stack-fold[aria-disabled="true"]:hover { background: transparent; }
 @media (prefers-reduced-motion: reduce) { .pane-stack-fold > .chevron { transition: none; } }
 .pane-stack-tabs { list-style: none; margin: 0; padding: 0; }
 .pane-stack-tabs button { padding-left: 38px; }
 .pane-child-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-coordinator { flex-shrink: 0; color: var(--muted); }
 .state-slot { display: flex; align-items: center; justify-content: center; width: 8px; height: 8px; flex: none; }
 .session-list .state-dot { width: 8px; height: 8px; border-width: 1.5px; }
 .session-list .state-dot.idle { background: transparent; border: 0; box-shadow: inset 0 0 0 1.5px var(--line); opacity: 1; animation: none; }
@@ -292,28 +295,50 @@ label.broadcast-row:hover { background: var(--hover); }
 .switch-row { display: flex; align-items: center; gap: 16px; min-height: 56px; cursor: pointer; }
 .switch-row > span { flex: 1; display: grid; gap: 3px; }
 .switch-row small { color: var(--muted); font-size: 13px; line-height: 1.4; }
-.switch-row input { appearance: none; flex-shrink: 0; width: 46px; height: 28px; margin: 0; border-radius: 14px; background: var(--line); position: relative; cursor: pointer; transition: background .15s; }
-.switch-row input::after { content: ''; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px #0003; transition: transform .15s; }
-.switch-row input:checked { background: var(--accent); }
-.switch-row input:checked::after { transform: translateX(18px); }
+/* Off: an outlined track and a small muted thumb, so the control and its state reach 3:1 (WCAG 1.4.11). */
+.switch-row input { appearance: none; flex-shrink: 0; width: 46px; height: 28px; margin: 0; border-radius: 14px; background: transparent; box-shadow: inset 0 0 0 2px var(--muted); position: relative; cursor: pointer; transition: background .15s, box-shadow .15s; }
+.switch-row input::after { content: ''; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: var(--muted); transform: scale(.73); transition: transform .15s, background .15s; }
+.switch-row input:checked { background: var(--accent); box-shadow: none; }
+.switch-row input:checked::after { background: #fff; box-shadow: 0 1px 2px #0003; transform: translateX(18px); }
 .switch-row input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { .switch-row input, .switch-row input::after { transition: none; } }
+/* Forced colors drop box shadows and author colors: draw the track and thumb in system colors. */
+@media (forced-colors: active) {
+  .switch-row input { forced-color-adjust: none; border: 2px solid ButtonText; box-shadow: none; background: Canvas; }
+  .switch-row input::after { top: 1px; left: 1px; background: ButtonText; forced-color-adjust: none; }
+  .switch-row input:checked { background: Highlight; border-color: Highlight; }
+  .switch-row input:checked::after { background: HighlightText; }
+  .switch-row input:disabled { border-color: GrayText; }
+  .switch-row input:disabled::after { background: GrayText; }
+}
 /* Pane tabs under the chat header: one tab per tmux pane, + splits. */
-.pane-tabs { display: flex; gap: 4px; overflow-x: auto; padding: 6px max(12px, env(safe-area-inset-left)); border-bottom: 1px solid var(--line); scrollbar-width: none; }
-.pane-tabs button { display: flex; align-items: center; gap: 6px; flex-shrink: 0; min-height: var(--control); padding: 0 12px; border-radius: var(--radius); font-size: 13px; color: var(--muted); border: 1px solid transparent; }
-.pane-tabs button.active { background: var(--surface); border-color: var(--line); color: var(--text); }
+/* Concept D (B446, notes/b446-prototypes): the task row sits on the sidebar tone; the active task is a tab in the page color,
+   rounded on top and standing on the row's bottom line, like a browser tab. */
+.pane-tabs { display: flex; gap: 2px; overflow-x: auto; padding: 8px max(10px, env(safe-area-inset-left)) 0; border-bottom: 1px solid var(--line); background: var(--sidebar); scrollbar-width: none; }
+.pane-tabs button { display: flex; align-items: center; gap: 6px; flex-shrink: 0; min-height: var(--control); padding: 0 12px; border-radius: var(--radius) var(--radius) 0 0; font-size: 13px; color: var(--muted); border: 1px solid transparent; }
+.pane-tabs button.active { background: var(--bg); color: var(--text); }
 .pane-tabs .tab-add { padding: 0 10px; }
 .pane-tabs { position: relative; }
 .pane-tabs button { position: relative; }
-.pane-tab-pill { position: absolute; left: 0; top: 0; border-radius: var(--radius); background: var(--surface); border: 1px solid var(--line); pointer-events: none; }
+.pane-tab-pill { position: absolute; left: 0; top: 0; border-radius: var(--radius) var(--radius) 0 0; background: var(--bg); border: 1px solid transparent; pointer-events: none; }
 .pane-tabs:not(.has-pill) .pane-tab-pill { display: none; }
 .pane-tabs.has-pill button.active { background: transparent; border-color: transparent; }
 /* Agent session names can be long (reviewer-esef-phase-1-3-…): one line, cut with an ellipsis. */
-/* Advisor tabs (server delegate.ROLES): a lightbulb after the agent icon, and a soft glow while the advisor works. */
-.pane-tabs .tab-advisor { flex-shrink: 0; margin-left: -3px; color: var(--advisor); }
+/* Advisor tabs and helper chips carry the same icon. Only the pane tabs glow while an advisor works. */
+:is(.pane-tabs, .task-chips) button > .tab-advisor { flex-shrink: 0; color: var(--advisor); }
+/* Concept D: helper-row icons are all grey. A working advisor chip has no glow (B474, decoration); its dot and 'Advising' name mark it. */
+.task-chips button > svg, .task-chips button > .tab-advisor { color: var(--muted); }
+.pane-tabs .tab-coordinator { flex-shrink: 0; color: var(--muted); }
+.coordinator-choice { flex: 1 1 auto; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; text-align: left; }
+[aria-labelledby="pane-title"] .coordinator-picker .action-list button .coordinator-choice small { flex: none; margin-left: 0; text-align: left; white-space: normal; }
+.coordinator-picker .action-list button { padding-block: 10px; }
+.coordinator-picker .coordinator-name { overflow-wrap: anywhere; }
+.coordinator-picker .action-list button[aria-disabled="true"]:not([aria-checked="true"]) { opacity: .55; cursor: default; }
 .pane-tabs button.advisor-tab .pane-tab-name { max-width: 22ch; }
-.pane-tabs button.advising { color: var(--text); border-color: color-mix(in srgb, var(--advisor) 70%, transparent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--advisor) 35%, transparent), 0 0 12px color-mix(in srgb, var(--advisor) 45%, transparent); animation: advise-glow 1.8s ease-in-out infinite alternate; }
-.pane-tabs button.advising .state-dot.working { border-color: color-mix(in srgb, var(--advisor) 25%, transparent); border-top-color: var(--advisor); }
+.pane-tabs button.advising { border-color: color-mix(in srgb, var(--advisor) 70%, transparent); }
+.task-chips button.advising { color: var(--text); }
+.pane-tabs button.advising { color: var(--text); box-shadow: 0 0 0 1px color-mix(in srgb, var(--advisor) 35%, transparent), 0 0 12px color-mix(in srgb, var(--advisor) 45%, transparent); animation: advise-glow 1.8s ease-in-out infinite alternate; }
+:is(.pane-tabs, .task-chips) button.advising .task-dot.working { border-color: var(--advisor); background: var(--advisor); }
 @keyframes advise-glow { from { box-shadow: 0 0 0 1px color-mix(in srgb, var(--advisor) 25%, transparent), 0 0 4px color-mix(in srgb, var(--advisor) 25%, transparent); } to { box-shadow: 0 0 0 1px color-mix(in srgb, var(--advisor) 55%, transparent), 0 0 14px color-mix(in srgb, var(--advisor) 55%, transparent); } }
 @media (prefers-reduced-motion: reduce) { .pane-tabs button.advising { animation: none; } }
 .pane-tab-name { max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -390,6 +415,7 @@ button.stop-button:not(:disabled):hover { background: var(--muted); }
 .action-list button:hover { background: var(--hover); }
 .action-list button:disabled { opacity: .45; }
 .sheet-sub:not(:has(> svg)) { display: block; }
+.sheet-sub-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A sentence under a sheet title wraps; names and paths in .sheet-sub keep one line. */
 .sheet-sub.sheet-note { overflow: visible; white-space: normal; overflow-wrap: anywhere; line-height: 1.45; }
 [aria-labelledby="pane-title"] .action-list button small { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
@@ -401,6 +427,14 @@ button.stop-button:not(:disabled):hover { background: var(--muted); }
 .hint { color: var(--muted); font-size: 13px; line-height: 1.5; margin: 0 0 16px; }
 .sheet-buttons { display: flex; gap: 10px; justify-content: flex-end; }
 .app-toast { --toast-bottom: 110px; position: fixed; left: 50%; bottom: var(--toast-bottom); transform: translateX(-50%); z-index: 20; max-width: calc(100% - 32px); margin: 0; }
+.app-toast, .update-banner, .heads-up { transition: opacity 200ms var(--motion-out), translate 200ms var(--motion-out); }
+@starting-style {
+  .app-toast, .heads-up { opacity: 0; translate: 0 8px; }
+  .update-banner { opacity: 0; translate: 0 -8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  @starting-style { .app-toast, .update-banner, .heads-up { translate: none; } }
+}
 .state-dot { display: inline-block; width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--muted); }
 .state-dot.working { width: 10px; height: 10px; background: none; border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent); border-top-color: var(--accent); animation: spin .9s linear infinite; }
 .state-dot.approval { background: var(--attention); width: 8px; height: 8px; }
@@ -424,7 +458,8 @@ button.stop-button:not(:disabled):hover { background: var(--muted); }
 /* Files dragged over a chat (chatDrop.ts). It ignores the pointer, so the drop lands on the panel below. */
 .chat-drop { position: absolute; inset: 6px; z-index: 40; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 16px; border: 2px dashed var(--accent); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--accent) 10%, color-mix(in srgb, var(--surface) 90%, transparent)); color: var(--text); font-weight: 600; text-align: center; overflow-wrap: anywhere; pointer-events: none; }
 .chat-drop.refused { border-color: var(--muted); background: color-mix(in srgb, var(--surface) 92%, transparent); color: var(--muted); font-weight: 500; }
-.chat-header { touch-action: pan-y; display: flex; align-items: center; min-height: 83px; gap: 12px; padding: max(12px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 12px max(10px, env(safe-area-inset-left)); border-bottom: 1px solid var(--line); z-index: 2; }
+.chat-header { touch-action: pan-y; display: flex; align-items: center; min-height: 83px; gap: 12px; padding: max(12px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 12px max(10px, env(safe-area-inset-left)); border-bottom: 1px solid var(--line); z-index: 3; }
+/* z-index 3: above the tab strip's close buttons (z-index 2), so the … menu that hangs over the strip covers them (B378). */
 .chat-title { min-width: 0; }
 .chat-title h1 { font-size: 16px; font-weight: 600; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; margin-bottom: 5px; }
 .chat-title > div { display: flex; gap: 7px; align-items: center; font-size: 12px; color: var(--muted); }
@@ -561,13 +596,13 @@ a { -webkit-touch-callout: default; }
 .toast.app-toast { margin: 0; max-height: calc(100dvh - var(--toast-bottom) - 16px); overflow: auto; overscroll-behavior: contain; overflow-wrap: anywhere; }
 .read-only { font-size: 13px; color: var(--muted); padding: 4px 20px; text-align: center; }
 dialog { color: var(--text); background: var(--surface); border: 1px solid var(--line); }
-dialog::backdrop { background: #11110e66; opacity: calc(1 - var(--sheet-progress, 0)); transition: opacity var(--sheet-duration, 0ms) cubic-bezier(.32,.72,0,1); }
-.drawer { position: fixed; inset: 0 auto 0 0; margin: 0; width: min(340px, 88vw); max-width: none; height: 100dvh; max-height: none; border: 0; padding: 0; background: var(--sidebar); transition: transform 320ms cubic-bezier(.32,.72,0,1); touch-action: pan-y; }
+dialog::backdrop { background: #11110e66; opacity: calc(1 - var(--sheet-progress, 0)); transition: opacity var(--sheet-duration, 0ms) var(--motion-drawer); }
+.drawer { position: fixed; inset: 0 auto 0 0; margin: 0; width: min(340px, 88vw); max-width: none; height: 100dvh; max-height: none; border: 0; padding: 0; background: var(--sidebar); transition: transform 320ms var(--motion-drawer); touch-action: pan-y; }
 .drawer[open] { display: flex; flex-direction: column; }
 @starting-style { .drawer[open] { transform: translateX(-100%); } }
 .sheet { position: fixed; inset: auto 0 0; width: 100%; max-width: 500px; max-height: 90dvh; margin: 0 auto; padding: 22px 24px max(24px, env(safe-area-inset-bottom)); border-radius: var(--radius-xl) var(--radius-xl) 0 0; border-bottom: 0; }
 @media (max-width: 599.98px) {
-  .sheet:not(.popover) { transition: transform 300ms cubic-bezier(.32,.72,0,1); touch-action: pan-x pan-y; }
+  .sheet:not(.popover) { transition: transform 300ms var(--motion-drawer); touch-action: pan-x pan-y; }
   /* Content keeps native scrolling; the heading reserves vertical drags. */
   .sheet:not(.popover) .sheet-heading { touch-action: pan-x; }
   @starting-style { .sheet:not(.popover)[open] { transform: translateY(100%); } }
@@ -592,6 +627,14 @@ dialog::backdrop { background: #11110e66; opacity: calc(1 - var(--sheet-progress
 .signin .primary { min-width: 150px; }
 @media (min-width: 600px) {
   .sheet { inset: 0; margin: auto; height: fit-content; border-radius: var(--radius-xl); border: 1px solid var(--line); padding: 26px; }
+  .sheet:not(.popover, .command-menu, .preview-drawer, .task-pop) { transition: opacity 200ms var(--motion-out), scale 200ms var(--motion-out); }
+  @starting-style { .sheet:not(.popover, .command-menu, .preview-drawer, .task-pop)[open] { opacity: 0; scale: .97; } }
+  dialog.sheet:not(.popover, .command-menu)::backdrop { transition: opacity 200ms var(--motion-out); }
+  @starting-style { dialog.sheet:not(.popover, .command-menu)[open]::backdrop { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .sheet:not(.popover, .command-menu, .preview-drawer, .task-pop) { transition: opacity 150ms ease-out; }
+    @starting-style { .sheet:not(.popover, .command-menu, .preview-drawer, .task-pop)[open] { scale: none; } }
+  }
   .messages { padding: 36px 34px 16px; }
   .chat-header { padding-left: 24px; padding-right: 24px; }
   .composer-area { padding-bottom: max(22px, env(safe-area-inset-bottom)); }
@@ -697,6 +740,22 @@ dialog::backdrop { background: #11110e66; opacity: calc(1 - var(--sheet-progress
 @media (pointer: coarse) { .watch-row > summary { min-height: 40px; } }
 @media (prefers-reduced-motion: reduce) { .watch-row > summary .chevron { transition: none; } }
 .compact-row pre { white-space: pre-wrap; max-height: 60dvh; font-family: inherit; font-size: 13px; line-height: 1.5; }
+.advisor-call > summary { width: 100%; gap: 5px; white-space: nowrap; }
+.advisor-call > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.advisor-call > summary > svg, .advisor-call > summary > time { flex: none; }
+.advisor-call > summary > time { margin-left: auto; font-size: 12px; font-variant-numeric: tabular-nums; }
+.advisor-call > summary:not(:has(time)) > .chevron { margin-left: auto; }
+.advisor-call .tool-error { margin-left: 0; }
+.advisor-call-what, .advisor-call-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.advisor-call-what { flex-shrink: 0; }
+.advisor-call { container-type: inline-size; }
+/* A narrow row puts the state and model on a line of their own, so a phone shows them in full. */
+@container (max-width: 440px) {
+  .advisor-call > summary { flex-wrap: wrap; row-gap: 0; }
+  .advisor-call-meta { order: 1; flex-basis: 100%; padding-left: 20px; font-size: 13px; }
+}
+.advisor-call-body { margin: 2px 0 8px 12px; padding-left: 15px; border-left: 1px solid var(--line); line-height: 1.5; overflow-wrap: anywhere; }
+.advisor-call-body p + p { margin-top: 6px; }
 
 /* After a swipe, the new pane slides in from the side it came from. */
 /* A side swipe drags the page (chat + footer) and the next-door page (.chat-peek, waiting just off screen) together. */
@@ -767,7 +826,7 @@ dialog::backdrop { background: #11110e66; opacity: calc(1 - var(--sheet-progress
 
 /* Sidebar row swipe: Pin and Delete sit under the row; a left swipe slides the row aside. */
 .swipe-row { position: relative; overflow: hidden; border-radius: var(--radius); touch-action: pan-y pinch-zoom; }
-.swipe-row > .session-row { position: relative; z-index: 1; background: var(--sidebar); transition: transform .22s cubic-bezier(.32,.72,0,1); }
+.swipe-row > .session-row { position: relative; z-index: 1; background: var(--sidebar); transition: transform .22s var(--motion-drawer); }
 .swipe-row > .session-row.selected { background: linear-gradient(var(--hover), var(--hover)), var(--sidebar); }
 .swipe-row.swiped > .session-row { transform: translateX(-228px); }
 .swipe-actions { position: absolute; inset: 0 0 0 auto; display: flex; width: 228px; visibility: hidden; }
@@ -965,11 +1024,16 @@ button.live-chip:active { background: var(--line); }
 .reconnect-banner > span:not(.retry) { flex: 1; min-width: 0; }
 .reconnect-banner > .retry { flex: none; }
 .reconnect-banner button { flex: none; min-height: var(--control); padding: 0 12px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--surface); color: var(--text); font: inherit; font-weight: 600; }
-.failed-message { opacity: 1; }
+.failed-message, .terminal-note { opacity: 1; }
 .failed-message > span { opacity: .75; }
 .failed-message small { color: var(--error); flex-wrap: wrap; }
 .failed-message .failed-reason { flex: 1 1 100%; text-align: right; }
-.failed-message .failed-action { width: auto; height: var(--control); margin: -8px 0; padding: 0 10px; gap: 4px; border-radius: var(--radius); color: var(--text); font-size: 12px; font-weight: 600; }
+:is(.failed-message, .terminal-note) .failed-action { width: auto; height: var(--control); padding: 0 10px; gap: 4px; border-radius: var(--radius); color: var(--text); font-size: 12px; font-weight: 600; }
+.failed-message .failed-action { margin: -8px 0; }
+.terminal-note small { color: color-mix(in srgb, var(--muted) 80%, var(--text)); flex-wrap: wrap; }
+.terminal-note small button { flex-shrink: 0; margin: 0; }
+.terminal-note-text { display: inline-flex; align-items: center; gap: 5px; }
+.terminal-note-text svg { flex: none; }
 
 /* Keep the whole review within a phone viewport, including a long CLI menu. */
 .plan-review { flex: 0 1 auto; min-height: 0; max-height: 65dvh; overflow: auto; overscroll-behavior: contain; }
@@ -1138,7 +1202,71 @@ button.live-chip:active { background: var(--line); }
 .peer-message .assistant-message { margin: 4px 0 8px; }
 .review-message summary .badge { flex: none; }
 .review-meta { margin: 2px 0 8px; font-size: 13px; color: var(--muted); }
+.review-meta code { overflow-wrap: anywhere; font-size: 12px; }
+.review-terms { white-space: pre-wrap; overflow-wrap: anywhere; }
 .review-path { margin-top: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+/* Tether's coordinator update (StatusCard.tsx): one row per tab. A row that waits on you gets the needs-you wash (attention.css). */
+.status-card { margin: 16px 0; padding: 4px 0; border-left: 2px solid var(--line); container-type: inline-size; }
+/* Folded by default: one line that says how many tabs reported and what waits on the person. */
+.status-toggle { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 32px; margin: 0; padding: 4px 8px 4px 12px; border: 0; border-radius: var(--radius); background: transparent; color: var(--muted); font-size: 13px; text-align: left; cursor: pointer; }
+.status-toggle:hover { background: var(--hover); }
+.status-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.status-toggle-icon, .status-chevron { flex: none; }
+.status-summary { display: flex; align-items: center; gap: 0 6px; min-width: 0; overflow: hidden; white-space: nowrap; }
+.status-total, .status-count { flex: none; }
+.status-count { display: inline-flex; align-items: center; gap: 4px; color: var(--text); font-variant-numeric: tabular-nums; }
+.status-count::before { content: "·"; margin-right: 2px; color: var(--muted); }
+.status-count.needs { font-weight: 600; }
+.status-count.needs svg, .status-count.asks svg { color: var(--attention); }
+.status-count.failed svg { color: var(--error); }
+.status-summary .short { display: none; }
+.status-toggle time { margin-left: auto; padding-left: 6px; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.status-toggle[aria-expanded='true'] .status-chevron { transform: rotate(180deg); }
+.status-card.has-needs { border-left-color: var(--attention); }
+/* --muted and --attention text on the wash fall under 4.5:1: the text stays --text, the icons carry the color. */
+.status-card.has-needs > .status-toggle { color: var(--text); background: color-mix(in srgb, var(--attention) 13%, transparent); }
+.status-card.has-needs > .status-toggle .status-toggle-icon { color: var(--attention); }
+.status-rows[hidden] { display: none; }
+.status-rows { margin-top: 4px; }
+.status-when { display: none; }
+/* A phone or a narrow pane: short words, no separators, and the time moves inside the open card, so the line stays one line. */
+@container (max-width: 680px) {
+  .status-summary { gap: 0 10px; }
+  .status-summary .long { display: none; }
+  .status-summary .short { display: inline; }
+  .status-count::before { content: none; }
+  .status-toggle time { display: none; }
+  .status-when { display: block; padding: 0 12px 2px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+}
+@media (pointer: coarse) { .status-toggle { min-height: var(--control); } }
+/* Wide: the rows share columns (subgrid), so names, states and summaries line up. A long name gets at most 40%. */
+.status-card ul { display: grid; grid-template-columns: auto fit-content(40%) minmax(0, 1fr) auto; margin: 0; padding: 0; list-style: none; }
+.status-row { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: center; gap: 2px 8px; min-height: 36px; margin-left: 4px; padding: 4px 8px; border: 1px solid transparent; border-radius: var(--radius); font-size: 14px; line-height: 1.4; }
+.status-icon { color: var(--muted); }
+.status-row.done .status-icon { color: var(--done); }
+.status-row.failed .status-icon { color: var(--error); }
+.status-row.asks .status-icon, .status-row.needs .status-icon { color: var(--attention); }
+.status-row.needs { border-color: color-mix(in srgb, var(--attention) 28%, transparent); background: color-mix(in srgb, var(--attention) 13%, transparent); }
+/* The name wraps instead of cutting: a closed tab has no other place to read its full name (WCAG 1.4.10). */
+.status-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 8px; min-width: 0; }
+.status-name { font-weight: 600; overflow-wrap: anywhere; }
+.status-head .file-link { min-width: 0; }
+.status-state { flex: none; color: var(--text); font-size: 13px; }
+.status-row.needs .status-state, .status-row.failed .status-state { font-weight: 600; }
+.status-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.status-text.expanded { grid-column: 2 / 4; grid-row: 2; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* --muted on the waiting wash is under 4.5:1; the question it asks is what the person reads first anyway. */
+.status-row.needs .status-text { color: var(--text); }
+.status-more { display: inline-flex; grid-column: 4; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border-radius: var(--radius); color: var(--muted); }
+.status-more[aria-expanded='true'] svg { transform: rotate(180deg); }
+@media (max-width: 560px) {
+  /* Narrow: the summary goes under the name, so the name and the state stay readable. */
+  .status-card ul { display: block; }
+  .status-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .status-text, .status-text.expanded { grid-column: 2; grid-row: 2; }
+  .status-more { grid-column: 3; grid-row: 1 / span 2; }
+}
+@media (pointer: coarse) { .status-more { width: 44px; height: 44px; margin: -6px -6px -6px 0; } .status-head .file-link { display: inline-block; min-height: 24px; } }
 .review-quote { max-height: 50vh; overflow: auto; padding: 10px 12px; border-radius: var(--radius); background: var(--surface); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.5; }
 .chip-view { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 0 !important; color: inherit; }
 .chip .chip-view { display: flex; flex: 0 1 auto; width: auto; height: auto; min-width: 0; }
@@ -1382,14 +1510,33 @@ button.live-chip:active { background: var(--line); }
 .workspace .chat-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; flex: 1; margin-right: 6px; }
 .workspace .chat-title h1 { flex: 0 1 auto; min-width: 0; margin: 0; font-size: 15px; }
 .workspace .chat-title > div { flex: 0 0 auto; max-width: 100%; min-width: 0; }
-.workspace .pane-tabs { padding: 4px 12px; }
-.workspace .pane-tabs button { min-height: var(--control-sm); padding: 0 10px; border-radius: var(--radius); font-size: 12.5px; }
-.workspace .pane-tab-pill { border-radius: var(--radius); }
+.workspace .pane-tabs { padding: 4px 12px 0; }
+.workspace .pane-tabs button { min-height: var(--control-sm); padding: 0 10px; border-radius: var(--radius) var(--radius) 0 0; font-size: 12.5px; }
+.workspace .pane-tab-pill { border-radius: var(--radius) var(--radius) 0 0; }
 .workspace .chat-header[draggable="true"] { cursor: grab; }
 .workspace .chat-header[draggable="true"] :is(button, kbd) { cursor: pointer; }
 @container (max-width: 560px) {
-  .workspace .chat-title { flex-direction: column; align-items: stretch; gap: 2px; }
+  /* nowrap: a wrapping flex line is as wide as its longest child, so the title ran under the header buttons (B271). */
+  .workspace .chat-title { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 2px; }
 }
+/* B378: a narrow pane keeps the title readable. Pin, search and the terminal move into the … menu; under 320px also the
+   slot badge, swap and zoom. Close stays. The open terminal's toggle stays: it shows the state and takes the focus.
+   .foldable is set only while the … menu works (chat data loaded), so no action is ever out of reach. */
+.keys-menu > :is(.keys-fold, .keys-fold-slot) { display: none; }
+/* In a workspace the menu opens in the top layer (Chat.tsx): keep the app text color, not the popover default. */
+.keys-menu:popover-open { color: inherit; }
+@container (max-width: 420px) {
+  .workspace .chat-header > :is(.side-pin-toggle, .search-toggle).foldable,
+  .workspace .chat-header > .terminal-toggle.foldable:not([aria-pressed="true"]) { display: none; }
+  .workspace .keys-menu > .keys-fold { display: flex; }
+}
+@container (max-width: 320px) {
+  .workspace .chat-header:has(.keys-container > button:not(:disabled)) > :is(.slot-badge, .slot-pick, .slot-zoom) { display: none; }
+  .workspace .keys-menu > .keys-fold-slot { display: flex; }
+}
+/* Under 280px the title takes its own row (below); keep the buttons on the right of the next row, so the … menu,
+   which hangs right-aligned from its button, stays inside the slot. */
+@container (max-width: 280px) { .workspace .chat-header { justify-content: flex-end; } }
 /* Drop hints while dragging a pane, a session or a slot. */
 .drop-hint { position: absolute; inset: 6px; z-index: 5; display: flex; align-items: center; justify-content: center; border: 2px dashed var(--accent); border-radius: 10px; background: color-mix(in srgb, var(--accent) 10%, transparent); pointer-events: none; }
 .touch-drop-hint { display: none; }
@@ -1404,17 +1551,30 @@ button.live-chip:active { background: var(--line); }
 /* Actions as a popover on the desktop: a compact menu at the pointer, no dimmed page. */
 .action-label { margin: 6px 6px 2px; font-size: 12px; color: var(--muted); }
 .sheet.popover { inset: auto; width: 288px; max-width: calc(100vw - 16px); height: auto; max-height: calc(100dvh - 16px); overflow-y: auto; margin: 0; padding: 6px; border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: 0 12px 32px #0000002e, 0 2px 6px #0000001a; }
+.sheet.popover:not(.command-menu) { transition: opacity 150ms var(--motion-out), scale 150ms var(--motion-out); }
+@starting-style { .sheet.popover:not(.command-menu)[open] { opacity: 0; scale: .96; } }
+@media (prefers-reduced-motion: reduce) {
+  .sheet.popover:not(.command-menu) { transition: opacity 150ms ease-out; }
+  @starting-style { .sheet.popover:not(.command-menu)[open] { scale: none; } }
+}
 .sheet.popover::backdrop { background: transparent; }
 .sheet.popover:focus-visible { outline: none; }
 .sheet.popover .sheet-heading { padding: 6px 8px 0; }
-.sheet.popover h2 { font-family: inherit; font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sheet:is(.popover, .task-close-sheet) h2 { font-family: inherit; font-size: 13.5px; font-weight: 600; }
+.sheet.popover h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sheet.popover .sheet-sub { margin: 2px 8px 6px; font-size: 12px; }
 .sheet.popover .action-label { margin: 4px 8px 2px; font-size: 11.5px; }
 .sheet.popover .action-list button { min-height: var(--control); gap: 10px; padding: 0 8px; border-radius: var(--radius-sm); font-size: 13.5px; }
+.sheet.popover .coordinator-picker .action-list button { padding-block: 6px; }
 .sheet.popover .action-list button svg { width: 16px; height: 16px; flex: none; }
-.sheet.popover .action-list button:focus-visible { outline: none; background: var(--hover); }
+.sheet.popover .action-list button:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; background: var(--hover); }
 .sheet.popover .action-list hr { margin: 4px 0; }
-.sheet.popover :is(.rename-form, .confirm-box) { padding: 2px 8px 8px; font-size: 13.5px; }
+.sheet.popover :is(.rename-form, .confirm-box) { padding: 2px 8px 8px; }
+.sheet.popover :is(.rename-form, .confirm-box), .sheet.task-close-sheet { font-size: 13.5px; }
+.sheet.task-close-sheet { padding: 16px; font-family: var(--font-sans, system-ui); overflow-wrap: anywhere; }
+.sheet.task-close-sheet:not(.popover) { padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+.sheet.task-close-sheet .confirm-box, .sheet.task-close-sheet .sheet-heading { padding: 0; }
+.sheet.task-close-sheet h2 { white-space: normal; }
 .sheet.popover .error { margin: 6px 8px; font-size: 13px; }
 /* Codex provider: Azure Foundry spends Azure credit, so it shows in the accent color wherever it applies. */
 .codex-provider { width: 100%; margin: 4px 0 14px; }
@@ -1590,12 +1750,12 @@ button.live-chip:active { background: var(--line); }
 
 /* The end of a turn this page watched: a check, then it goes away. */
 .done-line { align-items: center; }
-.done-check { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: none; border-radius: 50%; background: var(--accent-fill); color: var(--accent-text); animation: done-pop .2s cubic-bezier(.23, 1, .32, 1); }
+.done-check { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: none; border-radius: 50%; background: var(--accent-fill); color: var(--accent-text); animation: done-pop .2s var(--motion-out); }
 .done-line strong { font-weight: 500; }
 @keyframes done-pop { from { opacity: 0; transform: scale(.9); } }
 
 /* New messages settle in. Only movement: a message is fully visible even when the animation never runs. */
-.messages > [data-msg-id]:last-child, .messages > div:last-child > [data-msg-id], .messages > .user-message:last-child { animation: message-in .22s cubic-bezier(.23, 1, .32, 1); }
+.messages > [data-msg-id]:last-child, .messages > div:last-child > [data-msg-id], .messages > .user-message:last-child { animation: message-in .22s var(--motion-out); }
 @keyframes message-in { from { transform: translateY(6px); } }
 /* A pane that just opened shows its messages in place. A 0s duration ends the animation at once; the later change
    back to .22s does not restart it, so only messages that come after this moment settle in. */
@@ -2013,7 +2173,7 @@ button.live-chip:active { background: var(--line); }
 .suggest-list span { color: var(--muted); overflow-wrap: anywhere; }
 
 /* Groups (Groups.tsx): a row of groups above the tab strip on wide screens; on phones a switcher left of the strip. */
-.group-row { display: flex; align-items: stretch; gap: 2px; overflow-x: auto; padding: 0 max(12px, env(safe-area-inset-left)); border-bottom: 1px solid var(--line); scrollbar-width: none; }
+.group-row { display: flex; align-items: stretch; gap: 2px; overflow-x: auto; padding: 0 max(12px, env(safe-area-inset-left)); border-bottom: 1px solid var(--line); background: var(--sidebar); scrollbar-width: none; }
 .group-tab { display: flex; align-items: center; gap: 7px; flex-shrink: 0; min-height: 36px; padding: 0 12px; margin-bottom: -1px; border-bottom: 2px solid transparent; font-size: 13px; color: var(--muted); }
 .group-tab:hover { color: var(--text); }
 .group-tab.active { color: var(--text); font-weight: 600; border-bottom-color: var(--accent); }
@@ -2084,6 +2244,12 @@ button.live-chip:active { background: var(--line); }
 .undo-toast-more { display: inline-grid; place-items: center; border: 0; border-radius: var(--radius); background: none; color: var(--muted); cursor: pointer; }
 .undo-toast-more:hover { color: inherit; }
 .undo-toast :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* A restart offer (B326): the text and Dismiss on the first row, the actions on the second, so a 320 px screen fits them. */
+.undo-toast-restart { flex-wrap: wrap; width: min(440px, calc(100vw - 32px)); padding-top: 4px; }
+.undo-toast-restart .undo-toast-text { flex: 1 1 calc(100% - 56px); padding: 8px 0; }
+.undo-toast-restart .undo-toast-close { order: 1; align-self: flex-start; }
+.undo-toast-restart .undo-toast-action { order: 2; }
+.undo-toast-restart .undo-toast-more { order: 3; margin-left: auto; }
 .undo-effects { margin: 0 0 18px; padding-left: 20px; line-height: 1.5; overflow-wrap: anywhere; }
 .undo-effects li + li { margin-top: 6px; }
 .undo-confirm h2 { overflow-wrap: anywhere; }
@@ -2140,7 +2306,7 @@ button.live-chip:active { background: var(--line); }
   .thread { min-height: 25%; }
   .chat-header .chat-title { min-height: var(--control-lg); }
   .chat-header .chat-title h1 { margin-bottom: 0; line-height: 1.2; }
-  .pane-tabs { padding-block: 2px; }
+  .pane-tabs { padding-block: 2px 0; }
   .composer-area { display: flex; flex-direction: column; min-height: 0; flex-shrink: 1; max-height: 60%; padding-block: 4px; }
   .composer { display: flex; flex-direction: column; min-height: 0; padding: 4px 10px; }
   .composer-input, .composer-controls { flex-shrink: 0; }

@@ -1,6 +1,8 @@
 """Process readers against a small fake proc tree."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import time
@@ -112,8 +114,20 @@ class ProcinfoTests(unittest.TestCase):
 
 
 class ProcessTableTests(unittest.TestCase):
+    def test_failed_linux_process_table_aborts_discovery(self):
+        import agents
+
+        for code, output in ((-15, ''), (1, ' 42 7 zsh\n')):
+            with self.subTest(code=code), patch.object(procinfo, 'DARWIN', False), \
+                    patch.object(agents.pane_view, 'zoom_repair_all'), patch.object(agents, 'process_start', return_value='1'):
+                run = Mock(side_effect=[SimpleNamespace(returncode=0, stdout='%1\t$1\twork\t0.0\t42\t/work\n'),
+                                        SimpleNamespace(returncode=code, stdout=output)])
+                with self.assertRaises(subprocess.CalledProcessError) as error:
+                    agents.discover({}, run)
+                self.assertEqual(error.exception.returncode, code)
+
     def test_linux_table_preserves_discovery_run_contract(self):
-        run = Mock(return_value=SimpleNamespace(stdout=' 42 7 codex\n 7 1 name with spaces\nshort\n'))
+        run = Mock(return_value=SimpleNamespace(returncode=0, stdout=' 42 7 codex\n 7 1 name with spaces\nshort\n'))
         with patch.object(procinfo, 'DARWIN', False):
             self.assertEqual(procinfo.table(run), {42: (7, 'codex'), 7: (1, 'name with spaces')})
         run.assert_called_once_with(['ps', '-eo', 'pid=,ppid=,comm='],

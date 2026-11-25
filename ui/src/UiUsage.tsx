@@ -5,7 +5,7 @@ import type { Prefs } from './prefs'
 import { Choice } from './SettingsControls'
 import { USAGE_CLEARED } from './uiUsage'
 
-// Settings › About & system › UI usage: the report from server/ui_usage.py. The log is uiUsage.ts.
+// Settings › Usage tracking › UI usage: the report from server/ui_usage.py. The log is uiUsage.ts.
 interface Row { region: string; label: string; kind: string; depth: number; clicks: number; seen: number; rate: number; steps: number | null }
 interface View { view: string; visits: number; steps: number | null; most: number | null; keyboard: number; from: string }
 export interface UsageReport { enabled: boolean; days: number; device: string; visits: number; clicks: number; controls: number; ready: boolean; top: Row[]; demote: Row[]; promote: Row[]; unused: Row[]; views: View[] }

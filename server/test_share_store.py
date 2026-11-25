@@ -1,4 +1,5 @@
 """Share persistence and recovery, entirely under temporary folders."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import multiprocessing
 import os

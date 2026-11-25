@@ -1,4 +1,5 @@
 """Saved answers stay in temporary projects, never in the user's configuration."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from datetime import datetime
 import hashlib
 from pathlib import Path

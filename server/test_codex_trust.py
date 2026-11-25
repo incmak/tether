@@ -1,4 +1,5 @@
 """Trust a folder for Codex (codex_trust.py). Files live in temporary folders; no real Codex config is read."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import fcntl
 import json
 import os

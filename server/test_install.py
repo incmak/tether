@@ -1,5 +1,8 @@
 """Installer tests never use the real user manager or fixed production ports."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -224,6 +227,75 @@ class InstallTests(unittest.TestCase):
                 with mock.patch('builtins.print') as output:
                     installer.print_plan(plan)
                 self.assertTrue(any(f'URL: {plan["url"]}' in str(call) for call in output.call_args_list))
+
+    def test_systemd_plan_compares_unit_text_and_only_shows_it_in_verbose_mode(self):
+        plan = self.plan()
+        unit = Path(plan['units_dir']) / 'tether.service'
+        unit.parent.mkdir(parents=True)
+        content = plan['units'][unit.name]
+        for existing, action, verbose in ((None, 'Write', False), (b'old', 'Write', False),
+                                          (b'\xff', 'Write', False), (content.encode(), 'Keep', False),
+                                          (content.encode(), 'Keep', True)):
+            with self.subTest(existing=action, verbose=verbose), contextlib.redirect_stdout(io.StringIO()) as output:
+                if existing is not None:
+                    unit.write_bytes(existing)
+                installer.print_plan(plan, verbose=verbose)
+            self.assertIn(f'{action} ~/.config/systemd/user/tether.service', output.getvalue().splitlines())
+            self.assertEqual('[Unit]' in output.getvalue(), verbose)
+        with mock.patch.object(Path, 'read_text', side_effect=PermissionError):
+            self.assertEqual(installer.unit_changes(plan), ({unit.name}, set()))
+
+    def test_main_success_summaries_use_unit_counts_from_before_apply(self):
+        plan = self.plan('--updates', 'auto')
+        cases = (
+            (['--plan'], 'Result: PASS (plan ready; 2 unit files to write, 1 unchanged)'),
+            (['--apply', '--defer-restart'], 'Staged: 2 unit files written, 1 unchanged; restart follows.'),
+            (['--apply'], 'Result: PASS (installed; 2 unit files written, 1 unchanged)'),
+            (['--apply', '--uninstall'], 'Result: PASS (uninstalled)'),
+        )
+        for index, (args, last) in enumerate(cases):
+            units = Path(self.temp.name) / f'units-{index}'
+            units.mkdir()
+            (units / 'tether.service').write_text(plan['units']['tether.service'])
+            selected_plan = self.plan('--uninstall') if '--uninstall' in args else plan
+            selected_plan = dict(selected_plan, units_dir=str(units))
+            with self.subTest(args=args), mock.patch.object(installer, 'make_plan', return_value=selected_plan), \
+                    mock.patch.object(installer, 'apply_plan', side_effect=lambda p: installer.write_units(p, units)) as apply, \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(installer.main(args), 0)
+            self.assertEqual(output.getvalue().splitlines()[-1], last)
+            self.assertEqual(apply.call_count, int('--apply' in args))
+            if '--defer-restart' in args:
+                self.assertNotIn('Result:', output.getvalue())
+                self.assertNotIn('Installed.', output.getvalue())
+            elif '--uninstall' in args:
+                self.assertIn('Uninstalled Tether services.\n', output.getvalue())
+            elif '--apply' in args:
+                self.assertIn(f'Installed. URL: {plan["url"]}\nToken: {plan["token_file"]}\n', output.getvalue())
+
+    def test_main_failed_checks_and_apply_exceptions(self):
+        plan = self.plan()
+        failed = dict(plan, checks=[dict(name='test check', ok=False, fix='Fix test check.')])
+        for args, selected_plan, status, last, error in (
+            (['--plan'], failed, 0, 'Result: FAIL (1 required checks failed)', ''),
+            (['--apply'], failed, 1, 'Result: FAIL (1 required checks failed)', '1. Fix test check.'),
+            (['--apply'], plan, 1, 'Result: FAIL (see the error above)', 'apply error'),
+            (['--apply', '--defer-restart'], plan, 1, None, 'apply error'),
+            (['--apply', '--defer-restart'], failed, 1, None, '1. Fix test check.'),
+        ):
+            with self.subTest(args=args, last=last), mock.patch.object(installer, 'make_plan', return_value=selected_plan), \
+                    mock.patch.object(installer, 'apply_plan', side_effect=OSError('apply error')) as apply, \
+                    contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(installer.main(args), status)
+            self.assertEqual((errors.getvalue().splitlines() or [''])[-1], error)
+            if last is None:
+                self.assertNotIn('Result:', output.getvalue())
+            else:
+                self.assertEqual(output.getvalue().splitlines()[-1], last)
+            if selected_plan is failed:
+                apply.assert_not_called()
+                self.assertIn('FAIL: test check\n', output.getvalue())
+                self.assertIn('Fix required checks:\n1. Fix test check.\n', output.getvalue())
 
     def test_plan_rejects_control_characters_in_unit_values(self):
         # The OS rejects NUL in environment variables before planning can start.
@@ -736,6 +808,12 @@ class InstallTests(unittest.TestCase):
             parsed = json.loads(result.stdout)
             self.assertEqual(parsed['options']['port'], self.port)
             self.assertFalse((self.home / '.config').exists())
+
+    def test_verbose_does_not_change_json_output(self):
+        plan = self.plan()
+        with mock.patch.object(installer, 'make_plan', return_value=plan), contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(installer.main(['--plan', '--json', '--verbose']), 0)
+        self.assertEqual(output.getvalue(), json.dumps(plan, sort_keys=True, indent=2) + '\n')
 
     def test_cli_apply_json_stays_parseable_and_reuses_saved_options(self):
         script = self.repo / 'install.py'

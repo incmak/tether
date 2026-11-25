@@ -1,5 +1,6 @@
 """The broadcast broker: skip panes that wait on the user, re-check each pane right before its send, report per pane.
 No test touches a real tmux pane: sends are fakes, or terminal_input.submit with a fake `run`."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import http.client
 import importlib.machinery
 import importlib.util
@@ -176,7 +177,7 @@ class EndpointTests(unittest.TestCase):
         entries = [pane('%1'), pane('%2', 'codex'), pane('%3')]
         states = {'%1': 'Idle', '%2': 'Working', '%3': 'Approval'}
         for name, value in (('sessions', lambda: entries), ('live_status', lambda entry: {'state': states[entry['id']]}),
-                            ('submit', lambda message, config: self.sent.append((config['id'], message))),
+                            ('terminal_submit', lambda config, message: self.sent.append((config['id'], message))),
                             ('agent_folder', lambda entry: '/w')):
             patcher = patch.object(server, name, value)
             patcher.start()

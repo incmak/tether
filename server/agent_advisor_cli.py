@@ -9,8 +9,10 @@ import sys
 
 import advisor
 import advisor_log
+import audit
 import codex_level
 import paths
+import projects
 
 TAB_CLI = Path(__file__).resolve().with_name('agent_tab_cli.py')
 PANE = re.compile(r'%[0-9]+')
@@ -217,6 +219,14 @@ def main(argv=None):
             log(pid, args.question, result, settings)
         except OSError as exc:
             result = dict(result_for('error', replies), error=f'Could not write the advisor log: {exc}')
+    if args is not None:
+        # Never the question text: a cut excerpt can still hold a token or a key. The project advisor log keeps the
+        # full question; the audit log names only the goal (1 to 3 words, already shown as the advisor tab name).
+        words = (args.stack or '').split()
+        goal = audit.clip(' '.join(words[:3]) + ('…' if len(words) > 3 else ''), 40)
+        summary = f'Asked advisor: {goal}' if goal else 'Asked advisor'
+        audit.record('advisor.ask', summary, project=projects.audit_name(pid), status=result['status'],
+                     critical=args.critical)
     print(json.dumps(result))
     return CODES[result['status']]
 

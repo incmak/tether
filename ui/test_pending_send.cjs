@@ -52,7 +52,8 @@ async function main() {
         if (endpoint === 'message') {
           const sent = request.postDataJSON()
           sends.push(sent)
-          messages = [...messages, record('retry', sent.message)]
+          // A broken transcript stays broken: the server answers the send but the chat still has no list.
+          if (Array.isArray(messages)) messages = [...messages, record('retry', sent.message)]
           return route.fulfill({ json: { ok: true } })
         }
         const responses = {
@@ -143,6 +144,31 @@ async function main() {
     await card.getByRole('button', { name: 'Retry' }).click()
     await failure.waitFor({ state: 'detached' })
     assert.equal(sends.length, 1, 'When the first response was lost, retry must check for delivery before posting again')
+    // Chat data is not trusted. A Codex image send must still go out when the transcript is not a list, or has bad entries.
+    for (const [name, broken, clears] of [['an object', {}, false], ['bad entries', [null, { role: 'user', text: 5 }], true]]) {
+      const before = sends.length
+      messages = broken
+      retryMessages = undefined
+      await replacePending({})
+      await open()
+      await page.locator('.composer textarea').fill(draft)
+      await page.getByRole('button', { name: 'Send message', exact: true }).click()
+      await page.waitForFunction(() => document.querySelector('.composer textarea')?.value === '')
+      assert.equal(sends.length, before + 1, `${name}: the send must POST`)
+      assert.deepEqual(sends.at(-1), { session: '%45', thread, message: draft }, name)
+      if (clears) {
+        // The bad entries drop out; the new record lands in a valid list, so the send leaves the queue.
+        await page.waitForFunction(() => !JSON.parse(localStorage.getItem('tether.pending') || '{}')['%45'])
+      } else {
+        // No list to check against: the send stays queued, not failed.
+        await page.getByRole('button', { name: '1 queued', exact: true }).waitFor()
+        const [item] = (await readPending())['%45']
+        assert.equal(item.text, draft, name)
+        assert.equal(item.failed, undefined, name)
+      }
+      assert.equal(await page.getByText('Tether stopped').count(), 0, name)
+    }
+    console.log('A Codex image send posts and keeps the right queue when the transcript is an object or has bad entries')
     assert.deepEqual(errors, [], 'No uncaught browser exceptions')
     console.log('Pending Codex sends preserve unsent text, retry only missing content, and reconcile within the original pane and thread')
   } finally {

@@ -20,24 +20,29 @@ import subprocess
 import sys
 import tempfile
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+REPO = Path(__file__).resolve().parent.parent
+sys.path[:0] = [str(REPO / 'scripts'), str(REPO / 'server')]
+import review_gate  # noqa: E402
 import verification  # noqa: E402  (scripts/verification.py)
 
 STAMP = '.build-commit'
 RECORD = '.live-commit'
 PENDING = '.live-commit.pending'
 LOCK = '.deploy-lock'
-REPO = Path(__file__).resolve().parent.parent
 
 
 class Refused(ValueError):
     """The guard stopped the install. --force overrides it."""
 
 
-def git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+class ReviewRefused(ValueError):
+    """The review gate stopped the install."""
+
+
+def git(repo: Path, *args: str, timeout=30) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(['git', '-C', str(repo), *args], capture_output=True, text=True, errors='replace',
-                              timeout=30, env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'})
+                              timeout=timeout, env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'})
     except subprocess.TimeoutExpired:
         raise Refused(f'git {args[0]} timed out') from None
     except OSError as error:
@@ -63,7 +68,8 @@ def read_json(path: Path, label: str):
         data = json.loads(path.read_text())
     except ValueError:
         raise Refused(f'{label} {path} is not valid JSON.') from None
-    if not isinstance(data, dict) or not re.fullmatch(r'[0-9a-f]{40}', str(data.get('commit', ''))):
+    if (not isinstance(data, dict) or not isinstance(data.get('commit'), str)
+            or not review_gate.HASH.fullmatch(data['commit'])):
         raise Refused(f'{label} {path} has no full commit id.')
     return data
 
@@ -72,9 +78,8 @@ def resolve(repo: Path, commit: str) -> bool:
     return git(repo, 'cat-file', '-e', f'{commit}^{{commit}}').returncode == 0
 
 
-def check(build: Path, target: Path, repo: Path) -> list[str]:
+def check(stamp: dict | None, target: Path, repo: Path) -> list[str]:
     """Return warnings, or raise Refused when the build would remove live work."""
-    stamp = read_json(build / STAMP, 'The build stamp')
     live = read_json(target / RECORD, 'The live record')
     if (target / PENDING).exists():
         raise Refused(f'An earlier deploy did not finish ({target / PENDING}), so the live commit is unknown. Check '
@@ -106,6 +111,39 @@ def check(build: Path, target: Path, repo: Path) -> list[str]:
     if ancestor.returncode != 0:
         raise Refused(f'git merge-base failed: {ancestor.stderr.strip()}')
     return warnings
+
+
+def review_base(repo: Path) -> str | None:
+    try:
+        result = git(repo, 'ls-remote', 'origin', review_gate.MAIN, timeout=review_gate.GIT_TIMEOUT)
+        commit, sep, ref = result.stdout.rstrip('\n').partition('\t')
+        if result.returncode == 0 and sep and ref == review_gate.MAIN and review_gate.HASH.fullmatch(commit):
+            return commit if resolve(repo, commit) else None
+    except Refused:
+        pass
+    return None
+
+
+def check_review(stamp: dict | None, repo: Path):
+    commit = stamp['commit'] if stamp else None
+    try:
+        pane = review_gate.pane_identity()
+        links = review_gate.links_for(pane) if pane is not None else []
+    except review_gate.GateRefused as error:
+        short = f'Commit {commit[:12]}. ' if commit else ''
+        raise ReviewRefused(f'{short}{error}') from None
+    if not links:
+        return
+    if not stamp or stamp.get('dirty') is not False:
+        reason = f'The build stamp for {commit[:12]} does not show a clean checkout.' if commit else (
+            'The build has no valid commit stamp.')
+        raise ReviewRefused(f'{reason} Rebuild from a clean checkout and get the commit approved, '
+                            'or stop the review link with Mak.')
+    base = review_base(repo) if review_gate.MERGE_FORWARD else None
+    try:
+        review_gate.check(repo, commit, pane=pane, links=links, base=base)
+    except review_gate.GateRefused as error:
+        raise ReviewRefused(str(error)) from None
 
 
 def write_record(target: Path, record: dict, name: str = RECORD):
@@ -173,23 +211,27 @@ def install(build: Path, target: Path, repo: Path, force: bool, dry_run: bool, w
     assets = re.findall(r'(?:src|href)=["\'](/chat/assets/[^"\']+)["\']', entry.read_text())
     if not assets or any(not (build / url.removeprefix('/chat/')).is_file() for url in assets):
         raise ValueError('The entry page must reference files present in the build.')
+    stamp = None
+    guard_error = None
     try:
-        for text in check(build, target, repo):
-            warn(text)
+        stamp = read_json(build / STAMP, 'The build stamp')
+        warnings = check(stamp, target, repo)
     except Refused as error:
+        guard_error = error
+        warnings = []
+    check_review(stamp, repo)
+    if guard_error is not None:
         if not force:
-            raise
-        warn(f'--force: installing anyway. {error}')
+            raise guard_error
+        warn(f'--force: installing anyway. {guard_error}')
+    for text in warnings:
+        warn(text)
     # After the guard, and the same with --dry-run: an invalid folder is reported and counts as no proof.
     shown, count = verification.observe_shots(shots, repo, warn)
     proof = {'shots': shown, 'shots_count': count} if shown is not None else {}
     observe_deploy(build, target, repo, warn, bool(proof))
     if dry_run:
         return 0
-    try:
-        stamp = read_json(build / STAMP, 'The build stamp')
-    except Refused:
-        stamp = None
     target.mkdir(parents=True, exist_ok=True)
     # Until the record is written, the live commit is unknown. If this run stops after the entry page is published,
     # the pending file makes the next deploy refuse instead of comparing against a stale record.
@@ -296,6 +338,8 @@ def main():
         count = deploy(*args.paths, force=args.force, dry_run=args.dry_run, verified=args.verified, shots=args.shots)
     except Refused as error:
         parser.exit(1, f'Deployment refused: {error}\nUse --force only when you mean to remove that work.\n')
+    except ReviewRefused as error:
+        parser.exit(1, f'Deployment refused by the review gate. {error}\n')
     except (OSError, ValueError) as error:
         parser.exit(1, f'Deployment failed: {error}\n')
     print('Checks passed; nothing installed (--dry-run).' if args.dry_run

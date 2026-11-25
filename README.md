@@ -67,7 +67,7 @@ See the [Claude Code marketplace docs](https://code.claude.com/docs/en/plugin-ma
 The setup skills install the latest stable release by default. To prepare a release without a checkout:
 
 ```sh
-curl -fL https://raw.githubusercontent.com/incmak/tether/v0.1.14/integrations/claude/tether/skills/setup/bootstrap.py -o tether-bootstrap.py
+curl -fL https://raw.githubusercontent.com/incmak/tether/v0.1.16/integrations/claude/tether/skills/setup/bootstrap.py -o tether-bootstrap.py
 python3 tether-bootstrap.py
 python3 ~/.local/share/tether/current/install.py --plan --json --no-build-ui
 python3 ~/.local/share/tether/current/install.py --apply --json --no-build-ui
@@ -145,13 +145,13 @@ To rotate the token, remove `~/.config/mobile-tmux/token` and restart the servic
 Treat the token like an SSH key. Shell commands run as the server user.
 Report security problems privately; see [SECURITY.md](SECURITY.md).
 
-Passkey approvals (Settings › Setup) guard requests that raise agent power, such as a higher autonomy level.
+Passkey approvals (Settings › Autonomy › Setup) guard requests that raise agent power, such as a higher autonomy level.
 They stop requests through the Tether API. They do not stop a process that runs as your user: agents run as that user, so they can change Tether's files directly.
 For the same reason, the first passkey needs no approval: no local check can tell you from an agent.
 When the first passkey is added, or the last passkey is removed, Tether sends a push notice and an urgent ping, when one is set up. The urgent ping goes out even when urgent pings are switched off.
 If you did not add that first passkey, Settings cannot remove it: removal needs a passkey you hold. Delete `~/.config/mobile-tmux/passkeys.json` on the Tether host, add your own passkey, and check your agents.
 
-Answers from Teams: when the urgent ping goes to the BriskBot 1:1 chat (Settings › Agents › Urgent pings in Teams, Send to: Direct chat), each card gets a reply box.
+Answers from Teams: when the urgent ping goes to the BriskBot 1:1 chat (Settings › Autonomy › Setup › Urgent pings in Teams, Send to: Direct chat), each card gets a reply box.
 Type the answer in the box and select **Send to the tab**, or quote-reply the card.
 Tether reads the answer back with `chat-replies.py` (next to `post-update.py`) and types it into the tab that asked, as `[Answer from Teams] …`.
 It sends the answer only when that tab still shows the same conversation, and not while the tab waits on an approval or a picker or has an unsent draft.
@@ -203,14 +203,20 @@ Phones get the desktop editor, because Community Edition opens its mobile editor
 
 ## Panel browser in a container (optional)
 
-When Docker and the `lscr.io/linuxserver/chromium` image are present, the panel browser runs in a container and streams as live video.
-Tether serves the live view on its own port (7698 by default, `MOBILE_TMUX_BROWSER_LIVE_PORT`), so the page in it cannot reach Tether.
-Without that port, the panel shows still pictures as before. Set `MOBILE_TMUX_BROWSER_SELKIES=0` to keep the local Chromium.
+The Test and Signed-in browsers each use a separate container and live video origin when Docker and the pinned
+`lscr.io/linuxserver/chromium` image are present. The Test browser uses port 7698 (`MOBILE_TMUX_BROWSER_LIVE_PORT`).
+The Signed-in browser uses port 7699 (`MOBILE_TMUX_BROWSER_SIGNED_LIVE_PORT`). Sign in again in the Signed-in panel
+after upgrade. Its Chromium profile stays in the container's persistent config.
 
-If you reach Tether through Tailscale Serve, publish the port too:
+If the video origin is unreachable, the panel shows Retry. With Docker or the image unavailable, the Test browser
+uses local Chromium and the Signed-in browser is unavailable. Set `MOBILE_TMUX_BROWSER_SELKIES=0` to use local
+Chromium for the Test browser.
+
+If you reach Tether through Tailscale Serve, publish both ports.
 
 ```sh
 tailscale serve --bg --https=7698 http://127.0.0.1:7698
+tailscale serve --bg --https=7699 http://127.0.0.1:7699
 ```
 
 ## Dev server previews
@@ -235,15 +241,53 @@ for port in $(seq 7700 7709); do tailscale serve --bg --https=$port http://127.0
 
 Set `MOBILE_TMUX_DEV_PREVIEW_PORTS` to change the pool (`7700-7704`), or to `off` to turn previews off.
 
+## Commit gate
+
+Install the Git commit gate from the worktree with `python3 server/commit_gate.py install-hook`. It checks the final
+`Verified:` line for Claude, Codex and terminal commits, using the mode in Settings › Commit & merge. If you already have your
+own `commit-msg` hook, the installer gives you a line to add before the hook exits with status 0. Add
+`--uninstall` to remove the Tether hook. Both forms let the commit through if the gate takes more than 10 seconds.
+For the line in your own hook, the helper uses `python3` unless you set `TETHER_PYTHON`.
+
+## Review gate
+
+Install the review gate from the main checkout with `python3 server/review_gate.py install-hook`. It adds a marked
+block to the `pre-push` hook and keeps the rest of the hook. A tab with a live review link can then push to `main` or a
+tag, deploy with `deploy-ui.py`, or auto-merge only the commit that every reviewer approved. A `main` push and a deploy
+also accept a clean merge of remote `main` into that commit; a tag push and auto-merge need the exact hash. Branch
+pushes pass. Any lookup error refuses. Add `--uninstall` to remove the block.
+All agents run as one OS user, so `git push --no-verify` still bypasses the gate: it guards against mistakes and races.
+
+The gate compares possible cleanup results for `#` and any single configured comment character. If the results
+disagree, the gate lets the commit through and records `unknown` with reason `cleanup`. It also records `unknown`
+when the result is `would_block` but any raw message line is a valid stamp or starts with `fixup! `, `squash! `
+or `amend! `. In enforce mode, an agent without a session key can commit and the log records `let_through` with
+reason `no-session`.
+
+When Claude defers its check to the Git hook, Tether matches each landed commit by worktree, tree, parent and a keyed
+digest of the normalized message. A hook verdict from any session can cover one commit if the hook ran after the call
+started. For an amend, the hook can refer to the replaced commit if it shares the landed commit's first parent and is
+no longer reachable from `HEAD`. Rows without a message digest leave the commit uncovered. Tether checks the landed
+message of each uncovered commit and logs one `hook-silent` row per worktree and commit hash.
+
 ## Auto-merge
 
 Auto-merge checks a low-risk worker branch against `main` at the push URL for `origin` after a reviewer tab approves it.
 The available modes are **Observe** and **Off**. Tether starts in Observe and records what it would merge in
-Settings › Agents › Auto-merge. Off stops the checks. The Enforce engine is built and tested. It will become
+Settings › Commit & merge › Auto-merge. Off stops the checks. The Enforce engine is built and tested. It will become
 available when auto-merge has its own identity, so agents on the same OS account cannot change its trust or approve it.
 
 A branch passes the checks when all of this holds:
 
+- Tether checks the worktree that the review checked. That can be a worktree other than the tab's start folder, but
+  it must belong to the same repository as the tab's folder, and to the repository the review saw: Tether saves the
+  repository's Git folder when it sends the review request and checks it again at the approval and right before each
+  network command (the fetch, the look at the remote main, and the push). An approval saved before this rule names no
+  worktree or repository and waits. Each check sees one moment: a change while a Git command runs, or after the
+  last check, is not caught. Settings reads trust from a logged repository only while its path still holds the
+  repository of that decision, and checks that again before each network command. A decision logged before this
+  rule names no repository: Settings shows that repository again after its next decision, or while a tab is open
+  in it.
 - The reviewer approved the exact commit at the head of the branch. The worktree has no uncommitted or untracked files.
   Git itself answers (`git status`, with untracked files and submodules). A tree with a filter such as Git LFS
   waits: Tether does not run the filter's program.
@@ -373,6 +417,17 @@ Friday uses Pocket TTS's `alba` voice with offline Hugging Face access.
 
 The two Friday units are `tether-friday.service` (worker, loopback port 7686) and `tether-llm.service` (llama-server, loopback port 7687).
 The unit files live in `server/deploy/`. They require the prepared venv and models; the installer does not install these units.
+
+Run only one Friday worker. A second copy fails with "address already in use" on port 7686 and, with `Restart=always`, restarts every few seconds.
+To give voice a higher CPU share on a busy host, you can run the worker as a system unit in its own slice instead of the user unit:
+
+1. Copy `server/deploy/tether-friday.service` to `/etc/systemd/system/`.
+2. In `[Service]`, add `User=`, `Group=`, `Slice=voice.slice`, `Environment=HOME=…` and `Environment=XDG_RUNTIME_DIR=/run/user/<uid>`. Replace each `%h` with the home folder, and set `WantedBy=multi-user.target`.
+3. Create `/etc/systemd/system/voice.slice` with `CPUWeight=1000` under `[Slice]`.
+4. Run `sudo systemctl daemon-reload && sudo systemctl enable --now tether-friday.service`.
+5. Remove the user copy: `systemctl --user disable --now tether-friday.service`, then delete `~/.config/systemd/user/tether-friday.service`.
+
+Check which copy runs with `systemctl status tether-friday.service` and `systemctl --user status tether-friday.service`.
 `TETHER_FRIDAY_PORT`, `TETHER_LLM_URL`, and `TETHER_FRIDAY_MODELS` override the worker defaults.
 `TETHER_FRIDAY_URL` sets the server's signaling proxy destination.
 Set `TETHER_FRIDAY_BRAIN=gemini` for Vertex AI; `local` is the default. STT, VAD, Smart Turn, and TTS stay local.

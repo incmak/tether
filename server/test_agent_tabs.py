@@ -1,4 +1,5 @@
 """Agent commands use isolated review stores and mocked launchers and HTTP."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import contextlib
 import io
 import json
@@ -13,6 +14,7 @@ from urllib.error import HTTPError, URLError
 
 import agent_tab_cli as cli
 import agent_tabs
+import audit
 import auth
 import delegate
 import review_links
@@ -27,11 +29,13 @@ class AgentTabsTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.enterContext(patch.object(review_links, 'FILE', self.root / 'links.json'))
-        self.entries = [dict(id='%12', agent='codex', thread=THREAD, writable=True,
+        self.entries = [dict(id='%12', agent='codex', thread=THREAD, codex_binding='open', writable=True,
                              transcript='/project/source.jsonl', pane_name='Source', label='Other name'),
-                        dict(id='%13', agent='claude', thread=THREAD, writable=True, label='Reviewer'),
+                        dict(id='%13', agent='claude', thread=THREAD, registry='/fake/13.json',
+                             writable=True, label='Reviewer'),
                         dict(id='%14', agent='claude', thread=None, pane_name='Second reviewer')]
         self.enterContext(patch.object(server, 'sessions', return_value=self.entries))
+        self.fresh = self.enterContext(patch.object(server, 'fresh_sessions', return_value=self.entries))
         self.enterContext(patch.object(server, 'agent_folder', return_value=str(self.root)))
         self.enterContext(patch.object(auth, 'session_value', return_value='test-credential'))
         self.real_run = subprocess.run
@@ -39,11 +43,13 @@ class AgentTabsTests(unittest.TestCase):
         self.reply = self.enterContext(patch.object(server, 'last_reply', return_value='Work done.'))
         self.status = self.enterContext(patch.object(agent_tabs, 'live_status', return_value={'state': 'Idle'}))
         self.stack_calls = []
+        self.start_group = agent_tabs._start_group
 
         @contextlib.contextmanager
         def start_group(body, caller, run, entries=(), **kwargs):  # the real rules run against tmux in test_groups.py
             self.stack_calls.append((body, caller['id'], kwargs))
-            yield 'gabcdef12', caller['id'], 'Task'
+            owner = dict(agent_tabs.helper_tabs.new_record(caller), root_pane=caller['id'])
+            yield 'gabcdef12', 'Task', owner
         self.enterContext(patch.object(agent_tabs, '_start_group', start_group))
 
     def request(self, payload, headers=None, peer='127.0.0.1', denied=False, path=agent_tabs.PATH):
@@ -132,7 +138,7 @@ class AgentTabsTests(unittest.TestCase):
                         self.assertEqual(agent_tabs.link_pair({'worker': '%12', 'reviewer': '%13'},
                                                               entries, self.reply), {'linked': True})
                         self.assertEqual(review_links.reviewed_by(), {'%12': ['%13']})
-                        link, = json.loads((self.root / 'links.json').read_text())
+                        link, = (row for row in json.loads(review_links.FILE.read_text()) if 'reviewer' in row)
                         self.assertEqual((link['name'], link['agent'], link['reviewer_thread'], link['seen_working']),
                                          (expected, 'codex', THREAD if thread == THREAD else None, seen))
                         self.reply.assert_called_with(entries[0])
@@ -219,6 +225,133 @@ class AgentTabsTests(unittest.TestCase):
             self.assertEqual(self.request({'action': 'start', 'message': '', 'review': 'new',
                                            'thread': 'ignored', 'name': 'New tab', 'cwd': str(self.root)}),
                              (201, {'pane': '%15', 'name': 'New tab'}))
+
+    def mock_placement(self):
+        for entry in self.entries:
+            entry['tmux_session'] = 'here'
+        self.enterContext(patch.object(agent_tabs, '_start_group', self.start_group))
+        self.enterContext(patch.object(agent_tabs.groups, 'LOCK', contextlib.nullcontext))
+        stack = {'%12': {'id': 'gabcdef12', 'name': 'Source stack'},
+                 '%13': {'id': 'gabcdef13', 'name': 'Owner stack'}}
+        self.enterContext(patch.object(agent_tabs.groups, 'group_of_pane',
+                                       side_effect=lambda pane, run: ('$1', stack[pane])))
+        self.enterContext(patch.object(agent_tabs.groups, 'start_begin', return_value='token'))
+        self.enterContext(patch.object(agent_tabs.groups, 'start_end'))
+        self.run.return_value = subprocess.CompletedProcess([], 0, stdout='%12\t\n')
+
+    def test_default_and_explicit_caller_owner_use_callers_stack(self):
+        self.mock_placement()
+        self.entries[0]['pane_name'] = 'o' * 45
+        with patch.object(delegate, 'start', return_value=('%15', 'Task')) as start:
+            for options in ({}, {'owner': '%12'}):
+                with self.subTest(options=options):
+                    self.assertEqual(self.request(dict(action='start', message='Task', **options))[0], 201)
+                    launch = start.call_args.kwargs
+                    self.assertEqual(launch['group'], 'gabcdef12')
+                    self.assertEqual(launch['owner']['kind'], 'helper')
+                    self.assertEqual(launch['owner']['home_pane'], '%12')
+                    self.assertEqual(launch['owner']['home_thread'], THREAD)
+                    self.assertEqual(launch['owner']['opener_name'], 'o' * 40)
+
+    def test_self_owner_starts_unstacked_and_saves_its_own_root(self):
+        self.mock_placement()
+        self.run.return_value = subprocess.CompletedProcess([], 0, stdout='%15\t\n')
+        with patch.object(delegate, 'new_window_after', return_value='%15') as window, \
+                patch.object(delegate, 'write_prompt', return_value=self.root / 'prompt.md'):
+            reply = self.request({'action': 'start', 'owner': 'self', 'agent': 'claude',
+                                  'message': 'a task', 'group': 'Other goal'})
+        self.assertEqual(reply[0], 201)
+        self.assertEqual(window.call_args.kwargs['group'], '')
+        options = [call.args[0] for call in self.run.call_args_list if '@tether_helper' in call.args[0]]
+        record = json.loads(options[0][-1])
+        self.assertEqual((record['kind'], record['root_pane'], record['home_pane'], record['home_thread']),
+                         ('own', '%15', None, None))
+        self.assertEqual(record['owner_pane'], '%12')
+
+    def test_placement_owner_uses_its_stack_but_gets_no_command_authority(self):
+        self.mock_placement()
+        home_thread = '1f8fad5b-d9cb-469f-a165-70867728950e'
+        self.entries[1]['thread'] = home_thread
+        with patch.object(delegate, 'start', return_value=('%15', 'Task')) as start:
+            self.assertEqual(self.request({'action': 'start', 'owner': '%13', 'message': 'Task'})[0], 201)
+            launch = start.call_args.kwargs
+            self.assertEqual(launch['group'], 'gabcdef13')
+            record = launch['owner']
+            self.assertEqual((record['root_pane'], record['home_pane'], record['home_thread']),
+                             ('%13', '%13', home_thread))
+            self.assertEqual((record['owner_pane'], record['owner_thread']), ('%12', THREAD))
+            self.assertEqual(self.request({'action': 'start', 'owner': '%13', 'message': 'Task',
+                                           'group': 'Unstacked'})[0], 201)
+            self.assertEqual(start.call_args.kwargs['group'], '')
+            for options in ({'review': 'new'}, {'role': 'advisor'}):
+                with self.subTest(options=options):
+                    self.assertEqual(self.request(dict(action='start', owner='%13', message='Task', **options))[0], 201)
+                    self.assertEqual(start.call_args.kwargs['owner']['owner_pane'], '%12')
+                    self.assertEqual(start.call_args.kwargs['owner']['home_pane'], '%13')
+        self.entries.append(dict(id='%15', agent='claude', registry='/fake/15.json', thread=THREAD, writable=True))
+        with patch.object(agent_tabs.helper_tabs, 'load', return_value=(True, record)), \
+                patch.object(agent_tabs.helper_tabs, 'write_record'), \
+                patch.object(server, 'shared_status', return_value={'state': 'Idle'}), \
+                patch.object(server, 'timeline', return_value={}), \
+                patch.object(server, 'review_send', return_value='queued') as send, \
+                patch.object(agent_tabs.helper_close, 'close_pane') as close:
+            for action in ('send', 'wait', 'close'):
+                with self.subTest(action=action):
+                    body = dict(action=action, pane='%15', message='Follow up.')
+                    self.assertEqual(self.request(dict(body, session='%13'))[0], 400)
+                    self.assertEqual(self.request(body)[0], 200)
+            send.assert_called_once()
+            close.assert_called_once_with('%15', self.run)
+
+    def test_start_refuses_invalid_placement_before_launch_or_worktree(self):
+        self.mock_placement()
+        self.entries[1]['tmux_session'] = 'elsewhere'
+        self.entries[2]['agent'] = 'shell'
+        wrong_tab = 'Choose an owner tab in this tmux session.'
+        wrong_value = 'Choose self or a pane ID like %12 for the owner.'
+        needs_owner = 'A reviewer or advisor needs an owner tab.'
+        with patch.object(delegate, 'start') as start, patch.object(agent_tabs.worktrees, 'from_body') as worktree:
+            for options, error in (
+                    ({'owner': '%13'}, wrong_tab), ({'owner': '%14'}, wrong_tab),
+                    ({'owner': '%90', 'worktree': 'feature/no-owner'}, wrong_tab),
+                    ({'owner': 'not-a-pane'}, wrong_value), ({'owner': None}, wrong_value),
+                    ({'owner': 'self', 'review': 'new'}, needs_owner),
+                    ({'owner': 'self', 'role': 'advisor'}, needs_owner)):
+                with self.subTest(options=options):
+                    self.assertEqual(self.request(dict(action='start', message='Task', **options)),
+                                     (400, {'error': error}))
+            self.run.assert_not_called()
+            start.assert_not_called()
+            worktree.assert_not_called()
+
+    def test_audit_records_one_start_and_close_with_cli_actor(self):
+        headers = {'X-Tether-Client': 'agent-cli', 'X-Tether-Pane': '%12'}
+        ownership = {'owner_pane': '%12', 'owner_thread': THREAD, 'helper_thread': THREAD}
+        with patch.object(audit.paths, 'CONFIG', self.root), patch.object(audit, '_tab_name', return_value=('Source', None)), \
+                patch.object(delegate, 'start', return_value=('%15', 'Audit Log')), \
+                patch.object(agent_tabs.helper_tabs, 'load', return_value=(True, ownership)), \
+                patch.object(server, 'shared_status', return_value={'state': 'Idle'}), \
+                patch.object(agent_tabs.auto_resume, 'forget_pane'):
+            self.assertEqual(self.request({'action': 'start', 'agent': 'claude', 'message': 'Task'}, headers)[0], 201)
+            self.assertEqual(self.request({'action': 'close', 'pane': '%13'}, headers)[0], 200)
+            entries = {entry['kind']: entry for entry in audit.query()['entries']}
+            self.assertEqual(len(audit.query()['entries']), 2)
+        for kind, summary in (('tab.start', 'Started tab Audit Log (claude)'), ('tab.close', 'Closed tab Reviewer')):
+            self.assertEqual(entries[kind]['summary'], summary)
+            self.assertEqual(entries[kind]['actor'], {'source': 'agent-cli', 'pane': '%12', 'tab': 'Source'})
+
+    def test_audit_records_one_link_and_stop_with_request_actor(self):
+        headers = {'X-Tether-Client': 'web', 'User-Agent': 'Firefox/1 (Linux)'}
+        with patch.object(audit.paths, 'CONFIG', self.root):
+            pair = {'worker': '%12', 'reviewer': '%13'}
+            self.assertEqual(self.request(pair, headers, path='/mobile/api/review-link')[0], 200)
+            self.assertEqual(self.request({'action': 'stop', **pair}, headers)[0], 200)
+            self.assertEqual(self.request({'action': 'stop', **pair}, headers)[1], {'stopped': False})
+            entries = audit.query()['entries']
+        self.assertCountEqual([entry['kind'] for entry in entries], ['review.link', 'review.stop'])
+        for entry in entries:
+            self.assertEqual(entry['actor'], {'source': 'ui', 'device': 'Firefox on Linux'})
+            self.assertEqual(entry['detail'], pair)
 
     def test_agent_override_shell_default_and_large_body(self):
         with patch.object(delegate, 'start', return_value=('%15', 'task')) as start:
@@ -366,7 +499,7 @@ class AgentTabsTests(unittest.TestCase):
 
     def stop_review_at(self, rounds, **state):
         self.link()
-        link, = json.loads(review_links.FILE.read_text())
+        link, = (row for row in json.loads(review_links.FILE.read_text()) if 'reviewer' in row)
         link.update(worker_thread=THREAD, rounds=rounds, **state)
         review_links.FILE.write_text(json.dumps([link]))
         self.assertEqual(self.request({'action': 'stop', 'worker': '%12', 'session': '%13'}),
@@ -394,9 +527,29 @@ class AgentTabsTests(unittest.TestCase):
         self.entries[0]['thread'] = THREAD
         self.assertEqual(self.request({'action': 'link', 'worker': '%12', 'reviewer': '%13'}),
                          (200, {'linked': True}))
-        link, = json.loads(review_links.FILE.read_text())
-        self.assertEqual((link['rounds'], link['empty_rounds']), (1, 2))
-        self.assertNotIn('paused', link)
+        link, cap = json.loads(review_links.FILE.read_text())
+        self.assertEqual(cap['counts'], {review_links._reviewer_key(link): {'rounds': 1, 'empty_rounds': 2}})
+        self.assertNotIn('paused', cap)
+        self.assertFalse({'rounds', 'empty_rounds', 'paused'} & link.keys())
+
+    def test_unreadable_pause_survives_stop_and_either_agent_relink(self):
+        for start in (False, True):
+            with self.subTest(start=start):
+                review_links.FILE.write_text('[]')
+                self.stop_review_at(0, paused=True, unreadable=True)
+                if start:
+                    self.run.return_value = subprocess.CompletedProcess([], 0, stdout='%15\t\n')
+                    with patch.object(delegate, 'new_window_after', return_value='%15'), \
+                            patch.object(delegate, 'write_prompt', return_value=self.root / 'prompt'):
+                        status, result = self.request({'action': 'start', 'review': 'new', 'message': '',
+                                                       'agent': 'claude'})
+                    self.assertEqual(status, 201, result)
+                    reviewer = '%15'
+                else:
+                    status, result = self.request({'action': 'link', 'worker': '%12', 'reviewer': '%13'})
+                    self.assertEqual(status, 200, result)
+                    reviewer = '%13'
+                self.assertEqual(review_links.paused(), {'%12': [reviewer]})
 
     def test_browser_link_resets_a_saved_cap(self):
         for reviewer in ('%13', '%14'):
@@ -404,8 +557,9 @@ class AgentTabsTests(unittest.TestCase):
                 self.stop_review_at(5, paused=True, limit=5, grant_rounds=3)
                 self.assertEqual(self.request({'worker': '%12', 'reviewer': reviewer}, path='/mobile/api/review-link'),
                                  (200, {'linked': True}))
-                link, = json.loads(review_links.FILE.read_text())
-                self.assertFalse({'rounds', 'limit', 'grant_rounds', 'paused'} & link.keys())
+                link, cap = json.loads(review_links.FILE.read_text())
+                for row in (link, cap):
+                    self.assertFalse({'counts', 'limit', 'grant_rounds', 'paused'} & row.keys())
                 self.assertTrue(review_links.remove('%12', reviewer))
 
     def test_relink_in_a_new_worker_conversation_starts_fresh(self):
@@ -413,10 +567,12 @@ class AgentTabsTests(unittest.TestCase):
         self.entries[0]['thread'] = '17b9c72a-a916-46a0-bc10-bc41a8c6249a'
         self.assertEqual(self.request({'action': 'link', 'worker': '%12', 'reviewer': '%13'}),
                          (200, {'linked': True}))
-        old, new = json.loads(review_links.FILE.read_text())
-        self.assertEqual((old['worker_thread'], old['rounds']), (THREAD, 5))
+        link, new, old = json.loads(review_links.FILE.read_text())
+        self.assertEqual(old['worker_thread'], THREAD)
+        self.assertEqual(list(old['counts'].values()), [{'rounds': 5}])
         self.assertEqual(new['worker_thread'], self.entries[0]['thread'])
-        self.assertFalse({'rounds', 'limit', 'paused'} & new.keys())
+        self.assertEqual(new['worker_thread'], link['worker_thread'])
+        self.assertFalse({'counts', 'limit', 'paused'} & new.keys())
 
     def test_reviewer_stop_removes_only_its_own_link_with_or_without_reviewer(self):
         for extra in ({}, {'reviewer': '%12'}):
@@ -438,8 +594,8 @@ class AgentTabsTests(unittest.TestCase):
 
     def test_only_parent_can_escalate_its_workers_waiting_review(self):
         self.link(worker='%13', reviewer='%14')
-        link, = json.loads(review_links.FILE.read_text())
-        link.update(paused=True, rounds=3, parent_stage=dict(pane='%12', thread=THREAD, notice='Fix it.', sent=True))
+        link, = (row for row in json.loads(review_links.FILE.read_text()) if 'reviewer' in row)
+        link.update(worker_thread=THREAD, paused=True, rounds=3, parent_stage=dict(pane='%12', thread=THREAD, notice='Fix it.', sent=True))
         review_links.FILE.write_text(json.dumps([link]))
         payload = {'action': 'escalate', 'pane': '%13'}
         error = (400, {'error': 'That tab has no review waiting on this tab.'})
@@ -447,12 +603,26 @@ class AgentTabsTests(unittest.TestCase):
         self.entries[0]['thread'] = '17b9c72a-a916-46a0-bc10-bc41a8c6249a'
         self.assertEqual(self.request(payload), error)
         self.assertEqual(json.loads(review_links.FILE.read_text()), [link])
+        stored_link, cap = review_links._read()
+        self.assertEqual(cap['parent_stage'], link['parent_stage'])
         self.entries[0]['thread'] = THREAD
         self.assertEqual(self.request(payload), (200, {'escalated': True}))
-        link.pop('parent_stage')
-        self.assertEqual(json.loads(review_links.FILE.read_text()), [dict(link, escalate='Fix it.')])
+        cap.pop('parent_stage')
+        self.assertEqual(json.loads(review_links.FILE.read_text()), [stored_link, dict(cap, escalate='Fix it.')])
         self.assertEqual(self.request(payload), error)
         self.run.assert_not_called()
+
+    def test_parent_can_escalate_a_stopped_review_only_in_the_workers_current_thread(self):
+        self.entries[2]['thread'] = THREAD
+        other_thread = '17b9c72a-a916-46a0-bc10-bc41a8c6249a'
+        caps = [dict(worker='%14', worker_thread=thread, saved_at=1, rounds=3, paused=True,
+                     parent_stage=dict(pane='%12', thread=THREAD, notice=thread, sent=True))
+                for thread in (THREAD, other_thread)]
+        review_links.FILE.write_text(json.dumps(caps))
+        self.assertEqual(self.request({'action': 'escalate', 'pane': '%14'}), (200, {'escalated': True}))
+        current, other = json.loads(review_links.FILE.read_text())
+        self.assertEqual(current['escalate'], THREAD)
+        self.assertEqual(other['parent_stage'], caps[1]['parent_stage'])
 
     def test_list_reports_both_sides_with_names_in_store_order(self):
         self.link()
@@ -485,6 +655,19 @@ class AgentTabsTests(unittest.TestCase):
         forget.assert_called_once_with('%13', run=self.run)
         self.assertEqual(self.kills()[0].args[0][-3:], ['kill-pane', '-t', '%13'])
         self.assertEqual(review_links.reviewed_by(), {})
+
+    def test_close_reads_the_caller_and_target_from_uncached_discovery(self):
+        # The one-second cache still shows the reviewer's old conversation; the fresh read shows a new one.
+        self.status_shared = self.enterContext(patch.object(server, 'shared_status'))
+        self.link(worker='%13', reviewer='%12')
+        self.fresh.return_value = [dict(self.entries[0], thread='3c4a9a50-2c1e-4c5f-9b67-8d1f0e2a7b11'),
+                                   *self.entries[1:]]
+        result, _ = self.close()
+        self.assertEqual(result[0], 400)
+        self.assertEqual(self.kills(), [])
+        self.fresh.assert_called()
+        self.fresh.return_value = self.entries  # the same conversation: the reviewer may close
+        self.assertEqual(self.close()[0], (200, {'closed': '%13'}))
 
     def test_close_by_linked_reviewer_without_owner_record(self):
         self.status_shared = self.enterContext(patch.object(server, 'shared_status'))
@@ -543,6 +726,12 @@ class AgentTabsTests(unittest.TestCase):
 
 
 class CLITests(unittest.TestCase):
+    def test_start_passes_placement_owner(self):
+        for owner in ('self', '%13'):
+            with self.subTest(owner=owner):
+                self.assertEqual(cli.arguments(['start', '--owner', owner, 'Task'])['owner'], owner)
+        self.assertNotIn('owner', cli.arguments(['start', 'Task']))
+
     def test_worktree_body_is_unchanged_and_uses_long_timeout(self):
         for branch in ('feature/foo', ' feature/foo ', ''):
             with self.subTest(branch=branch):
@@ -579,6 +768,7 @@ class CLITests(unittest.TestCase):
                                              context=True, agent='codex', name='Name', cwd=os.path.abspath('relative')))
         for name, value in (('Origin', 'http://127.0.0.1:12345'), ('Content-type', 'application/json'),
                             ('X-codex-mobile', '1'), ('X-tether-hook', 'derived-credential'),
+                            ('X-tether-client', 'agent-cli'), ('X-tether-pane', '%12'),
                             ('Cookie', auth.COOKIE + '=derived-credential')):
             self.assertEqual(request.get_header(name), value)
         self.assertEqual(self.opener.open.call_args.kwargs, {'timeout': 30})

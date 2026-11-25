@@ -1,4 +1,5 @@
 """The agent command: no live tmux or agent. The fake tmux fails, as it does in Codex's sandbox, unless a test says otherwise."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import contextlib
 import io
 import os
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import agent_backlog_cli as cli
+import audit
 import backlog
 import paths
 
@@ -25,6 +27,7 @@ class BacklogCliTests(unittest.TestCase):
         (self.repo / '.git').mkdir(parents=True)
         (self.repo / 'server').mkdir()
         for patch in (mock.patch.object(paths, 'TETHER', self.root / 'tether'), mock.patch.object(paths, 'HOME', self.home),
+                      mock.patch.object(paths, 'CONFIG', self.root / 'config'),
                       mock.patch.dict(os.environ, ENV, clear=True), mock.patch.object(cli.subprocess, 'run', side_effect=OSError('blocked'))):
             patch.start()
             self.addCleanup(patch.stop)
@@ -46,6 +49,14 @@ class BacklogCliTests(unittest.TestCase):
         self.assertEqual(self.run_cli('add', '--agent', 'claude', 'Two')[0], 0)
         self.assertEqual(self.text(), '## tether\n- [ ] One (codex · tmux $7 · pane %12 · chat codex-thread) #B1\n'
                                       '- [ ] Two (claude · tmux $7 · pane %12 · chat claude-chat) #B2\n')
+
+    def test_direct_cli_audit_uses_the_calling_pane(self):
+        self.enterContext(mock.patch.object(audit, '_TABS', {}))
+        self.assertEqual(self.run_cli('add', 'Fix login')[0], 0)
+        entry, = audit.query()['entries']
+        self.assertEqual(entry['kind'], 'backlog.add')
+        self.assertEqual(entry['actor'], {'source': 'agent-cli', 'pane': '%12'})
+        self.assertEqual(entry['project'], 'tether')
 
     def test_list_detail_and_done(self):
         self.run_cli('add', '--agent', 'codex', 'Fix login')

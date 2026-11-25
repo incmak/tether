@@ -1,10 +1,12 @@
 """Auto-merge decisions and the trust ladder, on disposable git repositories. Nothing here touches tmux or a real remote."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import hashlib
 import io
 import json
 import os
 import re
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -12,6 +14,7 @@ import unittest
 from unittest import mock
 
 import auto_merge
+import review_scope
 import paths
 
 RULES = {'version': 1, 'areas': [
@@ -28,6 +31,10 @@ CHECKLIST_ROWS = auto_merge.checklist_rows  # the real function: Base replaces i
 def git_settings(env):
     return [(env[f'GIT_CONFIG_KEY_{index}'], env[f'GIT_CONFIG_VALUE_{index}'])
             for index in range(int(env['GIT_CONFIG_COUNT']))]
+
+
+def credential_lookup(root):
+    return ['git', '-C', str(root), 'config', '--includes', '--null', '--show-scope', '--get-regexp', r'^credential\.']
 
 
 def is_shadow_status(argv):
@@ -73,6 +80,7 @@ class Base(unittest.TestCase):
             self.enterContext(mock.patch.object(auto_merge, 'ENFORCE_AVAILABLE', True))
         auto_merge._ladder_cache.clear()
         auto_merge._target_cache.clear()
+        auto_merge._target_errors.clear()
         auto_merge._seen.clear()
         self.rows = []
         self.enterContext(mock.patch.object(auto_merge, 'checklist_rows', lambda *args: self.rows))
@@ -110,11 +118,22 @@ class Base(unittest.TestCase):
     def failed(self, decision):
         return [item['key'] for item in decision['checks'] if not item['ok']]
 
+    def repo_of(self, folder=None):
+        """The repository identity a review of `folder` saves (review_scope.repo_identity)."""
+        return review_scope.repo_identity(str(folder or self.work))
+
     def job(self, head, at='now'):
         at = int(auto_merge.time.time()) + 5 if at == 'now' else at
-        return {'folder': str(self.work), 'commit': head, 'approved_at': at,
+        self.review_store(head)
+        repo = self.repo_of()
+        return {'folder': str(self.work), 'repo': repo, 'tab': str(self.work), 'commit': head, 'approved_at': at,
                 'worker': '%1', 'name': 'Worker', 'reviewer': '%2', 'reviewer_agent': 'codex',
-                'current': lambda: {'%1': {'%2': {'commit': head, 'at': at}}}}
+                'current': lambda: {'%1': {'%2': {'commit': head, 'at': at, 'folder': str(self.work), 'repo': repo}}}}
+
+    def review_store(self, head, *others):
+        self.write(paths.CACHE, 'review-links.json', json.dumps([
+            {'worker': '%1', 'reviewer': '%2', 'approved_commit': head}, *others,
+        ]))
 
     def origin_main(self):
         return self.git(self.origin, 'rev-parse', 'main')
@@ -944,11 +963,15 @@ class Modes(Base):
         seen = []
         global_config = str(self.root / 'global.conf')
         helping = []
-        Path(global_config).write_text('[credential]\n\thelper = cache\n\thelper = store --file /srv/credentials\n')
+        Path(global_config).write_text('[credential]\n\thelper = cache\n\thelper = store --file /srv/credentials\n'
+                                       '[credential "https://git.example"]\n\thelper =\n\thelper = !/usr/bin/tool get\n'
+                                       '\tusername = someone\n[credential "https://other.example"]\n\tuseHttpPath = true\n'
+                                       '[url "https://evil.example/"]\n\tinsteadOf = https://git.example/\n'
+                                       '[core]\n\tfsmonitor = /srv/evil\n')
 
         def run(argv, **kwargs):
-            if argv[:3] == ['git', 'config', '--global']:
-                self.assertEqual(argv[-3:], ['--null', '--get-all', 'credential.helper'])
+            if argv[3:5] == ['config', '--includes']:
+                self.assertEqual(argv, credential_lookup(self.repo))
                 self.assertNotIn('env', kwargs)
                 helping.append(1)
             elif argv[:3] == ['git', 'config', '--file']:
@@ -969,8 +992,12 @@ class Modes(Base):
                 if is_shadow_status(argv):
                     want = GIT_SETTINGS[:-1]
                 if command[0] in ('fetch', 'ls-remote'):
-                    want = GIT_SETTINGS + [('credential.helper', helper)
-                                           for helper in ('', 'cache', 'store --file /srv/credentials')]
+                    # Only the user's credential settings come from the global config, host settings included.
+                    want = GIT_SETTINGS + [('credential.helper', 'cache'), ('credential.helper', 'store --file /srv/credentials'),
+                                           ('credential.https://git.example.helper', ''),
+                                           ('credential.https://git.example.helper', '!/usr/bin/tool get'),
+                                           ('credential.https://git.example.username', 'someone'),
+                                           ('credential.https://other.example.usehttppath', 'true')]
                 self.assertEqual(git_settings(env), want)
             result = real(argv, **kwargs)
             if argv[3] == 'merge-base':
@@ -980,7 +1007,7 @@ class Modes(Base):
         with mock.patch.dict(os.environ, GIT_CONFIG_GLOBAL=global_config), mock.patch.object(auto_merge, 'RUN', run):
             decision = auto_merge.process(self.job(head))
         self.assertEqual(decision['outcome'], 'would_merge')
-        self.assertEqual(len(helping), 2)
+        self.assertEqual(len(helping), 1)  # one credential read covers ls-remote and fetch
         self.assertEqual(self.origin_main(), before)
         self.assertEqual(self.refs(), refs)
         self.assertFalse(fetch_head.exists())
@@ -1025,9 +1052,11 @@ class Modes(Base):
                         if argv[6] == 'submodule.active':
                             active_copies.append(argv[7])
                         continue
-                    if argv[:2] != ['git', '-C']:
-                        self.assertEqual(argv, ['git', 'config', '--global', '--null', '--get-all', 'credential.helper'])
+                    if argv[3:5] == ['config', '--includes']:
+                        self.assertEqual(argv, credential_lookup(self.repo))
+                        self.assertNotIn('env', call.kwargs)
                         continue
+                    self.assertEqual(argv[:2], ['git', '-C'])
                     directory, command = Path(argv[2]), argv[3]
                     if directory in (self.work, folder, self.repo):
                         self.assertIn(command, local_commands, argv)
@@ -1286,12 +1315,16 @@ class Modes(Base):
         self.assertEqual(auto_merge.process(self.job(head, at=old + 3600))['outcome'], 'merged')
 
     def test_a_folder_git_cannot_read_is_logged_by_folder_and_approval(self):
-        decision = auto_merge.process({**self.job('a' * 40), 'folder': str(self.root)})
+        # With no tab folder (the check command), the log names the folder.
+        decision = auto_merge.process({**self.job('a' * 40), 'folder': str(self.root), 'tab': None})
         self.assertEqual((decision['outcome'], decision['root'], decision['head']), ('wait', str(self.root), 'a' * 40))
         other = self.root / 'elsewhere'
         other.mkdir()
-        auto_merge.process({**self.job('a' * 40), 'folder': str(other)})
+        auto_merge.process({**self.job('a' * 40), 'folder': str(other), 'tab': None})
         self.assertEqual(len(auto_merge.records()), 2)
+        # B368: with a tab, the log names the tab's repository, never the folder that failed.
+        decision = auto_merge.process({**self.job('b' * 40), 'folder': str(other)})
+        self.assertEqual((decision['outcome'], decision['root'], decision['head']), ('wait', str(self.repo), 'b' * 40))
 
     def test_a_refused_push_is_a_failure_and_nothing_is_forced(self):
         self.enforce()
@@ -1452,6 +1485,27 @@ class Modes(Base):
             auto_merge.merge(plan, 'codex', self.job(head))
         self.assertEqual(self.origin_main(), before)
 
+    def test_observe_waits_for_every_live_reviewer(self):
+        head = self.change()
+        job = self.job(head)
+        self.review_store(head, {'worker': '%1', 'reviewer': '%3'})
+        decision = auto_merge.process(job)
+        self.assertEqual(decision['outcome'], 'wait')
+        self.assertEqual(self.failed(decision), ['review'])
+        self.assertIn('not approved', decision['checks'][-1]['text'])
+
+    def test_push_rechecks_every_live_reviewer_after_the_plan(self):
+        self.enforce()
+        head = self.change()
+        job = self.job(head)
+        before = self.origin_main()
+        _, plan = auto_merge.evaluate(self.work, head)
+        self.assertEqual(auto_merge.review_gate.check(self.work, head, pane='%1'), head)
+        self.review_store(head, {'worker': '%1', 'reviewer': '%3'})
+        with self.assertRaisesRegex(auto_merge.NotAuthorized, 'not approved'):
+            auto_merge.merge(plan, 'codex', job)
+        self.assertEqual(self.origin_main(), before)
+
     def test_a_new_grant_before_the_push_rejects_the_old_approval_without_retry(self):
         now = int(auto_merge.time.time())
         with mock.patch.object(auto_merge.time, 'time', return_value=now - 1):
@@ -1523,9 +1577,13 @@ class Modes(Base):
             (lambda: self.git(self.work, 'switch', '-c', 'other'), 'branch changed'),
             (lambda: self.write(self.work, 'nested/new.txt', 'untracked\n'), 'untracked files'),
             (lambda: self.write(self.work, 'ui/src/App.tsx', 'uncommitted\n'), 'uncommitted'),
-            (lambda: job.update(current=self.job(head, at=job['approved_at'] + 1)['current']), 'approval changed'),
-            (lambda: job.update(current=self.job('a' * 40, at=job['approved_at'])['current']), 'approval changed'),
+            (lambda: job.update(current=lambda: {'%1': {'%2': {'commit': head, 'at': job['approved_at'] + 1}}}),
+             'approval changed'),
+            (lambda: job.update(current=lambda: {'%1': {'%2': {'commit': 'a' * 40, 'at': job['approved_at']}}}),
+             'approval changed'),
             (lambda: job.update(current=lambda: {}), 'approval changed'),
+            (lambda: job.update(current=lambda: {'%1': {'%2': {'commit': head, 'at': job['approved_at'],
+                                                               'folder': str(self.repo)}}}), 'approval changed'),
             (lambda: job.update(current=None), 'approval changed'),
             (lambda: job.update(current=fail_read), 'Could not read'),
         )
@@ -1575,6 +1633,65 @@ class Modes(Base):
         self.assertFalse([call for call in run.call_args_list if call.args[0][3] == 'push'])
         self.assertEqual(self.git(self.origin, 'show', 'main:server/server.py'), 'print(7)')
         self.assertEqual(self.git(self.origin, 'log', '-1', '--format=%s', 'main'), 'Race')
+
+
+class Credentials(Base):
+    """The lookup of the user's credential settings, with real Git and a home folder of its own."""
+
+    def lookup(self, files, root=None, **environment):
+        home = self.root / 'home'
+        for name, text in files.items():
+            path = home / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(text if isinstance(text, bytes) else text.encode())
+        clean = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+        clean.update(HOME=str(home), XDG_CONFIG_HOME=str(home / '.config'), GIT_CONFIG_NOSYSTEM='1', **environment)
+        with mock.patch.dict(os.environ, clean, clear=True):
+            return auto_merge._credential_helpers(root or self.repo)
+
+    def test_a_carriage_return_in_a_name_cannot_turn_another_setting_into_a_credential_helper(self):
+        # In text mode the "\r" became a line break: the key ended there and the rest became the value.
+        files = {'.gitconfig': b'[credential "https://git.example.helper\r!/srv/evil"]\n\tother = 1\n'
+                               b'[other "credential.https://git.example.helper\r!/srv/evil"]\n\thelper = 1\n'
+                               b'[credential "https://two\rlines"]\n\thelper = kept\n\tusername = a\\nb\n'}
+        self.assertEqual(self.lookup(files), (('credential.https://two\rlines.helper', 'kept'),
+                                              ('credential.https://two\rlines.username', 'a\nb')))
+
+    def test_both_global_files_and_their_includes_give_the_settings_in_the_order_of_git(self):
+        files = {'.config/git/config': '[credential]\n\thelper = xdg\n',
+                 '.gitconfig': '[credential "https://git.example"]\n\thelper = home\n[include]\n\tpath = more\n',
+                 'more': '[credential]\n\tuseHttpPath = true\n[core]\n\tfsmonitor = /srv/evil\n'}
+        self.assertEqual(self.lookup(files), (('credential.helper', 'xdg'), ('credential.https://git.example.helper', 'home'),
+                                              ('credential.usehttppath', 'true')))
+
+    def test_a_conditional_include_applies_only_in_its_repository(self):
+        other = self.root / 'other'
+        self.git(self.root, 'init', '-q', str(other))
+        files = {'.gitconfig': f'[includeIf "gitdir:{self.repo}/"]\n\tpath = work\n',
+                 'work': '[credential "https://git.example"]\n\tusername = work\n'}
+        self.assertEqual(self.lookup(files), (('credential.https://git.example.username', 'work'),))
+        self.assertEqual(self.lookup(files, root=other), ())
+
+    def test_settings_of_the_repository_and_of_the_command_environment_do_not_pass(self):
+        self.git(self.repo, "config", "credential.helper", "!/srv/local")
+        files = {'.gitconfig': '[credential]\n\thelper = mine\n'}
+        found = self.lookup(files, GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='credential.helper', GIT_CONFIG_VALUE_0='!/srv/command')
+        self.assertEqual(found, (('credential.helper', 'mine'),))
+
+    def test_a_credential_setting_requires_a_value(self):
+        with self.assertRaises(auto_merge.GitError):
+            self.lookup({'.gitconfig': '[credential]\n\tuseHttpPath\n'})
+        with self.assertRaises(auto_merge.GitError):
+            self.lookup({'.gitconfig': '[credential "https://github.com"]\n\tuseHttpPath\n'})
+        with self.assertRaises(auto_merge.GitError):
+            self.lookup({'.gitconfig': '[credential]\n\thelper\n'})
+        self.assertEqual(self.lookup({'.gitconfig': '[credential]\n\tuseHttpPath = true\n'}),
+                         (('credential.usehttppath', 'true'),))
+
+    def test_no_settings_and_a_broken_config_are_different(self):
+        self.assertEqual(self.lookup({'.gitconfig': '[user]\n\tname = x\n'}), ())
+        with self.assertRaises(auto_merge.GitError):
+            self.lookup({'.gitconfig': '[credential\n'})
 
 
 class Ladder(Base):
@@ -1847,23 +1964,444 @@ class Ladder(Base):
         self.assertEqual({area['rung'] for area in self.levels().values()}, {1})
 
 
+class CrossWorktree(Base):
+    """B368: auto-merge checks the worktree the approval checked, inside the tab's own repository."""
+
+    def other_worktree(self, name='other'):
+        folder = self.root / 'project-wt' / name
+        self.git(self.repo, 'worktree', 'add', '-b', name, str(folder), 'main')
+        return folder
+
+    def test_an_approval_in_another_worktree_of_the_tab_repository_passes(self):
+        head = self.change()
+        # The tab started in the main checkout, or in a sibling worktree, and committed in project-wt/work.
+        for tab in (self.repo, self.other_worktree()):
+            with self.subTest(tab=tab.name):
+                auto_merge._seen.clear()
+                decision = auto_merge.process({**self.job(head), 'tab': str(tab)})
+                self.assertEqual(self.failed(decision), [])
+                self.assertEqual((decision['outcome'], decision['head']), ('would_merge', head))
+
+    def test_the_review_folder_is_merged_not_the_tab_folder(self):
+        self.enforce()
+        head = self.change()
+        decision = auto_merge.process({**self.job(head), 'tab': str(self.repo)})
+        self.assertEqual(decision['outcome'], 'merged')
+        self.assertEqual(self.git(self.origin, 'rev-parse', 'main^2'), head)
+
+    def test_a_moved_tip_in_the_review_folder_is_refused(self):
+        head = self.change()
+        self.change(text='later\n')
+        decision = auto_merge.process({**self.job(head), 'tab': str(self.repo)})
+        self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['approval']))
+        self.assertIn(f'approved {head[:12]}, but the branch is at', decision['checks'][0]['text'])
+
+    def test_an_approval_without_a_folder_is_refused_without_a_guess(self):
+        head = self.change()
+        before = self.origin_main()
+        # No folder, or a folder with no repository identity (the request could not read it).
+        for missing in ({'folder': None}, {'repo': None}):
+            with self.subTest(missing=missing):
+                with mock.patch.object(auto_merge, 'evaluate') as evaluate:
+                    decision = auto_merge.process({**self.job(head), **missing})
+                evaluate.assert_not_called()
+                self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['approval']))
+                self.assertIn('does not name the folder and repository it reviewed', decision['checks'][0]['text'])
+                self.assertEqual((decision['root'], decision['head']), (None, head))
+                self.assertEqual(self.origin_main(), before)
+
+    def test_a_gone_review_folder_is_refused(self):
+        head = self.change()
+        gone = self.root / 'project-wt' / 'gone'
+        decision = auto_merge.process({**self.job(head), 'folder': str(gone)})
+        self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['git']))
+        self.assertIn('is gone', decision['checks'][0]['text'])
+        self.assertEqual(decision['root'], str(self.repo))
+
+    def test_a_review_folder_in_another_repository_is_refused_before_any_fetch(self):
+        head = self.change()
+        clone = self.root / 'clone'
+        self.git(self.root, 'clone', '-q', str(self.origin), str(clone))
+        self.git(clone, 'fetch', '-q', str(self.repo), 'work')
+        self.git(clone, 'worktree', 'add', '-b', 'work', str(self.root / 'clone-wt'), head)
+        cases = ((str(self.root / 'clone-wt'), str(self.work), 'not a checkout of the tab', str(self.repo)),
+                 # A tab in another repository is not the repository the review saw: nothing is logged as root.
+                 (str(self.work), str(self.root / 'clone-wt'), 'another repository than the one the review saw', None),
+                 (str(self.work), str(self.root), "tab's own folder is not in a Git repository", None))
+        for folder, tab, reason, root in cases:
+            with self.subTest(reason=reason, tab=tab):
+                with mock.patch.object(auto_merge, '_fetch_target') as fetch:
+                    decision = auto_merge.process({**self.job(head), 'folder': folder, 'tab': tab})
+                fetch.assert_not_called()
+                self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['git']))
+                self.assertIn(reason, decision['checks'][0]['text'])
+                # Settings reads trust from each logged root: a refused folder must not become one.
+                self.assertEqual(decision['root'], root)
+        logged = {item['root'] for item in auto_merge.records()}
+        self.assertNotIn(str(self.root / 'clone-wt'), logged)
+        with mock.patch.object(auto_merge, '_trust', return_value=None) as trust:
+            auto_merge.state()
+        self.assertNotIn(str(self.root / 'clone-wt'), [call.args[0] for call in trust.call_args_list])
+
+    def clone_at(self, head, where):
+        """A clean checkout of another repository (a clone of the same origin) at `head` on branch work."""
+        self.git(self.root, 'clone', '-q', str(self.origin), str(where))
+        self.git(where, 'fetch', '-q', str(self.repo), 'work')
+        self.git(where, 'checkout', '-q', '-b', 'work', head)
+        return where
+
+    def test_a_checkout_of_another_repository_at_the_reviewed_path_is_refused_before_any_fetch(self):
+        # Round-3 review case: the tab and the review share one path. After the approval, another repository's clean
+        # checkout at the same commit takes that path. Every live check agrees; only the saved identity differs.
+        head = self.change()
+        job = self.job(head)
+        self.work.rename(self.work.with_name('work-aside'))
+        self.clone_at(head, self.root / 'b-repo').rename(self.work)
+        with mock.patch.object(auto_merge, '_fetch_target') as fetch:
+            decision = auto_merge.process(job)
+        fetch.assert_not_called()
+        self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['git']))
+        self.assertIn('in another repository than the one the review saw', decision['checks'][0]['text'])
+        # Settings reads trust (and fetches) from each logged root: the other repository must not become one.
+        self.assertIsNone(decision['root'])
+        with mock.patch.object(auto_merge, '_trust', return_value=None) as trust:
+            auto_merge.state()
+        self.assertNotIn(str(self.work), [call.args[0] for call in trust.call_args_list])
+
+    def test_a_repository_replaced_at_the_same_git_path_is_refused(self):
+        # The common Git directory keeps its path but is another directory (here a copy): its inode differs.
+        head = self.change()
+        job = {**self.job(head), 'tab': str(self.repo)}
+        common = self.repo / '.git'
+        common.rename(self.repo / '.git-aside')
+        shutil.copytree(self.repo / '.git-aside', common, symlinks=True)
+        self.assertEqual(self.repo_of()['path'], job['repo']['path'])
+        with mock.patch.object(auto_merge, '_fetch_target') as fetch:
+            decision = auto_merge.process(job)
+        fetch.assert_not_called()
+        self.assertIn('in another repository than the one the review saw', decision['checks'][0]['text'])
+
+    def test_a_repository_replaced_before_the_fetch_is_refused_without_a_network_command(self):
+        head = self.change()
+        job = {**self.job(head), 'tab': str(self.repo)}
+        real = auto_merge._scratch
+
+        def scratch(root):  # runs after the first identity check, before the fetch
+            common = self.repo / '.git'
+            common.rename(self.repo / '.git-aside')
+            shutil.copytree(self.repo / '.git-aside', common, symlinks=True)
+            return real(root)
+
+        with mock.patch.object(auto_merge, '_scratch', side_effect=scratch), \
+                mock.patch.object(auto_merge, '_object_git', wraps=auto_merge._object_git) as git:
+            decision = auto_merge.process(job)
+        self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['git']))
+        self.assertIn('in another repository than the one the review saw', decision['checks'][0]['text'])
+        self.assertFalse({'ls-remote', 'fetch'} & {call.args[1] for call in git.call_args_list})
+        # A late refusal logs no root either: Settings would fetch from the replacement.
+        self.assertIsNone(decision['root'])
+        with mock.patch.object(auto_merge, '_trust', return_value=None) as trust:
+            auto_merge.state()
+        self.assertNotIn(str(self.repo), [call.args[0] for call in trust.call_args_list])
+
+    def test_a_repository_replaced_between_network_commands_is_refused(self):
+        # During the credential lookup before ls-remote, or after ls-remote and before fetch.
+        for moment in ('credentials', 'ls-remote'):
+            with self.subTest(moment=moment):
+                head = self.change(text=f'{moment}\n')
+                aside = self.repo / f'.git-{moment}'
+                job = {**self.job(head), 'tab': str(self.repo)}
+                real_git, real_helpers = auto_merge._object_git, auto_merge._credential_helpers
+                steps = []
+
+                def swap():
+                    common = self.repo / '.git'
+                    common.rename(aside)
+                    shutil.copytree(aside, common, symlinks=True)
+
+                def object_git(scratch, *args, **kwargs):
+                    result = real_git(scratch, *args, **kwargs)
+                    steps.append(args[0])
+                    if moment == 'ls-remote' and args[0] == 'ls-remote':
+                        swap()
+                    return result
+
+                def helpers(root):
+                    if moment == 'credentials' and 'ls-remote' not in steps:
+                        swap()
+                    return real_helpers(root)
+
+                with mock.patch.object(auto_merge, '_object_git', side_effect=object_git), \
+                        mock.patch.object(auto_merge, '_credential_helpers', side_effect=helpers):
+                    decision = auto_merge.process(job)
+                self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['git']))
+                self.assertIn('in another repository than the one the review saw', decision['checks'][0]['text'])
+                self.assertNotIn('fetch', steps)
+                self.assertEqual('ls-remote' in steps, moment == 'ls-remote')
+                self.assertIsNone(decision['root'])
+
+    def test_a_repository_replaced_after_the_decision_stops_the_push(self):
+        self.enforce()
+        head = self.change()
+        before = self.origin_main()
+        job = {**self.job(head), 'tab': str(self.repo)}
+        real = auto_merge._object_git
+        steps = []
+
+        def object_git(scratch, *args, **kwargs):
+            result = real(scratch, *args, **kwargs)
+            steps.append(args[0])
+            if args[0] == 'commit-tree':
+                common = self.repo / '.git'
+                common.rename(self.repo / '.git-aside')
+                shutil.copytree(self.repo / '.git-aside', common, symlinks=True)
+            return result
+
+        with mock.patch.object(auto_merge, '_object_git', side_effect=object_git):
+            decision = auto_merge.process(job)
+        self.assertEqual(decision['outcome'], 'failed')
+        self.assertIn('in another repository than the one the review saw', decision['error'])
+        self.assertIn('commit-tree', steps)
+        self.assertNotIn('push', steps)
+        self.assertEqual(self.origin_main(), before)
+        self.assertNoTrustRoot(decision, self.repo)
+
+    def test_a_repository_replaced_during_the_last_clean_read_stops_the_push(self):
+        # The binding check is the last step of confirm(), after its Git reads (here the clean-tree read).
+        self.enforce()
+        head = self.change()
+        before = self.origin_main()
+        job = {**self.job(head), 'tab': str(self.repo)}
+        real_git, real_dirty = auto_merge._object_git, auto_merge._dirty
+        steps = []
+
+        def object_git(scratch, *args, **kwargs):
+            steps.append(args[0])
+            return real_git(scratch, *args, **kwargs)
+
+        def dirty(checkout):
+            result = real_dirty(checkout)
+            if 'commit-tree' in steps and not (self.repo / '.git-aside').exists():
+                common = self.repo / '.git'
+                common.rename(self.repo / '.git-aside')
+                shutil.copytree(self.repo / '.git-aside', common, symlinks=True)
+            return result
+
+        with mock.patch.object(auto_merge, '_object_git', side_effect=object_git), \
+                mock.patch.object(auto_merge, '_dirty', side_effect=dirty):
+            decision = auto_merge.process(job)
+        self.assertEqual(decision['outcome'], 'failed')
+        self.assertIn('in another repository than the one the review saw', decision['error'])
+        self.assertEqual(steps.count('ls-remote'), 1)  # only the evaluation's look at main
+        self.assertNotIn('push', steps)
+        self.assertEqual(self.origin_main(), before)
+        self.assertNoTrustRoot(decision, self.repo)
+
+    def test_a_tab_folder_replaced_after_the_decision_stops_the_push(self):
+        # The tab works in a sibling worktree. After commit-tree it becomes a checkout of repository B; the reviewed
+        # folder and A's main checkout stay. The push still needs the whole binding.
+        self.enforce()
+        head = self.change()
+        before = self.origin_main()
+        tab = self.other_worktree()
+        job = {**self.job(head), 'tab': str(tab)}
+        real = auto_merge._object_git
+        steps = []
+
+        def object_git(scratch, *args, **kwargs):
+            result = real(scratch, *args, **kwargs)
+            steps.append(args[0])
+            if args[0] == 'commit-tree':
+                tab.rename(tab.with_name(tab.name + '-aside'))
+                self.clone_at(head, self.root / 'b-tab').rename(tab)
+            return result
+
+        with mock.patch.object(auto_merge, '_object_git', side_effect=object_git):
+            decision = auto_merge.process(job)
+        self.assertEqual(decision['outcome'], 'failed')
+        self.assertIn('in another repository than the one the review saw', decision['error'])
+        self.assertNotIn('push', steps)
+        self.assertEqual(self.origin_main(), before)
+        self.assertNoTrustRoot(decision, self.repo)
+
+    def assertNoTrustRoot(self, decision, path):
+        # Settings reads trust (and fetches) from each logged root: a refused repository must not become one.
+        self.assertIsNone(decision['root'])
+        with mock.patch.object(auto_merge, '_trust', return_value=None) as trust:
+            auto_merge.state()
+        self.assertNotIn(str(path), [call.args[0] for call in trust.call_args_list])
+
+    def test_a_late_binding_failure_runs_no_network_command_and_logs_no_root(self):
+        # After the first checks: during scratch setup the reviewed worktree becomes a clean checkout of repository B
+        # (the tab and A's main checkout stay), or right before the check A's common Git directory is briefly absent.
+        for case in ('worktree from B', 'tab from B', 'repository absent'):
+            with self.subTest(case=case):
+                head = self.change(text=f'{case}\n')
+                tab = self.other_worktree() if case == 'tab from B' else self.repo
+                job = {**self.job(head), 'tab': str(tab)}
+                real, real_env = auto_merge._scratch, auto_merge._object_env
+                aside = self.root / f'aside-{len(case)}'
+
+                def scratch(root):
+                    made = real(root)
+                    if case == 'worktree from B':
+                        self.work.rename(aside)
+                        self.clone_at(head, self.root / 'b-late').rename(self.work)
+                    elif case == 'tab from B':
+                        tab.rename(aside)
+                        self.clone_at(head, self.root / 'b-late-tab').rename(tab)
+                    return made
+
+                def object_env(*args, **kwargs):  # the last step before the check
+                    env = real_env(*args, **kwargs)
+                    if case == 'repository absent':
+                        (self.repo / '.git').rename(aside)
+                    return env
+
+                with mock.patch.object(auto_merge, '_scratch', side_effect=scratch), \
+                        mock.patch.object(auto_merge, '_object_env', side_effect=object_env), \
+                        mock.patch.object(auto_merge, '_object_git', wraps=auto_merge._object_git) as git:
+                    decision = auto_merge.process(job)
+                self.assertEqual((decision['outcome'], self.failed(decision)), ('wait', ['git']))
+                self.assertFalse({'ls-remote', 'fetch'} & {call.args[1] for call in git.call_args_list})
+                self.assertNoTrustRoot(decision, self.repo)
+                if case == 'worktree from B':
+                    self.assertIn('in another repository than the one the review saw', decision['checks'][0]['text'])
+                    shutil.rmtree(self.work)
+                    aside.rename(self.work)
+                elif case == 'tab from B':
+                    self.assertIn('in another repository than the one the review saw', decision['checks'][0]['text'])
+                    shutil.rmtree(tab)
+                    aside.rename(tab)
+                else:
+                    self.assertIn('Could not read the repository', decision['checks'][0]['text'])
+                    aside.rename(self.repo / '.git')
+
+    def link_to(self, link, target):
+        tmp = link.with_name(link.name + '.tmp')
+        tmp.symlink_to(target)
+        tmp.replace(link)
+
+    def test_a_symlinked_review_folder_is_resolved_once(self):
+        head = self.change()
+        link = self.root / 'reviewed'
+        self.link_to(link, self.work)
+        real = auto_merge.evaluate
+        with mock.patch.object(auto_merge, 'evaluate', side_effect=real) as check:
+            decision = auto_merge.process({**self.job(head), 'folder': str(link), 'tab': str(self.repo)})
+        self.assertEqual((decision['outcome'], self.failed(decision)), ('would_merge', []))
+        _, plan = real(str(link), head, tab=str(self.repo), repo=self.repo_of())
+        self.assertEqual(plan['folder'], str(self.work))
+        check.assert_called_once()
+
+    def test_a_review_folder_that_moves_to_another_worktree_stops_the_push(self):
+        self.enforce()
+        head = self.change()
+        before = self.origin_main()
+        link = self.root / 'reviewed'
+        self.link_to(link, self.work)
+        # A second worktree with the same branch and commit: only the folder differs.
+        twin = self.root / 'project-wt' / 'twin'
+        self.git(self.repo, 'worktree', 'add', '-f', str(twin), 'work')
+        saved = str(link)
+        job = {**self.job(head), 'folder': saved, 'tab': str(self.repo),
+               'current': lambda: {'%1': {'%2': {'commit': head, 'at': job['approved_at'], 'folder': saved,
+                                                 'repo': job['repo']}}}}
+        real = auto_merge.evaluate
+
+        def evaluate(*args, **kwargs):
+            result = real(*args, **kwargs)
+            self.link_to(link, twin)
+            return result
+
+        with mock.patch.object(auto_merge, 'evaluate', side_effect=evaluate), \
+                mock.patch.object(auto_merge, 'RUN', wraps=subprocess.run) as run:
+            decision = auto_merge.process(job)
+        self.assertEqual(decision['outcome'], 'failed')
+        self.assertIn('another worktree', decision['error'])
+        self.assertFalse(any(call.args[0][3] == 'push' for call in run.call_args_list))
+        self.assertEqual(self.origin_main(), before)
+
+    def test_an_approval_that_changes_during_the_remote_check_stops_the_push(self):
+        # The approval moves during the look at the remote main, during the push's credential lookup before it, or
+        # during the binding check's Git reads (the approval read comes after them).
+        for moment in ('ls-remote', 'credentials', 'binding'):
+            with self.subTest(moment=moment):
+                self.enforce()
+                head = self.change(text=f'{moment}\n')
+                before = self.origin_main()
+                live = {'commit': head, 'at': None, 'folder': str(self.work), 'repo': self.repo_of()}
+                job = {**self.job(head), 'tab': str(self.repo), 'current': lambda: {'%1': {'%2': dict(live)}}}
+                live['at'] = job['approved_at']
+                real, real_helpers, real_bound = auto_merge._object_git, auto_merge._credential_helpers, auto_merge._check_bound
+                steps = []
+
+                def check_bound(*args):
+                    real_bound(*args)
+                    if moment == 'binding' and 'commit-tree' in steps:
+                        live.clear()
+
+                def object_git(scratch, *args, **kwargs):
+                    result = real(scratch, *args, **kwargs)
+                    steps.append(args[0])
+                    if moment == 'ls-remote' and args[0] == 'ls-remote' and 'commit-tree' in steps:
+                        live['folder'] = str(self.repo)
+                    return result
+
+                def helpers(root):
+                    if moment == 'credentials' and 'commit-tree' in steps:
+                        live.clear()
+                    return real_helpers(root)
+
+                with mock.patch.object(auto_merge, '_object_git', side_effect=object_git), \
+                        mock.patch.object(auto_merge, '_credential_helpers', side_effect=helpers), \
+                        mock.patch.object(auto_merge, '_check_bound', side_effect=check_bound):
+                    decision = auto_merge.process(job)
+                self.assertEqual(decision['outcome'], 'failed')
+                self.assertIn('approval changed', decision['error'])
+                self.assertIn('commit-tree', steps)
+                self.assertNotIn('push', steps)
+                # No network command after the change: the push's look at main runs only when the approval held.
+                self.assertEqual(steps.count('ls-remote'), 2 if moment == 'ls-remote' else 1)
+                self.assertEqual(self.origin_main(), before)
+
+
 class Watcher(Base):
     def test_each_approval_is_queued_once_with_the_reviewer_agent(self):
         entries = [{'id': '%1', 'name': 'Worker', 'agent': 'claude'}, {'id': '%2', 'agent': 'codex'}]
-        approvals = {'%1': {'%2': {'commit': 'a' * 40, 'at': 5}}, '%9': {'%2': {'commit': 'b' * 40, 'at': 5}},
+        repo = self.repo_of()
+        approvals = {'%1': {'%2': {'commit': 'a' * 40, 'at': 5, 'folder': str(self.work), 'repo': repo}},
+                     '%9': {'%2': {'commit': 'b' * 40, 'at': 5}},
                      '%2': {'%1': {'commit': 'short', 'at': 5}}}
         def current():
             return approvals
 
-        jobs = auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False, current=current)
-        self.assertEqual(jobs, [{'folder': str(self.work), 'commit': 'a' * 40, 'approved_at': 5, 'worker': '%1',
-                                 'name': 'Worker', 'reviewer': '%2', 'reviewer_agent': 'codex', 'current': current}])
+        jobs = auto_merge.observe(entries, approvals, lambda entry: str(self.repo), start=False, current=current)
+        self.assertEqual(jobs, [{'folder': str(self.work), 'repo': repo, 'tab': str(self.repo), 'commit': 'a' * 40,
+                                 'approved_at': 5, 'worker': '%1', 'name': 'Worker', 'reviewer': '%2',
+                                 'reviewer_agent': 'codex', 'current': current}])
         self.assertEqual(auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False), [])
         approvals['%1']['%2']['at'] = 6
-        renewed = auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False, current=current)
+        renewed = auto_merge.observe(entries, approvals, lambda entry: str(self.repo), start=False, current=current)
         self.assertEqual(renewed, [dict(jobs[0], approved_at=6)])
         self.assertEqual(auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False), [])
         approvals['%1']['%2'] = {'commit': 'c' * 40, 'at': 6}
+        self.assertEqual(len(auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False)), 1)
+
+    def test_an_approval_without_a_folder_is_queued_once_with_no_folder(self):
+        entries = [{'id': '%1', 'name': 'Worker', 'agent': 'claude'}]
+        for saved in ({'commit': 'a' * 40, 'at': 5}, {'commit': 'b' * 40, 'at': 5, 'folder': None},
+                      {'commit': 'c' * 40, 'at': 5, 'folder': ''}):
+            with self.subTest(saved=saved):
+                approvals = {'%1': {'%2': saved}}
+                jobs = auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False)
+                self.assertEqual([(job['folder'], job['tab']) for job in jobs], [(None, str(self.work))])
+                self.assertEqual(auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False), [])
+
+    def test_a_tab_without_a_folder_is_tried_again(self):
+        entries = [{'id': '%1', 'name': 'Worker', 'agent': 'claude'}]
+        approvals = {'%1': {'%2': {'commit': 'a' * 40, 'at': 5, 'folder': str(self.work)}}}
+        self.assertEqual(auto_merge.observe(entries, approvals, lambda entry: None, start=False), [])
         self.assertEqual(len(auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False)), 1)
 
 
@@ -1878,6 +2416,95 @@ class Http(Base):
         self.assertEqual(handler.body['decisions'][0]['outcome'], 'would_merge')
         self.assertEqual([area['name'] for area in handler.body['trust'][0]['areas']], ['tests', 'ui'])
         self.assertEqual(handler.body['trust'][0]['areas'][0]['need'], auto_merge.CLEAN_MERGES)
+
+    def test_a_repository_tether_cannot_read_is_not_listed_and_not_asked_again(self):
+        other = self.root / 'private'
+        self.git(self.root, 'init', '-q', '-b', 'main', str(other))
+        self.git(other, 'remote', 'add', 'origin', str(self.root / 'no-such-remote.git'))
+        self.git(other, 'commit', '-q', '--allow-empty', '-m', 'First')
+        auto_merge._target_errors.clear()
+        with mock.patch.object(auto_merge, 'RUN', wraps=subprocess.run) as run:
+            for _ in range(3):
+                listed = auto_merge.state([str(other), str(self.repo)])['trust']
+                self.assertEqual([item['repo'] for item in listed], ['project'])
+        asked = [call.args[0] for call in run.call_args_list if 'ls-remote' in call.args[0] and str(self.root / 'no-such-remote.git') in call.args[0]]
+        self.assertEqual(len(asked), 1)
+        # With a decision in the log the repository is listed, with the reason.
+        auto_merge.record({'root': str(other), 'root_id': review_scope.repo_identity(str(other)), 'head': 'a' * 40,
+                           'mode': 'observe', 'outcome': 'wait', 'checks': []})
+        listed = auto_merge.state([str(self.repo)])['trust']
+        self.assertEqual([item['repo'] for item in listed], ['private', 'project'])
+        self.assertIn('ls-remote', listed[0]['error'])
+        auto_merge._target_errors.clear()
+
+    def test_settings_checks_the_logged_repository_before_each_network_command(self):
+        # The scan saw the logged repository; then another one takes the path during scratch setup, or between
+        # ls-remote and fetch. Settings runs no later network command for that root.
+        decision = auto_merge.process(self.job(self.change()))
+        for moment in ('scratch', 'ls-remote'):
+            with self.subTest(moment=moment):
+                auto_merge._target_cache.clear()
+                auto_merge._target_errors.clear()
+                aside = self.repo / f'.git-{moment}'
+                swapped = []
+                real_scratch, real_git = auto_merge._scratch, auto_merge._object_git
+
+                def swap():
+                    if not swapped:
+                        swapped.append(True)
+                        (self.repo / '.git').rename(aside)
+                        shutil.copytree(aside, self.repo / '.git', symlinks=True)
+
+                def scratch(root):
+                    made = real_scratch(root)
+                    if moment == 'scratch':
+                        swap()
+                    return made
+
+                def object_git(scratch_dir, *args, **kwargs):
+                    result = real_git(scratch_dir, *args, **kwargs)
+                    if moment == 'ls-remote' and args[0] == 'ls-remote':
+                        swap()
+                    return result
+
+                with mock.patch.object(auto_merge, '_scratch', side_effect=scratch), \
+                        mock.patch.object(auto_merge, '_object_git', side_effect=object_git) as git:
+                    trust = auto_merge.state()['trust']
+                commands = [call.args[1] for call in git.call_args_list]
+                self.assertEqual(swapped, [True])
+                self.assertEqual(commands.count('ls-remote'), 0 if moment == 'scratch' else 1)
+                self.assertNotIn('fetch', commands)
+                self.assertEqual([item['areas'] for item in trust], [[]])
+                self.assertIn('another repository than the one in the decision log', trust[0]['error'])
+                # The next case starts from a log entry for the repository now at the path.
+                auto_merge.record({**decision, 'root_id': self.repo_of(self.repo), 'head': moment[0] * 40})
+
+    def test_settings_fetches_a_logged_root_only_while_it_reads_the_logged_repository(self):
+        # The log holds a path. After the decision, another repository takes it (here a copy of the Git directory,
+        # so only the identity differs), or the record names no repository: Settings runs no Git network command.
+        decision = auto_merge.process(self.job(self.change()))
+        self.assertEqual(decision['root_id'], self.repo_of(self.repo))
+        for case in ('no identity', 'another repository'):
+            with self.subTest(case=case):
+                # Each case starts from a logged root that Settings reads.
+                auto_merge.record({**decision, 'head': ('c' if case == 'no identity' else 'd') * 40})
+                with mock.patch.object(auto_merge, '_trust', return_value=None) as trust:
+                    auto_merge.state()
+                self.assertEqual(trust.call_args_list, [mock.call(str(self.repo), True, decision['root_id'])])
+                if case == 'another repository':
+                    common = self.repo / '.git'
+                    common.rename(self.repo / '.git-aside')
+                    shutil.copytree(self.repo / '.git-aside', common, symlinks=True)
+                else:
+                    auto_merge.record({**decision, 'root_id': None, 'head': 'b' * 40})
+                auto_merge._target_cache.clear()
+                with mock.patch.object(auto_merge, '_trust', return_value=None) as trust:
+                    auto_merge.state()
+                trust.assert_not_called()
+        # A live tab in that repository is still listed: it is the user's open repository, not a logged path.
+        with mock.patch.object(auto_merge, '_trust', return_value=None) as trust:
+            auto_merge.state([str(self.repo)])
+        self.assertEqual(trust.call_args_list, [mock.call(str(self.repo), False, None)])
 
     def test_a_repository_without_rules_is_listed_only_when_it_has_decisions(self):
         other = self.root / 'other'
@@ -1918,17 +2545,15 @@ class Http(Base):
             self.assertEqual(auto_merge.state([root])['trust'][0]['areas'][1]['label'], 'Frontend')
             self.assertEqual(fetch.call_args_list, [mock.call(root, scratch)] * 3)
 
-    def test_settings_shows_target_errors_with_or_without_decisions(self):
+    def test_settings_shows_a_target_error_only_for_a_repository_with_decisions(self):
         root = str(self.repo)
         self.git(self.repo, 'remote', 'set-url', '--push', 'origin', str(self.root / 'gone.git'))
-        for known in (False, True):
-            with self.subTest(known=known):
-                if known:
-                    auto_merge.process(self.job(self.change()))
-                trust = auto_merge.state([root])['trust']
-                self.assertEqual(len(trust), 1)
-                self.assertEqual(trust[0]['root'], root)
-                self.assertIn('git ls-remote failed', trust[0]['error'])
+        self.assertEqual(auto_merge.state([root])['trust'], [])
+        auto_merge.process(self.job(self.change()))
+        trust = auto_merge.state([root])['trust']
+        self.assertEqual(len(trust), 1)
+        self.assertEqual(trust[0]['root'], root)
+        self.assertIn('git ls-remote failed', trust[0]['error'])
 
     def test_post_sets_the_mode_and_refuses_agents_and_bad_values(self):
         handler = Handler({'mode': 'enforce'})

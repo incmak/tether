@@ -1,3 +1,4 @@
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import tempfile
 import time
 import unittest
@@ -70,6 +71,14 @@ class PrefsSyncTests(unittest.TestCase):
     def test_empty_store_is_version_zero(self):
         self.assertEqual(prefs_sync.load(), {'prefs': {}, 'version': 0})
 
+    def test_time_zone_syncs_only_known_iana_names(self):
+        stored = prefs_sync.save({'timeZone': 'Pacific/Auckland'})
+        self.assertEqual(stored['prefs'], {'timeZone': 'Pacific/Auckland'})
+        for value in ('../etc', 'Not/AZone', '', 'a' * 65, 42):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, r'^Invalid preference: timeZone\.$'):
+                prefs_sync.save({'timeZone': value})
+        self.assertEqual(prefs_sync.load(), stored)
+
     def test_changed_keys_merge_and_bump_version(self):
         prefs_sync.save({'pinned': ['$1'], 'theme': 'dark'})
         stored = prefs_sync.save({'paneOrder': {'$1': ['%2', '%1']}})
@@ -87,6 +96,17 @@ class PrefsSyncTests(unittest.TestCase):
                 stored = prefs_sync.save({'waitingOrder': value})
                 self.assertEqual(stored['prefs']['waitingOrder'], value)
                 self.assertEqual(prefs_sync.load(), stored)
+
+    def test_friday_acts_syncs_only_booleans(self):
+        for value in (True, False):
+            with self.subTest(value=value):
+                stored = prefs_sync.save({'fridayActs': value})
+                self.assertIs(stored['prefs']['fridayActs'], value)
+                self.assertEqual(prefs_sync.load(), stored)
+        for value in (1, 'false'):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, r'^Invalid preference: fridayActs\.$'):
+                prefs_sync.save({'fridayActs': value})
+        self.assertEqual(prefs_sync.load(), stored)
 
     def test_invalid_waiting_order_does_not_save(self):
         for value in ('sideways', 42):
@@ -197,6 +217,15 @@ class PrefsSyncTests(unittest.TestCase):
             prefs_sync.save({'archived': ['$3']})
         with self.assertRaises(ValueError):
             prefs_sync.save({'archivedTabs': ['%1']})
+
+    def test_helper_tab_filter_syncs(self):
+        shown = {'%2': {'thread': 'review-thread', 'dir': '/work'}}
+        stored = prefs_sync.save({'hideHelpers': False, 'shownHelpers': shown})
+        self.assertEqual(stored['prefs'], {'hideHelpers': False, 'shownHelpers': shown})
+        self.assertEqual(prefs_sync.load(), stored)
+        for bad in ({'hideHelpers': 'yes'}, {'shownHelpers': ['%2']}):
+            with self.assertRaises(ValueError):
+                prefs_sync.save(bad)
 
     def test_rejects_unknown_or_badly_typed_keys(self):
         for changes in ({}, {'selected': '%1'}, {'pinned': 'x'}, {'showPaths': 1}, []):

@@ -13,7 +13,8 @@ type Props = {
 
 // Keep the mic beside its field, including while an inline title is edited.
 export function VoiceField({ value, setValue, label, multiline, fieldRef, field, onLeave, onBusyChange }: Props) {
-  const [prefs] = usePrefs()
+  // The app owns the zone. A field can mount before its own prefs request returns.
+  const [prefs] = usePrefs({ syncZone: false })
   const dictation = useDictation({ text: value, setText: setValue, chime: prefs.voiceSound })
   const { listening, transcribing, canRecord } = dictation
   useEffect(() => { onBusyChange?.(listening || transcribing); return () => onBusyChange?.(false) }, [listening, transcribing, onBusyChange])

@@ -1,3 +1,5 @@
+import { fmtDate, fmtTime, sameDay } from './zone'
+
 export type Agent = 'claude' | 'codex' | 'antigravity' | 'shell'
 /** Omit browser for the existing test browser. Approved signed tabs use mode: 'agent'. */
 export type BrowserId = 'test' | 'signed' | 'chrome'
@@ -82,6 +84,7 @@ export interface Pane {
   tmux_pane_name?: string  // the raw tmux name (@chat_name); pane_name is empty when a newer /rename wins
   group?: string  // the group id (tmux option @group, server/groups.py); empty or unknown = Unstacked
   worktree?: string  // the branch, when Tether started this tab in a new worktree (tmux option @worktree)
+  coordinator?: 'all' | 'needs' | 'off'  // this tab coordinates its tmux session and gets these updates (server/coordinator.py)
   role?: 'advisor'  // a helper tab that answers another tab's questions (server delegate.ROLES)
   pane_icon?: string  // tmux option @chat_icon: a lucide icon name, or svg-<name> for an icon Claude drew (Sidebar.tsx AgentIcon)
   agent_name?: string  // the Claude or Codex session name (/rename); shown when the pane has no Tether name
@@ -95,6 +98,19 @@ export interface Pane {
   ask?: Ask | null  // Attention mode: the ask that waits on you until you answer it (server/attention.py)
   reviewers?: string[]
   reviewers_paused?: string[]  // the panes that review each finished turn of this one (server/review_links.py)
+  parent?: string  // the tab that started this one, from @tether_helper (server/helper_tabs.py)
+  opened_by?: { pane: string; name: string | null; live: boolean }  // the tab that ran `start` for this one (B400)
+  owner?: string  // the live tab that owns this tab's work; the tab nests under it (B400)
+  helper?: boolean  // an agent opened it for its own work; "Hide agent helper tabs" may hide it (helperTabs.ts)
+  task?: string
+  task_role?: string
+  task_depth?: 1 | 2
+  answer_digest?: string
+  from?: { pane: string; name: string; live: boolean }
+  done?: true
+  done_mark?: true
+  moved_by?: 'user'
+  escalated?: boolean  // its owner sent a paused review to you (agent_tab_cli.py escalate)
   brief?: TabBrief | null  // the AI name and description of this conversation (server/tab_brief.py)
 }
 /** A session cron job. every: the schedule in words; next: the next run in Unix seconds, approximate (Claude Code adds jitter). */
@@ -102,11 +118,11 @@ export interface PaneCron { id: string; label: string; every: string; next?: num
 export interface FooterCron extends PaneCron { schedule: string; recurring: boolean }
 // A clock time for a Unix second: "14:05" today, "Wed 09:00" within a week, else the date.
 export const cronTime = (seconds: number, now = Date.now()) => {
-  const date = new Date(seconds * 1000), today = new Date(now)
-  const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  if (date.toDateString() === today.toDateString()) return time
-  if (seconds * 1000 - now < 6 * 86400000) return `${date.toLocaleDateString([], { weekday: 'short' })} ${time}`
-  return `${date.toLocaleDateString([], { day: 'numeric', month: 'short' })} ${time}`
+  const at = seconds * 1000
+  const time = fmtTime(at, { hour: '2-digit', minute: '2-digit' })
+  if (sameDay(at, now)) return time
+  if (at - now < 6 * 86400000) return `${fmtDate(at, { weekday: 'short' })} ${time}`
+  return `${fmtDate(at, { day: 'numeric', month: 'short' })} ${time}`
 }
 export const cronsLabel = (crons: { label: string }[]) => crons.length === 1 ? crons[0].label : `${crons.length} scheduled jobs`
 // One line per job for a tooltip or a screen reader: name, schedule, next run.
@@ -119,17 +135,27 @@ export interface TabBrief { name?: string; description?: string; description_by?
 export interface TabBriefLink { id: string; title: string; state: 'doing' | 'added' | 'done'; open: boolean }
 export interface Needs { kind: 'approval' | 'plan' | 'question'; text: string }
 // since and snoozed_until are Unix seconds. next is the reply's "Next:" line or the prompt's question.
-export interface Ask { pane: string; thread: string | null; since: number; next: string; kind: 'reply' | 'approval' | 'plan' | 'question'; opened: boolean; snoozed_until: number | null; urgent?: boolean }
+export interface Ask { pane: string; thread: string | null; since: number; next: string; kind: 'reply' | 'approval' | 'plan' | 'question'; opened: boolean; snoozed_until: number | null; urgent?: boolean
+  /** The occurrence: a new turn that asks again gets a new id. Writes name it, so a stale page gets 409. */
+  id?: string; asked_at?: number
+  /** In Later: out of the queue until you put it back. by 'rule': the stale ask rule moved it (B335). */
+  later?: { at: number; by: 'rule' | 'you'; entry?: string | null } | null }
 // images: how many images the tool result holds (Claude's Read of a screenshot). GET tool-image serves them.
 // artifact: a page Claude published with its Artifact tool. url: the claude.ai link; path: the local HTML file it came from.
 export interface ToolArtifact { url: string; path: string; title: string }
 export interface ToolSummary { id: string; name: string; title: string; is_error: boolean; status: 'pending' | 'complete'; images?: number; description?: string; started?: string; ended?: string; artifact?: ToolArtifact }
 export interface ToolDetail extends ToolSummary { detail: string; format: 'text' | 'diff'; truncated: boolean }
+export interface AdvisorCall { id: string; model?: string; status: 'pending' | 'answered' | 'error' | 'unknown'; error?: string; result_type?: string; started?: string; ended?: string }
+export type StatusTab = { pane: string; session: string; thread: string | null }
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant'
   text: string
-  kind?: 'actions' | 'terminal' | 'notice' | 'peer' | 'watch' | 'side'
+  source?: 'tether'
+  legacy?: true
+  prompt?: 'status' | 'rules' | 'review'
+  tabs?: StatusTab[]
+  kind?: 'actions' | 'advisor' | 'terminal' | 'notice' | 'peer' | 'watch' | 'side'
   quiet?: string
   watch?: string
   members?: ChatMessage[]
@@ -144,10 +170,104 @@ export interface ChatMessage {
   cron?: string
   title?: string
   tools?: ToolSummary[]
+  advisor?: AdvisorCall
   count?: string
   time: string
   images?: number  // Claude: images inside this user message. GET message-image serves them by image_key.
   image_key?: string
+}
+// Chat data comes from the server and is not trusted. A message needs a role and text to render or to match a send.
+// Its optional fields must have their declared types, or the readers that walk them (tools, members) would throw.
+const MESSAGE_FIELDS: Record<string, 'string' | 'number' | 'boolean'> = {
+  id: 'string', kind: 'string', quiet: 'string', watch: 'string', result: 'string', cron: 'string', title: 'string',
+  count: 'string', time: 'string', image_key: 'string', cycles: 'number', images: 'number', schedule: 'boolean',
+  rearmed: 'boolean', reported: 'boolean',
+}
+const TOOL_FIELDS: Record<string, 'string' | 'number' | 'boolean'> = {
+  is_error: 'boolean', status: 'string', images: 'number', description: 'string', started: 'string', ended: 'string',
+}
+const isObject = (item: unknown): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item)
+const hasStrings = (item: Record<string, unknown>, keys: string[]) => keys.every(key => typeof item[key] === 'string')
+const isArtifact = (item: unknown) => isObject(item) && hasStrings(item, ['url', 'path', 'title'])
+/** Each entry cleaned; entries that clean to null drop out. The same array when every entry came back as itself.
+ *  A rejected entry (null in, null out) counts as a change, and so does a hole in a sparse array. */
+function cleanEach<T>(list: unknown[], clean: (item: unknown) => T | null): T[] {
+  const out: T[] = []
+  let same = true
+  for (let index = 0; index < list.length; index++) {
+    const entry = index in list ? clean(list[index]) : null
+    if (entry === null || entry !== list[index]) same = false
+    if (entry !== null) out.push(entry)
+  }
+  return same ? list as T[] : out
+}
+/** The tool itself when valid, a copy without its wrong-type fields, or null when it has no id, name and title. */
+const cleanTool = (item: unknown): ToolSummary | null => {
+  if (!isObject(item) || !hasStrings(item, ['id', 'name', 'title'])) return null
+  const bad = Object.entries(TOOL_FIELDS).filter(([key, type]) => item[key] !== undefined && typeof item[key] !== type).map(([key]) => key)
+  if (item.artifact !== undefined && !isArtifact(item.artifact)) bad.push('artifact')
+  if (!bad.length) return item as unknown as ToolSummary
+  const rest = { ...item }
+  for (const key of bad) delete rest[key]
+  return rest as unknown as ToolSummary
+}
+const cleanAdvisor = (item: unknown) => {
+  if (!isObject(item) || typeof item.id !== 'string' || !item.id
+    || typeof item.status !== 'string' || !['pending', 'answered', 'error', 'unknown'].includes(item.status)) return undefined
+  const bad = ['model', 'error', 'result_type', 'started', 'ended'].filter(key => item[key] !== undefined && typeof item[key] !== 'string')
+  if (!bad.length) return item
+  const rest = { ...item }
+  for (const key of bad) delete rest[key]
+  return rest
+}
+const isStringList = (item: unknown) => Array.isArray(item) && item.every(entry => typeof entry === 'string')
+function isStatusTabs(item: unknown): item is StatusTab[] {
+  if (!Array.isArray(item)) return false
+  for (const tab of item) {
+    if (!isObject(tab) || !hasStrings(tab, ['pane', 'session']) || (tab.thread !== null && typeof tab.thread !== 'string')) return false
+  }
+  return true
+}
+/** The message itself when every field it has is the right type; a copy without the wrong fields when it has a role and
+ *  text; else null. Bad tools drop out of the tool list, and bad members out of the member list. */
+const cleanMessage = (item: unknown): ChatMessage | null => {
+  if (!isObject(item) || typeof item.role !== 'string' || typeof item.text !== 'string') return null
+  let copy: Record<string, unknown> | null = null
+  const set = (key: string, value: unknown) => { copy ??= { ...item }; if (value === undefined) delete copy[key]; else copy[key] = value }
+  for (const [key, type] of Object.entries(MESSAGE_FIELDS)) if (item[key] !== undefined && typeof item[key] !== type) set(key, undefined)
+  if (item.source !== undefined && item.source !== 'tether') set('source', undefined)
+  if (item.legacy !== undefined && item.legacy !== true) set('legacy', undefined)
+  if (item.prompt !== undefined && item.prompt !== 'status' && item.prompt !== 'rules' && item.prompt !== 'review') set('prompt', undefined)
+  if (item.tabs !== undefined && !isStatusTabs(item.tabs)) set('tabs', undefined)
+  const advisor = cleanAdvisor(item.advisor)
+  if (advisor !== item.advisor) set('advisor', advisor)
+  if (item.tools !== undefined) {
+    if (!Array.isArray(item.tools)) set('tools', undefined)
+    else {
+      const tools = cleanEach(item.tools, cleanTool)
+      if (tools !== item.tools) set('tools', tools)
+    }
+  }
+  if (item.members !== undefined) {
+    const members = Array.isArray(item.members) ? cleanList(item.members) : undefined
+    if (members !== item.members) set('members', members)
+  }
+  if (item.watches !== undefined && !isStringList(item.watches)) set('watches', undefined)
+  return (copy ?? item) as unknown as ChatMessage
+}
+/** A list of clean messages. A list that is already clean comes back as the same array. */
+const cleanList = (list: unknown[]): ChatMessage[] => cleanEach(list, cleanMessage)
+/** The transcript of a chat answer, without entries that are not messages. An error body or an old server can send no
+ *  list or another type; read that as empty. A valid list comes back as the same array, so memos keep it. */
+export const chatMessages = (data: { messages?: unknown } | null | undefined): ChatMessage[] => {
+  const list: unknown = data?.messages
+  return Array.isArray(list) ? cleanList(list) : []
+}
+/** The same chat data with a clean transcript. Valid data comes back as the same object. */
+export const cleanChat = <T extends { messages?: unknown }>(data: T | undefined): T | undefined => {
+  if (!data) return data
+  const messages = chatMessages(data)
+  return messages === data.messages ? data : { ...data, messages }
 }
 export interface ChatData {
   /** A hash of this payload. The chat stream takes it as `have` and skips sending the same payload again (B63). */
@@ -172,6 +292,8 @@ export interface ChatData {
   attention?: Attention | null
   footer?: Footer
   scheduled?: Record<string, ScheduledRun>
+  // Claude only, while it works: prompts waiting in its input queue, from any sender (this browser, Friday, another device, the terminal).
+  queued?: { id?: number; text: string; time: string | null }[]
 }
 // free: Claude's own-answer row ("Type something."). The answer goes in the message box, not a tap.
 export interface Choice { id: number; text: string; detail?: string; selected?: boolean; free?: boolean }
@@ -216,6 +338,7 @@ export interface DialogHint { keys: { key: string; label: string }[]; effect: st
 export interface ClaudeDialog { title: string; note?: string; tabs?: string[]; tab?: string; tab_focus?: boolean; blocks: DialogBlock[]; hints: DialogHint[]; focus: 'list' | 'search' | 'none'; mode: string; text: string }
 export type DialogAction = { action: 'key'; key: string } | { action: 'row'; row: number; label: string; then?: 'Up' | 'Down' } | { action: 'tab'; tab: string } | { action: 'scale'; value: string } | { action: 'filter'; text: string } | { action: 'subtab'; tab: string } | { action: 'option'; value: string }
 export interface Attention { id: string; text: string; reason: 'menu' | 'prompt' | 'no-input-box' | 'panel' | 'picker' | 'info' | 'permissions' | 'side' | 'dialog'; permissions?: PermissionsDialog; dialog?: ClaudeDialog;
+  menu_verified?: false | string;
   /** reason 'side' (Claude's /btw): pending = no answer yet, markdown = text is the raw Markdown answer, fork = the fork key is offered. */
   pending?: boolean; markdown?: boolean; fork?: boolean;
   promptId?: string; revision?: string; requiresResponse?: boolean; body?: string; hints?: string[]; actions?: PromptAction[]; title?: string; subtitle?: string; items?: PickerItem[]; more_above?: number; more_below?: number; hint?: string; question?: string; options?: Choice[]; choice?: ChoiceState; ask?: { id: string; questions: AskQuestion[] }; askBridge?: AskBridge; ask_current?: AskCurrent; login?: { url: string; code: boolean; user_code?: string; message?: string } }
@@ -258,7 +381,7 @@ export async function request<T>(path: string, body?: unknown, signal?: AbortSig
   const init: RequestInit = {
     method: method ?? (body === undefined ? 'GET' : 'POST'),
     credentials: 'same-origin',
-    headers: body === undefined ? undefined : { 'Content-Type': raw ? body.type || 'application/octet-stream' : 'application/json', 'X-Codex-Mobile': '1' },
+    headers: body === undefined ? undefined : { 'Content-Type': raw ? body.type || 'application/octet-stream' : 'application/json', 'X-Codex-Mobile': '1', 'X-Tether-Client': 'web' },
     body: body === undefined ? undefined : raw ? body : JSON.stringify(body),
     signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout),
   }
@@ -270,20 +393,32 @@ export async function request<T>(path: string, body?: unknown, signal?: AbortSig
     if (response.ok && path.split('?')[0] === 'footer') throw error
     return {}
   })
+  if (init.method !== 'GET') announceUndo(response, data)
   if (!response.ok) throw new ApiError(response.status, data.error || `Request failed (${response.status}). Please try again.`, data.draft === true, data.approval === 'required')
-  if (init.method !== 'GET') announceUndo(response)
   return data as T
 }
 
-/** A step the server recorded in the undo history (undo_api.headers): the page offers Undo in a toast (Undo.tsx). */
-export interface UndoStep { id: string; label: string }
+/** A moved tab whose agent still runs with the project it started in (server tmux_merge.restart_info, B326). The page
+ *  offers Restart in the same toast; restart-tab starts the agent again in place so it loads the session's project. */
+export interface RestartOffer { pane: string; thread: string | null; project: string; name: string; session: string }
+/** A step the server recorded in the undo history (undo_api.headers): the page offers Undo in a toast (Undo.tsx).
+ *  id is '' when a move needs a restart but the server recorded no undo step. */
+export interface UndoStep { id: string; label: string; restart?: RestartOffer }
 export const UNDO_EVENT = 'tether-undo-step'
-function announceUndo(response: Response) {
-  const id = response.headers.get('X-Tether-Undo')
-  if (!id || typeof window === 'undefined') return
+function restartOffer(data: unknown): RestartOffer | undefined {
+  const offer = (data as { restart?: Partial<RestartOffer> } | null)?.restart
+  if (!offer || typeof offer.pane !== 'string' || typeof offer.name !== 'string' || typeof offer.session !== 'string') return undefined
+  return { pane: offer.pane, thread: typeof offer.thread === 'string' && offer.thread ? offer.thread : null,
+    project: typeof offer.project === 'string' ? offer.project : '', name: offer.name, session: offer.session }
+}
+function announceUndo(response: Response, data: unknown) {
+  if (typeof window === 'undefined') return
+  const id = response.headers.get('X-Tether-Undo') ?? ''
+  const restart = response.ok ? restartOffer(data) : undefined
+  if (!id && !restart) return
   let label = ''
   try { label = decodeURIComponent(response.headers.get('X-Tether-Undo-Label') ?? '') } catch { /* a bad label: use the plain one */ }
-  window.dispatchEvent(new CustomEvent<UndoStep>(UNDO_EVENT, { detail: { id, label: label || 'Last step' } }))
+  window.dispatchEvent(new CustomEvent<UndoStep>(UNDO_EVENT, { detail: { id, label: label || 'Last step', ...(restart && { restart }) } }))
 }
 /** A GET that the server can answer with 304 Not Modified. It sends the ETag of the last answer and returns the last
  *  data again when nothing changed, so a poll of an unchanged list moves no body bytes. `last` holds the state per caller. */

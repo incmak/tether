@@ -1,14 +1,14 @@
-// The commit gate in Settings › Agents (src/CommitGate.tsx, server/commit_gate.py) against an existing build: the
+// The commit gate in Settings › Commit & merge (src/CommitGate.tsx, server/commit_gate.py) against an existing build: the
 // skeleton while it loads, the load error, the empty log, the numbers, a mode change, a failed save, the keyboard, and
 // 320 px and 1280 px without overflow, in light and dark. Every API request stays in this page's fixtures.
 // Run: cd ui && npm run test:ui (or DIST=<build> node test_commit_gate_ui.cjs).
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, shotsDir } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-18/commit-gate/shots')
+const SHOTS = shotsDir('commit-gate')
 const sizes = [[320, 720], [1280, 900]]
 const pane = { id: '%1', tmux_session: '$1', label: 'project:0.0', pane_name: 'Fix login', agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: 't1', approval: null }
 const fixture = {
@@ -28,11 +28,11 @@ const modes = [['off', 'Off', 'Commits are not checked.'], ['observe', 'Observe'
   ['enforce', 'Enforce', 'A Claude commit with no valid "Verified:" line is blocked. After 2 blocks in one session, the next one passes.']].map(([mode, name, summary]) => ({ mode, name, summary }))
 const none = { days: 7, commits: 0, passed: 0, would_block: 0, blocked: 0, let_through: 0, unknown: 0, stamped: 0, unstamped: 0, false_blocks: 0, rate: null }
 const busy = { days: 7, commits: 1240, passed: 1100, would_block: 90, blocked: 6, let_through: 2, unknown: 42, stamped: 1101, unstamped: 97, false_blocks: 3, rate: 0.0027 }
-let gate, load, saveFails, release
+let gate, load, saveFails, loadGate
 
 async function main() {
   let browser, page, server, failed = 0
-  const posts = [], pageErrors = []
+  const pageErrors = []
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
   try {
     await fs.mkdir(SHOTS, { recursive: true })
@@ -63,8 +63,8 @@ async function main() {
       if (url.pathname.includes('/api/')) {
         const endpoint = url.pathname.split('/api/')[1]
         if (request.method() !== 'GET') {
-          const body = request.postDataJSON(); posts.push({ endpoint, body })
           if (endpoint === 'commit-gate') {
+            const body = request.postDataJSON()
             if (saveFails) return route.fulfill({ status: 403, json: { error: 'Reload the page and try again.' } })
             gate = { ...gate, global: body.mode, mode: body.mode }
             if (body.mode === 'enforce') load = 'fail'
@@ -74,7 +74,7 @@ async function main() {
           return route.fulfill({ json: { ok: true } })
         }
         if (endpoint === 'commit-gate') {
-          if (load === 'wait') await new Promise(resolve => { release = resolve })
+          if (load === 'wait') await loadGate
           if (load === 'fail') return route.fulfill({ status: 500, json: { error: 'The server could not read the commit gate.' } })
           return route.fulfill({ json: gate })
         }
@@ -117,7 +117,9 @@ async function main() {
       const at = `${width}px`
       // Loading, then a load error.
       gate = { modes, global: 'observe', mode: 'observe', source: 'global', project: null, stats: none, max_blocks: 2 }
-      load = 'wait'; saveFails = false; posts.length = 0
+      let release
+      loadGate = new Promise(resolve => { release = resolve })
+      load = 'wait'; saveFails = false
       await open(width, height, 'light')
       await section.locator('.skeleton[aria-busy="true"]').waitFor()
       check(`${at} loading announces itself`, (await section.getByRole('status').first().innerText()).includes('Loading the commit gate'))
@@ -141,6 +143,14 @@ async function main() {
       await section.scrollIntoViewIfNeeded()
       await page.screenshot({ path: path.join(SHOTS, `commit-gate-empty-${width}.png`) })
 
+      gate = { ...gate, stats: null }
+      await open(width, height, 'light')
+      await section.getByRole('status').filter({ hasText: 'Commit gate stats are temporarily unavailable.' }).waitFor()
+      check(`${at} unavailable stats keep the mode controls`, await observe.isChecked() && await observe.isEnabled())
+      check(`${at} unavailable stats: no page overflow`, !(await overflow()) && await inside())
+      await section.scrollIntoViewIfNeeded()
+      await page.screenshot({ path: path.join(SHOTS, `commit-gate-unavailable-${width}.png`) })
+
       // The numbers, a mode change by keyboard, and a failed save.
       gate = { ...gate, stats: busy }
       await open(width, height, 'light')
@@ -149,10 +159,13 @@ async function main() {
       check(`${at} shows the counts`, status.includes('1,240 commits checked · 98 with no valid line · 6 blocked, 2 let through · 42 not readable'), status)
       check(`${at} shows the false-block rate`, status.includes('False-block rate: 0.3% (3 of 1,101 commits with a valid line).'), status)
       await observe.focus()
-      await page.keyboard.press('ArrowRight')
+      const [request] = await Promise.all([
+        page.waitForRequest(req => req.method() === 'POST' && new URL(req.url()).pathname.endsWith('/api/commit-gate')),
+        page.keyboard.press('ArrowRight'),
+      ])
+      const sent = request.postDataJSON()
+      check(`${at} arrow key posts the mode`, JSON.stringify(sent) === '{"mode":"enforce"}', JSON.stringify(sent))
       await section.locator('.codex-level-note').filter({ hasText: 'Enforce.' }).waitFor()
-      const sent = posts.find(post => post.endpoint === 'commit-gate')
-      check(`${at} arrow key posts the mode`, sent && JSON.stringify(sent.body) === '{"mode":"enforce"}', JSON.stringify(sent))
       check(`${at} Enforce is checked and keeps focus`, await enforce.isChecked() && await enforce.evaluate(node => node === document.activeElement))
       await section.getByRole('alert').filter({ hasText: 'The server could not read the commit gate.' }).waitFor()
       check(`${at} failed refresh keeps the saved mode`, await enforce.isChecked())

@@ -1,0 +1,47 @@
+/* Settings › Activity (ActivityLog.tsx). The tools wrap at narrow widths; every control is at least 34 px (44 px on touch). */
+.activity-log code { font-size: 12px; overflow-wrap: anywhere; }
+.activity-log .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.audit-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 14px; }
+.audit-search { display: flex; flex: 1 1 220px; align-items: center; gap: 6px; min-width: 0; height: 34px; padding: 0 8px 0 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--muted); cursor: text; }
+.audit-search:focus-within { border-color: var(--accent); outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -1px; }
+.activity-log .audit-search input { flex: 1; width: auto; min-width: 0; height: 100%; min-height: 0; margin: 0; padding: 0; border: 0; background: none; color: var(--text); font-size: 14px; outline: none; box-shadow: none; }
+.audit-filters { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.sm-trigger.audit-filter { width: auto; max-width: 200px; min-height: 34px; padding: 0 8px 0 10px; border-radius: var(--radius); font-size: 13px; }
+.sm-trigger.audit-filter > svg:first-child { color: var(--muted); }
+.audit-dates { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; padding: 0; border: 0; min-width: 0; color: var(--muted); }
+.audit-dates label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+.activity-log .audit-dates input { width: auto; min-height: 34px; margin: 0; padding: 0 8px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--text); font: inherit; font-size: 13px; }
+.audit-clear { min-height: 34px; font-size: 13px; }
+
+.audit-days { list-style: none; margin: 0; padding: 0; }
+.audit-day h4 { position: sticky; top: 0; z-index: 1; margin: 0; padding: 10px 0 6px; background: var(--panel, var(--bg)); color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .02em; text-transform: uppercase; }
+.audit-list { list-style: none; margin: 0 0 6px; padding: 0; }
+.audit-row { display: grid; grid-template-columns: 4.5em minmax(0, 1fr); gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); }
+.audit-list .audit-row:first-child { border-top: 0; }
+.audit-time { padding-top: 1px; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.audit-text { display: grid; gap: 3px; min-width: 0; }
+.audit-summary { font-weight: 500; overflow-wrap: anywhere; }
+.audit-undo { display: inline-flex; align-items: center; gap: 3px; margin-right: 6px; padding: 0 6px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 11px; font-weight: 600; vertical-align: 1px; }
+.audit-change { font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.audit-change .audit-old { color: var(--muted); }
+.audit-meta { display: flex; flex-wrap: wrap; gap: 2px 12px; color: var(--muted); font-size: 12px; }
+.audit-meta > span { display: inline-flex; align-items: center; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.audit-meta svg { flex: none; }
+
+.audit-state { margin: 28px 0; color: var(--muted); }
+.audit-state h4 { margin: 0 0 6px; color: var(--text); font-size: 15px; }
+.audit-state p { margin: 0 0 12px; font-size: 13px; line-height: 1.6; max-width: 60ch; }
+.audit-state .secondary { display: inline-flex; align-items: center; gap: 6px; }
+.audit-stale { font-size: 13px; }
+.audit-more { margin: 8px 0 4px; }
+.audit-end { margin: 10px 0 0; }
+
+@media (max-width: 420px) {
+  .audit-search { flex-basis: 100%; }
+  .activity-log .audit-search input { font-size: 16px; }
+  .audit-row { grid-template-columns: 1fr; gap: 2px; }
+}
+@media (pointer: coarse) {
+  .audit-search, .sm-trigger.audit-filter, .activity-log .audit-dates input, .audit-clear { min-height: 44px; height: 44px; }
+  .activity-log .audit-search input, .activity-log .audit-dates input { font-size: 16px; }
+}

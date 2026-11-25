@@ -26,7 +26,8 @@ VERIFY_SECS = 60
 MAX_PASS = 20
 GAP = 1.5
 OPTIONS = ('@chat_name', '@chat_name_at', '@chat_name_auto', '@chat_name_by', '@chat_icon', '@chat_icon_by',
-           '@project_rev', '@worktree', '@group', '@tether_role', '@group_by')
+           '@project_rev', '@worktree', '@group', '@tether_role', '@group_by',
+           '@tether_done', '@tether_reopened', '@tether_done_at')
 SESSION_OPTIONS = ('@project', '@groups')  # @groups: the session's groups (groups.py), so restored @group labels resolve
 _STATES = ('open', 'pending', 'resuming', 'failed', 'deferred')
 _FORMAT = '\t'.join('#{' + field + '}' for field in
@@ -144,7 +145,8 @@ def server_id(*, run=subprocess.run):
         identifier = result.stdout.strip()
         if result.returncode == 0 and re.fullmatch(r'\d+:\d+', identifier):
             return 'up', identifier
-        if result.returncode and any(text in result.stderr.lower() for text in ('no server running', 'error connecting')):
+        error = result.stderr.lower() if result.returncode else ''
+        if 'no server running' in error or ('error connecting' in error and '(no such file or directory)' in error):
             return 'none', None
     except (OSError, subprocess.SubprocessError):
         pass
@@ -167,7 +169,8 @@ def _eligible(entry):
     thread = entry.get('thread')
     return (entry.get('agent') in ('claude', 'codex') and entry.get('writable') is True
             and isinstance(thread, str) and UUID.fullmatch(thread)
-            and not entry.get('pending_conversation') and _session(entry) != side_shells.SESSION)
+            and not entry.get('pending_conversation') and not entry.get('friday_draft')
+            and _session(entry) != side_shells.SESSION)
 
 
 def _prune(now):
@@ -258,15 +261,20 @@ def tick(*, entries, folder_of, status_of, display_dir, run=subprocess.run,
             if _archived(entry, prefs, display_dir):
                 archived.add(thread)
                 continue
+            folder = folder_of(entry) or ''
+            try:
+                working = status_of(entry).get('state') == 'Working'
+            except (FileNotFoundError, ProcessLookupError):
+                continue  # The pane process can exit after discovery.
             row = rows.get(entry['id'], {})
             refreshed[thread] = dict(
                 thread=thread, agent=entry['agent'], profile=entry.get('codex_profile'), pane=entry['id'],
                 session=_session(entry), session_id=entry.get('tmux_session', ''),
                 order=_order(entry.get('position')),
-                folder=folder_of(entry) or '', name=row.get('@chat_name') or entry.get('pane_name') or '',
+                folder=folder, name=row.get('@chat_name') or entry.get('pane_name') or '',
                 icon=entry.get('pane_icon') or '', options={opt: row[opt] for opt in OPTIONS if row.get(opt)},
                 session_options={opt: row[opt] for opt in SESSION_OPTIONS if row.get(opt)},
-                working=status_of(entry).get('state') == 'Working', state='open', error='', started=0,
+                working=working, state='open', error='', started=0,
                 missing_since=None, stopped=False, offset=0, transcript=entry.get('transcript') or '')
 
         # Terminal probes and cleanup must stay outside the snapshot lock.

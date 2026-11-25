@@ -1,4 +1,4 @@
-// Desktop: a two-finger trackpad swipe over a chat's stack row or tab strip scrolls that strip (Settings › Sessions &
+// Desktop: a two-finger trackpad swipe over a chat's stack row or tab strip scrolls that strip (Settings › Sidebar &
 // chat). It never switches tabs and never goes Back or Forward. Elsewhere on the page the swipe stays the browser's
 // Back and Forward (B81: the root lets x overscroll through, index.css).
 //

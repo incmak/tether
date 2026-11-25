@@ -2,6 +2,7 @@ import { Spinner } from './Skeleton'
 import { useSyncExternalStore } from 'react'
 import { X } from 'lucide-react'
 import { errorText, request } from './api'
+import { reloadPage } from './backNav'
 
 interface Run { state: 'running' | 'failed' | 'done'; target: string; error?: string }
 interface Update { current?: string; latest: string | null; available: boolean; url: string; mode: 'notify' | 'auto' | 'off'; checking: boolean; can_update?: boolean; run?: Run | null }
@@ -103,7 +104,7 @@ export function UpdateBanner() {
   if (active?.state === 'done') {
     return <div className="release-update-banner" role="status">
       <span>Updated to {label(active.target)}</span>
-      <button type="button" className="primary sm" onClick={() => location.reload()}>Reload</button>
+      <button type="button" className="primary sm" onClick={reloadPage}>Reload</button>
     </div>
   }
   if (active?.state === 'running') {

@@ -6,6 +6,8 @@ window.fetch = async (...args) => {
   return response;
 };
 const chat = document.querySelector('#chat');
+// Fold labels for prompts Tether sent, by the receipt's prompt kind (server/injected_prompts.py track_send).
+const TETHER_PROMPTS = {status: 'Tether status update', review: 'Review message from Tether', rules: 'Coordinator rules from Tether'};
 const status = document.querySelector('#status');
 const tabs = document.querySelector('#tabs');
 const latest = document.querySelector('#latest');
@@ -151,10 +153,20 @@ function updateAttention(value) {
   document.querySelector('#attention-type').style.display = info ? 'none' : '';
   document.querySelector('#attention-keys').style.display = info ? 'none' : '';
   if (wasHidden || atBottom) text.scrollTop = text.scrollHeight;
-  // A recognised multiple-choice question reads as a chat card with tappable options; the raw screen stays one tap away.
-  const card = document.querySelector('#attention-card'), choices = !info && value.options?.length > 1;
+  // A one-choice question the server verified (menu_verified holds its revision) reads as a chat card with tappable options.
+  // Anything else shows the raw keys: a card answer must name the question it answers, so the server can refuse a stale one.
+  const card = document.querySelector('#attention-card'), answers = (value.options || []).filter(option => !option.free);
+  const choices = !info && !value.ask_current?.multi && typeof value.menu_verified === 'string' && answers.length > 1;
   panel.classList.toggle('as-card', choices);
   card.hidden = !choices;
+  // A question the server did not verify, or a multi-select one: a raw key would land on a row nobody checked.
+  // Offer the interactive terminal instead, where the user sees the rows.
+  const terminalOnly = !info && value.reason === 'menu' && !choices;
+  document.querySelector('#attention-terminal').hidden = !terminalOnly;
+  if (terminalOnly) {
+    document.querySelector('#attention-keys').style.display = 'none';
+    document.querySelector('#attention-type').style.display = 'none';
+  }
   // Show only the keys that mean something for this screen: a card's options replace the arrows and numbers.
   const numbers = new Set([...value.text.matchAll(/^\s*[>❯›]?\s*(\d)[.)]\s/gm)].map(match => match[1]));
   const yesNo = /\(y\/n\)|\[y\/n\]|\(yes\/no\)|\by\/n\b/i.test(value.text);
@@ -166,16 +178,18 @@ function updateAttention(value) {
   if (!choices) return;
   card.querySelector('.q').textContent = value.question || 'Choose an option';
   const list = card.querySelector('.opts');
-  const signature = JSON.stringify(value.options.map(option => [option.id, option.text, option.detail]));
+  list.dataset.revision = value.menu_verified;
+  const signature = JSON.stringify(answers.map(option => [option.id, option.text, option.detail]));
   if (list.dataset.signature !== signature) {
     list.dataset.signature = signature;
-    list.replaceChildren(...value.options.map(option => {
+    list.replaceChildren(...answers.map(option => {
       const button = document.createElement('button'); button.type = 'button';
       const number = document.createElement('b'); number.textContent = option.id;
       const label = document.createElement('span'); label.textContent = option.text;
       if (option.detail) { const detail = document.createElement('small'); detail.textContent = option.detail; label.append(detail); }
       button.append(number, label);
-      button.addEventListener('click', () => sendTerminalInput('/mobile/api/key', {key: String(option.id)}));
+      button.addEventListener('click', () => sendTerminalInput('/mobile/api/menu',
+        {choice: option.id, label: option.text, revision: list.dataset.revision}));
       return button;
     }));
   }
@@ -191,6 +205,9 @@ async function sendTerminalInput(path, payload) {
     setTimeout(refresh, 400);
   } catch (failure) { error.textContent = failure.message; }
 }
+document.querySelector('#attention-terminal').addEventListener('click', () => {
+  openModelPicker(selected, thread);
+});
 for (const button of document.querySelectorAll('#attention-keys button'))
   button.addEventListener('click', () => sendTerminalInput('/mobile/api/key', {key: button.dataset.key}));
 document.querySelector('#attention-type').addEventListener('submit', event => {
@@ -489,19 +506,24 @@ async function refresh(pushed) {
     if (live.size) for (const [id, item] of rendered) if (!live.has(id)) { item.element.remove(); rendered.delete(id); }
     for (let position = data.messages.length - 1; position >= 0; position--) {
       const message = data.messages[position], existing = rendered.get(message.id);
-      if (existing?.text === message.text) { next = existing.element; continue; }
+      // A receipt can bind after the first render: same id and text, new provenance. Key on both.
+      const key = message.text + '\u0000' + (message.source || '') + '\u0000' + (message.prompt || '');
+      if (existing?.key === key) { next = existing.element; continue; }
       const article = document.createElement('article');
       article.className = 'message ' + message.role;
       if (message.kind === 'notice') article.classList.add('agent-notice');
       if (message.kind === 'banner') article.classList.add('agent-banner');
       const carried = message.role === 'user' && /^This session is being continued from a previous conversation/.test(message.text);
-      if (carried) {
-        // The summary Claude Code inserts after a context reset: not something you wrote, so it stays folded.
-        article.className = 'message agent-actions';
+      // A prompt Tether sent (the server proved it with a send receipt): never shown as your words.
+      const sent = message.role === 'user' && message.source === 'tether';
+      if (carried || sent) {
+        // The summary Claude Code inserts after a context reset, or a Tether prompt: not something you wrote, so it stays folded.
+        article.className = 'message agent-actions' + (sent ? ' tether-sent' : '');
         const details = document.createElement('details'), summary = document.createElement('summary'), body = document.createElement('div');
-        summary.textContent = 'Summary of the earlier conversation'; body.className = 'carried-summary';
+        summary.textContent = carried ? 'Summary of the earlier conversation' : (Object.hasOwn(TETHER_PROMPTS, message.prompt) ? TETHER_PROMPTS[message.prompt] : 'Sent by Tether');
+        body.className = 'carried-summary';
         details.append(summary, body); article.append(details); format(body, message.text);
-        rendered.set(message.id, {text: message.text, element: article, role: message.role});
+        rendered.set(message.id, {key, element: article, role: message.role});
         if (existing) existing.element.replaceWith(article); else if (next) next.before(article); else chat.append(article);
         changed = true; next = article;
         continue;
@@ -529,7 +551,7 @@ async function refresh(pushed) {
       else if (next) next.before(article);
       else chat.append(article);
       changed = true; next = article;
-      rendered.set(message.id, {text: message.text, element: article, role: message.role});
+      rendered.set(message.id, {key, element: article, role: message.role});
     }
     if (data.earlier > 0) {
       const reachable = data.limit < (data.max_limit || Infinity);   // the server never sends more than max_limit messages
@@ -550,7 +572,7 @@ async function refresh(pushed) {
     setState(selected, data.state || (data.busy ? 'Working' : 'Idle'));
     const pending = pendingMessages.get(selected + ':' + thread) || [];
     // Confirmed = a user message with the same text that arrived after this one was sent (by position in the history, not by clock).
-    const confirmed = item => data.messages.some(message => message.role === 'user' && sameText(message.text, item.text) && !(parseFloat(message.id) <= item.after));
+    const confirmed = item => data.messages.some(message => message.role === 'user' && message.source !== 'tether' && sameText(message.text, item.text) && !(parseFloat(message.id) <= item.after));
     const matched = new Set(pending.filter(confirmed));
     let last = -1, dropped = 0;
     pending.forEach((item, position) => { if (matched.has(item)) last = position; });
@@ -572,7 +594,7 @@ async function refresh(pushed) {
     }
     workingLabel.textContent = (agentNames[agent] || agent) + ' is working…';
     working.hidden = !!data.approval || !!data.attention || (data.state !== 'Working' && !data.busy);
-    const lastUser = [...chat.querySelectorAll('.message.user')].at(-1);
+    const lastUser = [...chat.querySelectorAll(':scope > .message.user, :scope > .message.tether-sent')].at(-1);   // rows only: a message may render HTML with these classes
     if (lastUser) lastUser.after(working); else chat.prepend(working);
     updateUsage(data.usage);
     const busy = !!(data.busy || data.state === 'Working');
@@ -765,8 +787,7 @@ addEventListener('drop', (event) => {
 });
 document.querySelector('#close-screen').addEventListener('click', () => screenDialog.close());
 document.querySelector('#screen-interact').addEventListener('click', () => {
-  const tmuxSession = chatTabs().find(tab => tab.dataset.session === selected)?.dataset.tmuxSession;
-  screenDialog.close(); openModelPicker(tmuxSession, selected, thread);   // the full interactive terminal
+  screenDialog.close(); openModelPicker(selected, thread);   // the full interactive terminal
 });
 screenDialog.addEventListener('close', () => { clearInterval(screenTimer); screenTimer = null; if (!input.disabled) input.focus({preventScroll: true}); });
 document.querySelector('#screen-more').addEventListener('click', event => {
@@ -781,11 +802,12 @@ document.querySelector('#screen-copy').addEventListener('click', async event => 
 const modelDialog = document.querySelector('#model-dialog');
 const modelFrame = document.querySelector('#model-frame');
 let modelSession = null, modelThread = null;
-function openModelPicker(tmuxSession, session, conversation) {
-  if (!tmuxSession) { showNotice('Could not find the terminal for this tab. Refresh and try again.'); return; }
+// The live view and the key buttons act on the same pane: "z%N" shows that pane (zoomed), never the session's active tab.
+function openModelPicker(session, conversation) {
+  if (!/^%[0-9]+$/.test(session || '')) { showNotice('Could not find the terminal for this tab. Refresh and try again.'); return; }
   modelSession = session; modelThread = conversation;
   document.querySelector('#model-error').textContent = '';
-  modelFrame.src = '/terminal/live/?arg=' + encodeURIComponent(tmuxSession);
+  modelFrame.src = '/terminal/live/?arg=' + encodeURIComponent('z' + session);
   modelDialog.showModal();
 }
 document.querySelector('#close-model').addEventListener('click', () => modelDialog.close());

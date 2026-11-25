@@ -3,10 +3,10 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser, serveLocal } = require('../browser_test_helper.cjs')
+const { getBrowser, serveLocal, shotsDir, prefsStore } = require('../browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.resolve(__dirname, '../dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../../.release-work/2026-11-16/responsive/tools/shots')
+const SHOTS = shotsDir('responsive/tools')
 const sizes = [[320, 640], [390, 844], [740, 360], [768, 1024], [1024, 768], [1440, 900]]
 const now = Date.now()
 const iso = seconds => new Date(now - seconds * 1000).toISOString()
@@ -39,7 +39,7 @@ const fixture = {
   footer: { observed: true, model: 'Opus 5.5', mode: 'default', notices: [] },
   subagents: { main: { model: 'claude-opus-5-5', context: 91452, title: 'Build the agent map' }, agents, tasks },
   'subagent-tool': { id: 't1', name: 'Bash', title: 'ls server', is_error: false, status: 'complete', detail: '$ ls server\nserver.py\nsubagents.py', format: 'text', truncated: false, images: 0 },
-  prefs: { prefs: {}, version: 1 }, 'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
+  'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
   update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Test server', office: false },
   catalog: { commands: [], plugins: [], mcp: [], note: '' }, stream: {}, 'codex-runs': { pane: '%1', running: 0, runs: [] }, 'autonomy/review': { due: false, reason: null, new: 0, disputed: 0, total: 0, last_review: 0, snoozed_until: 0, groups: [] },
   'browser/agents': { enabled: false, available: false, reason: 'off', agents: [], asks: [] },
@@ -78,10 +78,12 @@ async function main() {
   await page.emulateMedia({reducedMotion:'reduce',colorScheme:'light'})
   await page.routeWebSocket('**/*',socket=>socket.close())
   let detailMode='ok', trustMode='untrusted', terminalMode='ok'
+  const prefs = prefsStore()
   await page.route('**/*',async route=>{
    const req=route.request(),url=new URL(req.url())
    if(url.pathname.includes('/api/')){
     const endpoint=url.pathname.split('/api/')[1]
+    if (endpoint === 'prefs') return route.fulfill({ json: req.method() === 'GET' ? prefs.get() : prefs.post(req.postDataJSON()) })
     if(endpoint==='stream')return route.fulfill({status:204,body:''})
     if(endpoint==='codex-trust'&&req.postDataJSON()?.op==='trust')return route.fulfill({status:500,json:{error:long}})
     if(endpoint==='codex-trust')return route.fulfill({json:{state:trustMode,folder:'/workspace/a',target:'/workspace/'+long,target_id:'1:1'}})
@@ -107,7 +109,7 @@ async function main() {
    Object.defineProperty(navigator,'mediaDevices',{value:{getUserMedia:async()=>{throw new DOMException('Blocked','NotAllowedError')}}})
   })
   const audit=async(selector,label)=>{const bad=await page.locator(selector).first().evaluate((root,selector)=>{const box=root.getBoundingClientRect();return [...root.querySelectorAll('button')].filter(el=>el.getClientRects().length).flatMap(el=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width<24||r.height<24||r.left<box.left-1||r.right>box.right+1||(selector==='.live'&&(r.top<box.top-1||r.bottom>box.bottom+1))||el.textContent.trim()&&el.scrollWidth>el.clientWidth+1&&s.textOverflow!=='ellipsis'?[{text:el.textContent,label:el.ariaLabel,w:r.width,h:r.height,left:r.left,right:r.right,top:r.top,bottom:r.bottom,scroll:el.scrollWidth,client:el.clientWidth}]:[]})},selector);check(label,!bad.length,JSON.stringify(bad))}
-  const voiceFits=async label=>{const bad=await page.locator('.live').evaluate(root=>{const top=root.querySelector('.live-top').getBoundingClientRect().bottom,bottom=root.querySelector('.live-approval').getBoundingClientRect().top;return [...root.querySelectorAll('.live-center > *')].filter(el=>el.getClientRects().length).map(el=>({name:el.className,top:el.getBoundingClientRect().top,bottom:el.getBoundingClientRect().bottom})).filter(r=>r.top<top-1||r.bottom>bottom+1)});check(label,!bad.length,JSON.stringify(bad));const error=await page.locator('.live-problem').evaluate(el=>{const box=el.parentElement,r=el.getBoundingClientRect(),b=box.getBoundingClientRect();return{top:r.top,bottom:r.bottom,boxTop:b.top,boxBottom:b.bottom,scroll:box.scrollHeight,client:box.clientHeight}});check(label+' live status visible',await page.locator('.live-status').isVisible());check(label+' microphone error fully visible',error.top>=error.boxTop+7&&error.bottom<=error.boxBottom+1&&error.scroll<=error.client+1,JSON.stringify(error))}
+  const voiceFits=async label=>{const bad=await page.locator('.live').evaluate(root=>{const top=root.querySelector('.live-top').getBoundingClientRect().bottom,bottom=root.querySelector('.live-approval').getBoundingClientRect().top;return [...root.querySelectorAll('.live-center > *')].filter(el=>el.getClientRects().length).map(el=>({name:el.className,top:el.getBoundingClientRect().top,bottom:el.getBoundingClientRect().bottom})).filter(r=>r.top<top-1||r.bottom>bottom+1)});check(label,!bad.length,JSON.stringify(bad));const error=await page.locator('.live-problem').evaluate(el=>{/* The faded scroll box, not the .live-now wrapper: its top padding keeps text below the fade mask. */const box=el.closest('.live-words'),r=el.getBoundingClientRect(),b=box.getBoundingClientRect();return{top:r.top,bottom:r.bottom,boxTop:b.top,boxBottom:b.bottom,fade:parseFloat(getComputedStyle(box).paddingTop),scroll:box.scrollHeight,client:box.clientHeight}});check(label+' live status visible',await page.locator('.live-status').isVisible());check(label+' microphone error fully visible',error.fade>=7&&error.top>=error.boxTop+error.fade-1&&error.bottom<=error.boxBottom+1&&error.scroll<=error.client+1,JSON.stringify(error))}
   const shot=async name=>page.screenshot({path:path.join(SHOTS,`${phase}-${name}.png`)})
   const fit=async(selector,label)=>{
    const metrics=await page.locator(selector).first().evaluate(el=>{

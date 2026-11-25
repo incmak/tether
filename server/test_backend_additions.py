@@ -1,4 +1,5 @@
 """Backend routes use in-memory requests and mocked tmux, never live panes."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 import os
@@ -176,7 +177,7 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(self.request('/mobile/api/split', {
                 'session': '%12', 'direction': 'right', 'cwd': '~/projects/project',
             }), (201, {'pane': '%13'}))
-        new_window.assert_called_once_with('%12', self.run, cwd=str(self.project.resolve()), group=None)
+        new_window.assert_called_once_with('%12', self.run, cwd=str(self.project.resolve()), group=None, by_user=True)
 
     def test_tmux_session_passes_explicit_cwd(self):
         with patch.object(server, 'create_session', return_value='%13') as create:
@@ -223,6 +224,7 @@ class BackendTests(unittest.TestCase):
                 [paths.TMUX, 'display-message', '-p', '-t', '%12', '#{window_id}\t#{pane_current_path}\t#{@group}'],
                 [paths.TMUX, 'display-message', '-p', '-t', '@7', '#{window-size}\t#{window_width}\t#{window_height}'],
                 [paths.TMUX, 'new-window', '-a', '-t', '@7', '-c', '/a folder', '-P', '-F', '#{pane_id}'],
+                [paths.TMUX, 'set-option', '-p', '-t', '%13', '@group_by', 'user'],
                 [paths.TMUX, 'resize-window', '-t', '%13', '-x', '160', '-y', '48'],
             ])
         self.verify.assert_not_called()
@@ -243,9 +245,30 @@ class BackendTests(unittest.TestCase):
                                                         'set-option', '-p', '-t', '%12', '-u', '@chat_name_at', ';',
                                                         'set-option', '-p', '-t', '%12', '@chat_name_by', 'cleared', ';', 'set-option', '-p', '-t', '%12', '-u', '@chat_name_auto'])
         self.run.reset_mock()
-        for body in ({'pane': '$1', 'name': 'x'}, {'pane': '%12', 'name': 'x' * 41}, {'pane': '%12', 'name': 'a\nb'}, {'pane': '%12'}):
+        for body in ({'pane': '$1', 'name': 'x'}, {'pane': '%12', 'name': 'x' * 41}, {'pane': '%12', 'name': 'a\nb'},
+                     {'pane': '%12'}, {'pane': '%12', 'name': 'x', 'keep_session': 'yes'}):
             self.assertEqual(self.request('/mobile/api/pane-name', body)[0], 400)
         self.run.assert_not_called()
+
+    def test_pane_name_can_preserve_a_one_pane_session(self):
+        entry = {'id': '%12', 'tmux_session': '$7', 'label': 'Friday chats', 'agent': 'claude'}
+        self.entries.return_value = [entry]
+        with patch.object(server, 'rename_agent', return_value='') as agent:
+            self.assertEqual(server.name_together('%12', 'api', from_session=False, keep_session=True), '')
+            self.run.assert_not_called()
+            agent.assert_called_once_with(entry, 'api')
+
+            agent.reset_mock()
+            self.assertEqual(server.name_together('%12', 'api', from_session=False), '')
+            self.run.assert_called_once_with([paths.TMUX, 'rename-session', '-t', '%12', 'api'], capture_output=True, timeout=5)
+            agent.assert_called_once_with(entry, 'api')
+
+            self.run.reset_mock()
+            agent.reset_mock()
+            body = {'pane': '%12', 'name': 'api', 'keep_session': True}
+            self.assertEqual(self.request('/mobile/api/pane-name', body), (200, {'pane': '%12', 'name': 'api'}))
+            self.assertFalse(any(call.args[0][1] == 'rename-session' for call in self.run.call_args_list))
+            agent.assert_called_once_with(entry, 'api')
 
     def test_pane_icon_sets_and_clears_a_tmux_pane_option(self):
         self.run.reset_mock()

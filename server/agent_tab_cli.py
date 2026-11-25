@@ -41,7 +41,12 @@ def arguments(argv):
     start.add_argument('--role', choices=('advisor', 'second-advisor'), help='name the tab after this tab and mark it with the role icon')
     start.add_argument('--cwd')
     start.add_argument('--worktree', metavar='BRANCH')
-    start.add_argument('--stack', '--group', dest='group', metavar='NAME', help='1 to 3 words that name the new tab. The tab opens in your stack, or in no stack; Tether makes no stack for it (Unstacked or Main = no stack); --group is the old name')
+    start.add_argument('--owner', metavar='self|%N',
+                       help='The placement owner defaults to this tab. Use self for a separate task in Unstacked. '
+                            'Use %%N for a Claude or Codex tab in this tmux session.')
+    start.add_argument('--stack', '--group', dest='group', metavar='NAME',
+                       help='1 to 3 words that name the new tab. A helper opens in its owner’s stack. '
+                            'Use Unstacked or Main for no stack. --group is the old name.')
     start.add_argument('task', nargs='?', default='')
     stop = actions.add_parser('stop')
     stop.add_argument('--worker', required=True)
@@ -70,7 +75,7 @@ def arguments(argv):
             parser.error('a task is required unless --reviews-me is set')
         body.update(message=message, context=args.context,
                     review='new' if args.reviews_me else 'source' if args.review_it else False)
-        for key in ('agent', 'model', 'effort', 'name', 'role', 'cwd', 'worktree', 'group'):
+        for key in ('agent', 'model', 'effort', 'name', 'role', 'cwd', 'worktree', 'owner', 'group'):
             value = getattr(args, key)
             if value is not None:
                 body[key] = os.path.abspath(value) if key == 'cwd' else value
@@ -105,6 +110,24 @@ def http_error(exc):
     return error
 
 
+def connection(body, path=PATH):
+    """(opener, request) for one local command from this tab to the Tether server, with the hook credential."""
+    port = int(os.environ.get('MOBILE_TMUX_PORT') or install_settings()['port'])
+    if not 1 <= port <= 65535:
+        raise ValueError('Invalid port.')
+    secret = auth.TOKEN_FILE.read_text().strip()
+    if not secret:
+        raise ValueError('Local hook authentication required.')
+    credential = auth.session_value(secret)
+    url = f'http://127.0.0.1:{port}'
+    request = Request(url + path, json.dumps(body).encode(), headers={
+        'Content-Type': 'application/json', 'Origin': url, 'X-Codex-Mobile': '1',
+        # The activity log names the calling tab (B56); the server checks the pane format.
+        'X-Tether-Client': 'agent-cli', 'X-Tether-Pane': os.environ.get('TMUX_PANE') or '',
+        'X-Tether-Hook': credential, 'Cookie': auth.COOKIE + '=' + credential})
+    return build_opener(ProxyHandler({})), request
+
+
 def main(argv=None):
     pane = os.environ.get('TMUX_PANE')
     if not pane:
@@ -117,20 +140,9 @@ def main(argv=None):
         return 1
     body['session'] = pane
     try:
-        port = int(os.environ.get('MOBILE_TMUX_PORT') or install_settings()['port'])
-        if not 1 <= port <= 65535:
-            raise ValueError('Invalid port.')
-        secret = auth.TOKEN_FILE.read_text().strip()
-        if not secret:
-            raise ValueError('Local hook authentication required.')
-        credential = auth.session_value(secret)
-        url = f'http://127.0.0.1:{port}'
         waiting = body['action'] == 'wait'
         seconds = body.pop('timeout') if waiting else None
-        request = Request(url + PATH, json.dumps(body).encode(), headers={
-            'Content-Type': 'application/json', 'Origin': url, 'X-Codex-Mobile': '1',
-            'X-Tether-Hook': credential, 'Cookie': auth.COOKIE + '=' + credential})
-        opener = build_opener(ProxyHandler({}))
+        opener, request = connection(body)
         if not waiting:
             with opener.open(request, timeout=150 if 'worktree' in body else 60 if body['action'] == 'send' else 30) as response:
                 result = json.loads(response.read(262144))

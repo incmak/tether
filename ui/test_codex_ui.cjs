@@ -9,8 +9,10 @@ const icons = require('lucide-react')
 const compile = text => ts.transpileModule(text, { compilerOptions: {
   module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
 } }).outputText
+const zone = {}
+runInNewContext(compile(readFileSync('src/zone.ts', 'utf8')), { exports: zone, require })
 const api = {}
-runInNewContext(compile(readFileSync('src/api.ts', 'utf8')), { exports: api })
+runInNewContext(compile(readFileSync('src/api.ts', 'utf8')), { exports: api, require: name => name === './zone' ? zone : require(name) })
 let state
 const dock = {}
 runInNewContext(compile(readFileSync('src/Dock.tsx', 'utf8')), {
@@ -18,6 +20,7 @@ runInNewContext(compile(readFileSync('src/Dock.tsx', 'utf8')), {
   require(name) {
     if (['react', 'react/jsx-runtime', 'lucide-react'].includes(name)) return require(name)
     if (name === './api') return api
+    if (name === './zone') return zone
     if (name === './hooks') return { useModal: () => ({}), usePolling: () => ({ data: state, error: '', refresh() {} }) }
     return {}
   },

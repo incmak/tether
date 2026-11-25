@@ -17,15 +17,32 @@ const parseCases = [
   ['soon', null], ['', null], ['call mom tomorrow', null],
 ]
 
-function loadReminders() {
-  const file = path.join(__dirname, 'src/reminders.ts')
+function loadSource(name, resolve = require) {
+  const file = path.join(__dirname, 'src', name)
   const mod = new module.constructor(file)
-  // The polling hook is not called. Load the real chrono-node package via its CJS exports.
-  mod.require = name => name === './hooks' ? {} : require(name)
+  mod.require = resolve
   mod._compile(ts.transpileModule(readFileSync(file, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText, file)
   return mod.exports
+}
+
+function loadReminders(tetherZone = 'Asia/Kolkata') {
+  const zone = loadSource('zone.ts')
+  zone.setTetherZone(tetherZone)
+  // The polling hook is not called. Load the real chrono-node package via its CJS exports.
+  return loadSource('reminders.ts', name => name === './zone' ? zone : name === './hooks' ? {} : require(name))
+}
+
+if (process.argv[2] === '--elapsed-across-device-dst') {
+  // Tether in UTC, the device in New York on its spring-forward night: elapsed times stay plain arithmetic.
+  const { parseWhen } = loadReminders('UTC')
+  for (const now of [seconds('2026-03-08T02:30:00Z'), seconds('2026-03-08T06:45:00Z')]) {
+    assert.equal(parseWhen('in 30 minutes', now), now + 1800)
+    assert.equal(parseWhen('in 2h', now), now + 7200)
+    assert.equal(parseWhen('in 1 day', now), now + 86400)
+  }
+  return
 }
 
 if (process.argv[2] === '--parse-in-zone') {
@@ -36,9 +53,56 @@ if (process.argv[2] === '--parse-in-zone') {
 }
 
 for (const [zone, offset] of [['UTC', 0], ['America/New_York', 300]]) {
-  test(`parseWhen in ${zone}`, () => {
+  test(`parseWhen uses IST with process TZ=${zone}`, () => {
     // Each process loads Chrono after its time zone is set, with its own module cache.
     execFileSync(process.execPath, [__filename, '--parse-in-zone', String(offset)], { env: { ...process.env, TZ: zone }, stdio: 'inherit' })
+  })
+}
+
+test('elapsed times ignore a device DST change', () => {
+  execFileSync(process.execPath, [__filename, '--elapsed-across-device-dst'], { env: { ...process.env, TZ: 'America/New_York' }, stdio: 'inherit' })
+})
+
+test('parseWhen uses New York wall time', () => {
+  const { parseWhen } = loadReminders('America/New_York')
+  const now = seconds('2026-11-18T17:00:00Z'), tomorrow = seconds('2026-11-19T15:00:00Z')
+  const cases = [
+    ['tomorrow 10:00', tomorrow], ['tomorrow 10am', tomorrow], ['2026-11-19 10:00', tomorrow],
+    ['in 2 h', now + 7200], ['10:00', tomorrow], ['tomorrow', seconds('2026-11-19T14:00:00Z')],
+    ['tonight', seconds('2026-11-19T03:00:00Z')],
+    ['soon', null], ['', null], ['call mom tomorrow', null],
+  ]
+  for (const [input, expected] of cases) assert.equal(parseWhen(input, now), expected, JSON.stringify(input))
+})
+
+test('parseWhen resolves wall times at the target offset and keeps elapsed times and explicit offsets', () => {
+  const { parseWhen, zoneTime } = loadReminders('America/New_York')
+  const spring = seconds('2026-03-07T07:30:00Z'), fall = seconds('2026-10-31T15:00:00Z')
+  assert.equal(parseWhen('tomorrow 10:00', spring), seconds('2026-03-08T14:00:00Z'))
+  assert.equal(parseWhen('tomorrow 10:00', fall), seconds('2026-11-01T15:00:00Z'))
+  assert.equal(parseWhen('in 25 hours', spring), spring + 25 * 3600)
+  assert.equal(parseWhen('2026-03-08T10:00:45Z', spring), seconds('2026-03-08T10:00:45Z'))
+  assert.equal(zoneTime(2026, 2, 8, 10), seconds('2026-03-08T14:00:00Z'))
+})
+
+test('parseWhen matches server wall times through offset transitions', () => {
+  const newYork = loadReminders('America/New_York').parseWhen
+  const lordHowe = loadReminders('Australia/Lord_Howe').parseWhen
+  for (const [parseWhen, text, now, expected] of [
+    [newYork, 'tomorrow 02:30', '2026-03-07T07:30Z', '2026-03-08T07:30Z'],
+    [newYork, 'tomorrow 01:30', '2026-10-31T15:00Z', '2026-11-01T05:30Z'],
+    [lordHowe, 'tomorrow 02:15', '2026-10-02T16:00Z', '2026-10-03T15:45Z'],
+    [newYork, '10am', '2026-11-01T06:10Z', '2026-11-01T15:00Z'],
+    [newYork, '6pm', '2026-11-01T06:10Z', '2026-11-01T23:00Z'],
+    [newYork, '18:00', '2026-11-01T23:00Z', '2026-11-02T23:00Z'],
+  ]) assert.equal(parseWhen(text, seconds(now)), seconds(expected), `${text} at ${now}`)
+})
+
+const bareTimes = require('../server/fixtures/zone_bare_times.json')
+const parsers = new Map([...new Set(bareTimes.map(row => row.zone))].map(zone => [zone, loadReminders(zone).parseWhen]))
+for (const { zone, now, typed, expect } of bareTimes) {
+  test(`shared bare time: ${zone} ${typed} at ${now}`, () => {
+    assert.equal(parsers.get(zone)(typed, seconds(now)), seconds(expect))
   })
 }
 
@@ -50,7 +114,121 @@ test('labels use the IST day and include the year only when needed', () => {
     ['2027-11-25T04:30:00Z', 'Thu 25 Nov 2027 10:00'], ['2026-11-18T19:00:00Z', 'Tomorrow 00:30'],
   ]
   for (const [iso, label] of labels) assert.equal(whenLabel(seconds(iso), NOW), label)
-  assert.equal(fullLabel(TOMORROW), 'Thu 19 Nov 2026, 10:00 IST')
+  const ist = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Kolkata', timeZoneName: 'short' })
+    .formatToParts(TOMORROW * 1000).find(part => part.type === 'timeZoneName').value
+  assert.equal(fullLabel(TOMORROW), `Thu 19 Nov 2026, 10:00 ${ist}`)
+})
+
+test('labels use the New York day and the offset of the displayed time', () => {
+  const { whenLabel, fullLabel } = loadReminders('America/New_York')
+  const labels = [
+    ['2026-11-18T15:00:00Z', 'Today 10:00'], ['2026-11-19T15:00:00Z', 'Tomorrow 10:00'],
+    ['2026-11-17T23:00:00Z', 'Yesterday 18:00'], ['2026-11-25T15:00:00Z', 'Wed 25 Nov 10:00'],
+    ['2027-11-25T15:00:00Z', 'Thu 25 Nov 2027 10:00'], ['2026-11-18T19:00:00Z', 'Today 14:00'],
+  ]
+  for (const [iso, expected] of labels) assert.equal(whenLabel(seconds(iso), NOW), expected)
+  assert.equal(fullLabel(seconds('2026-11-19T15:00:00Z')), 'Thu 19 Nov 2026, 10:00 EST')
+  assert.equal(fullLabel(seconds('2026-07-01T14:00:00Z')), 'Wed 1 Jul 2026, 10:00 EDT')
+})
+
+test('repeat labels use the anchor weekday in IST', () => {
+  const { repeatLabel } = loadReminders()
+  const rule = { anchor: seconds('2026-11-18T19:00:00Z'), zone: 'Asia/Kolkata' }
+  assert.equal(repeatLabel(null), '')
+  assert.equal(repeatLabel(undefined), '')
+  assert.equal(repeatLabel({ ...rule, every: 'day' }), 'Every day')
+  assert.equal(repeatLabel({ ...rule, every: 'weekday' }), 'Every weekday')
+  assert.equal(repeatLabel({ ...rule, every: 'week' }), 'Every Thursday')
+  assert.equal(repeatLabel({ ...rule, every: 'week', anchor: seconds('2026-11-23T04:30:00Z') }), 'Every Monday')
+  const york = loadReminders('America/New_York')
+  assert.equal(york.repeatLabel({ ...rule, every: 'week' }), 'Every Thursday', 'a stored series keeps its zone')
+  assert.equal(york.repeatLabel({ ...rule, every: 'week', zone: 'America/New_York' }), 'Every Wednesday')
+  assert.equal(york.repeatLabel({ ...rule, every: 'week', zone: 'Not/AZone' }), 'Every Wednesday')
+})
+
+test('repeat labels name N, the month day and the year date from the rule, not a clamped anchor', () => {
+  const { repeatLabel } = loadReminders()
+  const feb28 = seconds('2027-02-28T04:30:00Z'), zone = 'Asia/Kolkata'
+  assert.equal(repeatLabel({ every: 'day', interval: 3, anchor: feb28, zone }), 'Every 3 days')
+  assert.equal(repeatLabel({ every: 'week', interval: 2, anchor: feb28, zone }), 'Every 2 weeks on Sunday')
+  assert.equal(repeatLabel({ every: 'month', day: 31, anchor: feb28, zone }), 'Every month on the 31st')
+  assert.equal(repeatLabel({ every: 'month', day: -1, anchor: feb28, zone }), 'Every month on the last day')
+  assert.equal(repeatLabel({ every: 'month', interval: 3, day: 22, anchor: feb28, zone }), 'Every 3 months on the 22nd')
+  assert.equal(repeatLabel({ every: 'year', day: 29, month: 2, anchor: feb28, zone }), 'Every year on 29 Feb')
+  assert.equal(repeatLabel({ every: 'year', interval: 2, day: 21, month: 11, anchor: seconds('2026-11-21T04:30:00Z'), zone }), 'Every 2 years on 21 Nov')
+  // A rule from before day and month existed falls back to its anchor.
+  assert.equal(repeatLabel({ every: 'month', anchor: seconds('2026-11-13T04:30:00Z'), zone }), 'Every month on the 13th')
+})
+
+test('ordinals', () => {
+  const { ordinal } = loadReminders()
+  assert.deepEqual([1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 30, 31].map(ordinal), ['1st', '2nd', '3rd', '4th', '11th', '12th', '13th', '21st', '22nd', '23rd', '30th', '31st'])
+})
+
+test('repeat options name the date; the last-day option shows only for a short month end', () => {
+  const { repeatOptions } = loadReminders()
+  const values = at => repeatOptions(at).map(option => option.value)
+  const detail = (at, value, rule) => repeatOptions(at, rule).find(option => option.value === value)?.detail
+  assert.deepEqual(values(null), ['never', 'day', 'weekday', 'week', 'month', 'year', 'custom'])
+  assert.equal(detail(null, 'week'), 'Same day each week')
+  assert.equal(detail(TOMORROW, 'week'), 'On Thursdays')
+  assert.equal(detail(TOMORROW, 'month'), 'On the 19th')
+  assert.equal(detail(TOMORROW, 'year'), 'On 19 Nov')
+  const nov30 = seconds('2026-11-30T04:30:00Z'), dec31 = seconds('2026-12-31T04:30:00Z'), feb29 = seconds('2028-02-29T04:30:00Z')
+  assert.deepEqual(values(nov30), ['never', 'day', 'weekday', 'week', 'month', 'last', 'year', 'custom'])
+  assert.equal(detail(nov30, 'month'), 'On the 30th, or the last day')
+  assert.deepEqual(values(dec31), values(null), 'the 31st already is the last day')
+  assert.equal(detail(feb29, 'year'), "On 29 Feb; 28 Feb in other years")
+  // An edit that keeps a clamped 28 Feb copy of a 31st series names the 31st, and offers no last-day choice.
+  const rule = { every: 'month', day: 31, anchor: seconds('2027-02-28T04:30:00Z'), zone: 'Asia/Kolkata' }
+  assert.equal(detail(rule.anchor, 'month', rule), 'On the 31st, or the last day')
+  assert.equal(repeatOptions(rule.anchor, rule).some(option => option.value === 'last'), false)
+  assert.equal(repeatOptions(TOMORROW, null, 'last').some(option => option.value === 'last'), true, 'a last-day rule keeps its option')
+  // Another unit takes the date, as the server does: the 31st series on 28 Feb becomes 28 Feb yearly.
+  assert.equal(detail(rule.anchor, 'year', rule), 'On 28 Feb')
+  const leap = { every: 'year', day: 29, month: 2, anchor: seconds('2029-02-28T04:30:00Z'), zone: 'Asia/Kolkata' }
+  assert.equal(detail(leap.anchor, 'year', leap), "On 29 Feb; 28 Feb in other years")
+  assert.equal(detail(leap.anchor, 'month', leap), 'On the 28th')
+  const last = { every: 'month', day: -1, anchor: rule.anchor, zone: 'Asia/Kolkata' }
+  assert.equal(detail(last.anchor, 'month', last), 'On the 28th', 'a last-day rule switched to a fixed day takes the date')
+  // A New York series (Sun 14 Feb 2027, 15:00; already Mon 15 Feb in IST) uses New York dates, as the server does.
+  const york = { every: 'month', day: 14, anchor: seconds('2027-02-14T20:00:00Z'), zone: 'America/New_York' }
+  assert.equal(detail(york.anchor, 'year', york), 'On 14 Feb')
+  assert.equal(detail(york.anchor, 'week', york), 'On Sundays')
+  const { choiceLabel, repeatLabel } = loadReminders()
+  assert.equal(choiceLabel({ pick: 'custom', unit: 'week', interval: 2, lastDay: false }, york.anchor, york), 'Every 2 weeks on Sunday')
+  assert.equal(repeatLabel({ ...york, every: 'week' }), 'Every Sunday')
+  assert.equal(detail(york.anchor, 'week', { ...york, zone: 'Not/AZone' }), 'On Mondays', 'an unknown zone falls back to IST')
+})
+
+test('repeat choices round-trip to the request body and validate N per unit', () => {
+  const { choiceOf, repeatBody, choiceValid, sameChoice, choiceLabel, NO_REPEAT } = loadReminders()
+  const anchor = TOMORROW, zone = 'Asia/Kolkata'
+  assert.equal(repeatBody(choiceOf(null)), null)
+  assert.equal(repeatBody(choiceOf({ every: 'week', anchor, zone })), 'week')
+  assert.deepEqual(repeatBody(choiceOf({ every: 'month', day: -1, anchor, zone })), { every: 'month', last_day: true })
+  assert.deepEqual(choiceOf({ every: 'month', interval: 3, day: 19, anchor, zone }), { pick: 'custom', unit: 'month', interval: 3, lastDay: false })
+  assert.deepEqual(repeatBody({ pick: 'custom', unit: 'week', interval: 2 }), { every: 'week', interval: 2 })
+  assert.equal(repeatBody({ pick: 'custom', unit: 'day', interval: 1 }), 'day', 'every 1 day is the plain rule')
+  assert.equal(sameChoice({ pick: 'custom', unit: 'year', interval: 1 }, { ...NO_REPEAT, pick: 'year' }), true)
+  for (const [unit, max] of [['day', 365], ['week', 52], ['month', 60], ['year', 5]]) {
+    assert.equal(choiceValid({ pick: 'custom', unit, interval: max }), true, unit)
+    assert.equal(choiceValid({ pick: 'custom', unit, interval: max + 1 }), false, unit)
+  }
+  for (const interval of [0, -1, 1.5, NaN]) assert.equal(choiceValid({ pick: 'custom', unit: 'day', interval }), false, String(interval))
+  assert.equal(choiceValid({ pick: 'never', unit: 'day', interval: NaN }), true, 'a hidden N does not block')
+  assert.equal(choiceLabel({ pick: 'custom', unit: 'week', interval: 2 }, TOMORROW), 'Every 2 weeks on Thursday')
+  assert.equal(choiceLabel({ pick: 'custom', unit: 'month', interval: 3 }, seconds('2027-02-28T04:30:00Z'), { every: 'month', day: 31, anchor, zone }), 'Every 3 months on the 31st')
+  // A custom last-day rule keeps last_day when its N changes, and only a monthly unit sends it.
+  const feb28 = seconds('2027-02-28T04:30:00Z'), lastRule = { every: 'month', interval: 3, day: -1, anchor: feb28, zone }
+  const kept = choiceOf(lastRule)
+  assert.deepEqual(kept, { pick: 'custom', unit: 'month', interval: 3, lastDay: true })
+  assert.deepEqual(repeatBody({ ...kept, interval: 4 }), { every: 'month', interval: 4, last_day: true })
+  assert.deepEqual(repeatBody({ ...kept, interval: 1 }), { every: 'month', last_day: true })
+  assert.deepEqual(repeatBody({ ...kept, unit: 'week' }), { every: 'week', interval: 3 })
+  assert.equal(choiceLabel({ ...kept, interval: 4 }, feb28, lastRule), 'Every 4 months on the last day')
+  assert.equal(choiceLabel({ ...kept, lastDay: false }, feb28, lastRule), 'Every 3 months on the 28th')
+  assert.equal(choiceLabel({ ...kept, unit: 'year' }, feb28, lastRule), 'Every 3 years on 28 Feb')
 })
 
 test('quick picks respect the evening cutoff and round-trip across month end', () => {

@@ -12,6 +12,8 @@ jobs:
   server:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      TETHER_CHROME_STDERR: ${{ github.workspace }}/.release-work/ci-chrome-stderr
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v7
@@ -20,11 +22,25 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
-      - run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Ensure tmux is installed
+        run: |
+          if ! command -v tmux >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends tmux
+          fi
       # The Python tests load ui/src TypeScript, so install the UI packages first.
       - run: cd ui && npm ci
       - run: cd server && python3 -m unittest discover -q
       - run: cd scripts && python3 -m unittest discover -q
+      - name: Upload server Chrome stderr
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: server-chrome-stderr-${{ github.run_attempt }}
+          path: .release-work/ci-chrome-stderr/
+          if-no-files-found: ignore
+          retention-days: 7
+          include-hidden-files: true
   ui:
     # Match the OS supported by the pinned Playwright browser/dependency bundle.
     runs-on: ubuntu-24.04
@@ -39,31 +55,20 @@ jobs:
   browser:
     # Match the OS supported by the pinned Playwright browser/dependency bundle.
     runs-on: ubuntu-24.04
-    # The serial browser sweep takes about 18 minutes on the runner, after setup and build.
-    timeout-minutes: 30
+    # Setup about 3 min, tests about 6 min; each browser file is killed after 5 min (run_ui_tests.cjs).
+    timeout-minutes: 16
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
       - run: cd ui && npm ci && npm run build
       - uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: chromium-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ui/package-lock.json') }}
-      - name: Install Chromium system packages
-        shell: bash
-        run: |
-          cd ui
-          for attempt in 1 2 3; do
-            if npx playwright-core install-deps chromium; then
-              break
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              exit 1
-            fi
-            sleep 30
-          done
       - name: Install test Chromium
         shell: bash
         run: |
@@ -77,19 +82,48 @@ jobs:
             fi
             sleep 30
           done
-      - name: Real Chromium smoke test
-        # Release checks rely on this run, so the server's own Chromium launch must run here, not skip.
+      - name: Ensure a font for the CJK layout fixture
+        run: |
+          # The responsive chat sweep uses U+754C. Keep a real glyph on minimal images.
+          if [ -z "$(fc-list ':charset=754c' family)" ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends fonts-unifont
+          fi
+      - name: Real Chromium smoke, bridge device, and context tests
+        # Run the headless CDP tests on Playwright's pinned shell after stalls on the runner's Chrome.
+        # The hosted image supplies the shared libraries. The launch fails if a library is missing.
         shell: bash
+        env:
+          TETHER_CHROME_STDERR: ${{ github.workspace }}/.release-work/ci-chrome-stderr
         run: |
           chrome=$(ls -d ~/.cache/ms-playwright/chromium_headless_shell-*/chrome-*/headless_shell | sort | tail -1)
           test -x "$chrome"
+          if ldd "$chrome" | grep 'not found'; then
+            echo "The runner image lacks Chromium libraries (above). Restore 'npx playwright-core install-deps chromium'."
+            exit 1
+          fi
           cd server
-          MOBILE_TMUX_CHROME="$chrome" TETHER_REAL_BROWSER_TEST=1 python3 -m unittest -v test_browser.RealChromiumSmokeTest 2>&1 | tee ../smoke.log
+          MOBILE_TMUX_CHROME="$chrome" TETHER_REAL_BROWSER_TEST=1 python3 -m unittest -v \
+            test_browser.RealChromiumSmokeTest test_browser_device test_mac_browser.RealContextTests 2>&1 | tee ../smoke.log
           grep -q 'test_launch_load_and_get_one_frame .* ok$' ../smoke.log
+          # Release checks require all real Chromium tests. A skip produces 'OK (skipped=N)'.
+          grep -Fxq 'OK' ../smoke.log
+      - name: Install Chrome for Testing for the extension check
+        shell: bash
+        run: |
+          chrome=$(npx --yes @puppeteer/browsers@3.2.6 install chrome@147.0.7727.15 \
+            --path "$RUNNER_TEMP/tether-test-chrome" --format '{{path}}')
+          test -x "$chrome"
+          echo "TETHER_EXTENSION_CHROME=$chrome" >> "$GITHUB_ENV"
       - name: Browser UI tests
-        run: cd ui && node run_ui_tests.cjs --browser
-      - name: Upload browser test screenshots
-        if: failure()
+        env:
+          SHOTS: ../.release-work/ci-browser
+        run: |
+          nproc
+          cd ui
+          node run_ui_tests.cjs --browser --parallel
+      - name: Upload browser test screenshots and Chrome stderr
+        if: failure() || cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ui-browser-screenshots-${{ github.run_attempt }}

@@ -1,4 +1,5 @@
 """Rule migration contracts and isolated loader, fallback, and input guard tests."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import importlib
 import json
 from pathlib import Path
@@ -15,6 +16,7 @@ import terminal_replies
 # module, (rules file, JSON name), public attribute, original text, original flags
 ORIGINALS = [
     ('terminal_input', ('common', 'WORKING'), 'WORKING', (r'Working \(|esc to interrupt|(?m:^\s*[✻✶✽✢·*●]\s+[A-Z][a-z]+(?:ing|ed)?…)'), re.I),
+    ('terminal_input', ('claude', 'SPINNER'), 'CLAUDE_SPINNER', (r"^[✻✶✽✢·*]\s+[A-Z][\w']*…"), 0),
     ('terminal_input', ('common', 'APPROVAL_QUESTION'), 'APPROVAL_QUESTION', (r'^(?:Claude has written up a plan.*Would you like to proceed|Ready to code\?|Quick safety check|'
     r'Run this command\?|Would you like to \w+|Do you want to (?:proceed|allow|approve|make this edit|create)|'
     r'Do you trust|Trust this (?:folder|directory|project)|Allow access to|Allow this|'
@@ -31,6 +33,7 @@ ORIGINALS = [
     ('terminal_input', ('common', 'PICKER_MORE'), 'PICKER_MORE', (r'^\s*([↑↓])\s+(\d+)\s+more\s*$'), 0),
     ('terminal_input', ('common', 'PICKER_HINT'), 'PICKER_HINT', (r'^Enter to .+[·•].*\bEsc to \S'), re.I),
     ('terminal_input', ('claude', 'SETTINGS_TABS'), 'SETTINGS_TABS', (r'^\s*Settings\s+Status\b'), 0),
+    ('terminal_input', ('claude', 'INPUT_NAMED_RULE'), 'CLAUDE_NAMED_RULE', (r'^─* \S(?:.*\S)? ─$'), 0),
     ('terminal_input', ('claude', 'PANEL_CLOSE'), 'PANEL_CLOSE', (r'Esc to (?:cancel|close|exit|go back)|esc (?:Close|to close)'), re.I),
     ('terminal_input', ('antigravity', 'AGY_MODE_HINT'), 'AGY_MODE_HINT', (r'\bmode\b.*(?:\(shift\+tab to cycle\)|\.\.\.|…)\s*$'), re.I),
     ('terminal_input', ('antigravity', 'AGY_PANEL'), 'AGY_PANEL', (r'esc Close|↑/↓ Scroll|\(\d+–\d+ of \d+ lines\)|general\s+commands\s+shortcuts'), re.I),

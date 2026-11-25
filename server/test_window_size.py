@@ -1,4 +1,5 @@
 """Sizing uses fake tmux calls; integration proof uses a private socket only."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import subprocess
 import unittest
 from unittest.mock import patch

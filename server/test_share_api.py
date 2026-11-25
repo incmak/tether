@@ -1,4 +1,5 @@
 """Real private-port Handler tests. The live server and tmux are never used."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import http.client
 import io
 import json

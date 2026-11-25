@@ -1,13 +1,13 @@
-// Activity time (Settings › About & system) and the activity ping against an existing build. Every API request stays
+// Activity time (Settings › Usage tracking) and the activity ping against an existing build. Every API request stays
 // in this page's fixtures; no terminal is touched and nothing is published.
 // Run: cd ui && npm run test:ui (or node test_activity_ui.cjs against an existing build).
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, shotsDir } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-15/activity-time/shots')
+const SHOTS = shotsDir('activity-time')
 const sizes = [[320, 720], [1280, 900]]
 const paneA = { id: '%1', tmux_session: '$1', label: 'project:0.0', pane_name: 'Fix login', agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: 't1', approval: null }
 const paneB = { id: '%2', tmux_session: '$1', label: 'project:0.1', pane_name: 'Docs pass', agent: 'codex', dir: '/srv/docs', state: 'Idle', writable: true, thread: 't2', approval: null }
@@ -31,7 +31,7 @@ const sampleProjects = [{ name: 'a-project-with-a-very-long-name-that-must-not-o
 let activity = { enabled: false, agents: false, zone: 'Asia/Kolkata', since: null, store: '~/.tether/activity', days: [], projects: [], publish: publishOff }
 
 async function main() {
-  let browser, page, server, failed = 0
+  let browser, context, page, server, failed = 0
   const posts = [], pageErrors = []
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
   try {
@@ -49,10 +49,10 @@ async function main() {
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
     const origin = `http://localhost:${server.address().port}`
     browser = await getBrowser()
-    const context = browser.contexts()[0]
-    if (!context || context.pages().length >= 3) throw new Error('Shared browser has no context or already has three tabs')
+    context = await browser.newContext({ serviceWorkers: 'block', locale: 'en-US', timezoneId: 'UTC' })
     page = await context.newPage()
     page.setDefaultTimeout(10000)
+    await page.clock.install()
     page.on('pageerror', error => pageErrors.push(error.stack))
     // The refused publish folder answers 400 on purpose; the browser logs that response.
     page.on('console', message => { if (message.type() === 'error' && !message.text().includes('status of 400')) pageErrors.push(message.text()) })
@@ -78,7 +78,7 @@ async function main() {
           }
           return route.fulfill({ json: { ok: true } })
         }
-        if (endpoint === 'prefs') return route.fulfill({ json: { prefs, version } })
+        if (endpoint === 'prefs') return route.fulfill({ json: { prefs, version, zone: activity.zone } })
         if (endpoint === 'activity') return route.fulfill({ json: activity })
         if (endpoint.startsWith('chat')) return route.fulfill({ json: fixture.chat })
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
@@ -107,8 +107,9 @@ async function main() {
     })
     for (const [width, height] of sizes) {
       const at = `${width}px`
+      const zone = width === 320 ? 'Asia/Kolkata' : 'America/New_York'
       prefs = { selected: '%1' }; version++
-      activity = { ...activity, enabled: false, agents: false, since: null, days: [], projects: [], publish: publishOff }
+      activity = { ...activity, zone, enabled: false, agents: false, since: null, days: [], projects: [], publish: publishOff }
       posts.length = 0
       await page.setViewportSize({ width, height })
       await page.goto(`${origin}/chat/`, { waitUntil: 'load' })
@@ -130,10 +131,13 @@ async function main() {
       check(`${at} agent switch disabled until keep is on`, await agents.isDisabled())
       await page.getByText('Off. Nothing is counted.').waitFor()
       check(`${at} no page overflow (off)`, !(await overflow()))
-      await keep.click()
-      await page.waitForFunction(() => document.querySelector('[role="switch"]:checked') !== null)
+      await Promise.all([page.waitForResponse(response => {
+        const request = response.request()
+        return new URL(response.url()).pathname === '/mobile/api/prefs'
+          && request.method() === 'POST' && request.postDataJSON()?.changes?.activity === true
+      }), keep.click()])
+      check(`${at} keep switch on`, await keep.isChecked())
       check(`${at} agent switch enabled`, !(await agents.isDisabled()))
-      await page.waitForTimeout(500)
       check(`${at} pref saved`, posts.some(post => post.endpoint === 'prefs' && post.body.changes.activity === true), JSON.stringify(posts.map(post => post.endpoint)))
       // Clicks inside Settings name no tab, so they send no ping.
       await keep.focus()
@@ -143,6 +147,7 @@ async function main() {
       // Data: today's total, a 14-day table and top projects, with long names that must not overflow.
       await agents.click()
       activity = { ...activity, since: 1, days: sampleDays, projects: sampleProjects }
+      await page.clock.fastForward(15_000) // let the real polling hook read the next fixture
       await page.getByText('Today: 5 h 25 m').waitFor({ timeout: 20000 })
       check(`${at} today shown with agents`, await page.getByText('agents 10 h 50 m').isVisible())
       check(`${at} 14 day rows`, await page.locator('.activity-table').first().locator('tbody tr').count() === 14)
@@ -161,9 +166,20 @@ async function main() {
       await page.getByRole('button', { name: 'Save folder' }).click()
       await page.getByText('Saved. Tether publishes every 6 hours').waitFor()
       const now = page.getByRole('button', { name: 'Publish now' })
-      await now.click()
+      await Promise.all([page.waitForResponse(response => {
+        const request = response.request()
+        return new URL(response.url()).pathname === '/mobile/api/activity/publish'
+          && request.method() === 'POST' && request.postDataJSON()?.now === true
+      }), now.click()])
       check(`${at} publish now posted`, posts.some(post => post.endpoint === 'activity/publish' && post.body.now === true))
+      const published = Date.parse('2026-11-22T02:15:00Z')
+      activity = { ...activity, publish: { ...activity.publish, published: published / 1000 } }
+      await page.clock.fastForward(15_000)
+      const when = new Intl.DateTimeFormat('en-US', { timeZone: zone, dateStyle: 'medium', timeStyle: 'short' }).format(published)
+      await page.getByText(`Published ${when}.`, { exact: true }).waitFor()
+      check(`${at} published time uses ${zone}`, true)
       activity = { ...activity, publish: { ...activity.publish, last: { at: 1, ok: false, error: 'git push failed: fatal: Authentication failed' } } }
+      await page.clock.fastForward(15_000)
       await page.getByRole('alert').filter({ hasText: 'Authentication failed' }).waitFor({ timeout: 20000 })
       check(`${at} publish error shown`, true)
       check(`${at} no page overflow (publish)`, !(await overflow()))
@@ -176,7 +192,7 @@ async function main() {
       const message = chat.locator('.composer textarea')
       await Promise.all([waitForPing('%1'), message.click()])
       await message.press('ArrowLeft')
-      check(`${at} chat input pings its tab once`, pings().length === 1 && pings()[0].body.pane === '%1' && typeof pings()[0].body.zone === 'string', JSON.stringify(pings()))
+      check(`${at} chat input pings its tab once without a zone`, pings().length === 1 && pings()[0].body.pane === '%1' && !Object.hasOwn(pings()[0].body, 'zone'), JSON.stringify(pings()))
       // A click on another tab's button counts for that tab, not for the tab that was open before the click.
       await message.blur()
       const other = page.locator('[role="tab"][data-pane="%2"]:visible').first()
@@ -188,7 +204,7 @@ async function main() {
     failed++
     console.log(`FAIL ${error.stack}`)
   } finally {
-    await page?.close().catch(() => {})
+    await context?.close().catch(() => {})
     server?.close()
     await browser?.close?.().catch(() => {})
   }

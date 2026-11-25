@@ -3,10 +3,10 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal, shotsDir, prefsStore } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-12/guided-setup/shots')
+const SHOTS = shotsDir('guided-setup')
 const sizes = [[390, 844], [1280, 900]]
 const now = Math.floor(Date.now() / 1000)
 const ask = (pane, extra) => ({ pane, thread: null, since: now - 600, next: '', kind: 'reply', opened: false, snoozed_until: null, urgent: false, ...extra })
@@ -49,7 +49,7 @@ const fixture = {
   chat: { messages: [], busy: false, thread: 't1', agent: 'claude', writable: true, session: '%1', earlier: 0, limit: 100, state: 'Idle', approval: null },
   footer: { observed: true, model: 'Opus 5.5', mode: 'default', notices: [] },
   subagents: { main: { model: null, context: null, title: null }, agents: [], tasks: [] },
-  prefs: { prefs: {}, version: 1 }, 'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
+  'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
   update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Test server', office: false },
   catalog: { commands: [], plugins: [], mcp: [], note: '' }, stream: {}, 'codex-runs': { pane: '%1', running: 0, runs: [] },
   'browser/agents': { enabled: false, available: false, reason: 'off', agents: [], asks: [] },
@@ -68,7 +68,7 @@ let setup = setupFresh()
 let keys = []
 const b64 = bytes => Buffer.from(bytes).toString('base64url')
 const approved = body => !!body.approval?.challenge_id && !!body.approval?.credential?.response?.signature
-const needsKey = () => ({ status: 403, json: keys.length ? { error: 'Approve with your passkey.', approval: 'required' } : { error: 'Add a passkey in Settings › Setup first.', approval: 'no-passkey' } })
+const needsKey = () => ({ status: 403, json: keys.length ? { error: 'Approve with your passkey.', approval: 'required' } : { error: 'Add a passkey in Settings › Autonomy › Setup first.', approval: 'no-passkey' } })
 
 async function main() {
   let browser, page, server, failed = 0
@@ -96,11 +96,13 @@ async function main() {
     page.on('pageerror', error => pageErrors.push(error.stack))
     await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'light' })
     await page.routeWebSocket('**/*', socket => socket.close())
+    const prefs = prefsStore()
     await page.route('**/*', async route => {
       const request = route.request(), url = new URL(request.url())
       if (url.pathname.endsWith('/sw.js')) return route.fulfill({ status: 404, body: '' })
       if (url.pathname.includes('/api/')) {
         const endpoint = url.pathname.split('/api/')[1]
+        if (endpoint === 'prefs') return route.fulfill({ json: request.method() === 'GET' ? prefs.get() : prefs.post(request.postDataJSON()) })
         if (request.method() !== 'GET') {
           const body = request.postDataJSON(); posts.push({ endpoint, body })
           if (endpoint === 'passkeys') {
@@ -126,7 +128,7 @@ async function main() {
             return route.fulfill({ json: body.action === 'ping-test' ? { ...setup, test: { ok: true, code: 0, detail: '' } } : setup })
           }
           if (endpoint === 'autonomy/review' && body.action === 'check') {
-            if (checkMode === 'off') return route.fulfill({ status: 400, json: { error: 'Turn on the advisor in Settings › Agents first.' } })
+            if (checkMode === 'off') return route.fulfill({ status: 400, json: { error: 'Turn on the advisor in Settings › Models & helpers first.' } })
             if (checkMode === 'busy') {
               reviewState = { ...reviewState, check: { ...reviewState.check, state: 'running', started: now + 5, finished: null, count: 3 } }
               return route.fulfill({ status: 409, json: { error: 'The advisor is already checking the lessons.' } })
@@ -151,6 +153,13 @@ async function main() {
         if (endpoint.startsWith('autonomy')) return route.fulfill({ json: autonomy })
         if (endpoint.startsWith('codex-level')) return route.fulfill({ json: { level: 0, global: 0, levels: [], project: null, models: [] } })
         if (endpoint.startsWith('chat')) return route.fulfill({ json: fixture.chat })
+        // Home reads the Handled for you count (B335).
+        if (endpoint === 'attention') return route.fulfill({ json: { asks: [], snoozed: 0, later: [], handled_today: 0, rules: { stale: true }, digest: { enabled: false, hour: 9 } } })
+        if (endpoint === 'audit') {
+          const json = { entries: [], next: null, retention_days: 90 }
+          if (url.searchParams.get('facets') === '1') json.facets = { kinds: [], projects: [], actors: [] }
+          return route.fulfill({ json })
+        }
         if (!(endpoint in fixture)) unexpected.add(endpoint)
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
         return route.fulfill({ json: fixture[endpoint] || {} })
@@ -388,7 +397,7 @@ async function main() {
       await page.screenshot({ path: path.join(SHOTS, `settings-reviewer-sheet-${width}.png`) })
       await sheet.getByRole('button', { name: 'Done' }).click()
       await sheet.waitFor({ state: 'hidden' })
-      if (await search.count()) await search.fill('learning')
+      await search.fill('learning from feedback')
       const learnSwitch = page.getByRole('switch', { name: /Learn from your feedback/ })
       await learnSwitch.waitFor()
       await learnSwitch.scrollIntoViewIfNeeded()
@@ -396,12 +405,13 @@ async function main() {
       check(`${at} global lesson shows kind and did-not-stick flag`, await page.locator('.lesson').first().getByText('Avoid', { exact: true }).isVisible() && await page.getByText('Did not stick').first().isVisible())
       check(`${at} no page overflow (learning)`, !(await overflow()))
       await page.screenshot({ path: path.join(SHOTS, `settings-learning-${width}.png`) })
-      mark0 = posts.length
-      await learnSwitch.click()
-      await page.waitForTimeout(300)
-      check(`${at} switch posts enabled false`, posts.slice(mark0).some(post => post.endpoint === 'autonomy/lessons' && post.body.enabled === false))
-      await learnSwitch.click()
-      await page.waitForTimeout(300)
+      const toggleLearning = () => Promise.all([
+        page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/api/autonomy/lessons')),
+        learnSwitch.click(),
+      ])
+      const [learningOff] = await toggleLearning()
+      check(`${at} switch posts enabled false`, learningOff.request().postDataJSON().enabled === false)
+      await toggleLearning()
       reviewState = { ...reviewState, due: true, check: { state: 'idle' } }
       await page.getByRole('button', { name: 'Review', exact: true }).click()
       const reviewSheet = page.getByRole('dialog', { name: 'Review lessons' })
@@ -418,7 +428,7 @@ async function main() {
       checkMode = 'off'
       mark0 = posts.length
       await reviewSheet.getByRole('button', { name: 'Ask the advisor to check these' }).click()
-      await reviewSheet.getByText('Turn on the advisor in Settings › Agents first.').waitFor()
+      await reviewSheet.getByText('Turn on the advisor in Settings › Models & helpers first.').waitFor()
       check(`${at} check posts action check`, posts.slice(mark0).some(post => post.endpoint === 'autonomy/review' && post.body.action === 'check'))
       checkMode = 'ok'
       await reviewSheet.getByRole('button', { name: 'Try again' }).click()

@@ -1,4 +1,5 @@
 """Autonomy settings use temporary paths and mocked processes, never live tmux."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 import os
@@ -13,10 +14,12 @@ from unittest import mock
 import autonomy
 import advisor
 import approval
+import audit
 import codex_level
 import decisions
 import lessons
 import paths
+import projects
 import model_catalog
 import server
 from test_approval import HAS_CRYPTO, Handler as PasskeyHandler, PasskeyCase
@@ -99,6 +102,24 @@ class Resolve(Base):
 
 
 class Rules(Base):
+    def test_codex_standing_rules_fit_for_each_level(self):
+        safety = ('At every level, ask before you delete data, force-push, run a destructive migration, spend money, '
+                  'make a public release, or send a message to another person.')
+        for level, (name, _) in enumerate(autonomy.LEVELS):
+            for codex, (codex_name, _) in enumerate(codex_level.LEVELS):
+                with self.subTest(autonomy=level, codex=codex):
+                    text = autonomy.codex_standing_rules({'level': level}, {'level': codex})
+                    self.assertLessEqual(len(text), 1200)
+                    self.assertIn(f'Autonomy level {level} ({name})', text)
+                    self.assertIn(f'Codex level {codex} ({codex_name})', text)
+                    self.assertIn(safety, text.splitlines())
+                    self.assertIn(autonomy.VERIFIED, text.splitlines())
+                    reviewer = next(line for line in text.splitlines() if line.startswith('Choose a reviewer'))
+                    for risk in ('Critical:', 'Normal:', 'Light:'):
+                        self.assertIn(risk, reviewer)
+                    self.assertEqual(text.splitlines()[-1],
+                                     'Tether may send newer rules in this chat; the newest rules win.')
+
     def test_each_level_has_its_rules_and_safety_and_last_line(self):
         safety = ('At every level, ask before you delete data, force-push, run a destructive migration, spend money, '
                   'make a public release, or send a message to another person.')
@@ -124,6 +145,13 @@ class Rules(Base):
         for level in (3, 4, 5):
             self.assertNotIn('sensible defaults', autonomy.RULES[level])
             self.assertNotIn('assumptions', autonomy.RULES[level])
+
+    def test_full_auto_selects_the_oldest_eligible_backlog_item(self):
+        rule = autonomy.RULES[5]
+        self.assertIn('skip items marked doing, items in the Inbox, and items that need a product, business or safety '
+                      'decision from the user.', rule)
+        self.assertIn('Take the oldest item that is left. If none is left, stop.', rule)
+        self.assertIn('hand the next open backlog item of this project to a new tab (see Backlog)', rule)
 
     def test_saved_answers_only_at_levels_three_to_five_for_the_selected_project(self):
         folder = paths.TETHER / 'projects' / PID
@@ -296,7 +324,12 @@ class Hook(Base):
         self.assertEqual([len(row['text']) for row in rows], [150] * 8)
         self.assertEqual(text.count('- Avoid ('), 8)
         self.assertIn('Lessons from past feedback', text)
-        self.assertLess(len(text), 9000)
+        # Measure the guidance at typical install paths so the checkout length cannot skew the check.
+        checkout = str(Path(autonomy.__file__).resolve().parent.parent)
+        normalized = text.replace(str(paths.TETHER), '/srv/user/.tether')
+        normalized = normalized.replace(checkout, '/srv/user/apps/tether')
+        normalized = normalized.replace(sys.executable, '/usr/bin/python3')
+        self.assertLess(len(normalized), 9000)
         self.assertIn('Autonomy level 5', text)
         self.assertIn('second advisor (Codex, GPT New (latest), high effort)', text)
         self.assertIn('The user saved answers', text)
@@ -504,6 +537,77 @@ class Http(Base):
                          (400, {'error': 'Choose an advisor, a model and an effort.'}))
         self.assertEqual(advisor.read(), dict(value, version=2))
 
+    def test_level_audit_records_project_and_global_changes_with_undo(self):
+        autonomy.set_project(PID, False, 1)
+        projects.set_name(PID, 'Example Project')
+        with audit.acting('ui'), mock.patch.object(approval, 'require') as require:
+            for body, status in (({'level': 1, 'undo': 1}, 400),
+                                 ({'level': 1, 'undo': True, 'revision': codex_level.revision(autonomy.global_path())}, 200),
+                                 ({'project': PID, 'override': True, 'level': 1}, 200)):
+                handler = Handler(body=body)
+                autonomy.post(handler)
+                self.assertEqual(handler.status, status, handler.body)
+            require.assert_not_called()
+        rows = audit.query(kinds=['setting.autonomy_level'])['entries']
+        self.assertCountEqual([(row['summary'], row['old'], row['new'], row.get('project'), row.get('undo'))
+                               for row in rows],
+                              [('Undo: Autonomy level 2 → 1', 2, 1, None, True),
+                               ('Autonomy level for Example Project: 1 (override off) → 1 (override on)',
+                                '1 (override off)', '1 (override on)', 'Example Project', None)])
+        self.assertTrue(all(row['actor'] == {'source': 'ui'} for row in rows))
+
+    def test_stale_undo_is_refused_before_approval(self):
+        # B56 review: another device wrote 4 → 3 → 4 after this change. The value matches, the revision does not.
+        autonomy.set_global(4)
+        autonomy.set_project(PID, True, 2)
+        with audit.acting('ui'), mock.patch.object(approval, 'require') as require:
+            def post(body):
+                handler = Handler(body=body)
+                autonomy.post(handler)
+                return handler
+            change = post({'level': 3}).body['change']
+            project = post({'project': PID, 'override': True, 'level': 1}).body['change']
+            self.assertEqual((change['old'], project['old']), (4, {'level': 2, 'override': True}))
+            for body in ({'level': 4}, {'level': 3}, {'project': PID, 'override': True, 'level': 2},
+                         {'project': PID, 'override': True, 'level': 1}):
+                self.assertEqual(post(body).status, 200)
+            require.reset_mock()
+            for body in ({'level': 4, 'undo': True, 'revision': change['revision']},
+                         {'project': PID, 'override': True, 'level': 2, 'undo': True, 'revision': project['revision']},
+                         {'level': 4, 'undo': True}):
+                handler = post(body)
+                self.assertEqual((handler.status, handler.body), (409, {'error': codex_level.STALE_UNDO}), body)
+            require.assert_not_called()
+            fresh = post({'level': 1}).body['change']
+            self.assertEqual(post({'level': fresh['old'], 'undo': True, 'revision': fresh['revision']}).status, 200)
+        self.assertEqual((autonomy.read_global(), autonomy.read_project(PID)['level']), (3, 1))
+        self.assertEqual([row['summary'] for row in audit.query()['entries'] if row.get('undo')], ['Undo: Autonomy level 1 → 3'])
+
+    def test_reviewers_audit_names_every_changed_tier(self):
+        value = reviewers(critical={'agent': 'none'}, light={'agent': 'claude', 'model': 'haiku'})
+        with audit.acting('ui'):
+            for _ in range(2):
+                handler = Handler(body={'reviewers': value})
+                autonomy.post(handler)
+                self.assertEqual(handler.status, 200, handler.body)
+        row, = audit.query(kinds=['setting.reviewers'])['entries']
+        self.assertEqual(row['summary'], 'Reviewers changed: critical, light')
+        self.assertEqual((row['old'], row['new'], row['actor']),
+                         ('critical: auto · auto · auto / light: auto · auto · auto',
+                          'critical: none · auto · auto / light: claude · haiku · auto', {'source': 'ui'}))
+
+    def test_advisor_audit_records_main_and_second_choices(self):
+        value = {'main': dict(advisor.DEFAULT['main'], model='opus'), 'second': dict(advisor.OFF)}
+        with audit.acting('ui'):
+            for _ in range(2):
+                handler = Handler(body={'advisor': value})
+                autonomy.post(handler)
+                self.assertEqual(handler.status, 200, handler.body)
+        row, = audit.query(kinds=['setting.advisor'])['entries']
+        self.assertEqual((row['old'], row['new'], row['actor']),
+                         ('main: claude · latest · high / second: codex · latest · high',
+                          'main: claude · opus · high / second: none · latest · auto', {'source': 'ui'}))
+
     def test_bad_requests(self):
         for body in ({'level': 9}, {'level': '2'}, {'level': True}, {'project': 'x', 'override': True, 'level': 1},
                      {'project': PID, 'override': 'yes', 'level': 1}, {'reviewers': {}}, [1]):
@@ -577,6 +681,11 @@ class Http(Base):
 
 @unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
 class LevelApproval(PasskeyCase):
+    def setUp(self):
+        super().setUp()
+        # B405: autonomy.state reads model_catalog, which would probe the real `claude` binary in a daemon thread.
+        self.enterContext(mock.patch.object(model_catalog.shutil, 'which', return_value=None))
+
     def post(self, body):
         handler = PasskeyHandler(autonomy.PATH, body)
         autonomy.post(handler)
@@ -686,7 +795,9 @@ class Learning(Base):
         for prompt in ('[Tether status] wrong', 'You are the advisor wrong', 'wrong' + 'x' * 300, 'Do the task.'):
             self.assertNotIn('This message may correct', text(prompt))
             self.assertNotIn('If this message confirms a choice', text(prompt))
-        self.assertIn('--avoid --source reviewer.', text('[Tether review] wrong'))
+        for suffix in ('', '\n\n[Tether id 0123456789abcdef]'):
+            self.assertIn('--avoid --source reviewer.', text('[Tether review] wrong' + suffix))
+            self.assertNotIn('This message may correct', text('[Tether status] wrong' + suffix))
         for index in range(9):
             self.add(f'When case {index} occurs, inspect its exact output.')
         self.assertIn(f'More lessons: {lessons.path(PID)}.', text(''))
@@ -700,6 +811,16 @@ class Learning(Base):
                          stdout='' if args[-1] == '#{@tether_helper}' else PID))
         out = json.loads(autonomy.hook_output({'prompt': 'wrong'}, {'TMUX': '/fixture', 'TMUX_PANE': '%1'}, tmux))
         self.assertIn('This message may correct', out['hookSpecificOutput']['additionalContext'])
+
+    def test_learning_audit_records_toggles_once(self):
+        with audit.acting('ui'):
+            for enabled in (False, False, True):
+                handler = Handler(autonomy.PATH + '/lessons', {'enabled': enabled})
+                autonomy.post(handler)
+                self.assertEqual(handler.status, 200, handler.body)
+        rows = audit.query(kinds=['setting.learning'])['entries']
+        self.assertCountEqual([(row['old'], row['new']) for row in rows], [(True, False), (False, True)])
+        self.assertTrue(all(row['actor'] == {'source': 'ui'} for row in rows))
 
     def test_api_learning_keys_and_all_user_actions(self):
         review = {'due': False, 'reason': None, 'new': 0, 'disputed': 0, 'total': 0}
@@ -833,7 +954,7 @@ class Learning(Base):
 
     def test_review_check_conflict_and_disabled_advisor(self):
         for message, code in ((autonomy.lessons_check.BUSY, 409),
-                              ('Turn on the advisor in Settings › Agents first.', 400),
+                              ('Turn on the advisor in Settings › Models & helpers first.', 400),
                               ('There are no lessons to check.', 400)):
             with mock.patch.object(autonomy.lessons_check, 'start', side_effect=ValueError(message)):
                 handler = Handler(autonomy.PATH + '/review', {'action': 'check'})

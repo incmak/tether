@@ -1,5 +1,6 @@
 """What the chat box can suggest: slash commands and skills for "/", files for "@", and the MCP servers and plugins in reach.
 Read-only. Everything comes from the agents' own config folders; nothing here runs an agent."""
+from itertools import islice
 import json
 import os
 from pathlib import Path
@@ -167,11 +168,24 @@ LISTING_LINE = re.compile(r'^- ([^:\s][^:\n]*(?::[^:\s][^:\n]*)?): ?(.*)$', re.M
 _listings = {}  # transcript -> (bytes read, {name: description})
 
 
-def plugin_folder(key):
+def plugin_folder(key, limit=None):
     """The newest cached copy of an enabled plugin ("name@marketplace")."""
     name, _, market = key.partition('@')
-    versions = [path for path in (paths.CLAUDE / 'plugins' / 'cache' / market / name).glob('*') if path.is_dir()]
-    return max(versions, key=lambda path: path.stat().st_mtime) if versions else None
+    newest = None
+    newest_at = float('-inf')
+    try:
+        with os.scandir(paths.CLAUDE / 'plugins' / 'cache' / market / name) as versions:
+            for version in islice(versions, limit):
+                try:
+                    if version.is_dir():
+                        at = version.stat().st_mtime
+                        if at > newest_at:
+                            newest, newest_at = Path(version.path), at
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return newest
 
 
 def json_file(path):

@@ -1,4 +1,5 @@
 """Checks for Claude Code's /btw side question card. Frames in fixtures/ come from Claude Code 2.1.325."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import subprocess
 import tempfile
@@ -192,6 +193,16 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(status['state'], 'Idle')
         self.assertEqual(status['attention']['reason'], 'side')
         self.assertIsNone(status['approval'])
+
+    def test_live_status_without_registry_is_working_while_claude_answers(self):
+        # B490 review r1: the overlay hides Claude's status area, so its own answering row is the signal.
+        for name, state in (('claude_btw_answering.txt', 'Working'), ('claude_btw_answer.txt', 'Idle')):
+            with self.subTest(name=name):
+                plain, _ = frame(name)
+                with patch.object(side_question, '_seen', {}), patch.object(side_question, 'full_question', lambda entry, shown: shown), \
+                        patch.object(threading.Thread, 'start', lambda self: None), patch.object(terminal, 'capture_quota_notices'):
+                    status = terminal._live_status(dict(ENTRY), None, plain)
+                self.assertEqual((status['state'], status['attention']['reason']), (state, 'side'))
 
 
 class SavedTests(unittest.TestCase):

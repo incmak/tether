@@ -1,3 +1,4 @@
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 import os
@@ -6,9 +7,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import audit
 import autonomy
 import claude_advisor
 import paths
+import projects
 
 PID = 'abcdef012345'
 
@@ -184,6 +187,19 @@ class Http(Base):
         handler = Handler(f'{claude_advisor.PATH}?project={PID}')
         claude_advisor.get(handler)
         self.assertEqual(handler.body['project'], {'override': True, 'model': 'off'})
+
+    def test_audit_records_global_choice_and_project_override(self):
+        claude_advisor.set_project(PID, False, 'opus')
+        projects.set_name(PID, 'Example Project')
+        with audit.acting('ui', device='Chrome on Mac'):
+            for body in ({'model': 'opus'}, {'project': PID, 'override': True, 'model': 'opus'}):
+                handler = Handler(claude_advisor.PATH, body)
+                claude_advisor.post(handler)
+                self.assertEqual(handler.status, 200, handler.body)
+        rows = audit.query(kinds=['setting.claude_advisor'])['entries']
+        self.assertCountEqual([(row['old'], row['new'], row.get('project')) for row in rows],
+                              [('off', 'opus', None), ('opus (override off)', 'opus (override on)', 'Example Project')])
+        self.assertTrue(all(row['actor'] == {'source': 'ui', 'device': 'Chrome on Mac'} for row in rows))
 
     def test_bad_requests(self):
         for body, status in (({'model': ['opus']}, 400), ({'model': {'a': 1}}, 400),

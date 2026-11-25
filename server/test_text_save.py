@@ -1,4 +1,5 @@
 """Text saves use isolated files and authenticated local HTTP requests."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import errno
 import hashlib
 import http.client

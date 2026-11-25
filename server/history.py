@@ -7,10 +7,12 @@ import json
 import os
 import threading
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 import re
 import sqlite3
 
+import injected_prompts
 import paths
 
 MAX_FILES = 12
@@ -38,60 +40,81 @@ def keep_tail(state):
         state['dropped'] += excess
 
 
-def read(path, fresh, consume, trim=None):
+def records(stream, start, end=None):
+    """Yield byte offsets, decoded records, newline flags and byte lengths."""
+    stream.seek(start)
+    offset = start
+    while end is None or offset < end:
+        line = stream.readline() if end is None else stream.readline(end - offset)
+        if not line:
+            break
+        complete = line.endswith(b'\n')
+        try:
+            record = json.loads(line)
+        except ValueError:
+            if not complete:
+                break  # Pick up a record still being written on the next read.
+            record = None
+        yield offset, record, complete, len(line)
+        offset += len(line)
+
+
+def advance(path, cached, fresh, consume, trim, *, info=None, with_offset=False):
+    """Advance a caller-owned parser record under the path lock. Return None if stat fails."""
+    if info is None:
+        try:
+            info = os.stat(path)
+        except (OSError, TypeError):
+            return None
+    if cached and (cached['inode'] != info.st_ino or info.st_size < cached['offset']):
+        cached = None  # replaced or truncated: start over
+    if cached is None:
+        cached = {'inode': info.st_ino, 'offset': 0, 'index': 0, 'state': fresh()}
+    if info.st_size > cached['offset']:
+        with open(path, 'rb') as stream:
+            stream.seek(cached['offset'])
+            if cached.pop('unterminated', False) and stream.read(1) == b'\n':
+                cached['offset'] += 1  # the newline that finished a record already consumed
+            since_trim = 0
+            for offset, record, complete, length in records(stream, cached['offset']):
+                cached['offset'] += length
+                index, cached['index'] = cached['index'], cached['index'] + 1
+                cached['unterminated'] = not complete
+                if record is not None:
+                    try:
+                        if with_offset:
+                            consume(cached['state'], index, record, offset=offset)
+                        else:
+                            consume(cached['state'], index, record)
+                    except (AttributeError, TypeError):  # one odd record (an unexpected null) must not break the whole chat
+                        pass
+                    since_trim += 1
+                    if trim and since_trim >= 2000:  # keep the first load of a huge file bounded too
+                        trim(cached['state'])
+                        since_trim = 0
+        if trim:
+            trim(cached['state'])
+    return cached
+
+
+def read(path, fresh, consume, trim=None, *, namespace=None, with_offset=False):
     """Bring the cached state for `path` up to date and return it.
 
     `fresh()` builds an empty state; `consume(state, index, record)` folds one decoded record in, where `index`
     is the record's zero-based line number; `trim(state)` bounds its size after each read. The returned state is
-    shared: callers must copy before changing it.
+    shared: callers must copy before changing it. Use a namespace to keep a second parser's state for the same file.
+    With `with_offset=True`, consume also gets the byte offset of the line.
     """
     path = str(path)
+    key = path if namespace is None else (path, namespace)
     trim = keep_tail if trim is None else trim  # looked up now, so it can be replaced; pass False to disable
-    try:
-        info = os.stat(path)
-    except (OSError, TypeError):
-        return fresh()
     with _lock_for(path):
-        cached = _states.get(path)
-        if cached and (cached['inode'] != info.st_ino or info.st_size < cached['offset']):
-            cached = None  # replaced or truncated: start over
+        cached = advance(path, _states.get(key), fresh, consume, trim, with_offset=with_offset)
         if cached is None:
-            cached = {'inode': info.st_ino, 'offset': 0, 'index': 0, 'state': fresh()}
-        if info.st_size > cached['offset']:
-            with open(path, 'rb') as stream:
-                stream.seek(cached['offset'])
-                if cached.pop('unterminated', False) and stream.read(1) == b'\n':
-                    cached['offset'] += 1  # the newline that finished a record already consumed
-                stream.seek(cached['offset'])
-                since_trim = 0
-                while True:
-                    line = stream.readline()
-                    if not line:
-                        break
-                    complete = line.endswith(b'\n')
-                    try:
-                        record = json.loads(line)
-                    except ValueError:
-                        if not complete:
-                            break  # a record still being written is picked up on the next call
-                        record = None
-                    cached['offset'] += len(line)
-                    index, cached['index'] = cached['index'], cached['index'] + 1
-                    cached['unterminated'] = not complete
-                    if record is not None:
-                        try:
-                            consume(cached['state'], index, record)
-                        except (AttributeError, TypeError):  # one odd record (an unexpected null) must not break the whole chat
-                            pass
-                        since_trim += 1
-                        if trim and since_trim >= 2000:  # keep the first load of a huge file bounded too
-                            trim(cached['state'])
-                            since_trim = 0
-            if trim:
-                trim(cached['state'])
+            return fresh()
         with _registry_lock:
-            _states.pop(path, None)
-            _states[path] = cached  # most recently used goes last
+            _states.pop(key, None)
+            _states[key] = cached  # most recently used goes last
             while len(_states) > MAX_FILES:
                 oldest = next(iter(_states))
                 _states.pop(oldest)
@@ -131,11 +154,18 @@ def transcript_files(identifier=None):
         return
 
 
-def user_title(entry, limit=80):
-    if entry.get('type') != 'user' or entry.get('isMeta') or entry.get('isSidechain'):
+def user_title(entry, limit=80, *, bound=()):
+    identifier = entry.get('uuid')
+    if entry.get('isMeta') or entry.get('isSidechain') or (isinstance(identifier, str) and identifier in bound):
         return ''
-    message = entry.get('message')
-    content = message.get('content') if isinstance(message, dict) else None
+    if entry.get('type') == 'user':
+        message = entry.get('message')
+        content = message.get('content') if isinstance(message, dict) else None
+    elif entry.get('type') == 'attachment':
+        attachment = entry.get('attachment')
+        content = attachment.get('prompt') if isinstance(attachment, dict) and attachment.get('type') == 'queued_command' else None
+    else:
+        return ''
     if isinstance(content, list):
         content = '\n'.join(part.get('text', '') for part in content
                             if isinstance(part, dict) and part.get('type') == 'text' and isinstance(part.get('text'), str))
@@ -145,11 +175,22 @@ def user_title(entry, limit=80):
     return ' '.join(text.split())[:limit]
 
 
+def _head_records(path):
+    with path.open('rb') as stream:
+        for offset, entry, _, _ in records(stream, 0):
+            if isinstance(entry, dict):
+                yield offset, entry
+
+
 def preview(path, info):
-    signature = (info.st_mtime_ns, info.st_size)
+    try:
+        bound = injected_prompts.bindings({'transcript': path, 'agent': 'claude'})
+        signature = (info.st_mtime_ns, info.st_size, frozenset(bound))
+    except injected_prompts.ReceiptsUnreadable:
+        bound, signature = None, None
     with _preview_lock:
         cached = _previews.get(path)
-        if cached and cached[0] == signature:
+        if signature is not None and cached and cached[0] == signature:
             return dict(cached[1])
         with open(path, 'rb') as stream:
             head = stream.read(PREVIEW_BYTES)
@@ -159,7 +200,7 @@ def preview(path, info):
         # Never join two partial records across the unread middle of a large file.
         if tail_start > len(head):
             tail = tail.partition(b'\n')[2]
-        title, first_user, cwd = '', '', None
+        title, custom_title, first_user, cwd = '', '', '', None
         lines = (head + tail).splitlines() if tail_start == len(head) else head.splitlines() + tail.splitlines()
         for line in lines:
             try:
@@ -175,11 +216,29 @@ def preview(path, info):
             value = entry.get(field) if field else None
             if isinstance(value, str) and value.strip():
                 title = ' '.join(value.split())
-            if not first_user:
-                first_user = user_title(entry, limit=300)
+                if kind == 'custom-title':
+                    custom_title = title
+            if bound is not None and not first_user:
+                first_user = user_title(entry, limit=300, bound=bound)
+        if bound is None:
+            title = custom_title
+        elif bound:
+            # The bounded preview may skip the first real user message if a relay started the chat.
+            starts_with_relay = False
+            for _, entry in _head_records(path):
+                identifier = entry.get('uuid')
+                if isinstance(identifier, str) and identifier in bound:
+                    starts_with_relay = True
+                text = user_title(entry, limit=300, bound=bound)
+                if text:
+                    first_user = text
+                    break
+            if starts_with_relay:
+                title = custom_title
         result = {'id': path.stem, 'title': title or first_user[:80] or path.stem, 'text': first_user, 'cwd': cwd,
                   'time': datetime.fromtimestamp(info.st_mtime, timezone.utc).isoformat()}
-        _previews[path] = (signature, result)
+        if signature is not None:
+            _previews[path] = (signature, result)
         return dict(result)
 
 
@@ -192,6 +251,21 @@ def recent_chats(limit=30):
         except OSError:
             continue
     return chats
+
+
+@lru_cache(maxsize=128)
+def _codex_relay_title(path, _signature, bound):
+    """Return the next user's text if the first user record is a bound relay."""
+    started = False
+    for offset, entry in _head_records(path):
+        text = next(injected_prompts.codex_parts(entry), None)
+        if text is None:
+            continue
+        if injected_prompts.codex_id(offset, entry.get('timestamp')) in bound:
+            started = True
+        else:
+            return ' '.join(text.split()) if started else None
+    return '' if started else None
 
 
 def _codex_chats():
@@ -219,14 +293,32 @@ def _codex_chats():
                 identifier = row['id']
                 if not isinstance(identifier, str) or not UUID.fullmatch(identifier):
                     continue
-                title = next((' '.join(row[key].split()) for key in ('name', 'title', 'first_user_message')
-                              if isinstance(row.get(key), str) and row[key].strip()), None)
+                text = row.get('first_user_message')
+                rollout = row.get('rollout_path')
+                changed = None
+                unreadable = False
+                if isinstance(rollout, str) and rollout:
+                    try:
+                        bound = injected_prompts.bindings({'transcript': rollout, 'agent': 'codex'})
+                        if bound:
+                            path = Path(rollout)
+                            info = path.stat()
+                            changed = _codex_relay_title(path, (info.st_ino, info.st_size, info.st_mtime_ns), frozenset(bound))
+                    except (OSError, injected_prompts.ReceiptsUnreadable):
+                        unreadable = True
+                if unreadable:
+                    text, titles = '', (row.get('name'), identifier)
+                elif changed is not None:
+                    text = changed
+                    titles = (row.get('name'), text, identifier)
+                else:
+                    titles = (row.get('name'), row.get('title'), text)
+                title = next((' '.join(value.split()) for value in titles if isinstance(value, str) and value.strip()), None)
                 if title is None:
                     # An empty thread. has_user_event cannot tell: Codex stores 0 on every row.
                     if columns & {'name', 'title', 'first_user_message'}:
                         continue
                     title = identifier
-                text = row.get('first_user_message')
                 try:
                     updated = datetime.fromtimestamp(row['updated_at_ms'] / 1000, timezone.utc).isoformat()
                 except (KeyError, TypeError, ValueError, OverflowError, OSError):

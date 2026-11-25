@@ -1,4 +1,5 @@
 """Live helpers use fake session rows and an injectable Claude process."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import hashlib
 import io
 import json

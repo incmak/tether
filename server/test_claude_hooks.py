@@ -1,4 +1,5 @@
 """Hook capture uses isolated cache files; footer reads never touch tmux."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import os
 from pathlib import Path
@@ -296,6 +297,19 @@ class HookTests(unittest.TestCase):
         record.update(type='user', message={'role': 'user', 'content': 'next prompt'})
         self.transcript.write_text(json.dumps(record) + '\n')
         self.assertEqual(self.read(3700)['running'], self.screen['running'])
+
+    def test_compact_summary_does_not_invalidate_the_running_turn(self):
+        for flag in ('isCompactSummary', 'isAutoCompactSummary'):
+            for origin in ('human', 'task_notification'):
+                with self.subTest(flag=flag, turnOrigin=origin):
+                    self.screen['running'] = None
+                    self.feed('UserPromptSubmit')
+                    self.feed('PreToolUse', 101, tool_name='Bash', tool_use_id='one')
+                    summary = {'type': 'user', flag: True, 'isVisibleInTranscriptOnly': True, 'turnOrigin': origin,
+                               'timestamp': '1970-01-01T00:01:45Z',
+                               'message': {'role': 'user', 'content': 'This session is being continued.'}}
+                    self.transcript.write_text(json.dumps(summary) + '\n')
+                    self.assertEqual(self.read(3700)['running']['title'], 'Bash')
 
     def test_delayed_settings_cannot_revive_or_overwrite_newer_state(self):
         self.feed('UserPromptSubmit', permission_mode='plan')

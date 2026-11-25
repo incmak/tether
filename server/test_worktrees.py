@@ -1,4 +1,5 @@
 """Worktree creation uses disposable git repositories and never touches tmux."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import os
 from pathlib import Path
 import subprocess
@@ -7,10 +8,12 @@ import unittest
 from unittest.mock import patch
 
 import worktrees
+from unittest_environment import isolate
 
 
 class WorktreeTests(unittest.TestCase):
     def setUp(self):
+        isolate()
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)

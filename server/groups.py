@@ -8,7 +8,8 @@ out, and dissolves it when only its main session ("root") is left: the root goes
 never renames or removes a user stack. A stack with neither key was made before makers were recorded (2026-11-15);
 Tether leaves it alone too.
 The pane option @group holds a group id. A pane with no @group, or with an id that is not in @groups, is in Unstacked.
-The pane option @group_by is "user" after the user moved the tab by hand (groups_api.py). Auto stacks never move such a tab.
+The pane option @group_by is "user" when the user moves a tab by hand (groups_api.py) or opens it with Delegate or
+Quick create. Auto stacks never move a user-placed tab.
 A group's context is a projects.py bundle, made on first use. Removing a group archives the bundle; nothing is deleted.
 This module is the store and its rules. groups_api.py is the HTTP part."""
 import contextlib
@@ -302,10 +303,34 @@ def move(session_id, pane, group_id, run=subprocess.run, by_user=False, dissolve
             (drop_if_alone if dissolve else drop_if_empty)(session_id, old, run)
 
 
-def _labelled(session_id, group_id, run):
+def _labels(session_id, run):
     shown = _tmux(run, 'list-panes', '-s', '-t', session_id + ':', '-F', '#{pane_id}\t#{@group}')
     _check(shown, GONE_SESSION)
-    return [pane for pane, _, label in (line.partition('\t') for line in shown.stdout.splitlines()) if label == group_id]
+    return {pane: label for pane, _, label in (line.partition('\t') for line in shown.stdout.splitlines())}
+
+
+def _labelled(session_id, group_id, run):
+    return [pane for pane, label in _labels(session_id, run).items() if label == group_id]
+
+
+def stack_members(session_id, group_id, entries, run):
+    """Effective stack membership for close and remove. A child follows its task."""
+    import helper_tabs
+    import task_tree
+
+    labels = _labels(session_id, run)
+    options = helper_tabs.read_panes(run)
+    live = {entry['id']: entry for entry in entries if entry['id'] in labels}
+    fields = task_tree.placements(options, live)
+    members = {}
+    for pane in labels:
+        field = fields.get(pane, {})
+        if labels.get(field.get('task', pane)) == group_id:
+            members[pane] = field.get('task_depth', 0)
+    pending = task_tree.pending_roots(options, live, fields)
+    if any(labels.get(root) == group_id for root in pending) or starting(session_id, group_id, run):
+        raise GroupError(409, 'A tab is still starting in this stack. Wait for it to appear and try again.')
+    return members
 
 
 def panes_in(session_id, group_id, run=subprocess.run):
@@ -454,15 +479,25 @@ def closing(pane, run=subprocess.run):
             pass  # the 30 s sweep (auto_stacks.watch) tries again
 
 
-def remove(session_id, group_id, run=subprocess.run):
-    """Drop an empty group. Its context bundle goes to the archive."""
+def remove(session_id, group_id, run=subprocess.run, *, entries=None, after_close=False):
+    """Drop an empty group. after_close requires a complete preflight under LOCK before any kills."""
     with LOCK():
-        groups = read(session_id, run)
-        group = _find(groups, group_id)
-        if _labelled(session_id, group_id, run):
-            raise GroupError(409, 'The stack still has tabs. Move or close them first.')
+        try:
+            groups = read(session_id, run)
+            group = _find(groups, group_id)
+        except GroupError as exc:
+            if after_close and exc.status == 404:  # the last pane or the auto stack may be gone
+                return None
+            raise
+        if not after_close:
+            members = (_labelled(session_id, group_id, run) if entries is None
+                       else stack_members(session_id, group_id, entries, run))
+            if members:
+                raise GroupError(409, 'The stack still has tabs. Move or close them first.')
+        index = groups.index(group)
         write(session_id, [g for g in groups if g['id'] != group_id], run)
     _archive(group)
+    return group, index
 
 
 def reorder(session_id, ids, run=subprocess.run):
@@ -498,6 +533,8 @@ def arrange(session_id, plan, run=subprocess.run, unstack=(), thread_of=lambda p
     The tabs in unstack go to no stack (Unstacked). Other tabs stay where they are. A stack that the apply leaves empty
     is removed, unless a helper start is about to fill it. thread_of(pane): the conversation the tab holds now, or None.
     Returns the stacks that got tabs, in plan order."""
+    import helper_tabs  # helper_tabs imports terminal_input, which imports groups
+
     if (not isinstance(plan, list) or len(plan) > 20 or not isinstance(unstack, (list, tuple)) or len(unstack) > 200
             or not plan and not unstack):
         raise GroupError(400, 'Send 1 to 20 stacks.')
@@ -526,13 +563,11 @@ def arrange(session_id, plan, run=subprocess.run, unstack=(), thread_of=lambda p
         for line in live.stdout.splitlines():
             pane, label, record = (line.split('\t', 2) + ['', ''])[:3]
             old[pane] = label
-            try:
-                found = json.loads(record) if record else None
-            except ValueError:
-                found = None
-            found = found if isinstance(found, dict) else {}
-            link, linked_thread = found.get('owner_pane'), found.get('owner_thread')
-            if isinstance(link, str) and link != pane:
+            found = helper_tabs._record(record) if record else None
+            if found is None:
+                continue
+            link, linked_thread = helper_tabs.placement_owner(found)
+            if link is not None and link != pane:
                 known = thread_of(link)
                 # The owner now holds another conversation: the link is broken, and this tab is its own root
                 # (the same rule as auto_stacks.root_of).

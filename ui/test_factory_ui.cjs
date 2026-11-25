@@ -1,5 +1,5 @@
 // The Factory view (src/Factory.tsx) against a build, with fixture data only. It checks the keyboard zoom path
-// (arrows, Enter, Esc, Backspace), the breadcrumb, wheel zoom, a token that moves phase, the live region, the
+// (arrows, Enter, Esc, Backspace), the breadcrumb, wheel and touch zoom, a token that moves phase, the live region, the
 // loading, empty and error states, and no sideways scroll from 320 px. With SHOTS set (or by default) it saves
 // screenshots of all four levels at 390, 1280, 1920 and 3840 px wide, light and dark.
 // Run: cd ui && npm run test:ui (or DIST=<build> node test_factory_ui.cjs).
@@ -25,6 +25,8 @@ const panes = [
   pane('%7', 'Docs pass', { agent: 'codex', state: 'Working' }),
   pane('%8', 'Release notes', { finished: NOW / 1000 - 3 * 3600 }),
   pane('%9', 'Login fix', { agent: 'antigravity', state: 'Working' }),
+  pane('%11', 'Factory helper', { agent: 'codex', parent: '%2' }),
+  pane('%12', 'Factory advisor', { role: 'advisor', parent: '%11' }),
 ]
 const backlog = [
   '## tether',
@@ -78,19 +80,43 @@ const base = {
   'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] }, usage: { claude: null, codex: null }, 'work/board': { projects: [], items: [] },
 }
 const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json', '.webmanifest': 'application/manifest+json' }
+const touchViewports = [{ width: 320, height: 640 }, { width: 768, height: 1024 }]
+const readCrumbs = page => page.locator('.factory-crumbs li').allInnerTexts()
+const zoomSettled = page => page.waitForFunction(() => !document.documentElement.matches(':active-view-transition'))
+
+async function midpoint(item) {
+  await item.scrollIntoViewIfNeeded()
+  const { x, y, width, height } = await item.boundingBox()
+  return { x: Math.round(x + width / 2), y: Math.round(y + height / 2) }
+}
+
+async function dragTouches(cdp, paths) {
+  const dispatch = (type, touchPoints) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints })
+  const points = fraction => paths.map(([from, to], id) => ({
+    id,
+    x: from.x + (to.x - from.x) * fraction,
+    y: from.y + (to.y - from.y) * fraction,
+  }))
+  await dispatch('touchStart', points(0))
+  for (let step = 1; step <= 6; step++) await dispatch('touchMove', points(step / 6))
+  await dispatch('touchEnd', [])
+}
 
 async function main() {
   let browser, page, failed = 0
   const pageErrors = []
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
   // What the fake server answers. Tests change these between steps.
-  const state = { panes, moved: false, factory: 'ok', delay: 0 }
-  try {
-    if (SHOTS) await fs.mkdir(SHOTS, { recursive: true })
-    browser = await getBrowser()
-    const context = browser.contexts()[0]
-    if (!context || context.pages().length >= 3) throw new Error('Shared browser has no context or already has three tabs')
-    page = await context.newPage()
+  const history = Object.fromEntries(Object.entries({
+    B191: 'verify', B190: 'build', B192: 'inbox', B193: 'inbox', B194: 'inbox', B188: 'done', B168: 'build',
+    '%7': 'spec', '%8': 'done', '%9': 'build',
+  }).map(([id, phase]) => [id, [{ phase, at: NOW - 60000 }]]))
+  history.B71 = [{ phase: 'inbox', at: NOW - 26 * 3600000 }, { phase: 'build', at: NOW - 2 * 3600000 }]
+  const state = { panes, moved: false, factory: 'ok', factoryPoll: 0, rejectHistory: false, reports: [], history }
+  const reportsDeploy = body => body.moves.some(move => move.task === 'B71' && move.phase === 'deploy')
+  const deployReports = () => state.reports.filter(({ body }) => reportsDeploy(body))
+  let sessionGate, historyRetryGate, factoryGate
+  const setupPage = async page => {
     page.setDefaultTimeout(10000)
     page.on('pageerror', error => pageErrors.push(error.stack))
     await page.emulateMedia({ reducedMotion: 'no-preference', colorScheme: 'light' })
@@ -102,12 +128,33 @@ async function main() {
       if (url.pathname.includes('/api/')) {
         const endpoint = url.pathname.split('/api/')[1]
         if (endpoint === 'prefs') return route.fulfill({ json: { prefs: { selected: '%1' }, version: 1 } })
+        if (endpoint === 'factory/history' && request.method() === 'POST') {
+          const body = request.postDataJSON()
+          state.reports.push({ body, poll: state.factoryPoll, header: request.headers()['x-codex-mobile'] })
+          if (reportsDeploy(body)) {
+            if (state.rejectHistory) {
+              state.rejectHistory = false
+              return route.fulfill({ status: 503, json: { error: 'Phase history is unavailable' } })
+            }
+            await historyRetryGate
+          }
+          for (const { task, phase } of body.moves) {
+            const entries = state.history[task] ??= []
+            if (entries.at(-1)?.phase !== phase) entries.push({ phase, at: NOW })
+          }
+          return route.fulfill({ json: { ok: true } })
+        }
         if (request.method() !== 'GET') return route.fulfill({ json: { ok: true } })
-        if (endpoint === 'sessions') return route.fulfill({ json: { sessions: state.panes, default_thread: '%1' } })
+        if (endpoint === 'sessions') {
+          await sessionGate
+          return route.fulfill({ json: { sessions: state.panes, default_thread: '%1' } })
+        }
         if (endpoint === 'factory') {
-          if (state.delay) await new Promise(resolve => setTimeout(resolve, state.delay))
+          await factoryGate
           if (state.factory === 'down') return route.fulfill({ status: 502, json: { error: 'Bad gateway' } })
-          return route.fulfill({ json: state.factory === 'empty' ? { now: NOW / 1000, tools: {}, deployed: [], commits: [] } : factoryData(state.moved) })
+          state.factoryPoll++
+          const facts = state.factory === 'empty' ? { now: NOW / 1000, tools: {}, deployed: [], commits: [] } : factoryData(state.moved)
+          return route.fulfill({ json: { ...facts, history: state.history } })
         }
         if (endpoint === 'projects/backlog') return route.fulfill({ json: { text: state.factory === 'empty' ? '' : backlog } })
         if (endpoint === 'screen') return route.fulfill({ json: { text: screenText, session: url.searchParams.get('session'), agent: 'claude' } })
@@ -120,31 +167,38 @@ async function main() {
       if (!(file === path.join(DIST, 'index.html') || file.startsWith(DIST + path.sep))) return route.fulfill({ status: 404, body: '' })
       try { return route.fulfill({ body: await fs.readFile(file), contentType: mime[path.extname(file)] || 'application/octet-stream' }) } catch { return route.fulfill({ status: 404, body: '' }) }
     })
-    // The task timeline: B71 sat in the Inbox, then moved to Build two hours ago.
-    const seeded = { B71: [{ phase: 'inbox', at: NOW - 26 * 3600000 }, { phase: 'build', at: NOW - 2 * 3600000 }] }
-    await page.addInitScript(([history]) => {
+    // Old browser history conflicts with the server history and should be removed on first open.
+    await page.addInitScript(() => {
       if ('serviceWorker' in navigator) navigator.serviceWorker.register = () => Promise.reject(new Error('off'))
       if (sessionStorage.getItem('factory-test-seeded')) return
       sessionStorage.setItem('factory-test-seeded', '1')
       localStorage.clear()
       localStorage.setItem('tmux-chat.prefs.synced', '1')
       localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'light', voiceOff: true, voiceSound: false, selected: '%1' }))
-      localStorage.setItem('tether-factory-history', JSON.stringify(history))
-    }, [seeded])
+      localStorage.setItem('tether-factory-history', JSON.stringify({ B71: [{ phase: 'done', at: Date.now() }] }))
+    })
+  }
+  try {
+    if (SHOTS) await fs.mkdir(SHOTS, { recursive: true })
+    // The shared browser proxy does not allow per-page CDP sessions.
+    browser = await getBrowser({ local: true })
+    page = await browser.contexts()[0].newPage()
+    await setupPage(page)
 
     const view = page.locator('dialog.factory')
-    const crumbs = () => page.locator('.factory-crumbs li').allInnerTexts()
+    const crumbs = () => readCrumbs(page)
     const focused = () => page.evaluate(() => { const el = document.activeElement; return el ? (el.getAttribute('data-key') || el.textContent.trim().slice(0, 40)) : '' })
     const station = phase => page.locator(`.factory-station.phase-${phase}`)
     const overflow = () => page.evaluate(() => { const body = document.querySelector('.factory-body'); return document.documentElement.scrollWidth > innerWidth || (body && body.scrollWidth > body.clientWidth + 1) })
 
     // Loading, then the floor from the command URL.
     await page.setViewportSize({ width: 1280, height: 800 })
-    state.delay = 1500
+    let showFactory
+    factoryGate = new Promise(resolve => { showFactory = resolve })
     await page.goto(`${ORIGIN}/chat/?go=factory`)
     await view.locator('.factory-loading').waitFor()
     check('loading state shows', await view.locator('.factory-loading').isVisible())
-    state.delay = 0
+    showFactory()
     await station('build').waitFor()
     check('seven stations, left to right', JSON.stringify(await page.locator('.factory-station-name').allInnerTexts()) === JSON.stringify(['Inbox', 'Spec', 'Build', 'Review', 'Verify', 'Deploy', 'Done']), JSON.stringify(await page.locator('.factory-station-name').allInnerTexts()))
     check('B191 is in Verify: its worker last ran tsc', (await station('verify').innerText()).includes('B191'), await station('verify').innerText())
@@ -177,7 +231,9 @@ async function main() {
     await page.locator('.factory-task').waitFor()
     check('Enter on a token zooms to the task', JSON.stringify(await crumbs()) === '["Factory","Build","B71"]', JSON.stringify(await crumbs()))
     check('task view says why the phase is a guess', /Phase guessed from:/.test(await page.locator('.factory-why').innerText()))
-    check('task view shows the phase history', /Inbox.*Build/s.test(await page.locator('.factory-timeline').innerText()), await page.locator('.factory-timeline').innerText())
+    const timeline = page.locator('.factory-timeline')
+    check('task view shows the server timeline', JSON.stringify(await timeline.locator('b').allInnerTexts()) === '["Inbox","Build"]')
+    check('the old browser history key is removed', await page.evaluate(() => localStorage.getItem('tether-factory-history')) === null)
     check('task view shows the commit', (await page.locator('.factory-task').innerText()).includes('4c1e9a0'))
     await page.keyboard.press('Enter')
     await page.locator('.factory-agent').waitFor()
@@ -211,26 +267,188 @@ async function main() {
     check('a breadcrumb button zooms out to that level', JSON.stringify(await crumbs()) === '["Factory"]')
 
     // Wheel: ctrl+wheel up on a token zooms in, down zooms out.
-    await page.waitForTimeout(400)  // the zoom's view transition ends; during it, the pointer hits the root
+    await zoomSettled(page)  // during the zoom's view transition, the pointer hits the root
     const box = await page.locator('[data-key="task:B190"]').boundingBox()
     await page.mouse.move(box.x + 20, box.y + 10)
     await page.keyboard.down('Control'); await page.mouse.wheel(0, -100); await page.keyboard.up('Control')
     await page.locator('.factory-task').waitFor()
+    const zoomedAt = await page.evaluate(() => Date.now())
     check('pinch or ctrl+wheel zooms in on the item under the pointer', JSON.stringify(await crumbs()) === '["Factory","Build","B190"]', JSON.stringify(await crumbs()))
-    await page.waitForTimeout(500)
+    await zoomSettled(page)
+    // Factory.tsx drops a wheel within 450 ms of the last one, by the page clock.
+    await page.waitForFunction(at => Date.now() - at >= 450, zoomedAt)
     await page.keyboard.down('Control'); await page.mouse.wheel(0, 100); await page.keyboard.up('Control')
     await page.locator('.factory-phase').waitFor()
     check('ctrl+wheel down zooms out one level, to the phase', JSON.stringify(await crumbs()) === '["Factory","Build"]', JSON.stringify(await crumbs()))
     await page.keyboard.press('Escape')
     await page.locator('.factory-floor').waitFor()
 
-    // A task changes phase: its token moves to the new station, and the live region says so (at most every 15 s).
+    // Touch pinch at phone and tablet sizes.
+    {
+      const viewport = page.viewportSize()
+      const pointers = (center, steps, pointerType = 'touch') => page.evaluate(({ center, steps, pointerType }) => {
+        for (const [type, offsets] of steps) {
+          offsets.forEach((offset, index) => {
+            if (offset === null) return
+            const clientX = center.x + offset, clientY = center.y
+            const target = document.elementFromPoint(clientX, clientY)
+            if (!target?.closest('.factory')) throw new Error(`Touch point outside Factory: ${clientX}, ${clientY}`)
+            target.dispatchEvent(new PointerEvent(`pointer${type}`, {
+              bubbles: true, pointerType, pointerId: 11 + index, isPrimary: index === 0, clientX, clientY,
+            }))
+          })
+        }
+      }, { center, steps, pointerType })
+      const zoom = async (center, start, finish, pointerType) => {
+        await pointers(center, [['down', start], ['move', finish], ['up', finish]], pointerType)
+        await zoomSettled(page)
+      }
+
+      for (const { width, height } of touchViewports) {
+        await zoomSettled(page)
+        await page.setViewportSize({ width, height })
+        const center = await midpoint(page.locator('[data-key="task:B190"]'))
+        check(`${width}: Factory allows one-finger pan on both axes`, await view.evaluate(el => getComputedStyle(el).touchAction) === 'pan-x pan-y')
+        const prevented = await view.evaluate(el => {
+          const touches = [11, 12].map(identifier => new Touch({ identifier, target: el }))
+          return [touches, touches.slice(0, 1)].map(points => {
+            const event = new TouchEvent('touchmove', { cancelable: true, touches: points })
+            el.dispatchEvent(event)
+            return event.defaultPrevented
+          })
+        })
+        check(`${width}: two-touch move is canceled and one-touch move is allowed`, prevented[0] && !prevented[1], JSON.stringify(prevented))
+
+        await zoom(center, [-30, 30], [-45, 45])
+        check(`${width}: a spread of less than 40 px does not zoom`, JSON.stringify(await crumbs()) === '["Factory"]')
+        await zoom(center, [-80, 80], [-103, 103])
+        check(`${width}: a spread below the distance ratio does not zoom`, JSON.stringify(await crumbs()) === '["Factory"]')
+        await zoom(center, [-30], [-85])
+        check(`${width}: one moving finger does not zoom`, JSON.stringify(await crumbs()) === '["Factory"]')
+        for (const kind of ['mouse', 'pen']) {
+          await zoom(center, [-30, 30], [-60, 60], kind)
+          check(`${width}: ${kind} pointers do not pinch zoom`, JSON.stringify(await crumbs()) === '["Factory"]')
+        }
+        await zoom({ x: Math.floor(width / 2), y: 20 }, [-30, 30], [-60, 60])
+        check(`${width}: a spread with no item under the start midpoint does not zoom`, JSON.stringify(await crumbs()) === '["Factory"]')
+        await zoom(center, [-60, 60], [-30, 30])
+        check(`${width}: squeezing at the floor leaves Factory open`, await page.locator('dialog.factory[open]').isVisible() && JSON.stringify(await crumbs()) === '["Factory"]')
+
+        // A finger that ends outside the dialog (the browser sends pointercancel to <html>) leaves no stale id.
+        await page.evaluate(({ x, y }) => {
+          document.elementFromPoint(x, y).dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch', pointerId: 31, isPrimary: true, clientX: x, clientY: y }))
+          document.documentElement.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true, pointerType: 'touch', pointerId: 31, isPrimary: true, clientX: x, clientY: y }))
+        }, center)
+        await pointers(center, [['down', [-30, 30]], ['move', [-60, 60]]])
+        await page.locator('.factory-task').waitFor()
+        await zoomSettled(page)
+        check(`${width}: spreading two fingers on B190 zooms to the task`, JSON.stringify(await crumbs()) === '["Factory","Build","B190"]')
+        const agentCenter = await midpoint(page.locator('[data-key="agent:%5"]'))
+        await pointers(agentCenter, [['move', [-90, 90]], ['move', [-120, 120]], ['move', [-5, 5]], ['up', [-5, 5]]])
+        await zoomSettled(page)
+        check(`${width}: continuing or reversing the same pinch only zooms once`, JSON.stringify(await crumbs()) === '["Factory","Build","B190"]')
+
+        await zoom(agentCenter, [-50, 50], [-36, 36])
+        check(`${width}: a squeeze of less than 40 px does not zoom`, JSON.stringify(await crumbs()) === '["Factory","Build","B190"]')
+        await zoom(agentCenter, [-100, 100], [-77, 77])
+        check(`${width}: a squeeze above the distance ratio does not zoom`, JSON.stringify(await crumbs()) === '["Factory","Build","B190"]')
+        await pointers(agentCenter, [
+          ['down', [-30, 30]], ['cancel', [null, 30]], ['down', [null, 90]],
+          ['move', [-30, 30]], ['up', [-30, 30]],
+        ])
+        await page.locator('.factory-phase').waitFor()
+        check(`${width}: a new squeeze after pointercancel zooms out to the phase`, JSON.stringify(await crumbs()) === '["Factory","Build"]')
+        await page.keyboard.press('Escape')
+        await page.locator('.factory-floor').waitFor()
+      }
+      await zoomSettled(page)
+      await page.setViewportSize(viewport)
+    }
+
+    // CDP sends trusted touches through Chromium's gesture recognition and scrolling.
+    for (const viewport of touchViewports) {
+      const { width } = viewport
+      const context = await browser.newContext({ viewport, hasTouch: true, isMobile: true, serviceWorkers: 'block' })
+      try {
+        const touchPage = await context.newPage()
+        await setupPage(touchPage)
+        const cdp = await context.newCDPSession(touchPage)
+        await touchPage.goto(`${ORIGIN}/chat/?go=factory`)
+        const pinch = (center, from, to) => dragTouches(cdp, [-1, 1].map(side => [
+          { x: center.x + side * from, y: center.y },
+          { x: center.x + side * to, y: center.y },
+        ]))
+        const viewportScale = () => touchPage.evaluate(() => window.visualViewport.scale)
+
+        await pinch(await midpoint(touchPage.locator('[data-key="task:B190"]')), 30, 65)
+        await touchPage.locator('.factory-task').waitFor()
+        await zoomSettled(touchPage)
+        check(`${width}: real spread on B190 zooms to the task`, JSON.stringify(await readCrumbs(touchPage)) === '["Factory","Build","B190"]')
+        check(`${width}: viewport scale stays at 1 after real spread`, await viewportScale() === 1)
+
+        await pinch(await midpoint(touchPage.locator('[data-key="agent:%5"]')), 65, 30)
+        await touchPage.locator('.factory-phase').waitFor()
+        await zoomSettled(touchPage)
+        check(`${width}: real squeeze zooms out to the phase`, JSON.stringify(await readCrumbs(touchPage)) === '["Factory","Build"]')
+        check(`${width}: viewport scale stays at 1 after real squeeze`, await viewportScale() === 1)
+
+        const body = touchPage.locator('.factory-body')
+        if (!await body.evaluate(el => el.scrollHeight > el.clientHeight)) {
+          // Leave 120 px for the body so the Build fixture overflows.
+          const { y } = await body.boundingBox()
+          await touchPage.setViewportSize({ width, height: Math.ceil(y) + 120 })
+        }
+        await touchPage.waitForFunction(() => {
+          const el = document.querySelector('.factory-body')
+          return el.scrollHeight > el.clientHeight
+        })
+        await body.evaluate(el => { el.scrollTop = 0 })
+        const { x, y } = await midpoint(body)
+        await dragTouches(cdp, [[{ x, y: y + 40 }, { x, y: y - 40 }]])
+        await touchPage.waitForFunction(() => document.querySelector('.factory-body').scrollTop > 0)
+        check(`${width}: one real finger scrolls the body and keeps the phase`, JSON.stringify(await readCrumbs(touchPage)) === '["Factory","Build"]')
+      } finally {
+        await context.close()
+      }
+    }
+
+    // A task changes phase while its history write fails. A fresh floor prompts another attempt.
+    const deployReport = (status, count = 1) => page.waitForResponse(response => response.url().endsWith('/factory/history') &&
+      response.status() === status && reportsDeploy(response.request().postDataJSON()) && deployReports().length >= count,
+    { timeout: 12000 })
+    let saveRetry
+    historyRetryGate = new Promise(resolve => { saveRetry = resolve })
+    state.rejectHistory = true
+    const rejected = deployReport(503)
     state.moved = true
     await station('deploy').locator('[data-token="B71"]').waitFor({ timeout: 12000 })
-    check('B71 moves to Deploy on the next poll', await station('deploy').locator('[data-token="B71"].is-moved').count() === 1)
+    // The token renders in Deploy one render before the effect marks it moved: wait for the mark, do not read it at once.
+    const marked = await station('deploy').locator('[data-token="B71"].is-moved').waitFor({ timeout: 5000 }).then(() => true, () => false)
+    check('B71 moves to Deploy on the next poll', marked)
+    // Each poll (and each clock tick) rebuilds the floor with the same phases: the mark stays until a phase changes.
+    const nextPoll = page.waitForResponse(response => response.url().endsWith('/api/factory') && response.ok(), { timeout: 12000 })
+    await nextPoll
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    check('a poll with no phase change keeps the moved mark', await station('deploy').locator('[data-token="B71"].is-moved').count() === 1)
+    await rejected
+    await station('deploy').locator('[data-key="task:B71"]').click()
+    await timeline.waitFor()
+    const afterFailure = await timeline.locator('b').allInnerTexts()
+    check('a failed write leaves the displayed server timeline intact', JSON.stringify(afterFailure) === '["Inbox","Build"]', JSON.stringify(afterFailure))
+    const accepted = deployReport(200, 2)
+    saveRetry()
+    await accepted
+    const reports = deployReports()
+    check('a fresh floor retries with just the phase move and the write header', reports.length === 2 &&
+      reports[1].poll > reports[0].poll && reports.every(({ body, header }) =>
+        JSON.stringify(body) === '{"moves":[{"task":"B71","phase":"deploy"}]}' && header === '1'), JSON.stringify(reports))
+    await timeline.getByText('Deploy', { exact: true }).waitFor({ timeout: 12000 })
+    check('the next poll shows the phase saved by the server', JSON.stringify(await timeline.locator('b').allInnerTexts()) === '["Inbox","Build","Deploy"]')
     await page.waitForFunction(() => /B71 .* moved to Deploy/.test(document.querySelector('.factory [aria-live="polite"]')?.textContent || ''), null, { timeout: 20000 })
     check('the live region announces the move', true)
     state.moved = false
+    await page.locator('.factory-crumbs button', { hasText: 'Factory' }).click()
+    await page.locator('.factory-floor').waitFor()
 
     // Esc on the floor closes the view.
     await page.keyboard.press('Escape')
@@ -238,11 +456,16 @@ async function main() {
     check('Esc on the floor closes the view', !(await view.count()))
 
     // The command menu opens it, behind no setting.
+    const beforeReopen = state.reports.length
     await page.keyboard.press('Alt+Space')
     await page.keyboard.type('Factory')
     await page.locator('.command-menu').getByText('Factory view', { exact: true }).first().click()
     await station('inbox').waitFor()
     check('command menu entry opens the view', await view.evaluate(box => box.open))
+    await station('build').locator('[data-token="B71"]').waitFor()
+    await page.waitForResponse(response => response.url().endsWith('/api/factory') && response.ok())
+    check('a stale floor leaves a recently saved phase alone', !state.reports.slice(beforeReopen).some(({ body }) =>
+      body.moves.some(move => move.task === 'B71' && move.phase === 'build')))
 
     // Error with stale data, then the server with no data at all, then the empty floor.
     state.factory = 'down'
@@ -260,6 +483,21 @@ async function main() {
     if (SHOTS) await page.screenshot({ path: path.join(SHOTS, 'state-empty-1280-light.png') })
     state.factory = 'ok'; state.panes = panes
 
+    // Session data can arrive after Factory and the backlog. Only report phases from the complete floor.
+    const beforeOpen = state.reports.length
+    state.history.B71 = [{ phase: 'build', at: NOW - 60001 }]
+    state.moved = true
+    let showSessions
+    sessionGate = new Promise(resolve => { showSessions = resolve })
+    await page.goto(`${ORIGIN}/chat/?go=factory`)
+    await station('inbox').locator('[data-token="B71"]').waitFor()
+    const afterSessions = deployReport(200)
+    showSessions()
+    await afterSessions
+    check('only the complete floor reports a phase for B71', !state.reports.slice(beforeOpen).some(({ body }) =>
+      body.moves.some(move => move.task === 'B71' && move.phase === 'inbox')))
+    state.moved = false
+
     // Every width from 320 px: no sideways scroll at any level; targets stay 24 px or more.
     for (const [width, height] of [[320, 640], [390, 844], [1280, 800], [1920, 1080], [3840, 2160]]) {
       await page.setViewportSize({ width, height })
@@ -268,7 +506,26 @@ async function main() {
       check(`${width}: no sideways scroll on the floor`, !(await overflow()))
       const small = await page.evaluate(() => [...document.querySelectorAll('.factory button')].filter(el => el.getClientRects().length).map(el => el.getBoundingClientRect()).filter(r => r.width < 24 || r.height < 24).length)
       check(`${width}: every button is 24 px or more`, small === 0, `${small} small`)
+      if (width === 320 || width === 1280) {
+        await station('verify').locator('[data-key="task:B191"]').click()
+        await page.locator('.factory-task').waitFor()
+        await zoomSettled(page)
+        const roles = await page.locator('.factory-agents .factory-card-meta').allInnerTexts()
+        check(`${width}: B191 shows main, worker and advisor roles for its linked agents`,
+          JSON.stringify(roles.map(text => text.split(' · ')[0])) === '["main","worker","reviewer","worker","advisor"]', JSON.stringify(roles))
+        check(`${width}: the linked worker and advisor fit in the task view`, !(await overflow()))
+        if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `parent-links-${width}.png`) })
+        await page.locator('[data-key="agent:%11"]').focus()
+        await page.keyboard.press('Enter')
+        await page.locator('.factory-agent').waitFor()
+        check(`${width}: Enter opens the linked worker`, (await crumbs()).at(-1) === 'Factory helper')
+        await page.locator('.factory-crumbs button', { hasText: 'Factory', exact: true }).first().click()
+        await page.locator('.factory-floor').waitFor()
+        await zoomSettled(page)
+      }
       await page.locator('[data-key="task:B71"]').click()
+      await page.locator('.factory-task').waitFor()
+      await zoomSettled(page)
       await page.locator('.factory-agents button').first().click()
       await page.locator('.factory-screen').waitFor()
       check(`${width}: no sideways scroll on the agent level`, !(await overflow()))

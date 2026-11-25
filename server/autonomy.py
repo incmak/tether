@@ -23,6 +23,7 @@ import codex_level  # noqa: E402
 import claude_advisor  # noqa: E402
 import advisor  # noqa: E402
 import approval  # noqa: E402
+import audit  # noqa: E402
 import autonomy_setup  # noqa: E402
 import decisions  # noqa: E402
 import delegate  # noqa: E402
@@ -56,8 +57,9 @@ RULES = (
     'until the work is done and verified. Ask only when you need new authority or a decision that only the user can make.',
     'Work alone until the task is done and verified. Do not ask about normal decisions; list each decision in the '
     'final reply. Split large work with your own subagents and start reviewers with agent_tab_cli.py. When the task '
-    'is done, start the next open backlog item of this project, if there is one. Ask only when you are blocked: the task cannot '
-    'continue without the user, or a critical bug needs a decision.',
+    'is done, hand the next open backlog item of this project to a new tab (see Backlog): skip items marked doing, items in the Inbox, and items '
+    'that need a product, business or safety decision from the user. Take the oldest item that is left. If none is left, '
+    'stop. Ask only when you are blocked: the task cannot continue without the user, or a critical bug needs a decision.',
 )
 EVIDENCE = ('Never guess. Before you decide or ask, check the evidence in this order: the request and this '
             'conversation; the project notes and saved answers; the code, tests and git history; the primary docs and '
@@ -98,7 +100,7 @@ TIERS = ('critical', 'normal', 'light')
 EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
 CLAUDE_REVIEW_MODELS = tuple(model for model, _ in delegate.CLAUDE_MODELS)  # what a new tab accepts
 TIER_DEFAULT = {'agent': 'auto', 'model': 'auto', 'effort': 'auto'}
-_LEVEL_LOCK = threading.Lock()
+_SETTINGS_LOCK = threading.Lock()
 
 
 # ---- the files ----
@@ -137,6 +139,7 @@ def read_project(pid):
 
 
 def _write(path, text):
+    codex_level._WRITES[str(path)] = codex_level._WRITES.get(str(path), 0) + 1  # for codex_level.revision (Undo)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temp = path.with_name(f'.{path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
     try:
@@ -366,15 +369,34 @@ def set_reviewers(reviewers):
     _write(reviewers_path(), json.dumps(reviewers) + '\n')
 
 
+REVIEWER_HEADING = 'Choose a reviewer by the risk of the task:'
+REVIEWER_CHOICES = (
+    'Critical: security, auth, payments, data loss, migrations, deploys, public releases, concurrency, or a '
+    'change of more than about 300 lines. Start a reviewer tab from the other agent (Claude reviews Codex work, '
+    'Codex reviews Claude work) with the strongest model and high effort.',
+    'Normal: features and bug fixes. Start a reviewer tab from the other agent with its default model and '
+    'medium effort.',
+    'Light: docs, copy, styles and small fixes. Do not start a reviewer tab. Review the change yourself.',
+)
+
+
+def codex_standing_rules(resolved, codex_resolved):
+    """Launch-time rules that fit in Codex's rebuilt developer context after compaction."""
+    level = resolved['level']
+    codex = codex_resolved['level']
+    return '\n'.join([
+        f'Autonomy level {level} ({LEVELS[level][0]}). Codex level {codex} ({codex_level.LEVELS[codex][0]}).',
+        SAFETY,
+        VERIFIED,
+        ' '.join((REVIEWER_HEADING, *REVIEWER_CHOICES)),
+        'Tether may send newer rules in this chat; the newest rules win.',
+    ])
+
+
 def reviewer_rules(reviewers):
     lines = [
-        'Choose a reviewer by the risk of the task:',
-        '- Critical: security, auth, payments, data loss, migrations, deploys, public releases, concurrency, or a '
-        'change of more than about 300 lines. Start a reviewer tab from the other agent (Claude reviews Codex work, '
-        'Codex reviews Claude work) with the strongest model and high effort.',
-        '- Normal: features and bug fixes. Start a reviewer tab from the other agent with its default model and '
-        'medium effort.',
-        '- Light: docs, copy, styles and small fixes. Do not start a reviewer tab. Review the change yourself.',
+        REVIEWER_HEADING,
+        *(f'- {choice}' for choice in REVIEWER_CHOICES),
         f'Start a reviewer with `python3 {HERE / "agent_tab_cli.py"} start --reviews-me --agent AGENT '
         '[--model MODEL] [--effort EFFORT]`.',
     ]
@@ -612,6 +634,60 @@ def _lessons(handler, body, payload):
     return state(pid)
 
 
+def _choice_value(choice):
+    return f'{choice["agent"]} · {choice["model"]} · {choice["effort"]}'
+
+
+def _save_advisor(settings):
+    previous = advisor.read()
+    advisor.write(settings)
+    old, new = (' / '.join(f'{role}: {_choice_value(value[role])}' for role in ('main', 'second'))
+                for value in (previous, settings))
+    audit.record('setting.advisor', 'Advisor settings changed', old=old, new=new)
+
+
+def _save_reviewers(settings):
+    previous = read_reviewers()
+    set_reviewers(settings)
+    tiers = [tier for tier in TIERS if previous[tier] != settings[tier]]
+    if tiers:
+        old, new = (' / '.join(f'{tier}: {_choice_value(value[tier])}' for tier in tiers)
+                    for value in (previous, settings))
+        audit.record('setting.reviewers', f'Reviewers changed: {", ".join(tiers)}', old=old, new=new)
+
+
+def _save_level(handler, body, payload, pid):
+    undo = body.get('undo', False)
+    if not isinstance(undo, bool):
+        raise LevelError(400, 'Undo must be true or false.')
+    level, override = body.get('level'), body.get('override')
+    if not _valid(level) or (pid is not None and not isinstance(override, bool)):
+        raise LevelError(400, f'Choose a level from 0 to {len(LEVELS) - 1}.')
+    if pid is not None:
+        project_path(pid)
+    current = resolve(pid)
+    previous = current['project'] or {'level': current['global'], 'override': False}
+    path = global_path() if pid is None else project_path(pid)
+    if codex_level.stale_undo(body, path):  # before the passkey ask: a stale Undo must not ask for one
+        raise LevelError(409, codex_level.STALE_UNDO)
+    effective = current['global'] if pid is not None and not override else level
+    if effective > current['level']:
+        approval.require(handler, 'level-raise', payload, body.get('approval'))
+    if pid is None:
+        old, new = current['global'], level
+        set_global(level)
+    else:
+        old = codex_level._override_value(previous['level'], previous['override'])
+        new = codex_level._override_value(level, override)
+        set_project(pid, override, level)
+    codex_level._record_setting('setting.autonomy_level', 'Autonomy level', old, new, pid=pid, undo=undo)
+    # The value this write replaced and its revision: the UI's Undo restores exactly this change.
+    if pid is None:
+        return {'old': old, 'new': level, 'revision': codex_level.revision(path)}
+    return {'old': {'level': previous['level'], 'override': previous['override']},
+            'new': {'level': level, 'override': override}, 'revision': codex_level.revision(path)}
+
+
 def post(handler):
     """Set autonomy options, perform an explicit setup action, or save/delete a project answer."""
     try:
@@ -656,31 +732,18 @@ def post(handler):
             handler.respond(200, _lessons(handler, body, payload))
             return
         pid = body.get('project')
+        change = None
         if body.get('catalog') == 'recheck':
             model_catalog.recheck()
-        elif 'advisor' in body:
-            advisor.write(body['advisor'])
-        elif 'reviewers' in body:
-            set_reviewers(body['reviewers'])
         else:
-            with _LEVEL_LOCK:
-                level = body.get('level')
-                if not _valid(level) or (pid is not None and not isinstance(body.get('override'), bool)):
-                    raise LevelError(400, f'Choose a level from 0 to {len(LEVELS) - 1}.')
-                if pid is None:
-                    raises = level > read_global()
+            with _SETTINGS_LOCK:
+                if 'advisor' in body:
+                    _save_advisor(body['advisor'])
+                elif 'reviewers' in body:
+                    _save_reviewers(body['reviewers'])
                 else:
-                    project_path(pid)
-                    current = resolve(pid)
-                    effective = level if body['override'] else current['global']
-                    raises = effective > current['level']
-                if raises:
-                    approval.require(handler, 'level-raise', payload, body.get('approval'))
-                if pid is None:
-                    set_global(level)
-                else:
-                    set_project(pid, body['override'], level)
-        handler.respond(200, state(pid))
+                    change = _save_level(handler, body, payload, pid)
+        handler.respond(200, dict(state(pid), change=change) if change else state(pid))
     except approval.ApprovalError as exc:
         approval.error(handler, exc)
     except LevelError as exc:

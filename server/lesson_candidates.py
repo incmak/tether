@@ -1,7 +1,7 @@
 """Lesson candidates (B212): lessons an agent proposes and the person has not decided yet.
 
 A candidate is not a lesson. No agent gets it with a prompt. The person adds it (it becomes a trial lesson from
-the agent) or dismisses it in Settings › Agents › Daily ops report. Each project keeps at most LIMIT candidates in
+the agent) or dismisses it in Settings › Learning & upkeep › Daily ops report. Each project keeps at most LIMIT candidates in
 <project folder>/lesson-candidates.json; a proposal past that is refused, never swapped for an older one.
 """
 import json

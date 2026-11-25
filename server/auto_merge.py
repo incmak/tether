@@ -45,6 +45,7 @@ if str(HERE) not in sys.path:
 
 import approval  # noqa: E402
 import paths  # noqa: E402
+import review_gate  # noqa: E402
 
 MODES = (
     ('off', 'Off', 'Tether does not check branches.'),
@@ -87,6 +88,7 @@ REVERT = re.compile(r'This reverts commit ([0-9a-f]{40})')
 _lock = threading.RLock()
 _ladder_cache = {}
 _target_cache = {}
+_target_errors = {}  # root -> (time, message): Settings does not ask a failing remote again for TARGET_TTL
 _mode_lock = threading.Lock()
 _grant = None
 RUN = subprocess.run     # tests replace this to prove that observe mode never writes
@@ -104,6 +106,11 @@ class GitError(Exception):
 
 class NotAuthorized(GitError):
     pass
+
+
+class RepositoryChanged(NotAuthorized):
+    """The reviewed folder or the tab is no longer bound to the repository the review saw.
+    A decision that ends on this logs no root: Settings fetches from each logged root."""
 
 
 # ---- the mode ----
@@ -193,7 +200,7 @@ def _git_env(helpers=(), *, worktree_attributes=False):
                 ('push.followTags', 'false'), ('submodule.recurse', 'false')]
     if not worktree_attributes:
         settings.append(('core.attributesFile', os.devnull))
-    settings.extend(('credential.helper', helper) for helper in helpers)
+    settings.extend(helpers)
     full['GIT_CONFIG_COUNT'] = str(len(settings))
     for index, (key, value) in enumerate(settings):
         full[f'GIT_CONFIG_KEY_{index}'] = key
@@ -201,19 +208,40 @@ def _git_env(helpers=(), *, worktree_attributes=False):
     return full
 
 
-def _credential_helpers():
-    # This lookup alone uses the user's environment. Keep only the helpers, in their original order.
+CREDENTIAL_KEY = re.compile(r'credential\.(?:.+\.)?(helper|usehttppath|username)', re.I | re.S)
+
+
+def _credential_helpers(root):
+    """[(key, value)] for the user's own credential settings, in Git's order: credential.helper and the settings for
+    one URL, such as credential.https://github.com.helper.
+
+    Git itself lists them, in the repository `root`, so both global files, their includes and the conditions of
+    `includeIf` apply as they do for the user. Only entries with the scope "global" pass: nothing comes from the
+    repository, the system file, the command line or the environment. This lookup alone uses the user's environment.
+    The output is read as bytes: a name can contain a carriage return, and text mode turns that into a line break."""
     try:
-        result = RUN(['git', 'config', '--global', '--null', '--get-all', 'credential.helper'],
-                     stdin=subprocess.DEVNULL, capture_output=True, encoding='utf-8', errors='surrogateescape',
-                     timeout=GIT_TIMEOUT)
+        result = RUN(['git', '-C', str(root), 'config', '--includes', '--null', '--show-scope', '--get-regexp',
+                      r'^credential\.'], stdin=subprocess.DEVNULL, capture_output=True, timeout=GIT_TIMEOUT)
     except (OSError, subprocess.SubprocessError) as exc:
         raise GitError('Could not read global Git credential helpers.') from exc
     if result.returncode == 1:
-        return ('',)
-    if result.returncode:
+        return ()
+    fields = result.stdout.split(b'\0')
+    if result.returncode or fields[-1] or len(fields) % 2 != 1:
         raise GitError('Could not read global Git credential helpers.')
-    return ('', *result.stdout.split('\0')[:-1])
+    found = []
+    for scope, entry in zip(fields[:-1:2], fields[1:-1:2]):
+        if scope != b'global':
+            continue
+        key, separator, value = (os.fsdecode(part) for part in entry.partition(b'\n'))
+        match = CREDENTIAL_KEY.fullmatch(key)
+        if match is None:
+            continue
+        if not separator:
+            # Git credential fill requires a value even for useHttpPath.
+            raise GitError(f'The global Git setting {key!r} has no value.')
+        found.append((key, value))
+    return tuple(found)
 
 
 def _git(folder, *args, **kwargs):
@@ -236,15 +264,22 @@ def _run_git(prefix, *args, network=False, check=True, env=None, binary=False):
     return result
 
 
-def _object_git(scratch, *args, network=False, check=True, identity=None, binary=False):
-    env = _git_env(_credential_helpers() if network else ())
+def _object_env(network=None, identity=None):
+    env = _git_env(_credential_helpers(network) if network else ())
     for key in ('GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_SHALLOW_FILE'):
         env.pop(key, None)
     # A push URL may select a built-in transport, but not an arbitrary remote helper.
     env.update(GIT_ATTR_SOURCE=EMPTY_TREE, GIT_NO_LAZY_FETCH='1',
                GIT_ALLOW_PROTOCOL='file:git:http:https:ssh')
     env.update(identity or {})
-    return _git(scratch, *args, network=network, check=check, env=env, binary=binary)
+    return env
+
+
+def _object_git(scratch, *args, network=None, check=True, identity=None, binary=False, env=None):
+    """Run git in the scratch repository. `network` is the user's repository for a command that uses the remote:
+    its credential settings apply. `env`: an environment from _object_env, prepared before a last check."""
+    env = _object_env(network, identity) if env is None else env
+    return _git(scratch, *args, network=bool(network), check=check, env=env, binary=binary)
 
 
 def _commit_sha(result, revision):
@@ -268,6 +303,34 @@ def _git_dir(folder, option):
     if not output.endswith('\n') or '\n' in path or '\r' in path or not Path(path).is_absolute():
         raise GitError('Git did not report one absolute repository path.')
     return Path(path)
+
+
+def _repo_identity(common):
+    """{'path', 'dev', 'ino'} of a resolved common Git directory: the form review_scope.repo_identity saves."""
+    try:
+        info = os.stat(common)
+    except (OSError, ValueError) as exc:
+        raise GitError('Could not read the repository of the reviewed folder.') from exc
+    return {'path': str(common), 'dev': info.st_dev, 'ino': info.st_ino}
+
+
+def _check_bound(named, real, repo, *others):
+    """Raise RepositoryChanged unless `named` still resolves to `real`, and `real` and each of `others` (the tab) still
+    read the repository identity `repo`. A read that fails is a refusal too. The main checkout needs no check of its
+    own: it is the folder's common Git directory or that directory's parent."""
+    try:
+        moved = str(Path(named).resolve(strict=True)) != str(real)
+    except (OSError, RuntimeError, TypeError) as exc:
+        raise RepositoryChanged('The reviewed folder is gone.') from exc
+    if moved:
+        raise RepositoryChanged('The reviewed folder now points to another worktree.')
+    for path in (real, *others):
+        try:
+            same = _repo_identity(_git_dir(path, '--git-common-dir').resolve()) == repo
+        except (GitError, OSError, RuntimeError) as exc:
+            raise RepositoryChanged(f'Could not read the repository of {path} again: {exc}') from exc
+        if not same:
+            raise RepositoryChanged(f'The reviewed folder {named} is now in another repository than the one the review saw.')
 
 
 def main_checkout(folder):
@@ -359,24 +422,32 @@ def _push_url(root):
     raise GitError(f'{REMOTE} must have exactly one push URL.')
 
 
-def _fetch_target(root, scratch):
+def _fetch_target(root, scratch, verify=None):
+    """(push URL, target sha). verify: called after the URL and credential settings are read, right before each
+    network command."""
     try:
         url = _push_url(root)
         _check_push_url(root, url)
         # Git treats a colon before the first slash as a transport or an SSH host.
         if not re.match(r'^[^/]*:', url):
             url = str(Path(root) / url)
-        ref = _object_git(scratch, 'ls-remote', url, TARGET_REF, network=True).stdout
+        env = _object_env(root)  # the credential lookup runs git in `root`: before the check, not after it
+        if verify is not None:
+            verify()
+        ref = _object_git(scratch, 'ls-remote', url, TARGET_REF, network=root, env=env).stdout
         match = re.fullmatch(r'([0-9a-f]{40})\t' + TARGET_REF + r'\n', ref)
         if match is None:
             raise GitError(f'The push repository has no unique {TARGET} branch.')
         sha = match[1]
-        _object_git(scratch, 'fetch', '--no-tags', '--no-write-fetch-head', url, TARGET_REF, network=True)
+        if verify is not None:
+            verify()
+        _object_git(scratch, 'fetch', '--no-tags', '--no-write-fetch-head', url, TARGET_REF, network=root, env=env)
         _object_git(scratch, 'cat-file', '-e', sha + '^{commit}')
     except GitError:
         _target_cache.pop(root, None)
         raise
     _target_cache[root] = time.monotonic(), (url, sha)
+    _target_errors.pop(root, None)
     return url, sha
 
 
@@ -1066,10 +1137,14 @@ def _trial_merge(scratch, target_sha, head):
     return tree
 
 
-def evaluate(folder, approved):
+def evaluate(folder, approved, tab=None, repo=None):
     """(decision, plan) for the branch in `folder`. Git can write objects during fetch and trial merge.
 
-    decision: the record for the log and the Settings page. plan: what merge() needs, or None when a check failed."""
+    tab: the worker tab's own folder. When given (B368), `folder` is resolved once to its real path and must be a
+    checkout of the tab's repository (one `--git-common-dir`), and that repository must be `repo`, the one the review
+    saw (review_scope.repo_identity), both checked before any fetch. A refused folder is not
+    logged as `root`: Settings reads trust from each logged root. decision: the record for the log and the Settings
+    page. plan: what merge() needs, or None when a check failed."""
     decision = {'at': int(time.time()), 'folder': str(folder), 'approved': approved if isinstance(approved, str) else None,
                 'checks': [], 'areas': {}, 'outcome': 'wait'}
     checks = decision['checks']
@@ -1078,13 +1153,43 @@ def evaluate(folder, approved):
         checks.append({'key': key, 'ok': bool(ok), 'text': text})
         return bool(ok)
 
+    named = folder
     try:
-        root = main_checkout(folder)
+        own_root = None
+        if tab is not None:
+            decision['root'] = None
+            try:
+                own = _git_dir(tab, '--git-common-dir').resolve()
+            except GitError as exc:
+                raise GitError(f"The tab's own folder is not in a Git repository: {exc}") from exc
+            own_root = str(own.parent if own.name == '.git' else own)
+            # Before the root is logged: Settings fetches from each logged root.
+            if _repo_identity(own) != repo:
+                raise RepositoryChanged(f'The reviewed folder {folder} is now in another repository than the one the review saw.')
+            decision.update(root=own_root, repo=Path(own_root).name, root_id=repo)
+            try:
+                real = Path(folder).resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise GitError(f'The reviewed folder {folder} is gone.') from exc
+            if _git_dir(real, '--git-common-dir').resolve() != own:
+                raise GitError(f"The reviewed folder {folder} is not a checkout of the tab's repository {own_root}.")
+            folder = real  # every later read uses this one path, so a moved symlink cannot switch repositories
+        common = _git_dir(folder, '--git-common-dir')
+        root = str(common.parent if common.name == '.git' else common)
+        if own_root is not None and root != own_root:
+            raise GitError(f"The reviewed folder {folder} is not a checkout of the tab's repository {own_root}.")
+        # Settings fetches from a logged root only while it still reads this identity.
+        root_id = repo if tab is not None else _repo_identity(common.resolve())
         head = _head(folder)
         branch = _git(folder, 'symbolic-ref', '--quiet', '--short', 'HEAD', check=False).stdout.strip()
-        decision.update(root=root, repo=Path(root).name, head=head, branch=branch, target=f'{REMOTE}/{TARGET}')
+        decision.update(root=root, repo=Path(root).name, root_id=root_id, head=head, branch=branch,
+                        target=f'{REMOTE}/{TARGET}')
         scratch = _scratch(root)
-        url, target_sha = _fetch_target(root, scratch)
+
+        def same_repository():
+            _check_bound(named, folder, repo, tab)
+
+        url, target_sha = _fetch_target(root, scratch, same_repository) if tab is not None else _fetch_target(root, scratch)
         if _ancestor(scratch, head, target_sha):
             decision['outcome'] = 'already'
             return decision, None
@@ -1092,6 +1197,10 @@ def evaluate(folder, approved):
         if not SHA.fullmatch(base):
             raise GitError('The branch shares no history with the main branch.')
     except GitError as exc:
+        if isinstance(exc, RepositoryChanged):
+            decision['root'] = None
+            decision.pop('repo', None)
+            decision.pop('root_id', None)
         check('git', False, str(exc))
         return decision, None
     if not isinstance(approved, str) or not SHA.fullmatch(approved):
@@ -1223,23 +1332,30 @@ def _push_argv(url, made):
     return argv
 
 
-def _fast_forward_push(scratch, url, checked, made):
+def _fast_forward_push(root, scratch, url, checked, made, confirm=None):
     """Push the merge commit with a plain `git push`. No --force and no --force-with-lease, here or anywhere.
 
     Before the push: the merge commit must contain the checked main commit as its first parent, and the remote main
     must still be at that commit. A remote that moved, went back or lost the branch is "main moved". Git itself
-    refuses the push when main moved after that look to a commit the merge does not contain."""
+    refuses the push when main moved after that look to a commit the merge does not contain. confirm() runs right
+    before each network command (the look and the push) and raises to stop it. The credential settings are read
+    once, before the first confirm(): reading them runs git in `root`."""
     if not _hash(checked) or not _hash(made):
         raise GitError('The push needs two commit hashes.')
     if not _ancestor(scratch, checked, made):
         raise GitError('The merge commit does not contain the checked main commit.')
     if _sha(scratch, made + '^1') != checked:
         raise GitError('The merge commit does not have the checked main commit as its first parent.')
-    seen = _object_git(scratch, 'ls-remote', url, TARGET_REF, network=True).stdout
+    env = _object_env(root)
+    if confirm is not None:
+        confirm()
+    seen = _object_git(scratch, 'ls-remote', url, TARGET_REF, network=root, env=env).stdout
     if seen != f'{checked}\t{TARGET_REF}\n':
         raise MainMoved(f'{REMOTE}/{TARGET} moved after the checks. Tether pushed nothing.')
+    if confirm is not None:
+        confirm()
     try:
-        _object_git(scratch, *_push_argv(url, made), network=True)
+        _object_git(scratch, *_push_argv(url, made), network=root, env=env)
     except GitError as exc:
         raise MainMoved(f'{REMOTE}/{TARGET} did not accept a plain push, so it moved or refused it. Nothing is forced: {exc}') from exc
 
@@ -1278,32 +1394,49 @@ def merge(plan, reviewer, job):
         raise GitError('The merge commit does not contain the planned tree.')
     _check_push_url(root, plan['url'])
     with _mode_lock:
-        problem = _authorization_problem(read_setting(), job.get('approved_at'))
-        if problem:
-            raise NotAuthorized(problem)
-        try:
-            head = _head(folder)
-            branch = _git(folder, 'symbolic-ref', '--quiet', '--short', 'HEAD').stdout.strip()
-            checkout = _worker_checkout(folder)
-        except GitError as exc:
-            raise NotAuthorized(str(exc)) from exc
-        if checkout is None or head != plan['head'] or branch != plan['branch']:
-            raise NotAuthorized('The worker branch changed before the push.')
-        try:
-            dirty = _dirty(checkout)
-        except GitError as exc:
-            raise NotAuthorized(str(exc)) from exc
-        if dirty:
-            raise NotAuthorized(dirty)
-        current = job.get('current')
-        try:
-            live = current().get(job.get('worker'), {}).get(job.get('reviewer')) if callable(current) else None
-            matches = live == {'commit': head, 'at': job['approved_at']}
-        except Exception as exc:
-            raise NotAuthorized('Could not read the current reviewer approval.') from exc
-        if not matches:
-            raise NotAuthorized('The reviewer approval changed or is no longer available.')
-        _fast_forward_push(scratch, plan['url'], plan['target_sha'], made)
+        def confirm():
+            """Runs right before each network command of the push. Order: the Git reads of the worktree and the review gate,
+            then the binding check (_check_bound), then one in-process read of the approval. Each check sees one moment; a
+            change while the next Git command runs, or after the last read, is out of reach (the residual race)."""
+            problem = _authorization_problem(read_setting(), job.get('approved_at'))
+            if problem:
+                raise NotAuthorized(problem)
+            try:
+                head = _head(folder)
+                branch = _git(folder, 'symbolic-ref', '--quiet', '--short', 'HEAD').stdout.strip()
+                checkout = _worker_checkout(folder)
+            except GitError as exc:
+                raise NotAuthorized(str(exc)) from exc
+            if checkout is None or head != plan['head'] or branch != plan['branch']:
+                raise NotAuthorized('The worker branch changed before the push.')
+            try:
+                dirty = _dirty(checkout)
+            except GitError as exc:
+                raise NotAuthorized(str(exc)) from exc
+            if dirty:
+                raise NotAuthorized(dirty)
+            # The review gate runs Git, so it goes before the binding check; the approval read stays last.
+            try:
+                approved = review_gate.check(folder, head, pane=job['worker'])
+            except review_gate.GateRefused as exc:
+                raise NotAuthorized(str(exc)) from exc
+            if approved is None:
+                raise NotAuthorized('The review link is no longer available.')
+            if job.get('tab') is not None:
+                _check_bound(job.get('folder'), folder, job.get('repo'), job['tab'])
+            # Last: one in-process read of the approval store (no subprocess). The network command follows at once.
+            current = job.get('current')
+            try:
+                live = current().get(job.get('worker'), {}).get(job.get('reviewer')) if callable(current) else None
+                matches = live == {'commit': head, 'at': job['approved_at'], 'folder': job['folder'],
+                                   'repo': job.get('repo')}
+            except Exception as exc:
+                raise NotAuthorized('Could not read the current reviewer approval.') from exc
+            if not matches:
+                raise NotAuthorized('The reviewer approval changed or is no longer available.')
+
+        # Once before the look at the remote main and once after it, right before the push.
+        _fast_forward_push(root, scratch, plan['url'], plan['target_sha'], made, confirm)
     return made
 
 
@@ -1313,12 +1446,20 @@ _merge_lock = threading.Lock()
 def process(job, alert=None):
     """Decide one approved commit and, in enforce mode, merge it. Returns the recorded decision, or None.
 
-    job: {'folder', 'commit', 'approved_at', 'worker', 'name', 'reviewer', 'reviewer_agent', 'current'}.
+    job: {'folder' (the approved worktree, or None), 'repo' (its repository identity, or None), 'tab' (the tab's own
+    folder), 'commit', 'approved_at', 'worker', 'name', 'reviewer', 'reviewer_agent', 'current'}.
     The mode is read here, when the work runs, not when the approval was seen."""
     setting = read_setting()
     if setting['mode'] == 'off':
         return None
-    decision, plan = evaluate(job['folder'], job.get('commit'))
+    if job.get('folder') and (job.get('repo') is not None or job.get('tab') is None):
+        decision, plan = evaluate(job['folder'], job.get('commit'), tab=job.get('tab'), repo=job.get('repo'))
+    else:
+        # B368: the approval does not name the worktree and repository it checked. Do not guess.
+        decision = {'at': int(time.time()), 'folder': None, 'approved': job.get('commit'), 'areas': {},
+                    'outcome': 'wait', 'checks': [{'key': 'approval', 'ok': False, 'text':
+                    'The approval does not name the folder and repository it reviewed. Ask the reviewer to review the commit again.'}]}
+        plan = None
     if decision['outcome'] == 'already':
         return None
     decision.update(mode=setting['mode'], worker=job.get('worker'), name=job.get('name'), reviewer=job.get('reviewer'))
@@ -1327,6 +1468,12 @@ def process(job, alert=None):
     decision.setdefault('head', job.get('commit'))
     decision.pop('folder', None)
     at = job.get('approved_at')
+    if plan is not None:
+        try:
+            review_gate.check(job['folder'], decision['head'], pane=job['worker'])
+        except review_gate.GateRefused as exc:
+            decision['checks'].append({'key': 'review', 'ok': False, 'text': str(exc)})
+            plan = None
     if plan is None:
         decision['outcome'] = 'wait'
     elif not ENFORCE_AVAILABLE or setting['mode'] != 'enforce':
@@ -1343,6 +1490,10 @@ def process(job, alert=None):
             except GitError as exc:
                 decision['outcome'] = 'failed'
                 decision['error'] = str(exc)
+                if isinstance(exc, RepositoryChanged):
+                    decision['root'] = None  # Settings fetches from each logged root
+                    decision.pop('repo', None)
+                    decision.pop('root_id', None)
     added = record(decision)
     if added and alert is not None and decision['outcome'] in ('merged', 'failed'):
         name = decision.get('name') or decision.get('branch') or 'A branch'
@@ -1400,13 +1551,17 @@ def observe(entries, approvals, folder_of, alert=None, start=True, current=None)
             if key in _seen:
                 continue
             try:
-                folder = folder_of(entry)
+                tab = folder_of(entry)
             except (OSError, KeyError, ValueError, TypeError):
-                folder = None
-            if not folder:
+                tab = None
+            if not tab:
                 continue
+            # B368: merge the worktree the approval checked; the tab's own folder only names the repository.
+            folder = approval.get('folder')
             _seen.add(key)
-            jobs.append({'folder': folder, 'commit': commit, 'approved_at': at, 'worker': worker,
+            repo = approval.get('repo')
+            jobs.append({'folder': folder if isinstance(folder, str) and folder else None,
+                         'repo': repo if isinstance(repo, dict) else None, 'tab': tab, 'commit': commit, 'approved_at': at, 'worker': worker,
                          'name': str(entry.get('name') or '')[:80], 'reviewer': reviewer,
                          'reviewer_agent': (by_pane.get(reviewer) or {}).get('agent'), 'current': current})
     if jobs and start:
@@ -1429,13 +1584,28 @@ def handles(path):
     return path.split('?', 1)[0] == PATH
 
 
-def _trust(root, known):
-    """One repository's ladder for the Settings page. known: the repository appears in the decision log."""
+def _trust(root, known, identity=None):
+    """One repository's ladder for the Settings page. known: the repository appears in the decision log.
+    identity: the repository that decision saw. Each network command then runs only while `root` still reads it.
+    A live tab's root has none: the open tab names it."""
     entry = {'root': root, 'repo': Path(root).name, 'areas': [], 'error': ''}
+    failed = _target_errors.get(root)
+    if failed and time.monotonic() - failed[0] < TARGET_TTL:
+        entry['error'] = failed[1]
+        return entry if known else None
     try:
         scratch = _scratch(root)
         cached = _target_cache.get(root)
-        _, target_sha = cached[1] if cached and time.monotonic() - cached[0] < TARGET_TTL else _fetch_target(root, scratch)
+        if cached and time.monotonic() - cached[0] < TARGET_TTL:
+            _, target_sha = cached[1]
+        elif identity is not None:
+            def same_repository():
+                if not _still_repository(root, identity):
+                    raise RepositoryChanged(f'{root} now holds another repository than the one in the decision log.')
+            _, target_sha = _fetch_target(root, scratch, same_repository)
+        else:
+            _, target_sha = _fetch_target(root, scratch)
+        _target_errors.pop(root, None)
         entry['target'] = f'{REMOTE}/{TARGET}'
         rules = rules_at(scratch, target_sha)
         if rules is None:
@@ -1443,8 +1613,11 @@ def _trust(root, known):
             return entry if known else None
         levels = ladder(root, scratch, rules, target_sha)
     except GitError as exc:
+        # A repository Tether cannot read is listed only when it has decisions: other open repositories are not
+        # part of auto-merge, and their remote errors do not belong on the Settings page.
         entry['error'] = str(exc)
-        return entry
+        _target_errors[root] = time.monotonic(), entry['error']
+        return entry if known else None
     for area in rules:
         level = levels[area['name']]
         entry['areas'].append({'name': area['name'], 'label': area['label'], 'rung': level['rung'], 'limit': level['limit'],
@@ -1453,19 +1626,38 @@ def _trust(root, known):
     return entry
 
 
+def _still_repository(root, identity):
+    if not (isinstance(identity, dict) and set(identity) == {'path', 'dev', 'ino'}):
+        return False
+    try:
+        return _repo_identity(_git_dir(root, '--git-common-dir').resolve()) == identity
+    except (GitError, OSError, RuntimeError):
+        return False
+
+
 def state(roots=()):
     setting = read_setting()
     found = records()
     shown = [{key: item.get(key) for key in ('at', 'mode', 'outcome', 'repo', 'root', 'branch', 'head', 'target', 'name',
                                               'subject', 'checks', 'areas', 'files', 'merge', 'error', 'note')}
              for item in reversed(found[-SHOWN:])]
-    logged = []
+    logged, refused, identities = [], [], {}
     for item in reversed(found):
-        if isinstance(item.get('root'), str) and item['root'] not in logged:
-            logged.append(item['root'])
+        root = item.get('root')
+        if not isinstance(root, str) or root in logged or root in refused:
+            continue
+        if len(logged) >= 4 or len(logged) + len(refused) >= 8:
+            break
+        # The log holds a path, and another repository can take that path. The newest decision for a root names
+        # the repository it saw; Settings fetches only while the path still reads that repository.
+        if _still_repository(root, item.get('root_id')):
+            logged.append(root)
+            identities[root] = item['root_id']
+        else:
+            refused.append(root)
     trust = []
     for root in [*logged[:4], *[root for root in roots if root not in logged][:4]]:
-        entry = _trust(root, root in logged)
+        entry = _trust(root, root in logged, identities.get(root))
         if entry is not None:
             trust.append(entry)
     return {**setting, 'enforce_available': ENFORCE_AVAILABLE,

@@ -6,4 +6,10 @@
 .retry-button.link-button:disabled { color: var(--muted); }
 .retry-button svg { flex: none; }
 .retry-note { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+@media (pointer: coarse) {
+  /* Keep the shared minimum when a host or a compact button style sets its own height. */
+  .retry-button,
+  button.retry-button:is(.sm, .browser-text-button),
+  .reconnect-banner button.retry-button { min-height: 44px; }
+}
 @media (prefers-reduced-motion: reduce) { .retry-button:active:not(:disabled) { transform: none; } }

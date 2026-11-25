@@ -1,0 +1,2 @@
+{"type":"assistant","uuid":"1f543b95-34b4-49c2-83ac-257609c6a380","message":{"id":"msg_example","role":"assistant","content":[{"type":"text","text":"Next: Deploy?\nNeeds you: yes"}]}}
+{"type":"assistant","uuid":"aff325a7-8500-4f94-9709-f5cd77755851","message":{"id":"msg_thinking","role":"assistant","content":[{"type":"thinking","thinking":"Check first."}]}}

@@ -45,16 +45,16 @@ function ModeChoice({ name, modes, value, disabled, busy, onChange }: { name: st
   </fieldset>
 }
 
-function Numbers({ stats, mode, here }: { stats: GateStats; mode: GateMode; here?: boolean }) {
-  const { seen, rate } = gateSummary(stats, mode)
+function Numbers({ stats, mode, here }: { stats: GateStats | null; mode: GateMode; here?: boolean }) {
+  const { seen, rate } = stats ? gateSummary(stats, mode) : { seen: 'Commit gate stats are temporarily unavailable.', rate: '' }
   return <div className="switch-row codex-runs-summary" role="status">
-    <span><strong>Last {stats.days} days{here ? ', this project' : ''}</strong><small>{seen}{rate && <><br />{rate}</>}</small></span>
+    <span>{stats && <strong>Last {stats.days} days{here ? ', this project' : ''}</strong>}<small>{seen}{rate && <><br />{rate}</>}</small></span>
   </div>
 }
 
 const pendingMode = (pending: Record<string, unknown> | null) => typeof pending?.mode === 'string' ? pending.mode as GateMode : undefined
 
-/** Settings › Agents: the global mode and the numbers from the log. */
+/** Settings › Commit & merge: the global mode and the numbers from the log. */
 export function GlobalCommitGate({ api }: { api: Api }) {
   const { data, error, pending, save } = useCommitGate(api)
   const value = pendingMode(pending) ?? data?.global

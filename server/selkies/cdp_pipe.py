@@ -38,7 +38,7 @@ def main(argv):
         while True:
             data = os.read(from_chrome_r, 65536)
             if not data:
-                os._exit(0)
+                return  # waitpid below closes the relay socket after Chromium exits
             with lock:
                 client = current[0]
             if client is not None:

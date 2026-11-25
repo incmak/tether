@@ -1,4 +1,5 @@
 """The one-time cleanup plan (rule 8). plan() is pure: these tests give it a snapshot of one session."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import tempfile
 import unittest
 from pathlib import Path

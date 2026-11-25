@@ -1,4 +1,5 @@
 """footer.parse reads one styled capture of Claude's bottom area; no tmux needed."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 from pathlib import Path
 import tempfile

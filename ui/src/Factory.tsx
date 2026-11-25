@@ -8,15 +8,16 @@ import type { Row } from './backlogItems'
 import { BACKLOG_PATH } from './backlogNews'
 import { useBackStep } from './backNav'
 import { formatElapsed } from './paneState'
-import { PHASES, PHASE_NAMES, STATE_NAMES, SWEEP_NAMES, attentionOrder, buildFloor, clock, groupsOf, nearest, phaseSince, recordHistory, toMs } from './factoryModel'
+import { PHASES, PHASE_NAMES, STATE_NAMES, SWEEP_NAMES, attentionOrder, buildFloor, clock, deployLabel, groupsOf, historyMoves, nearest, phaseSince, toMs } from './factoryModel'
 import type { Agent, Direction, FactoryData, History, Phase, Sweep, SweepKind, SweepLine, Task } from './factoryModel'
+import { fmtDate, sameDay, useTetherZone } from './zone'
 import './Factory.css'
 
 /* The Factory view: every agent tab and backlog item as work moving through phases, on one canvas with four zoom
    levels: the floor (all phases), one phase, one task, one agent. Made for a big screen across the room, and it
    still works from 320 px wide, where each phase is a list.
    Read-only. The only action is "Open tab", which leaves the view for that tab.
-   Input: click, ctrl/pinch wheel to zoom in or out, arrows move focus to the nearest item in that direction,
+   Input: click, ctrl+wheel or a two-finger pinch to zoom in or out, arrows move focus to the nearest item in that direction,
    Enter zooms in, Esc or Backspace zooms out (a TV remote's Back key too). Phone Back zooms out one level. */
 
 const FACTORY_MS = 5000
@@ -27,20 +28,24 @@ const IDLE_MS = 60000          // ambient tour starts after a minute with no inp
 const TOUR_MS = 12000          // and shows each task this long
 const ANNOUNCE_MS = 15000      // at most one live-region message this often
 const FLOOR_TOKENS = 10        // tokens a station shows before "+N more"
+const PINCH_SPREAD_RATIO = 1.35
+const PINCH_SQUEEZE_RATIO = 0.75
+const PINCH_MIN_CHANGE = 40   // CSS pixels
 const HISTORY_KEY = 'tether-factory-history'
+const HISTORY_BATCH = 256 // factory_history.MAX_MOVES
 const TOUR_KEY = 'tether-factory-tour'
 const BACK_KEYS = new Set(['Escape', 'Backspace', 'BrowserBack', 'GoBack'])
 const ARROWS: Record<string, Direction> = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' }
 
 type Level = { phase?: Phase; task?: string; agent?: string }
-type Props = { api: Api; panes: Pane[]; groups?: Record<string, GroupInfo[]>; onOpen: (pane: Pane) => void; onClose: () => void }
+type Props = { api: Api; panes?: Pane[]; groups?: Record<string, GroupInfo[]>; onOpen: (pane: Pane) => void; onClose: () => void }
 
 const reduced = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
 const load = <T,>(key: string, fallback: T): T => { try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) as T : fallback } catch { return fallback } }
-const save = (key: string, value: unknown) => { try { localStorage.setItem(key, JSON.stringify(value)) } catch { /* private mode: history lasts this visit */ } }
+const save = (key: string, value: unknown) => { try { localStorage.setItem(key, JSON.stringify(value)) } catch { /* private mode: preference lasts this visit */ } }
 const ago = (ms: number, now: number) => ms ? formatElapsed((now - ms) / 1000) : 'unknown'
 /** A time, with the day when it is not today. */
-const when = (ms: number) => new Date(ms).toDateString() === new Date().toDateString() ? clock(ms) : `${new Date(ms).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} ${clock(ms)}`
+const when = (ms: number) => sameDay(ms, Date.now()) ? clock(ms) : `${fmtDate(ms, { day: 'numeric', month: 'short' })} ${clock(ms)}`
 /** When it last moved: a working agent is moving now, not "0s ago". */
 const lastMove = (busy: boolean, ms: number, now: number) => busy ? 'active now' : ms ? `moved ${ago(ms, now)} ago` : ''
 const visible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden'
@@ -67,6 +72,7 @@ function usePoll<T>(api: Api, path: string | null, every: number) {
 }
 
 export function Factory({ api, panes, groups, onOpen, onClose }: Props) {
+  const zone = useTetherZone()
   const dialog = useRef<HTMLDialogElement>(null)
   const body = useRef<HTMLDivElement>(null)
   const factory = usePoll<FactoryData>(api, 'factory', FACTORY_MS)
@@ -76,29 +82,59 @@ export function Factory({ api, panes, groups, onOpen, onClose }: Props) {
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(timer) }, [])
   const stackName = useCallback((pane: Pane) => Object.values(groups ?? {}).flat().find(group => group.id === pane.group)?.name, [groups])
   const ready = !!factory.data && !!backlog.data
-  const floor = useMemo(() => ready ? buildFloor({ panes, rows, data: factory.data, groupName: stackName, now }) : null, [ready, panes, rows, factory.data, stackName, now])
+  const floor = useMemo(() => ready ? buildFloor({ panes: panes ?? [], rows, data: factory.data, groupName: stackName, now, zone }) : null, [ready, panes, rows, factory.data, stackName, now, zone])
 
-  // Phase history and announcements.
-  const [history, setHistory] = useState<History>(() => load(HISTORY_KEY, {}))
-  const [opened] = useState(() => Date.now())
+  const history = factory.data?.history ?? {}
+  const report = useRef<{ data: FactoryData; inFlight: boolean } | null>(null)
+  const pending = useRef(new Map<string, Phase>())
+  const seen = useRef(new Set<string>())
+  useEffect(() => {
+    try { localStorage.removeItem(HISTORY_KEY) } catch { /* storage can be disabled */ }
+  }, [])
+
+  // Announce transitions observed on this screen once, even while a history write is pending.
   const [announce, setAnnounce] = useState('')
   const queue = useRef<string[]>([])
+  const phases = useRef<Map<string, Phase> | null>(null)
   const waited = useRef<Set<string> | null>(null)
   const [moved, setMoved] = useState<Set<string>>(new Set())
   useEffect(() => {
-    if (!floor) return
-    const result = recordHistory(history, floor.tasks, Date.now())
-    const changed = result.moved.length || Object.keys(result.history).length !== Object.keys(history).length
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- each new floor from the server extends the stored history once
-    if (changed) { setHistory(result.history); save(HISTORY_KEY, result.history) }
-    setMoved(new Set(result.moved.map(task => task.id)))
-    for (const task of result.moved) queue.current.push(`${label(task)} moved to ${PHASE_NAMES[task.phase]}.`)
+    // The open backlog alone can look like every task moved back to Inbox while sessions load.
+    if (!floor || !panes) return
+    const data = factory.data
+    const previous = phases.current
+    const decision = data?.history
+      ? historyMoves(data.history, data.now * 1000, previous, seen.current, floor.tasks, pending.current)
+      : null
+    if (decision) pending.current = decision.pending
+    for (const task of floor.tasks) seen.current.add(task.id)
+
+    const changes = floor.tasks.filter(task => previous?.has(task.id) && previous.get(task.id) !== task.phase)
+    // The clock rebuilds the floor every tick: keep the marks until the tasks or their phases change.
+    const same = !!previous && previous.size === floor.tasks.length && floor.tasks.every(task => previous.get(task.id) === task.phase)
+    phases.current = new Map(floor.tasks.map(task => [task.id, task.phase]))
+    if (!same) setMoved(new Set(changes.map(task => task.id)))
+    for (const task of changes) queue.current.push(`${label(task)} moved to ${PHASE_NAMES[task.phase]}.`)
     const waiting = new Set(floor.tasks.filter(task => task.waits).map(task => task.id))
     if (waited.current) for (const task of floor.tasks) if (task.waits && !waited.current.has(task.id)) queue.current.push(`${label(task)} waits for you.`)
     waited.current = waiting
-    // history is read here, not watched: this runs once per new floor
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [floor])
+
+    // Record evidence on every complete floor. Send at most one attempt per Factory response.
+    if (!data || !decision || report.current?.data === data || report.current?.inFlight) return
+    const { moves } = decision
+    const attempt = { data, inFlight: moves.length > 0 }
+    report.current = attempt
+    if (!attempt.inFlight) return
+    void (async () => {
+      try {
+        for (let start = 0; start < moves.length; start += HISTORY_BATCH) {
+          const batch = moves.slice(start, start + HISTORY_BATCH).filter(move => pending.current.get(move.task) === move.phase)
+          if (batch.length) await api('factory/history', { moves: batch })
+        }
+      } catch { /* keep pending moves for the next Factory poll */ }
+      finally { attempt.inFlight = false }
+    })()
+  }, [api, factory.data, floor, panes])
   useEffect(() => {
     const timer = setInterval(() => {
       if (!queue.current.length) return
@@ -214,6 +250,73 @@ export function Factory({ api, panes, groups, onOpen, onClose }: Props) {
     return () => box.removeEventListener('wheel', wheel)
   }, [out])
 
+  // Touch pinch: use the starting midpoint and take one step until a finger lifts.
+  const pinch = useRef({
+    pointers: new Map<number, { x: number; y: number }>(),
+    start: null as { first: number; second: number; distance: number; item: HTMLElement | null } | null,
+  })
+  useEffect(() => {
+    const box = dialog.current
+    if (!box) return
+    const state = pinch.current
+    const { pointers } = state
+    const down = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch' || pointers.has(event.pointerId)) return
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
+      if (pointers.size !== 2) return
+      const [[first, a], [second, b]] = pointers
+      const item = document.elementFromPoint((a.x + b.x) / 2, (a.y + b.y) / 2)?.closest<HTMLElement>('[data-zoom]')
+      state.start = {
+        first, second, distance: Math.hypot(a.x - b.x, a.y - b.y),
+        item: item && box.contains(item) ? item : null,
+      }
+      // Keep receiving touch events when zoom replaces the items under the fingers.
+      if (event.isTrusted) {
+        box.setPointerCapture(first)
+        box.setPointerCapture(second)
+      }
+    }
+    const move = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch' || !pointers.has(event.pointerId)) return
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
+      const start = state.start
+      if (!start || pointers.size !== 2) return
+      const a = pointers.get(start.first), b = pointers.get(start.second)
+      if (!a || !b) return
+      const distance = Math.hypot(a.x - b.x, a.y - b.y)
+      if (Math.abs(distance - start.distance) < PINCH_MIN_CHANGE) return
+      if (distance >= start.distance * PINCH_SPREAD_RATIO) {
+        state.start = null
+        if (start.item && box.contains(start.item)) start.item.click()
+      } else if (distance <= start.distance * PINCH_SQUEEZE_RATIO) {
+        state.start = null
+        // A squeeze at the floor leaves Factory open.
+        if (depth > 0) out()
+      }
+    }
+    const end = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch') return
+      pointers.delete(event.pointerId)
+      if (pointers.size < 2) state.start = null
+    }
+    const touchmove = (event: TouchEvent) => {
+      if (event.touches.length >= 2 && event.cancelable) event.preventDefault()
+    }
+    box.addEventListener('pointerdown', down, { passive: true })
+    box.addEventListener('pointermove', move, { passive: true })
+    // A finger can end outside the dialog (its item was removed, or it left the screen): listen on the window.
+    window.addEventListener('pointerup', end, { capture: true, passive: true })
+    window.addEventListener('pointercancel', end, { capture: true, passive: true })
+    box.addEventListener('touchmove', touchmove, { passive: false })
+    return () => {
+      box.removeEventListener('pointerdown', down)
+      box.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', end, { capture: true })
+      window.removeEventListener('pointercancel', end, { capture: true })
+      box.removeEventListener('touchmove', touchmove)
+    }
+  }, [depth, out])
+
   // Tokens that change station travel there (FLIP). Reduced motion: they just appear in the new place.
   const places = useRef(new Map<string, { rect: DOMRect; phase: string }>())
   useLayoutEffect(() => {
@@ -246,7 +349,7 @@ export function Factory({ api, panes, groups, onOpen, onClose }: Props) {
   else if (!floor) content = <p className="factory-loading" role="status">Loading the factory…</p>
   else if (!floor.tasks.length) content = <Problem title="No work on the floor" text={`No agent tab is open and no backlog item is open.${floor.parked ? ` ${floor.parked} idle tabs ended over a day ago.` : ''} Start a tab with New session.`} />
   else if (agent && task) content = <AgentLevel api={api} agent={agent} task={task} now={now} onOpen={pane => { onOpen(pane); onClose() }} />
-  else if (task) content = <TaskLevel task={task} history={history[task.id] ?? []} opened={opened} now={now} zoom={next => setLevel({ phase: shown.phase, task: task.id, agent: next.pane.id })} />
+  else if (task) content = <TaskLevel task={task} history={history[task.id] ?? []} now={now} zoom={next => setLevel({ phase: shown.phase, task: task.id, agent: next.pane.id })} />
   else if (shown.phase) content = <PhaseLevel phase={shown.phase} tasks={floor.tasks.filter(entry => entry.phase === shown.phase)} history={history} now={now} zoom={next => setLevel({ phase: shown.phase, task: next.id })} />
   else content = <FloorLevel floor={floor.tasks} parked={floor.parked} now={now} moved={moved} zoomPhase={phase => setLevel({ phase })} zoomTask={next => setLevel({ phase: next.phase, task: next.id })} />
 
@@ -362,7 +465,7 @@ function PhaseLevel({ phase, tasks, history, now, zoom }: { phase: Phase; tasks:
   </div>
 }
 
-function TaskLevel({ task, history, opened, now, zoom }: { task: Task; history: History[string]; opened: number; now: number; zoom: (agent: Agent) => void }) {
+function TaskLevel({ task, history, now, zoom }: { task: Task; history: History[string]; now: number; zoom: (agent: Agent) => void }) {
   const proof = task.agents.flatMap(agent => agent.tools.filter(tool => /(test|unittest|tsc -b|eslint|screenshot|SHOTS=|playwright)/i.test(`${tool.name} ${tool.title}`)).map(tool => ({ agent: agent.name, tool })))
   return <div className="factory-task">
     <div className="factory-task-head">
@@ -385,8 +488,9 @@ function TaskLevel({ task, history, opened, now, zoom }: { task: Task; history: 
       <p className="factory-note">Tether only reports. It does not rebase or change a branch.</p>
     </section>}
     <section aria-labelledby="factory-history"><h3 id="factory-history">Phase history</h3>
-      <ol className="factory-timeline">{history.map((entry, index) => <li key={index}><b>{PHASE_NAMES[entry.phase]}</b> from {when(entry.at)}</li>)}</ol>
-      <p className="factory-note">This screen keeps the history itself. It starts {history.length ? '' : 'now, '}from the first time a screen saw the task{opened ? ` (this one opened ${clock(opened)})` : ''}.</p>
+      {history.length ? <ol className="factory-timeline">{history.map((entry, index) => <li key={index}><b>{PHASE_NAMES[entry.phase]}</b> from {when(entry.at)}</li>)}</ol>
+        : <p className="factory-none">No phases recorded yet.</p>}
+      <p className="factory-note">Tether shares this history across screens. It starts when any screen first sees the task.</p>
     </section>
     <section aria-labelledby="factory-commits"><h3 id="factory-commits">Commits</h3>
       {task.commits.length ? <ul className="factory-list">{task.commits.map(commit => <li key={commit.hash + commit.repo}><code>{commit.hash}</code> {commit.subject} <span>{commit.repo} · {clock(commit.at * 1000)}</span></li>)}</ul>
@@ -394,7 +498,7 @@ function TaskLevel({ task, history, opened, now, zoom }: { task: Task; history: 
     </section>
     <section aria-labelledby="factory-proof"><h3 id="factory-proof">Proof</h3>
       <ul className="factory-list">
-        {task.deploys.map(line => <li key={line.at + line.text}><b>DEPLOYED.md</b> {line.timed ? clock(line.at * 1000) : new Date(line.at * 1000).toLocaleDateString()}: {line.text}</li>)}
+        {task.deploys.map(line => <li key={line.at + line.text}><b>DEPLOYED.md</b> {deployLabel(line)}: {line.text}</li>)}
         {proof.map(({ agent, tool }, index) => <li key={index}><b>{agent}</b> {tool.error ? 'failed: ' : ''}{tool.name}: {tool.title} {tool.at ? <span>{clock(toMs(tool.at))}</span> : null}</li>)}
         {task.item?.status?.kind === 'done' && <li><b>Backlog</b> Done: {task.item.status.text}</li>}
         {task.item?.details.filter(detail => /screenshot|shots|test|proof|verified/i.test(detail.text)).map(detail => <li key={detail.line}><b>Backlog note</b> {detail.text}</li>)}

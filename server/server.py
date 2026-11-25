@@ -1,15 +1,19 @@
 """Mobile transcript and message bridge to one existing Codex CLI thread."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from datetime import datetime
+from functools import partial
 import gzip
 import html
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import socket
 import sqlite3
+import stat
 from pathlib import Path
 import subprocess
 import threading
@@ -21,9 +25,13 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 from agents import claude_consume, claude_snapshot, discover, usage
 from agents import records
 import agents
+import audit
 import codex_messages
 import continuations
+import coordinator
+import injected_prompts
 import pane_icons
+import antigravity
 from antigravity import snapshot as antigravity_snapshot, transcript_message as antigravity_message, window_active
 from terminal_input import NAME_HELP, valid_name, fork_chat, new_window_after, DraftError, card_key, menu_choose, picker_choose, unqueue, clear_draft as terminal_clear_draft, type_text, live_status, capture, capture_screen, submit as terminal_submit, respond_approval, plan_menu, start_agent, create_session, shell_snapshot, shell_submit, verify
 from quota_notices import error_message, merge as merge_quota_notices
@@ -52,6 +60,7 @@ import notification_priority
 import push
 import shortcuts
 import prefs_sync
+import tether_zone
 import tab_brief
 import backlog
 import codex_provider
@@ -67,7 +76,10 @@ import voice_log
 import friday_proxy
 import live_mode
 import attention
+import friday_notes
+import friday_drafts
 import reminders
+import task_sources
 import suggest_groups
 import suggest_names
 import thread_started
@@ -94,6 +106,7 @@ import paths
 import side_shells
 import host_stats
 import tmux_merge
+import restart_tab
 import quick_tab
 import tmux_names
 import auto_resume
@@ -105,6 +118,10 @@ import work_feeds
 import work_jira
 import groups
 import helper_close
+import task_tree
+import task_tree_answer
+import task_tree_api
+import task_tree_close
 import helper_tabs
 import groups_api
 import undo
@@ -117,6 +134,8 @@ import commit_gate
 import claude_advisor
 import auto_merge
 import factory
+import factory_history
+import command_history
 import activity_time
 import ui_usage
 import feedback
@@ -227,10 +246,11 @@ def deliver_reminder_push(reminder):
 
 
 REMINDERS = reminders.Ticker({'push': deliver_reminder_push, 'ping': urgent_ping.remind})
-HELPER_CLOSER = helper_close.Closer()
+_QUIET_HELPERS = set()
 NOTIFIER = push.Notifier(notify, watching, levels=push.pane_levels, delivery=push.delivery_settings,
                         context=lambda entry: notification_context(entry),
-                        finished_low=lambda entry: review_links.in_parent_stage(entry['id'], entry.get('thread')))
+                        finished_low=lambda entry: review_links.in_parent_stage(entry['id'], entry.get('thread')),
+                        quiet=lambda entry: entry['id'] in _QUIET_HELPERS)
 WORK_WATCHER = work_api.Watcher(notify, delivery=push.delivery_settings)
 # The worktree sweep (B210), the weekly clean-up check (B211) and the daily ops report (B212).
 UPKEEP = upkeep_api.Upkeep(notify, push.delivery_settings)
@@ -273,37 +293,168 @@ def auto_merge_roots():
     return roots
 
 
+REVIEW_SOURCE_TAIL_BYTES = 8 * 1024 * 1024
+
+
 def review_turn_source(entry):
     """Return the source and transcript times of the latest turn for the review watcher."""
-    return notification_priority.turn_source(entry.get('agent'), notification_records(entry),
-                                             identify=lambda text: review_links.prompt_source(continuations.unwrap(text)),
-                                             distinguish_missing=True, with_time=True)
+    def classify(records, **options):
+        identify = partial(review_links.prompt_source, entry)
+        return notification_priority.turn_source(entry.get('agent'), records, identify=identify,
+                                                 distinguish_missing=True, with_time=True, require_receipts=True,
+                                                 **options)
+
+    result = classify(notification_records(entry, with_offset=True, require_read=True))
+    if entry.get('agent') == 'antigravity':
+        if result[0] in ('user', 'unknown', 'unknown-background'):
+            # Exports rewrite old steps out of order, so a tail can bring back an older prompt.
+            # Only the whole export shows which prompt is newest.
+            records, whole = _transcript_tail_records(entry, REVIEW_SOURCE_TAIL_BYTES, whole=True, require_read=True)
+            if whole:
+                result = classify(records, latest_turn=True)
+            elif result[0] == 'user':
+                result = ('unknown', *result[1:])
+    elif result[0] in ('unknown', 'unknown-background'):
+        # latest_turn: a prompt after the latest reply starts a turn with no reply yet.
+        # The wider tail must not credit an earlier turn's prompt to it.
+        result = classify(_transcript_tail_records(entry, REVIEW_SOURCE_TAIL_BYTES, with_offset=True, require_read=True),
+                          latest_turn=True)
+    return result
+
+
+REVIEW_GATE_TAIL_BYTES = 256 * 1024
+REVIEW_GATE_TAIL = (None, {})  # (path, size, mtime) -> the newest rows per (agent, thread)
+REVIEW_GATE_ROWS = 8
+REVIEW_GATE_LANDED = {}  # digest of the log row for confirmed landings
+REVIEW_GATE_LANDED_MAX = 256
+REVIEW_GATE_LANDED_LOCK = threading.Lock()
+REVIEW_GATE_SECONDS = 1.5
+
+
+def review_gate_records():
+    """Read complete commit-msg records at the end of the gate log. Cache only the parsed log data."""
+    global REVIEW_GATE_TAIL
+    path = commit_gate.log_path()
+    try:
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode):
+            return {}
+        key = (path, info.st_size, info.st_mtime_ns)
+        cached_key, records = REVIEW_GATE_TAIL
+        if key == cached_key:
+            return records
+        with open(path, 'rb', buffering=0, opener=lambda name, flags: os.open(name, flags | os.O_NONBLOCK)) as stream:
+            info = os.fstat(stream.fileno())  # The writer can rotate the log between stat and open.
+            if not stat.S_ISREG(info.st_mode):
+                return {}
+            key = (path, info.st_size, info.st_mtime_ns)
+            start = max(0, info.st_size - REVIEW_GATE_TAIL_BYTES)
+            stream.seek(start)
+            data = stream.read(info.st_size - start)
+    except OSError:
+        return {}
+    if start:
+        data = data.partition(b'\n')[2]  # The first line may start inside a record.
+    records = {}
+    for line in reversed(data.rpartition(b'\n')[0].split(b'\n')):  # Drop a partial last line and break ties by log order.
+        try:
+            row = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(row, dict) or row.get('via') != 'commit-msg' or row.get('verdict') == 'block':
+            continue
+        source, session, folder, at, head = (row.get(field) for field in ('source', 'session', 'folder', 'at', 'head'))
+        if (source not in ('claude', 'codex') or not isinstance(session, str) or not review_links.UUID.fullmatch(session)
+                or not isinstance(folder, str) or not os.path.isabs(folder)
+                or type(at) not in (int, float) or type(at) is float and not math.isfinite(at) or at <= 0
+                or head is not None and not isinstance(head, str)):
+            continue
+        identity = (source, session)
+        recent = records.setdefault(identity, [])
+        recent.append(dict(row, cache_key=hashlib.sha256(line).digest()))
+        recent.sort(key=lambda record: record['at'], reverse=True)
+        del recent[REVIEW_GATE_ROWS:]
+    REVIEW_GATE_TAIL = key, records
+    return records
+
+
+def _review_gate_landed(row, *, deadline):
+    """True, False, None or 'pending' (commit_gate.record_landed). Only a confirmed landing is cached."""
+    if time.monotonic() >= deadline:
+        return None
+    folder = row['folder']
+    key = row['cache_key']
+    if key in REVIEW_GATE_LANDED:
+        return True if commit_gate.cached_git_dir_matches(folder, commit_gate.git_dir_key(row.get('git_dir'))) else None
+    landed = commit_gate.record_landed(row, deadline=deadline)
+    if landed is True:
+        with REVIEW_GATE_LANDED_LOCK:
+            if key not in REVIEW_GATE_LANDED and len(REVIEW_GATE_LANDED) >= REVIEW_GATE_LANDED_MAX:
+                del REVIEW_GATE_LANDED[next(iter(REVIEW_GATE_LANDED))]
+            REVIEW_GATE_LANDED[key] = True
+    return landed
 
 
 def review_folder(entry):
-    """The folder a worker commits in: where the agent says it works, else the pane's folder."""
-    return agent_folder(entry)
+    """Resolve a bound request, a post-verdict scope, or a new request's folder.
+
+    B369: the gate rows of the session are read newest first. A row whose commit Git proves did not land (False) is
+    skipped. A confirmed, pending or uncertain row selects its folder, as every row did before B369: a commit still
+    in its hook, or one that Git cannot confirm, keeps the request on that worktree and its current HEAD."""
+    folder, after = entry.get('review_folder'), entry.get('review_after')
+    follow_up = 'review_after' in entry
+    if folder and not follow_up:
+        return folder
+    source = entry.get('agent')
+    thread = helper_tabs._thread(entry)
+    started = entry.get('process_start')
+    use_gate = after is not None if follow_up else started
+    if source in ('claude', 'codex') and thread and not entry.get('codex_unresolved') and use_gate:
+        threshold = after
+        if not follow_up:
+            try:
+                started_ms = agents.started_ms(started)
+            except (OSError, TypeError, ValueError, OverflowError):
+                started_ms = None
+            threshold = started_ms / 1000 if started_ms is not None else None
+        if threshold is not None:
+            deadline = time.monotonic() + REVIEW_GATE_SECONDS
+            for record in review_gate_records().get((source, thread), ()):
+                if not record['at'] > threshold:
+                    break
+                if _review_gate_landed(record, deadline=deadline) is False:
+                    continue
+                if follow_up or review_scope.head(record['folder']):
+                    return record['folder']  # the scope read checks this exact worktree
+                break
+    return folder if after is not None else folder or agent_folder(entry)
 
 
 REVIEW_SCOPES = {}  # pane id -> ((folder, work mark), monotonic time, scope)
 REVIEW_SCOPE_AGE = 60
 
 
-def review_scope_of(entry):
+def review_scope_of(entry, *, light=False):
     """The review scope of a worker. A request that cannot be delivered (a draft in the reviewer's composer) is tried
     again on each monitor tick. The checklist run and the UI listing then repeat only when the work changed
     (review_scope.fingerprint: commit, base, status, tracked, staged and untracked files), or after REVIEW_SCOPE_AGE
-    seconds."""
+    seconds. Idle close reads an uncached scope without the review request metadata."""
     folder = review_folder(entry)
     mark = review_scope.fingerprint(folder)
+    if light:
+        found = review_scope.scope(folder, light=True)
+        return dict(found, mark=mark) if found is not None else None
     key, now = (folder, mark), time.monotonic()
     cached = REVIEW_SCOPES.get(entry.get('id'))
     if mark is not None and cached is not None and cached[0] == key and now - cached[1] < REVIEW_SCOPE_AGE:
         return dict(cached[2])
     found = review_scope.scope(folder)
+    if found is not None:
+        found = dict(found, mark=mark)
     for pane in [pane for pane, item in REVIEW_SCOPES.items() if now - item[1] >= REVIEW_SCOPE_AGE]:
         del REVIEW_SCOPES[pane]
-    if mark is not None and found is not None:
+    if (mark is not None and found is not None and isinstance(found.get('commit'), str)
+            and type(found.get('dirty')) is bool):
         REVIEW_SCOPES[entry.get('id')] = (key, now, dict(found))
     else:
         REVIEW_SCOPES.pop(entry.get('id'), None)
@@ -342,7 +493,7 @@ def review_parent(entry, entries):
 
 
 def review_work_mark(entry):
-    cwd = entry.get('cwd')
+    cwd = entry.get('review_folder') or entry.get('cwd')
     if not cwd:
         return None
     try:
@@ -358,6 +509,113 @@ def review_work_mark(entry):
         return None
 
 
+def _helper_always_shown(entry, shown):
+    if not isinstance(shown, dict) or not isinstance(saved := shown.get(entry['id']), dict):
+        return False
+    if not isinstance(saved.get('dir'), str) or 'thread' not in saved:
+        return False
+    saved_thread = saved['thread']
+    if saved_thread is not None and not isinstance(saved_thread, str):
+        return False
+    thread = entry.get('thread')
+    return (saved['dir'] == home_path(tab_folder(entry))
+            and (thread == saved_thread or thread is None or saved_thread is None))
+
+
+def _observe_push(entries):
+    global _QUIET_HELPERS
+    try:
+        fields = helper_tabs.listing_fields(subprocess.run, entries)
+        prefs = prefs_sync.load()['prefs']
+        shown = prefs.get('shownHelpers')
+        # Hiding is on unless the synced value is explicitly false.
+        _QUIET_HELPERS = {entry['id'] for entry in entries
+                          if prefs.get('hideHelpers') is not False
+                          and fields.get(entry['id'], {}).get('helper') is True
+                          and not _helper_always_shown(entry, shown)}
+    except Exception as exc:
+        _QUIET_HELPERS = set()
+        print(f'helper notification visibility failed: {exc!r}', file=sys.stderr)
+    for entry in entries:
+        try:
+            if entry.get('owner_pid') and entry.get('writable'):
+                NOTIFIER.observe(entry, shared_status(entry))
+        except Exception:  # one odd pane must never stop the monitor for everyone
+            continue
+
+
+HELPER_CLOSER = helper_close.Closer(scope=lambda entry: review_scope_of(entry, light=True))
+TASK_CLOSER = task_tree_close.Closer()
+TASK_SEND_AT = {}
+TASK_USER_AT = {}
+TASK_AUTOMATED = {}
+TASK_VIEW_AT = {}
+
+
+def live_task_tree(entries=None, status=None):
+    return task_tree_api.Tree(fresh_sessions() if entries is None else entries, subprocess.run, status or fresh_status,
+                              attention.STORE.ask, review_links.escalated, fresh_entries=fresh_sessions)
+
+
+def task_view(pane):
+    with WATCHING_LOCK:
+        last = WATCHED.get(pane)
+        viewing = WATCHING.get(pane, 0) > 0 or (last is not None and time.monotonic() - last < 10)
+        return viewing, max(last or 0, TASK_VIEW_AT.get(pane, 0))
+
+
+def task_activity(entry):
+    version = notification_version(entry)
+    return (version, timeline(entry['id']), TASK_SEND_AT.get(entry['id'])) if version is not None else None
+
+
+def task_close_sweep(entries):
+    if not any(helper_tabs.PANE.fullmatch(entry['id']) for entry in entries):
+        TASK_CLOSER.reset()
+        return
+    try:
+        tree = live_task_tree(entries, shared_status)
+        with SEND_LOCK:
+            for activity in (TASK_SEND_AT, TASK_USER_AT):
+                for pane in activity.keys() - tree.options.keys():
+                    activity.pop(pane, None)
+            for key in list(TASK_AUTOMATED):
+                if key[0] not in tree.options:
+                    TASK_AUTOMATED.pop(key, None)
+        with WATCHING_LOCK:
+            for pane in TASK_VIEW_AT.keys() - tree.options.keys():
+                TASK_VIEW_AT.pop(pane, None)
+        unreadable = task_tree_close.clear_obsolete_marks(tree, SEND_LOCK, task_user_prompt_at)
+
+        def read_prompt(entry):
+            if entry['id'] in unreadable:
+                raise injected_prompts.ReceiptsUnreadable('Task prompt source unavailable this tick')
+            return task_user_prompt_at(entry)
+
+        TASK_CLOSER.observe(tree, live_task_tree, enabled=lambda: prefs_sync.load()['prefs'].get('task_auto_close') is True,
+                            lock=SEND_LOCK, activity=task_activity, viewed=task_view,
+                            draft=lambda entry: _web_draft(entry['id']).strip() or any(prompt_draft(entry, subprocess.run)),
+                            changed=forget_sessions, user_prompt_at=read_prompt)
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+        TASK_CLOSER.reset()
+        print(f'task close sweep failed: {exc}', file=sys.stderr)
+
+
+def task_answer(body, tree):
+    pane = body.get('pane')
+    entry = tree.bound(pane, body.get('thread'))
+    if pane not in tree.fields:
+        raise helper_tabs.Stale('That tab is no longer a helper. Open its chat to reply.')
+    result = task_tree_answer.answer(body, entry, tree.run, fresh_status, partial(send_text, held=True, user=True),
+                                     reply_turn=notification_reply_turn)
+    if body.get('text') is not None:
+        task_user_delivery(entry)
+    else:
+        TASK_SEND_AT[pane] = time.monotonic()
+    attention.STORE.clear(pane, entry['thread'])
+    return result
+
+
 def monitor_notices():
     """Keep native quota notices even when the phone page is closed."""
     while True:
@@ -367,17 +625,13 @@ def monitor_notices():
             print(f'session discovery failed: {exc!r}', file=sys.stderr)
             time.sleep(2)
             continue
-        for entry in entries:
-            try:
-                if entry.get('owner_pid') and entry.get('writable'):
-                    NOTIFIER.observe(entry, shared_status(entry))
-            except Exception:  # one odd pane must never stop the monitor for everyone
-                continue
-        review_links.observe(entries, shared_status, review_send, last_reply,
+        _observe_push(entries)
+        review_links.observe(entries, shared_status, partial(review_send, receipt=True), last_reply,
                              alert=review_alert, work_mark=review_work_mark, review_reply=review_reply,
                              turn_source=review_turn_source, level=review_level,
                              parent=lambda entry: review_parent(entry, entries),
-                             scope=review_scope_of, commit=review_commit, fresh=fresh_status)
+                             scope=review_scope_of, commit=review_commit, fresh=fresh_status,
+                             folder=review_folder)
         try:
             # B213: each commit a reviewer approved is checked once. Observe mode records the decision and merges nothing.
             auto_merge.observe(entries, review_links.approved_commits(), agent_folder, auto_merge_alert,
@@ -385,12 +639,21 @@ def monitor_notices():
         except Exception as exc:  # auto-merge must never stop the monitor
             print(f'auto-merge observe failed: {exc!r}', file=sys.stderr)
         try:
-            attention.STORE.observe(entries, shared_status, notification_reply, lambda entry: timeline(entry['id'])['finished'])
+            attention.STORE.observe(entries, shared_status, notification_reply_turn,
+                                    lambda entry: timeline(entry['id'])['finished'], notification_version)
             digest = attention.STORE.digest_due()
             if digest:
                 notify(digest, False)
         except Exception as exc:  # Attention mode must never stop the monitor
             print(f'attention observe failed: {exc!r}', file=sys.stderr)
+        try:
+            latest_outcome = coordinator.FEED.latest_outcome
+            deliver = partial(coordinator.deliver, lock=SEND_LOCK, fresh=fresh_sessions, fresh_status=fresh_status,
+                              latest_outcome=latest_outcome, submit_locked=submit_locked)
+            coordinator.FEED.observe(entries, shared_status, deliver, latest_outcome,
+                                     lock=SEND_LOCK, fresh=fresh_sessions)
+        except Exception as exc:  # the coordinator feed must never stop the monitor
+            print(f'coordinator feed failed: {exc!r}', file=sys.stderr)
         try:
             tab_brief.BRIEFER.observe(entries, shared_status, lambda entry: timeline(entry['id'])['finished'],
                                       brief_messages, apply_brief_name, brief_enabled)
@@ -414,7 +677,8 @@ def monitor_notices():
         except Exception as exc:  # work board feeds must never stop the monitor
             print(f'work feeds failed: {exc!r}', file=sys.stderr)
         try:
-            HELPER_CLOSER.observe(entries, shared_status, subprocess.run, watching, lock=SEND_LOCK, fresh=fresh_status)
+            HELPER_CLOSER.observe(entries, shared_status, subprocess.run, watching, lock=SEND_LOCK, fresh=fresh_status,
+                                  task_sweep=lambda: task_close_sweep(entries))
         except Exception as exc:  # closing idle helper tabs must never stop the monitor
             print(f'helper close failed: {exc!r}', file=sys.stderr)
         UPKEEP.observe(entries, tab_folder, shared_status, subprocess.run, SEND_LOCK, sessions)  # catches its own errors
@@ -469,13 +733,13 @@ STATUS_LOCK = threading.Lock()
 STATUS_PANE_LOCKS = {}
 
 
-def shared_status(entry):
+def shared_status(entry, *, fresh=False):
     """live_status for the session list and the monitor, which would otherwise each re-read the pane every few seconds."""
     with STATUS_LOCK:
         pane_lock = STATUS_PANE_LOCKS.setdefault(entry['id'], threading.Lock())
     with pane_lock:
         when, status = STATUS_CACHE.get(entry['id'], (0.0, None))
-        if time.monotonic() - when > 1:
+        if fresh or time.monotonic() - when > 1:
             try:
                 status = auto_resume.overlay(entry, live_status(entry))
             except (OSError, ValueError, KeyError, subprocess.SubprocessError):  # a pane that just closed must not fail the whole tab list
@@ -490,8 +754,7 @@ def shared_status(entry):
 
 def fresh_status(entry):
     """shared_status without the one-second cache: for a check that must see a prompt sent a moment ago."""
-    STATUS_CACHE.pop(entry['id'], None)
-    return shared_status(entry)
+    return shared_status(entry, fresh=True)
 
 
 TRANSITIONS = {}  # entry id -> {'state', 'since', 'finished'}: wall-clock times, so the phone can sort and mark finished turns
@@ -544,11 +807,15 @@ def quick_groups():
         return {}
 
 
+def fresh_sessions():
+    return discover(settings(), subprocess.run)
+
+
 def sessions():
     """Discovery shells out (ps, tmux, sqlite); every open page and the monitor ask every 2s, so share one result for a second."""
     with SESSIONS_LOCK:
         if time.monotonic() - SESSIONS_CACHE[0] > 1:
-            SESSIONS_CACHE[1] = discover(settings(), subprocess.run)
+            SESSIONS_CACHE[1] = fresh_sessions()
             window_size.apply(subprocess.run, entries=SESSIONS_CACHE[1])
             SESSIONS_CACHE[0] = time.monotonic()
         return SESSIONS_CACHE[1]
@@ -556,9 +823,9 @@ def sessions():
 
 # Writes that add, remove or rename tmux panes or sessions. After one succeeds, the next list must come from tmux,
 # so a page that refreshes right away sees the new pane (or no longer sees the closed one).
-TMUX_WRITES = {quick_tab.START_PATH, quick_tab.MOVE_PATH, '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/shell', '/mobile/api/session',
-               '/mobile/api/tmux-sessions', '/mobile/api/rename', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/side-shell',
-               '/mobile/api/side-shell/end', '/mobile/api/start', '/mobile/api/merge', '/mobile/api/auto-resume', '/mobile/api/review-stalled', undo_api.PATH} | groups_api.WRITES
+TMUX_WRITES = {coordinator.PATH, quick_tab.START_PATH, quick_tab.MOVE_PATH, '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/restart-tab', '/mobile/api/shell', '/mobile/api/session',
+               '/mobile/api/tmux-sessions', '/mobile/api/rename', '/mobile/api/pane-name', coordinator.ROLE_PATH, '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/side-shell',
+               '/mobile/api/side-shell/end', '/mobile/api/start', '/mobile/api/merge', '/mobile/api/auto-resume', '/mobile/api/review-stalled', undo_api.PATH} | groups_api.WRITES | task_tree_api.WRITES
 
 
 def _web_draft(pane):
@@ -570,7 +837,7 @@ def undo_env():
     """What undo.py reads: the live tabs, their state and unsent text, for its checks and its warnings."""
     return undo.Env(run=subprocess.run, entries=sessions, status=shared_status,
                     draft=lambda entry: prompt_draft(entry, subprocess.run), web_draft=_web_draft,
-                    name_window=name_in_tmux)
+                    name_window=name_in_tmux, fresh=fresh_sessions)
 
 
 def forget_sessions():
@@ -580,17 +847,35 @@ def forget_sessions():
 
 
 def build_listing():
-    rows = session_rows(sessions())
+    entries = sessions()
+    rows = session_rows(entries)
     try:
         links = review_links.reviewed_by()
         paused = review_links.paused()
     except Exception:  # a review-store read error must not hide the session list
         links = {}
         paused = {}
+    try:
+        escalations = review_links.escalated(entries)
+    except Exception:  # a review-store read error must not hide the session list
+        escalations = set()
+    try:
+        options = helper_tabs.read_panes(subprocess.run)
+        helper_fields = helper_tabs.listing_fields(subprocess.run, entries, options=options)
+    except Exception:  # a helper record read error must not hide the session list
+        options, helper_fields = {}, {}
+    by_id = {entry['id']: entry for entry in entries}
     for row in rows:
         if links.get(row['id']):
             row['reviewers'] = links[row['id']]
         row['reviewers_paused'] = paused.get(row['id'], [])
+        row.update(helper_fields.get(row['id'], {}))
+        if row['id'] in escalations:
+            row['escalated'] = True
+        if 'task' in row and (digest := task_tree_answer.prompt_digest(by_id[row['id']], row,
+                                                                       reply_turn=notification_reply_turn)):
+            row['answer_digest'] = digest
+    task_tree.annotate_done(rows, by_id, options, task_user_prompt_at)
     listing = {'sessions': rows, 'default_thread': settings()['thread']}
     try:
         found_groups = groups.all_groups()
@@ -638,6 +923,7 @@ def session_row(entry):
     """One pane in the session list. `needs` is a one-line summary when the pane waits on the user (the desktop "Needs you" list)."""
     status = shared_status(entry)
     return dict({key: entry.get(key) for key in ('id', 'tmux_session', 'label', 'agent', 'thread', 'writable', 'pane_name', 'tmux_pane_name', 'pane_icon', 'agent_name', 'codex_profile', 'worktree', 'group', 'role')},
+                **({'coordinator': entry['coordinator']} if entry.get('coordinator') in coordinator.MODES else {}),
                 dir=home_path(tab_folder(entry)), **status, **timeline(entry['id']), needs=needs.summary(status),
                 ask=attention.STORE.ask(entry['id'], entry.get('thread')),
                 brief=tab_brief.public(tab_brief.STORE.get(entry.get('thread'))) if entry.get('thread') else None)
@@ -646,13 +932,15 @@ def session_row(entry):
 def brief_messages(entry):
     """The chat for a tab brief, from the transcript only (no screen capture): user prompts and text replies."""
     if entry.get('agent') == 'claude':
-        return claude_snapshot(entry, display_text)['messages']
-    path = Path(entry.get('transcript') or '')
-    return history.read(path, codex_state, codex_consume)['messages'] if path.is_file() else []
+        messages = claude_snapshot(entry, display_text)['messages']
+    else:
+        path = Path(entry.get('transcript') or '')
+        messages = history.read(path, codex_state, codex_consume, with_offset=True)['messages'] if path.is_file() else []
+    return injected_prompts.mark(entry, messages)
 
 
 def brief_enabled():
-    """Settings › Main AI model = Local only keeps every chat on the server."""
+    """Settings › Models & helpers › Main AI model = Local only keeps every chat on the server."""
     return prefs_sync.load()['prefs'].get('mainModel') != 'none'
 
 
@@ -716,9 +1004,10 @@ def name_in_tmux(pane, name):
     subprocess.run([paths.TMUX, *command], capture_output=True, timeout=5)
 
 
-def name_together(pane, name, from_session):
+def name_together(pane, name, from_session, keep_session=False):
     """Keep one name per pane: the agent gets `/rename NAME`, and in a tmux session with only this pane the session
-    and the pane share the name too. from_session: the user renamed the session (else the pane). Returns a note or ''."""
+    and the pane share the name too unless keep_session is set. from_session: the user renamed the session
+    (else the pane). Returns a note or ''."""
     entries = sessions()
     entry = next((e for e in entries if e['id'] == pane), None)
     if not entry or not name:
@@ -727,7 +1016,7 @@ def name_together(pane, name, from_session):
     if alone and from_session:
         subprocess.run([paths.TMUX, 'set-option', '-p', '-t', pane, '@chat_name', name, ';', 'set-option', '-p', '-t', pane,
                         '@chat_name_at', str(int(time.time() * 1000))], capture_output=True, timeout=5)
-    elif alone and valid_name(name) and name != entry.get('label'):
+    elif alone and not keep_session and valid_name(name) and name != entry.get('label'):
         subprocess.run([paths.TMUX, 'rename-session', '-t', pane, name], capture_output=True, timeout=5)  # a taken name keeps the old one
     if from_session and not alone:
         return ''
@@ -778,6 +1067,7 @@ def codex_action_lines(payload):
 FACTORY_READERS = {
     'claude': (lambda: {'messages': []}, lambda state, index, record: claude_consume(state['messages'], index, record, display_text)),
     'codex': (lambda: codex_state(), lambda state, index, record: codex_consume(state, index, record)),
+    'antigravity': (antigravity.factory_state, antigravity.factory_consume),
 }
 
 
@@ -786,15 +1076,20 @@ def codex_state():
             'usage': None, 'model': '', 'effort': '', 'tier': '', 'credits': None}
 
 
-def settings_time(stamp):
-    """Seconds of a rollout timestamp ("2026-11-17T18:01:43.678Z"), or None when it does not parse."""
+def transcript_time(stamp, *, require_timezone=False):
+    """Epoch seconds for an ISO transcript timestamp, or None when it does not parse."""
+    if not isinstance(stamp, str):
+        return None
     try:
-        return datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp() if isinstance(stamp, str) else None
+        when = datetime.fromisoformat(stamp[:-1] + '+00:00' if stamp.endswith('Z') else stamp)
+        if require_timezone and when.tzinfo is None:
+            return None
+        return when.timestamp()
     except ValueError:
         return None
 
 
-def codex_consume(state, index, entry):
+def codex_consume(state, index, entry, *, offset=None):
     """Fold one rollout record into the chat messages, busy flag and latest usage figures."""
     messages = state['messages']
     payload = entry.get('payload', {})
@@ -808,7 +1103,7 @@ def codex_consume(state, index, entry):
         if not isinstance(settings, dict):
             return
         stamp = entry.get('timestamp')
-        when = settings_time(stamp)
+        when = transcript_time(stamp)
         last_index, last_when = state.get('settings_at', (None, None))
         adjacent = last_index == index - 1 and when is not None and last_when is not None and abs(when - last_when) <= 2
         state['settings_at'] = (index, when)
@@ -899,8 +1194,11 @@ def codex_consume(state, index, entry):
         text = continuations.unwrap(part['text']) if explicit_user else display_text(part['text'])
         if not text.strip() or (not explicit_user and text.startswith('# AGENTS.md instructions')):
             continue
-        messages.append(dict(part, id=str(index) if at == 0 else f'{index}.{at}', text=text,
-                             time=entry.get('timestamp'), phase=payload.get('phase')))
+        message = dict(part, id=str(index) if at == 0 else f'{index}.{at}', text=text,
+                       time=entry.get('timestamp'), phase=payload.get('phase'))
+        if offset is not None and role == 'user' and not part.get('kind'):
+            message['_record_id'] = injected_prompts.codex_id(offset, entry.get('timestamp'))
+        messages.append(message)
 
 
 def claude_cwd(entry):
@@ -1170,49 +1468,110 @@ def codex_metrics(config, reported_usage, model='', effort='', credits=None, *, 
 NOTIFICATION_TAIL_BYTES = 256 * 1024
 
 
-def notification_records(entry):
+def notification_records(entry, *, with_offset=False, require_read=False):
     """Read a bounded tail without tmux or history cache locks."""
-    if entry.get('agent') not in ('claude', 'codex', 'antigravity') or entry.get('ambiguous'):
-        return []
+    return _transcript_tail_records(entry, NOTIFICATION_TAIL_BYTES, with_offset=with_offset, require_read=require_read)
+
+
+def _transcript_tail_records(entry, tail_bytes, *, whole=False, with_offset=False, require_read=False):
+    """Read the last tail_bytes. With whole, also return whether the read started at the file start."""
+    records, start = [], None
+    if entry.get('agent') in ('claude', 'codex', 'antigravity') and not entry.get('ambiguous'):
+        try:
+            with open(entry['transcript'], 'rb') as stream:
+                size = stream.seek(0, os.SEEK_END)
+                start = max(0, size - tail_bytes)
+                stream.seek(start)
+                tail = stream.read(tail_bytes)
+            offset = start
+            if start:
+                prefix, newline, tail = tail.partition(b'\n')  # discard a record clipped by the byte limit
+                offset += len(prefix) + len(newline)
+            for line in tail.splitlines(keepends=True):
+                try:
+                    record = json.loads(line)
+                except (ValueError, UnicodeError):
+                    record = None
+                if isinstance(record, dict):
+                    if with_offset and entry['agent'] == 'codex':
+                        record['_offset'] = offset
+                    records.append(record)
+                offset += len(line)
+        except (OSError, KeyError, ValueError) as exc:
+            if require_read and isinstance(exc, OSError):
+                raise injected_prompts.ReceiptsUnreadable(str(exc)) from exc
+            records, start = [], None
+    return (records, start == 0) if whole else records
+
+
+def task_user_prompt_at(entry):
+    """Distinguish a user prompt from a review or another Tether agent's delivery."""
+    pane, thread = entry['id'], entry.get('thread')
+    recent = TASK_AUTOMATED.get((pane, thread), ())
+
+    def source(record, text):
+        # An unbound delivery id has unknown provenance. A read error defers the whole check.
+        if review := review_links.prompt_source(entry, record, text):
+            return review
+        timestamp = notification_priority._timestamp(record)
+        if timestamp is not None and recent:
+            digest = helper_tabs.digest(continuations.unwrap(text).strip())
+            if any(saved == digest and start <= timestamp <= end for saved, start, end in recent):
+                return 'tether'
+
+    user_thread, sent = TASK_USER_AT.get(pane, (None, 0))
+    sent = sent if user_thread == thread else 0
     try:
-        with open(entry['transcript'], 'rb') as stream:
-            size = stream.seek(0, os.SEEK_END)
-            start = max(0, size - NOTIFICATION_TAIL_BYTES)
-            stream.seek(start)
-            tail = stream.read(NOTIFICATION_TAIL_BYTES)
-        if start:
-            tail = tail.partition(b'\n')[2]  # discard a record clipped by the byte limit
-        records = []
-        for line in tail.splitlines():
-            try:
-                record = json.loads(line)
-            except (ValueError, UnicodeError):
-                continue
-            if isinstance(record, dict):
-                records.append(record)
-        return records
-    except (OSError, KeyError, ValueError):
-        return []
+        _, at, _ = notification_priority.turn_source(
+            entry.get('agent'), notification_records(entry, with_offset=True, require_read=True), identify=source,
+            distinguish_missing=True, with_time=True, latest_user=True, require_receipts=True)
+    except injected_prompts.ProvenanceUnknown as exc:
+        exc.user_at = max(exc.user_at, sent)
+        raise
+    return max(at or 0, sent)
 
 
 def notification_context(entry):
-    records = notification_records(entry)
+    records = notification_records(entry, with_offset=True, require_read=True)
     return notification_reply(entry, records), records
+
+
+def notification_version(entry):
+    """The transcript's size and change time.
+
+    A reply read while its last record was still being written is read again once the file changes.
+    """
+    try:
+        stat = os.stat(entry['transcript'])
+        version = (stat.st_size, stat.st_mtime_ns)
+    except (OSError, KeyError, TypeError, ValueError):
+        version = None
+    return version
 
 
 def notification_reply(entry, records=None):
     """Use the chat parsers to extract the last reply from the bounded tail."""
+    return notification_reply_turn(entry, records)[0]
+
+
+def notification_reply_turn(entry, records=None):
+    """Read the last reply and its record's stable turn id from one bounded tail.
+
+    A reply without a turn id cannot start an ask on the first successful read after startup.
+    It can start one after a later live turn end changes the finished marker.
+    """
     records = notification_records(entry) if records is None else records
     try:
-        latest_step, latest_text = None, ''
+        latest_step, latest_text, latest_turn = None, '', None
         for index, record in reversed(list(enumerate(records))):
             if entry['agent'] == 'antigravity':
                 message = antigravity_message(record, index, display_text)
                 if message and message['role'] == 'assistant':
                     step = record.get('step_index')
-                    step = step if isinstance(step, int) else index
-                    if latest_step is None or step > latest_step:
-                        latest_step, latest_text = step, message['text']
+                    turn = step if type(step) is int else None
+                    position = index if turn is None else turn
+                    if latest_step is None or position > latest_step:
+                        latest_step, latest_text, latest_turn = position, message['text'], turn
                 continue  # the chat orders by step; the newest version of a step wins
             state = codex_state()
             if entry['agent'] == 'claude':
@@ -1221,10 +1580,17 @@ def notification_reply(entry, records=None):
                 codex_consume(state, index, record)
             for message in reversed(state['messages']):
                 if message.get('role') == 'assistant' and not message.get('kind'):
-                    return message['text']
-        return latest_text
+                    turn = record.get('uuid' if entry['agent'] == 'claude' else 'timestamp')
+                    turn = turn if isinstance(turn, str) and turn else None
+                    if turn is not None and entry['agent'] == 'codex':
+                        payload = record.get('payload')
+                        payload_id = payload.get('id') if isinstance(payload, dict) else None
+                        if isinstance(payload_id, str) and payload_id:
+                            turn = f'{turn}/{payload_id}'
+                    return message['text'], turn
+        return latest_text, latest_turn
     except Exception:  # A missing, malformed or changing transcript must not break the poll loop.
-        return ''
+        return '', None
 
 
 def codex_footer(config, metrics):
@@ -1263,7 +1629,7 @@ def snapshot(config=None):
         metrics = codex_metrics(config, None)
         return {'messages': terminal_replies.merge(config, merge_quota_notices(dict(config, agent='codex'), [])), 'busy': False, 'thread': config['thread'], 'usage': metrics, 'footer': codex_footer(config, metrics),
                 'agent': 'codex', 'writable': config.get('writable', True), 'session': config.get('id')}
-    state = history.read(path, codex_state, codex_consume)
+    state = history.read(path, codex_state, codex_consume, with_offset=True)
     messages, busy = state['messages'], state['busy']
     try:
         cleared = fresh_codex_screen(capture(config))
@@ -1277,99 +1643,250 @@ def snapshot(config=None):
             'agent': 'codex', 'writable': config.get('writable', True), 'session': config.get('id'), 'footer': codex_footer(config, metrics)}
 
 
+def marked_snapshot(entry):
+    data = snapshot(entry)
+    messages = data.get('messages')
+    return dict(data, messages=injected_prompts.mark(entry, messages)) if isinstance(messages, list) else data
+
+
 def last_reply(entry):
-    """The most recent assistant text for a review request; missing history is harmless."""
+    """The most recent assistant prose for review prompts and stalled review recovery."""
     try:
         for message in reversed(snapshot(entry)['messages']):
             text = message.get('text')
-            if message.get('role') == 'assistant' and isinstance(text, str) and text.strip():
+            if (message.get('role') == 'assistant' and not message.get('kind')
+                    and message.get('phase') != 'commentary' and isinstance(text, str) and text.strip()):
                 return text
     except Exception:
         pass
     return ''
 
 
-def review_reply(entry, request_id):
-    """The last assistant text in the turn anchored by this review request.
+def _end_review_turn(state, text=''):
+    current = state.pop('current', None)
+    if current is not None:
+        state['replies'][current] = text
+    state['draft'] = ''
 
-    The anchor is the request itself: the last message that holds the head of the request with this id, as Tether
-    sends it (review_links.request_pattern). A request for a busy tab is in the transcript twice, and a note may
-    come before it. A later message that only quotes the id or starts like a request (a follow-up question, pasted
-    text) is not the request, and its answer is not the review."""
+
+def _review_record(state, index, record, agent, *, request_key=None, clean=display_text):
+    """Read prompts and final text from native records. Chat rows also contain activity and compact summaries."""
+    messages = []
+    if agent == 'claude':
+        if any(record.get(flag) for flag in ('isSidechain', 'isMeta', 'isCompactSummary', 'isAutoCompactSummary')):
+            return
+        kind = record.get('type')
+        if kind == 'system' and record.get('subtype') == 'turn_duration':
+            # A model's end_turn can still be followed by a blocking Stop hook.
+            _end_review_turn(state, state['draft'])
+            return
+        if kind == 'attachment' and (record.get('attachment') or {}).get('type') == 'hook_blocking_error':
+            state['draft'] = ''
+            return
+        if kind == 'assistant':
+            if ('current' not in state or (record.get('message') or {}).get('stop_reason')
+                    not in ('end_turn', 'stop_sequence')):
+                return
+        elif not agents.person_prompt(record):
+            return
+        claude_consume(messages, index, record, clean)
+    else:
+        payload = record.get('payload') or {}
+        kind = payload.get('type')
+        if record.get('type') == 'event_msg':
+            if payload.get('root_turn_id', payload.get('turn_id')) == payload.get('turn_id'):
+                if kind == 'task_complete':
+                    _end_review_turn(state, state['draft'])
+                elif kind in ('task_started', 'turn_aborted'):
+                    _end_review_turn(state)
+            return
+        if record.get('type') != 'response_item' or kind != 'message':
+            return
+        if payload.get('role') == 'assistant' and (
+                'current' not in state or payload.get('phase') not in (None, 'final_answer')):
+            return
+        codex_consume({'messages': messages}, index, record)
+
+    for message in messages:
+        if message.get('kind'):
+            continue
+        text = message['text']
+        if message['role'] == 'user':
+            _end_review_turn(state)
+            if request_key is None:
+                match = review_links.REQUEST_PATTERN.search(text)
+                request = match[1] if match else None
+            else:
+                request = request_key(text)
+            if request is not None:
+                # A queued request may occur twice. The last delivery with the same id owns the reply.
+                current = state['current'] = request
+                replies = state['replies']
+                replies.pop(current, None)
+                replies[current] = review_links.REPLY_PENDING
+                if len(replies) > review_links.MAX_LINKS:
+                    replies.pop(next(iter(replies)))
+        elif 'current' in state and text.strip():
+            state['draft'] = text
+
+
+def review_reply(entry, request_id):
+    """Return this request's completed verdict, or distinguish a pending turn from missing or empty history."""
     try:
-        messages = snapshot(entry)['messages']
-        request = review_links.request_pattern(request_id)
-        for index in range(len(messages) - 1, -1, -1):
-            message = messages[index]
-            text = message.get('text')
-            if message.get('role') == 'user' and isinstance(text, str) and request.search(text):
-                reply = ''
-                for message in messages[index + 1:]:
-                    if message.get('role') == 'user':
-                        break
-                    text = message.get('text')
-                    if message.get('role') == 'assistant' and isinstance(text, str) and text.strip():
-                        reply = text
-                return reply
+        agent = entry.get('agent')
+        if agent in ('claude', 'codex') and not entry.get('ambiguous'):
+            state = history.read(entry['transcript'], lambda: {'replies': {}, 'draft': ''},
+                                 lambda state, index, record: _review_record(state, index, record, agent),
+                                 trim=False, namespace=('review', agent))
+            return state['replies'].get(request_id)
     except Exception:
         pass
     return None
 
 
-def submit(message, config=None):
+def draft_reply_reader(entry, prompt):
+    """Read the reply of the exact prompt sent after this transcript position."""
+    path = entry['transcript']
+    try:
+        initial = os.stat(path)
+    except FileNotFoundError:
+        initial = None
+
+    def new_state():
+        return {'replies': {}, 'draft': ''}
+
+    def request_key(text):
+        return 'draft' if text == prompt else None
+
+    cached = (dict(inode=initial.st_ino, offset=initial.st_size, index=0, state=new_state())
+              if initial else None)
+    consume = partial(_review_record, agent='claude', request_key=request_key, clean=lambda text: text)
+
+    def read():
+        nonlocal cached
+        try:
+            info = os.stat(path)
+        except FileNotFoundError:
+            return None
+        if cached and (cached['inode'] != info.st_ino or cached['offset'] > info.st_size):
+            raise RuntimeError('The draft transcript changed.')
+        cached = history.advance(path, cached, new_state, consume, trim=False, info=info)
+        reply = cached['state']['replies'].get('draft')
+        return None if reply is review_links.REPLY_PENDING else reply
+
+    return read
+
+
+def friday_draft_runtime():
+    return friday_drafts.Runtime(entries=fresh_sessions, folder=tab_folder, status=fresh_status,
+                                 send=partial(send_text, held=True, exact=True), reply_reader=draft_reply_reader,
+                                 lock=SEND_LOCK, invalidate=forget_sessions, run=subprocess.run)
+
+
+def submit(message, config=None, *, user=False):
     config = config or settings()
+    with SEND_LOCK:
+        submit_locked(message, config, user=user)
+
+
+def _require_writable(config):
     if not config.get('writable', True):
         raise RuntimeError('Messaging is unavailable for this session. Use Termius.')
-    with SEND_LOCK:
-        wrapped, marker = continuations.prepare(config, message)
-        if marker:
-            continuations.stage(config, wrapped, marker)
-        terminal_submit(config, wrapped)
-        if marker:
-            continuations.sent(config, marker)
 
 
-def send_text(config, message, state=None):
+def submit_locked(message, config, *, user=False, exact=False):
+    """submit for a caller that holds SEND_LOCK already."""
+    _require_writable(config)
+    wrapped, marker = (message, None) if exact else continuations.prepare(config, message)
+    if marker:
+        continuations.stage(config, wrapped, marker)
+    started = time.time()
+    terminal_submit(config, wrapped)
+    pane, thread = config['id'], helper_tabs.verified_thread(config)
+    TASK_SEND_AT[pane] = time.monotonic()
+    if user:
+        task_user_delivery(config)
+    elif thread:
+        key = (pane, thread)
+        # Match the delivery to a transcript prompt, including its time. A later identical Mak prompt is independent.
+        delivery = (helper_tabs.digest(message.strip()), started, time.time() + 1)
+        TASK_AUTOMATED[key] = (*TASK_AUTOMATED.get(key, ())[-15:], delivery)
+    if marker:
+        continuations.sent(config, marker)
+
+
+def task_user_delivery(entry):
+    """Clear a conversation’s manual Done mark after a user message reaches it."""
+    pane, thread = entry['id'], helper_tabs.verified_thread(entry)
+    TASK_SEND_AT[pane] = time.monotonic()
+    if not thread:
+        return
+    TASK_USER_AT[pane] = (thread, time.time())
+    try:
+        command = [paths.TMUX, 'display-message', '-p', '-t', pane, '#{pane_id}\t#{@tether_done}']
+        shown = subprocess.run(command, capture_output=True, text=True, timeout=5)
+        if shown.returncode == 0 and shown.stdout.rstrip('\n') == f'{pane}\t{thread}':
+            task_tree.set_marks(pane, subprocess.run, done=None, done_at=None)
+    except (OSError, subprocess.SubprocessError):
+        pass  # The recorded user send still invalidates the mark.
+
+
+def send_text(config, message, state=None, *, held=False, user=False, exact=False):
     """The chat composer's guarded send to one pane. Returns 'queued' when the agent was working (it takes typed input
-    while busy; Tether keeps no queue of its own), else 'submitted'. state: a status the caller just read."""
+    while busy; Tether keeps no queue of its own), else 'submitted'. held: the caller already holds SEND_LOCK.
+    exact: deliver an approved text without the composer's normalization or added context."""
     state = state or live_status(config)['state']
-    if config['agent'] == 'codex' and re.match(r'/ls(\s|$)', message.strip()):
+    if not exact and config['agent'] == 'codex' and re.match(r'/ls(\s|$)', message.strip()):
         message = '!' + message.strip()[1:]   # Codex has no /ls; "!ls" runs it in the shell
-    wants_reply = (config['agent'] == 'codex' and state != 'Working'  # while it works, new lines are its answer, not the command's
+    # Exact drafts read the transcript. A busy pane is still showing the current turn's output.
+    wants_reply = (not exact and config['agent'] == 'codex' and state != 'Working'
                    and re.match(r'^/[a-z][a-z0-9_-]*(?:\s|$)', message.strip(), re.I) and message.strip() != '/model')
     before = capture(config) if wants_reply else ''
-    note = '' if message.strip().startswith(('/', '!')) else shell_log.folder_note(config['id'], agent_folder(config))
-    submit(note + message.strip(), config)
+    if not exact:
+        note = '' if message.strip().startswith(('/', '!')) else shell_log.folder_note(config['id'], agent_folder(config))
+        message = note + message.strip()
+    if exact:
+        with nullcontext() if held else SEND_LOCK:
+            submit_locked(message, config, user=user, exact=True)
+    elif held:
+        submit_locked(message, config, user=user)
+    else:
+        submit(message, config, user=user)
     if wants_reply:  # Codex answers its slash commands on the terminal only
         threading.Thread(target=terminal_replies.record, args=(config, before, capture), daemon=True).start()
     return 'queued' if state == 'Working' else 'submitted'
 
 
-def review_send(config, message, state=None):
+def review_send(config, message, state=None, *, receipt=False, held=False):
     """Deliver a review around a quiet Claude draft, preserving ordinary send guards."""
+    _require_writable(config)
     config = dict(config, _review=True)
-    stashed = stash_quiet_draft(config) if config.get('agent') == 'claude' else None
-    try:
-        result = send_text(config, message, state)
-    except Exception as exc:
+    # held: the caller holds SEND_LOCK already. A receipt needs the lock from its save to the send.
+    lock = SEND_LOCK if receipt and not held else nullcontext()
+    prompt = injected_prompts.track_send(config, message, 'review') if receipt else nullcontext(message)
+    with lock, prompt as delivery:
+        stashed = stash_quiet_draft(config) if config.get('agent') == 'claude' else None
         try:
-            if 'reached the agent input' in str(exc):
-                terminal_clear_draft(config)
-            else:
-                clear_unsent(config, message)
-        except (RuntimeError, OSError, subprocess.SubprocessError):
-            pass
-        if stashed:
+            result = send_text(config, delivery, state, held=receipt or held)
+        except Exception as exc:
             try:
-                if not any(prompt_draft(config)):
-                    verify(config)
-                    subprocess.run([paths.TMUX, 'send-keys', '-t', config['id'], 'C-s'],
-                                   check=True, capture_output=True, timeout=5)
+                if 'reached the agent input' in str(exc):
+                    terminal_clear_draft(config)
+                else:
+                    clear_unsent(config, message)
             except (RuntimeError, OSError, subprocess.SubprocessError):
                 pass
-        if isinstance(exc, (OSError, subprocess.SubprocessError)):
-            raise RuntimeError('Could not deliver the review message.') from exc
-        raise
+            if stashed:
+                try:
+                    if not any(prompt_draft(config)):
+                        verify(config)
+                        subprocess.run([paths.TMUX, 'send-keys', '-t', config['id'], 'C-s'],
+                                       check=True, capture_output=True, timeout=5)
+                except (RuntimeError, OSError, subprocess.SubprocessError):
+                    pass
+            if isinstance(exc, (OSError, subprocess.SubprocessError)):
+                raise RuntimeError('Could not deliver the review message.') from exc
+            raise
     if stashed:
         restore_check(config, stashed)
     return result
@@ -1378,16 +1895,16 @@ def review_send(config, message, state=None):
 def teams_answer(text, item):
     """Deliver one Teams answer (B126) to its tab through the broadcast guards; returns the result row.
     A delivered answer is your answer to that tab, like one typed in Tether: its ask clears."""
-    result = broadcast.deliver(text, [item], entries=sessions, status=live_status, send=send_text)['results'][0]
+    result = broadcast.deliver(text, [item], entries=sessions, status=live_status, send=partial(send_text, user=True))['results'][0]
     if result.get('result') in ('sent', 'sent_busy'):
         attention.STORE.clear(item['pane'], item.get('thread'))
     return result
 
 
-def broadcast_message(body):
+def broadcast_message(body, *, user=False):
     """POST /mobile/api/broadcast: one guarded broker for every multi-pane send (the Agents page and `tether broadcast`)."""
     return broadcast.deliver(body.get('message'), body.get('panes'), via=body.get('via') or 'direct', master=body.get('master'), exclude=body.get('exclude'),
-                             entries=sessions, status=live_status, send=send_text, cli=str(ROOT.parent / 'tether'))
+                             entries=sessions, status=live_status, send=partial(send_text, user=user), cli=str(ROOT.parent / 'tether'))
 
 
 DEFAULT_WINDOW = 150
@@ -1438,16 +1955,44 @@ def chat_delta(old, new):
     return delta
 
 
+# Mid-turn states: Claude still holds prompts sent meanwhile in its input queue.
+QUEUE_STATES = ('Working', 'Approval', 'Input needed')
+# A stale entry can show again after a backend restart clears this memory.
+STALE_QUEUE = {}
+STALE_QUEUE_LOCK = threading.Lock()
+
+
 def chat_payload(config, shell_mode=False, limit=DEFAULT_WINDOW, preview=False):
     """One chat view: the latest `limit` messages plus how many older ones were left out."""
     before = change_signature(config) if preview else None
     shell = config['agent'] == 'shell' and shell_mode
+    sampled = time.time() if config['agent'] == 'claude' else None
     state = {'state': 'Shell', 'approval': None} if shell else auto_resume.overlay(config, live_status(config))
-    data = shell_snapshot(config) if shell else snapshot(config)
+    data = shell_snapshot(config) if shell else marked_snapshot(config)
     if not shell and isinstance(data.get('messages'), list):
         data = dict(data, messages=shell_log.merge(config['id'], data['messages']))
     if data.get('busy') and state['state'] == 'Idle':
         state['state'] = 'Working'
+    if config['agent'] == 'claude':
+        transcript = config.get('transcript')
+        queued = data.get('queued', ())
+        if state['state'] not in QUEUE_STATES:
+            # Claude drains its input queue when idle. A later enqueue can still appear in this snapshot.
+            if state['state'] == 'Idle' and transcript:
+                stale = set()
+                for item in queued:
+                    when = transcript_time(item.get('time'), require_timezone=True)
+                    if when is not None and when < sampled:
+                        stale.add(item['id'])
+                with STALE_QUEUE_LOCK:
+                    STALE_QUEUE[transcript] = stale
+                    if len(STALE_QUEUE) > 200:
+                        del STALE_QUEUE[next(iter(STALE_QUEUE))]
+            queued = []
+        else:
+            stale = STALE_QUEUE.get(transcript, ()) if transcript else ()
+            queued = [item for item in queued if item['id'] not in stale]
+        data = dict(data, queued=queued[-50:])
     if not (config['agent'] == 'claude' and plan_menu(state.get('approval') or state.get('attention'))):
         data.pop('plan', None)
     ask = data.pop('ask', None) if isinstance(data, dict) else None
@@ -1487,23 +2032,29 @@ def find_messages(messages, query, limit=60):
     found = []
     for index in range(len(messages) - 1, -1, -1):
         message = messages[index]
+        if message.get('source') == injected_prompts.UNKNOWN_RECEIPT:
+            continue  # Search labels results by speaker.
         text = str(message.get('text') or '')
         lower = text.lower()
         if all(word in lower for word in words):
             at = lower.find(words[0])
             start = max(0, at - 60)
             snippet = ' '.join(text[start:at + len(words[0]) + 120].split())
-            found.append({'id': message.get('id'), 'role': message.get('role'), 'kind': message.get('kind'), 'time': message.get('time'),
-                          'from_end': len(messages) - index, 'snippet': ('…' if start else '') + snippet})
+            match = {'id': message.get('id'), 'role': message.get('role'), 'kind': message.get('kind'), 'time': message.get('time'),
+                     'from_end': len(messages) - index, 'snippet': ('…' if start else '') + snippet}
+            if message.get('source') == 'tether':
+                match['source'] = 'tether'
+            found.append(match)
     return {'matches': found[:limit], 'total': len(found)}
 
 
 def search_payload(config, query, shell_mode=False):
     shell = config['agent'] == 'shell' and shell_mode
-    data = shell_snapshot(config) if shell else snapshot(config)
+    data = shell_snapshot(config) if shell else marked_snapshot(config)
     messages = data.get('messages')
     if not shell and isinstance(messages, list):
         messages = shell_log.merge(config['id'], messages)
+        messages = continuations.decorate(config, dict(data, messages=messages))['messages']
     return dict(find_messages(messages, query), max_limit=MAX_WINDOW)
 
 
@@ -1516,7 +2067,7 @@ def change_signature(config):
             parts.append((info.st_ino, info.st_mtime_ns, info.st_size))
         except (OSError, TypeError):
             parts.append(None)
-    return tuple(parts)
+    return (*parts, injected_prompts.revision(config))
 
 
 CHAT_UI_ROOT = Path(os.environ.get('TMUX_CHAT_DIST', str(Path(__file__).resolve().parent.parent / 'ui' / 'dist')))
@@ -1565,7 +2116,7 @@ class Handler(BaseHTTPRequestHandler):
                 and not getattr(self, 'keep_sessions', False)):
             forget_sessions()
         headers = dict(headers or {})
-        if self.command in ('POST', 'DELETE'):
+        if self.command in ('POST', 'DELETE') and self.path != command_history.FRIDAY_PATH:
             try:
                 undo_api.note_start(self.path.split('?', 1)[0], status, body)
                 headers.update(undo_api.headers(status))  # the page offers Undo for the step this request made
@@ -1649,6 +2200,7 @@ class Handler(BaseHTTPRequestHandler):
         watched = config.get('id')
         with WATCHING_LOCK:
             WATCHING[watched] = WATCHING.get(watched, 0) + 1
+            TASK_VIEW_AT[watched] = time.monotonic()
         started = discovered = full = wrote = time.monotonic()
         signature = last_body = last_payload = screen = None
         sampled = 0.0
@@ -1703,9 +2255,15 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             with WATCHING_LOCK:
                 WATCHING[watched] = max(0, WATCHING.get(watched, 1) - 1)
+                TASK_VIEW_AT[watched] = time.monotonic()
 
     def deny(self):
         """Answer and return True when the request is not signed in."""
+        if (command_history.FRIDAY_HEADER in self.headers
+                and self.path.split('?', 1)[0] in (command_history.PATH, command_history.DELETE_PATH,
+                                                  '/mobile/api/message', friday_notes.TARGET_PATH)):
+            self.respond(403, {'error': 'Friday access refused.'})
+            return True
         if auth.signed_in(self.headers.get('Cookie')) or auth.tailscale_signed_in(self.headers.get('Tailscale-User-Login'), self.client_address[0]):
             return False
         if self.command == 'GET' and not self.path.startswith('/mobile/api/'):
@@ -1762,7 +2320,7 @@ class Handler(BaseHTTPRequestHandler):
             lines.append('Connection: close')
         self.pipe_upstream(upstream, lines)
 
-    def proxy_browser_live(self):
+    def proxy_browser_live(self, container):
         """Pass /browser/live/ (the Selkies client of the panel browser, WebSocket included) to the container's
         Unix socket. Only BrowserLiveOriginHandler calls this, on its own port: the container sends the page, so it
         must not share an origin with Tether's pages and APIs. Tether's cookie and identity headers stay here; the
@@ -1771,7 +2329,6 @@ class Handler(BaseHTTPRequestHandler):
         if origin and not auth.same_origin(origin, self.headers.get('Host', '')):
             self.respond(403, {'error': 'Reload the page and try again.'})
             return
-        container = browser.BROWSER.container
         secret = container.web_auth() if container is not None else None
         if secret is None:
             self.live_wait('The panel browser is not running.')
@@ -2017,6 +2574,9 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.login()
             return
+        if path == friday_notes.FRIDAY_TARGET:
+            friday_notes.friday_target(self, draft_runtime=friday_draft_runtime)
+            return
         if path not in ('/mobile/manifest.webmanifest', '/mobile/icon-192.png', '/mobile/icon-512.png', '/mobile/apple-touch-icon.png') and self.deny():
             return
         try:
@@ -2042,9 +2602,18 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/mobile/api/shortcuts':
                 self.respond(200, {'shortcuts': shortcuts.load()})
             elif path == '/mobile/api/prefs':
-                self.respond(200, prefs_sync.load())
+                with prefs_sync.LOCK:
+                    saved = prefs_sync.load()
+                    saved['zone'] = tether_zone.name()
+                saved['prefs'].setdefault('task_auto_close', False)
+                self.respond(200, saved)
+            elif path == task_tree_api.PLAN:
+                pane = parse_qs(urlsplit(self.path).query).get('pane', [None])[0]
+                task_tree_api.get(self, pane, live_task_tree)
             elif path == undo_api.PATH:
-                undo_api.get(self, undo_env())
+                undo_api.get(self, undo_env(), SEND_LOCK)
+            elif path == command_history.PATH:
+                command_history.get(self)
             elif path == '/mobile/api/auto-resume':
                 self.respond(200, auto_resume.notice())
             elif path == '/mobile/api/codex-provider':
@@ -2089,7 +2658,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = footer.parse(screen) if config['agent'] == 'claude' else {}
                 result = claude_hooks.overlay(config, result, screen_read_at=screen_read_at)
                 if config['agent'] == 'codex' and not config.get('ambiguous'):
-                    state = history.read(config['transcript'], codex_state, codex_consume)
+                    state = history.read(config['transcript'], codex_state, codex_consume, with_offset=True)
                     result = codex_footer(config, codex_metrics(config, state['usage'], state['model'], state.get('effort', ''),
                                                                 state.get('credits'), tier=state.get('tier', '')))
                     live = claude_hooks.codex_live(config)
@@ -2324,6 +2893,8 @@ class Handler(BaseHTTPRequestHandler):
                 app_identity.get(self)
             elif codex_level.handles(path):
                 codex_level.get(self)
+            elif audit.handles(path):
+                audit.get(self)  # backlog.watch() keeps observed backlog changes at most 2 s behind (B303)
             elif commit_gate.handles(path):
                 commit_gate.get(self)
             elif claude_advisor.handles(path):
@@ -2358,6 +2929,10 @@ class Handler(BaseHTTPRequestHandler):
                 attention.get(self)
             elif reminders.handles(path):
                 reminders.get(self)
+            elif friday_notes.handles(path):
+                friday_notes.get(self, draft_runtime=friday_draft_runtime())
+            elif path == task_sources.PREFIX:
+                task_sources.get(self)
             elif path == '/mobile/api/stream':
                 query = parse_qs(urlsplit(self.path).query)
                 self.stream_chat(query.get('session', [None])[0], query.get('mode') == ['shell'], window_limit(query), preview=query.get('preview') == ['1'], have=query.get('have', [''])[0][:64],
@@ -2439,6 +3014,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == mac_browser.PREFIX + 'exchange':
             mac_browser.exchange(self)
             return
+        if self.path == command_history.FRIDAY_PATH:
+            command_history.friday_post(self)
+            return
         if self.path == '/mobile/login':
             self.do_login()
             return
@@ -2450,8 +3028,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.close_connection = True
                     self.respond(403, {'error': 'Reload the page and try again.'})
             return
-        if not backgrounds.handles(self.path) and self.path not in ('/mobile/api/update', '/mobile/api/history/hide', '/mobile/api/file-check', '/mobile/api/preview', '/mobile/api/dev-preview', '/mobile/api/dev-preview/release', '/mobile/api/dev-preview/stop', '/mobile/api/ask-hook', '/mobile/api/ask-answer', '/mobile/api/ask-engage', '/mobile/api/message', '/mobile/api/broadcast', '/mobile/api/approval', '/mobile/api/menu', '/mobile/api/pick', '/mobile/api/prompt-action', '/mobile/api/start', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/key', '/mobile/api/dialog', '/mobile/api/clear-draft', '/mobile/api/unqueue', '/mobile/api/mode', '/mobile/api/type',
-                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, *quick_tab.PATHS, suggest_names.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not commit_gate.handles(self.path) and not claude_advisor.handles(self.path) and not auto_merge.handles(self.path) and not app_identity.handles(self.path) and not codex_trust.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path) and not reminders.handles(self.path) and not activity_time.handles(self.path) and not ui_usage.handles(self.path) and not feedback.handles(self.path) and not undo_api.handles(self.path) and not upkeep_api.handles(self.path):
+        if self.path not in task_tree_api.WRITES and not backgrounds.handles(self.path) and self.path not in (factory_history.PATH, '/mobile/api/update', '/mobile/api/history/hide', '/mobile/api/file-check', '/mobile/api/preview', '/mobile/api/dev-preview', '/mobile/api/dev-preview/release', '/mobile/api/dev-preview/stop', '/mobile/api/ask-hook', '/mobile/api/ask-answer', '/mobile/api/ask-engage', '/mobile/api/message', '/mobile/api/broadcast', '/mobile/api/approval', '/mobile/api/menu', '/mobile/api/pick', '/mobile/api/prompt-action', '/mobile/api/start', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/key', '/mobile/api/dialog', '/mobile/api/clear-draft', '/mobile/api/unqueue', '/mobile/api/mode', '/mobile/api/type',
+                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, *quick_tab.PATHS, suggest_names.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/restart-tab', '/mobile/api/auto-resume', '/mobile/api/pane-name', coordinator.ROLE_PATH, '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not commit_gate.handles(self.path) and not claude_advisor.handles(self.path) and not auto_merge.handles(self.path) and not app_identity.handles(self.path) and not codex_trust.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path) and not reminders.handles(self.path) and not friday_notes.handles(self.path) and not task_sources.handles(self.path) and not activity_time.handles(self.path) and not ui_usage.handles(self.path) and not feedback.handles(self.path) and not undo_api.handles(self.path) and not upkeep_api.handles(self.path) and not command_history.handles(self.path) and self.path != coordinator.PATH:
             self.respond(404, {'error': 'Not found'})
             return
         # Reject unauthenticated and cross-origin submissions.
@@ -2461,6 +3039,12 @@ class Handler(BaseHTTPRequestHandler):
         host = self.headers.get('Host', '')
         if not auth.same_origin(origin, host) or self.headers.get('X-Codex-Mobile') != '1':
             self.respond(403, {'error': 'Reload the page and try again.'})
+            return
+        if self.path == factory_history.PATH:
+            factory_history.post(self)
+            return
+        if command_history.handles(self.path):
+            command_history.post(self)
             return
         if browser_api.handles(self.path):
             browser_api.post(self)
@@ -2475,7 +3059,13 @@ class Handler(BaseHTTPRequestHandler):
             work_api.post(self, sessions=sessions, status=shared_status, send=review_send, run=subprocess.run, lock=SEND_LOCK)
             return
         if groups_api.handles(self.path):
-            groups_api.post(self, sessions=sessions)
+            def close_status(entry):
+                pane = entry['id']
+                return dict(fresh_status(entry), ask=attention.STORE.ask(pane, entry.get('thread')),
+                            escalated=pane in review_links.escalated([entry]))
+
+            groups_api.post(self, sessions=sessions, fresh=fresh_sessions, status=close_status,
+                            lock=SEND_LOCK, changed=forget_sessions)
             return
         if undo_api.handles(self.path):
             undo_api.post(self, undo_env(), SEND_LOCK)
@@ -2546,13 +3136,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             size = int(self.headers.get('Content-Length', '0'))
-            if not 0 < size <= (16384 if approval.handles(self.path) else 262144 if self.path in ('/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/delegate', '/mobile/api/agent-tab', quick_tab.START_PATH) else 65536):
+            if not 0 < size <= (16384 if approval.handles(self.path) else 262144 if self.path in ('/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/delegate', '/mobile/api/agent-tab', coordinator.PATH, quick_tab.START_PATH) else 65536):
                 self.respond(413, {'error': 'Message is too large.'})
                 return
             body = json.loads(self.rfile.read(size))
             message = body.get('message') if isinstance(body, dict) else None
             if not isinstance(body, dict):
                 raise ValueError('Invalid request.')
+            if self.path in task_tree_api.WRITES:
+                task_tree_api.post(self, body, live_task_tree, SEND_LOCK, task_answer, forget_sessions)
+                return
             if approval.handles(self.path):
                 approval.post(self, body)
                 return
@@ -2582,9 +3175,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(200, {'ok': True})
                 return
             if self.path == agent_tabs.PATH:
-                agent_tabs.serve(self, body, sessions=sessions, folder=agent_folder, snapshot=snapshot,
+                agent_tabs.serve(self, body, sessions=sessions, fresh=fresh_sessions, folder=agent_folder, snapshot=marked_snapshot,
                                  last_reply=last_reply, run=subprocess.run, lock=SEND_LOCK,
-                                 status=shared_status, send=review_send, timeline=timeline)
+                                 status=shared_status, send=partial(review_send, held=True), timeline=timeline)
                 return
             if self.path == '/mobile/api/dev-preview':
                 # Forward a dev server on this machine (http://localhost:5173/) on a preview port: dev_previews.py.
@@ -2617,6 +3210,15 @@ class Handler(BaseHTTPRequestHandler):
                 except dev_previews.Refused as exc:
                     self.respond({'unsupported': 503, 'busy': 429}.get(exc.code, 400), {'error': str(exc), 'code': exc.code})
                 return
+            if self.path == coordinator.ROLE_PATH:
+                self.respond(200, coordinator.browser_role(body, fresh=fresh_sessions, lock=SEND_LOCK, run=subprocess.run,
+                                                           status=fresh_status, send=partial(send_text, held=True)))
+                return
+            if self.path == coordinator.PATH:
+                coordinator.serve(self, body, sessions=sessions, fresh=fresh_sessions, lock=SEND_LOCK,
+                                  run=subprocess.run, status=shared_status, fresh_status=fresh_status,
+                                  send=partial(send_text, held=True), last_reply=last_reply, timeline=timeline)
+                return
             if self.path == '/mobile/api/preview':
                 try:
                     self.respond(200, previews.PREVIEWS.issue(body.get('path') if isinstance(body.get('path'), str) else '',
@@ -2644,11 +3246,17 @@ class Handler(BaseHTTPRequestHandler):
             if reminders.handles(self.path):
                 reminders.serve(self, body)
                 return
+            if friday_notes.handles(self.path):
+                friday_notes.serve(self, body, draft_runtime=friday_draft_runtime())
+                return
+            if task_sources.handles(self.path):
+                task_sources.serve(self, body)
+                return
             if self.path == '/mobile/api/message' and (not isinstance(message, str) or not message.strip()):
                 self.respond(400, {'error': 'Enter a message first.'})
                 return
             if self.path == '/mobile/api/broadcast':
-                result = broadcast_message(body)
+                result = broadcast_message(body, user=self.headers.get('X-Tether-Client') != 'agent-cli')
                 for row in result.get('results') or []:
                     if row.get('result') in ('sent', 'sent_busy'):
                         attention.STORE.clear(row.get('pane'))  # you answered that tab
@@ -2675,9 +3283,13 @@ class Handler(BaseHTTPRequestHandler):
                     with prefs_sync.LOCK:  # the read before, the save and the record are one step for an undo (undo.run)
                         before = prefs_sync.load()['prefs']
                         saved = prefs_sync.save(body.get('changes'))
+                        saved['zone'] = tether_zone.name()
                         for key in ('order', 'paneOrder'):  # a drag that reorders sessions or tabs
                             if isinstance(body.get('changes'), dict) and key in body['changes']:
                                 undo.record_order(key, before.get(key), saved['prefs'].get(key))
+                    if before.get('task_auto_close', False) != saved['prefs'].get('task_auto_close', False):
+                        TASK_CLOSER.reset()
+                    saved['prefs'].setdefault('task_auto_close', False)
                     self.respond(200, saved)
                 except ValueError as exc:
                     self.respond(400, {'error': str(exc)})
@@ -2738,6 +3350,11 @@ class Handler(BaseHTTPRequestHandler):
                     noted = undo.record_merge(body.get('kind'), body.get('source'), body.get('target'))
                     moved = tmux_merge.merge(body.get('kind'), body.get('source'), body.get('target'), keep=body.get('keep'))
                     noted(moved)
+                    if moved.get('restart'):  # B326: what the toast's Restart button sends to restart-tab
+                        forget_sessions()
+                        entry = next((item for item in sessions() if item['id'] == moved['pane']), None)
+                        moved['restart'].update(pane=moved['pane'],
+                                                thread=entry.get('thread') if entry and not entry.get('pending_conversation') else None)
                 self.respond(200, moved)
                 return
             if self.path in ('/mobile/api/session', '/mobile/api/tmux-sessions'):
@@ -2785,10 +3402,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self.path == '/mobile/api/pane-name':
                 pane, name = body.get('pane'), body.get('name')
+                keep_session = body.get('keep_session', False)
                 if not isinstance(pane, str) or not re.fullmatch(r'%[0-9]+', pane):
                     raise ValueError('Select a pane.')
                 if not isinstance(name, str) or len(name.strip()) > 40 or any(ord(c) < 32 or ord(c) == 127 for c in name):
                     raise ValueError('Use up to 40 characters for the pane name.')
+                if not isinstance(keep_session, bool):
+                    raise ValueError('keep_session must be a boolean.')
                 name = name.strip()
                 # The time lets the newest name win against a later /rename in Claude or Codex (agents.list_panes).
                 # @chat_name_by: 'user' marks the user's own name: Tether never renames that tab, and it names the stack
@@ -2805,7 +3425,7 @@ class Handler(BaseHTTPRequestHandler):
                     if result.returncode:
                         raise RuntimeError('Could not rename the pane. It may have closed.')
                     name_in_tmux(pane, name)
-                    note = name_together(pane, name, from_session=False)
+                    note = name_together(pane, name, from_session=False, keep_session=keep_session)
                     undo.record_pane_name(pane, name_was, name)
                     session_now = undo.session_of(pane)
                     if session_was and session_now and session_now[1] != session_was[1]:
@@ -2908,7 +3528,7 @@ class Handler(BaseHTTPRequestHandler):
                         self.respond(exc.status, {'error': str(exc)})
                         return
                 with SEND_LOCK:
-                    new_pane = new_window_after(pane, subprocess.run, group=group,
+                    new_pane = new_window_after(pane, subprocess.run, group=group, by_user=True,
                                                 **({'cwd': cwd} if cwd is not None else {}))
                 self.respond(201, {'pane': new_pane})
                 return
@@ -2946,7 +3566,7 @@ class Handler(BaseHTTPRequestHandler):
                             self.respond(200, {'pane': existing})
                             return
                     state = live_status(entry)['state']
-                    data = continuations.decorate(entry, snapshot(entry))
+                    data = continuations.decorate(entry, marked_snapshot(entry))
                     if data.get('busy'):
                         state = 'Working'
                     continuations.validate(entry, body, state)
@@ -3002,8 +3622,8 @@ class Handler(BaseHTTPRequestHandler):
                         if stack or 'group' in body:
                             place['group'] = stack['id'] if stack else body['group']
                         pane, name = delegate.start(entry, body, folder if folder and os.path.isdir(folder) else str(paths.HOME),
-                                                    run=subprocess.run, recent=lambda: snapshot(entry).get('messages') or [],
-                                                    **place)
+                                                    run=subprocess.run, recent=lambda: marked_snapshot(entry).get('messages') or [],
+                                                    by_user=True, **place)
                     except Exception:
                         if stack:
                             try:
@@ -3026,6 +3646,16 @@ class Handler(BaseHTTPRequestHandler):
                 with SEND_LOCK:
                     new_pane, name = fork_chat(entry, entries, folder if folder and os.path.isdir(folder) else str(paths.HOME))
                 self.respond(201, {'pane': new_pane, 'name': name})
+                return
+            if self.path == '/mobile/api/restart-tab':
+                try:
+                    with SEND_LOCK:
+                        reply = restart_tab.restart(body, sessions=lambda: discover(settings(), subprocess.run, repair_zoom=False),
+                                                    forget_sessions=forget_sessions)
+                except restart_tab.Refused as exc:
+                    self.respond(exc.status, {'error': str(exc)})
+                    return
+                self.respond(200, reply)
                 return
             if self.path == '/mobile/api/resume':
                 agent = body.get('agent', 'claude')
@@ -3200,19 +3830,37 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self.path == '/mobile/api/menu':
                 choice, label, answer = body.get('choice'), body.get('label'), body.get('answer')
+                revision = body.get('revision')
                 if (not isinstance(choice, int) or isinstance(choice, bool) or not (label is None or isinstance(label, str))
-                        or not (answer is None or isinstance(answer, str) and answer.strip())):
+                        or not (answer is None or isinstance(answer, str) and answer.strip())
+                        or not (revision is None or isinstance(revision, str) and re.fullmatch('[a-f0-9]{64}', revision))):
                     raise ValueError('Choose an option first.')
                 if answer is not None and any(ord(c) < 32 and c not in '\n\t' or ord(c) == 127 for c in answer):
                     raise ValueError('The answer contains terminal control characters.')
-                with SEND_LOCK:
-                    menu_choose(config, choice, label=label, answer=answer)
+                from terminal_input import MenuChanged, menu_refusal
+                try:
+                    with SEND_LOCK:
+                        if revision is None:
+                            raise MenuChanged(menu_refusal(config))
+                        menu_choose(config, choice, label=label, answer=answer, revision=revision)
+                        if answer is not None:
+                            task_user_delivery(config)
+                except MenuChanged as exc:
+                    self.respond(409, {'error': str(exc)})
+                    return
                 attention.STORE.clear(config['id'], config.get('thread'))
                 self.respond(200, {'accepted': True})
                 return
             if self.path == '/mobile/api/pick':
-                with SEND_LOCK:
-                    picker_choose(config, body.get('row'), body.get('labels'), then=body.get('then', 'Enter'), heading=body.get('heading'))
+                from terminal_input import MenuChanged
+                try:
+                    with SEND_LOCK:
+                        picker_choose(config, body.get('row'), body.get('labels'), then=body.get('then', 'Enter'),
+                                      heading=body.get('heading'), revision=body.get('revision'),
+                                      ticked=body.get('ticked'))
+                except MenuChanged as exc:
+                    self.respond(409, {'error': str(exc)})
+                    return
                 if body.get('then', 'Enter') == 'Enter':
                     attention.STORE.clear(config['id'], config.get('thread'))
                 self.respond(200, {'accepted': True})
@@ -3220,6 +3868,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/mobile/api/type':
                 with SEND_LOCK:
                     type_text(config, body.get('text'), enter=body.get('enter') is True, login_url=body.get('login_url'))
+                    if body.get('enter') is True and not body.get('login_url'):
+                        task_user_delivery(config)
                 if body.get('enter') is True:
                     attention.STORE.clear(config['id'], config.get('thread'))
                 self.respond(200, {'accepted': True})
@@ -3236,15 +3886,27 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self.path == '/mobile/api/approval':
                 with SEND_LOCK:
-                    respond_approval(config, body.get('approval'), body.get('action'), choice=body.get('choice'), feedback=body.get('feedback'))
+                    tab = delegate.source_title(config, fallback=config['id'])
+
+                    def answer_record(action):
+                        kind = 'approval.approve' if action == 'approve' else 'approval.deny'
+                        summary = 'Approved' if action == 'approve' else 'Denied'
+                        audit.record(kind, f'{summary} a permission prompt in {tab}', tab=tab, action=action)
+
+                    respond_approval(config, body.get('approval'), body.get('action'), choice=body.get('choice'),
+                                     feedback=body.get('feedback'), on_answer=answer_record)
+                    if body.get('feedback') is not None:
+                        task_user_delivery(config)
                 attention.STORE.clear(config['id'], config.get('thread'))
                 self.respond(200, {'accepted': True})
             else:
-                delivery = send_text(config, message)
+                delivery = send_text(config, message, user=True)
                 attention.STORE.clear(config['id'], config.get('thread'))  # you answered the tab
                 self.respond(200, {'accepted': True, 'delivery': delivery})
+        except undo.CloseInterrupted as exc:
+            task_tree_api.interrupted_response(self, exc)
         except (ValueError, UnicodeError) as exc:
-            self.respond(400, {'error': str(exc) if self.path in (*quick_tab.PATHS, '/mobile/api/history/hide', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/broadcast', '/mobile/api/merge', '/mobile/api/model', '/mobile/api/shell', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/mode', '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/menu', '/mobile/api/pick', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') else 'Invalid message.'})
+            self.respond(400, {'error': str(exc) if self.path in (*quick_tab.PATHS, coordinator.PATH, '/mobile/api/history/hide', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/broadcast', '/mobile/api/merge', '/mobile/api/model', '/mobile/api/shell', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/restart-tab', '/mobile/api/auto-resume', '/mobile/api/pane-name', coordinator.ROLE_PATH, '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/mode', '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/menu', '/mobile/api/pick', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') else 'Invalid message.'})
         except (OSError, RuntimeError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
             # The journal keeps why a send was refused; the access log shows only "503".
             print(f'{self.path} refused: {type(exc).__name__}: {str(exc)[:200]}', file=sys.stderr, flush=True)
@@ -3331,19 +3993,29 @@ class Handler(BaseHTTPRequestHandler):
                     if pane not in active_panes:
                         self.respond(404, {'error': 'That chat tab has already ended.'})
                         return
+                    entry = None
+                    entries = None
                     if 'thread' in body:  # the page names the chat it saw: refuse when the tab now holds another one
                         forget_sessions()
-                        entry = next((item for item in sessions() if item['id'] == pane), None)
+                        entries = sessions()
+                        entry = next((item for item in entries if item['id'] == pane), None)
                         if entry is None or (body['thread'] or None) != (entry.get('thread') or None):
                             self.respond(409, {'error': 'That tab now holds another chat. Reload and try again.'})
                             return
-                    closed = undo.capture_safe(pane, entries=sessions)
-                    auto_resume.forget_pane(pane, run=subprocess.run)
-                    with groups.closing(pane):  # its auto stack goes when empty or root-only
-                        subprocess.run([paths.TMUX, 'kill-pane', '-t', pane], check=True,
-                                       capture_output=True, timeout=5)
-                    review_links.close(pane)
-                    undo.record_tab_close(closed)
+                    options = helper_tabs.read_panes(subprocess.run)
+                    if any(task_tree.is_child(row.record, row.role, row.group_by)
+                           and helper_tabs.placement_owner(row.record)[0] == pane for row in options.values()):
+                        entries = sessions() if entries is None else entries
+                        by_id = {item['id']: item for item in entries}
+                        placements = task_tree.placements(options, by_id)
+                        if (any(field['task'] == pane for field in placements.values())
+                                or pane in task_tree.pending_roots(options, by_id, placements)):
+                            self.respond(409, {'error': 'This task has helpers. Open its task close dialog.'})
+                            return
+                    closed = undo.capture_safe(pane, entries=sessions if entries is None else entries)
+                    name = (closed or {}).get('name') or delegate.source_title(entry or {}, fallback=pane)
+                    undo.close_tab(pane, subprocess.run, closed, name)
+                    audit.record('tab.close', f'Closed tab {name}', pane=pane)
                 self.respond(200, {'closed': pane})
                 return
             identifier = body.get('session') if isinstance(body, dict) else None
@@ -3361,13 +4033,15 @@ class Handler(BaseHTTPRequestHandler):
                                        '-f', '#{==:#{window_linked_sessions},1}', '-F', '#{pane_id}'],
                                        check=True, capture_output=True, text=True, timeout=5).stdout.splitlines()
                 saved = undo.capture_session_safe(identifier, entries=sessions)
-                auto_resume.forget_session(identifier, run=subprocess.run)
-                subprocess.run([paths.TMUX, 'kill-session', '-t', identifier], check=True,
-                               capture_output=True, timeout=5)
-                for pane in panes:
-                    review_links.close(pane)
-                undo.record_session_close(saved)
+                def close_session():
+                    auto_resume.forget_session(identifier, run=subprocess.run)
+                    subprocess.run([paths.TMUX, 'kill-session', '-t', identifier], check=True,
+                                   capture_output=True, timeout=5)
+
+                undo.close_session(identifier, subprocess.run, saved, panes, close_session)
             self.respond(200, {'closed': identifier})
+        except undo.CloseInterrupted as exc:
+            task_tree_api.interrupted_response(self, exc)
         except (ValueError, UnicodeError):
             self.respond(400, {'error': 'Invalid request.'})
         except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
@@ -3385,14 +4059,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         import share_api
-        with undo_store.acting('user'), undo_store.step():  # the tab, session and stack steps this request makes
+        actor = audit.actor_from_request(getattr(self, 'headers', {}))
+        with audit.acting(**actor), undo_store.acting('user'), undo_store.step():
             if not share_api.dispatch(self):
                 self._post_without_share()
 
     _delete_plain = do_DELETE
 
     def do_DELETE(self):
-        with undo_store.acting('user'), undo_store.step():
+        with audit.acting(**audit.actor_from_request(self.headers)), undo_store.acting('user'), undo_store.step():
             self._delete_plain()
 
     def do_HEAD(self):
@@ -3419,6 +4094,10 @@ class BrowserLiveOriginHandler(Handler):
     A page from the container can then never read Tether's pages or call its APIs with the person's sign-in. This
     listener serves nothing else."""
 
+    def __init__(self, *args, panel_browser, **kwargs):
+        self.panel_browser = panel_browser
+        super().__init__(*args, **kwargs)
+
     def do_GET(self):
         if not self.path.startswith(browser_container.LIVE_PREFIX):
             self.respond(404, {'error': 'Not found'})
@@ -3427,19 +4106,19 @@ class BrowserLiveOriginHandler(Handler):
                 or auth.tailscale_signed_in(self.headers.get('Tailscale-User-Login'), self.client_address[0])):
             self.respond(401, {'error': 'Sign in required.'})
             return
-        self.proxy_browser_live()
+        self.proxy_browser_live(self.panel_browser.container)
 
     do_POST = do_PUT = do_HEAD = do_DELETE = do_OPTIONS = do_PATCH = do_GET
 
 
-def start_browser_live_origin(host):
-    import browser
-    if browser.BROWSER.container is None:
+def start_browser_live_origin(host, panel_browser):
+    if panel_browser.container is None:
         return None
+    port = panel_browser.container.live_port
     try:
-        http = ThreadingHTTPServer((host, browser_container.LIVE_PORT), BrowserLiveOriginHandler)
+        http = ThreadingHTTPServer((host, port), partial(BrowserLiveOriginHandler, panel_browser=panel_browser))
     except OSError as exc:
-        logging.getLogger(__name__).warning('Browser live view listener did not start: %s', type(exc).__name__)
+        logging.getLogger(__name__).warning('Browser live view listener on port %d did not start: %s', port, type(exc).__name__)
         return None
     threading.Thread(target=http.serve_forever, name='browser-live-listener', daemon=True).start()
     return http
@@ -3448,7 +4127,8 @@ def start_browser_live_origin(host):
 def start_dev_previews(host, port):
     """The pool of ports that forward dev servers (dev_previews.py). Tether's own ports are never forwarded."""
     office = office_addon.load() or {}
-    own = {port, MAIN_PORT, TTYD_PORT, browser_container.LIVE_PORT, 7697, office.get('editor_port'), urlsplit(office.get('url') or '').port}
+    own = {port, MAIN_PORT, TTYD_PORT, browser_container.LIVE_PORT, browser_container.SIGNED_LIVE_PORT,
+           7697, office.get('editor_port'), urlsplit(office.get('url') or '').port}
     return dev_previews.start(host, port, denied={item for item in own if item})
 
 
@@ -3467,6 +4147,8 @@ def start_office_origin(host):
 
 if __name__ == '__main__':
     undo_store.enable()
+    injected_prompts.initialize()
+    audit.prune()
     import share_api
     share_api.get_store()  # Reconcile private storage before accepting requests.
     import atexit
@@ -3474,9 +4156,15 @@ if __name__ == '__main__':
     import pane_view
     import detection_rules
     detection_rules.save_last_good()
-    container = browser_container.default('test')
-    if container is not None:
-        browser.BROWSER.use_container(container)
+    panel_browsers = (('test', browser.BROWSER), ('signed', browser.SIGNED_BROWSER))
+    if any(not 1 <= port <= 65535 for port in (browser_container.LIVE_PORT, browser_container.SIGNED_LIVE_PORT)):
+        raise SystemExit('Set each browser live port to a number from 1 to 65535.')
+    if browser_container.LIVE_PORT == browser_container.SIGNED_LIVE_PORT:
+        raise SystemExit('The Test and Signed-in browsers need distinct live ports.')
+    for name, panel_browser in panel_browsers:
+        container = browser_container.default(name)
+        if container is not None:
+            panel_browser.use_container(container)
     atexit.register(browser.stop_all)
     pane_view.zoom_repair_all()
     paths.SCOPE_TMUX = bool(os.environ.get('INVOCATION_ID'))
@@ -3494,6 +4182,7 @@ if __name__ == '__main__':
         auth.token()
     threading.Thread(target=monitor_notices, daemon=True).start()
     REMINDERS.start()  # its own thread: a failing session scan never delays a reminder
+    task_sources.start()
     threading.Thread(target=tmux_names.watch, daemon=True).start()  # tmux renames flow back into pane names
     threading.Thread(target=auto_resume.watch, kwargs={
         'entries': lambda: (forget_sessions(), sessions())[1],
@@ -3504,10 +4193,12 @@ if __name__ == '__main__':
     groups.HOLD = auto_resume.restoring  # no auto stack dissolves while saved tabs come back
     threading.Thread(target=auto_stacks.watch, kwargs={'restoring': auto_resume.restoring}, daemon=True).start()  # empty and root-only auto stacks go
     threading.Thread(target=window_size.watch, daemon=True).start()
+    threading.Thread(target=backlog.watch, daemon=True).start()
     threading.Thread(target=teams_replies.watch, args=(urgent_ping._config, teams_answer), daemon=True).start()
     backgrounds.upgrade_soon()  # small copies for photos saved before they existed
     office_addon.start_listener()
     start_office_origin(host)
-    start_browser_live_origin(host)
+    for _, panel_browser in panel_browsers:
+        start_browser_live_origin(host, panel_browser)
     start_dev_previews(host, port)
     http.serve_forever()

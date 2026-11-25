@@ -4,6 +4,10 @@ const { readFileSync } = require('node:fs')
 const { runInNewContext } = require('node:vm')
 const ts = require('typescript')
 const jsx = require('react/jsx-runtime')
+assert.match(readFileSync('src/Retry.css', 'utf8'),
+  /@media \(pointer: coarse\)\s*\{[^}]*?\.retry-button\s*[,\s][^{]*\{\s*min-height: 44px;/)
+assert.match(readFileSync('src/Sheets.tsx', 'utf8'),
+  /<p className="sheet-sub">\s*<AgentIcon\b[^>]*\/>\s*<span className="sheet-sub-text">\{chat\.title \|\| 'Untitled chat'\}<\/span>\s*<\/p>/)
 const flush = async () => { for (let n = 0; n < 12; n++) await Promise.resolve() }
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }
 const nodes = tree => !tree || typeof tree !== 'object' ? [] : [tree, ...[tree.props?.children].flat(Infinity).flatMap(nodes)]
@@ -53,7 +57,9 @@ function load(file, imports = {}, globals = {}, suffix = '') {
   })
   return exports
 }
-const { errorText, ApiError, NetworkError } = load('api.ts')
+const zone = load('zone.ts', { react: { useSyncExternalStore: (_subscribe, snapshot) => snapshot() } })
+const apiImports = { './zone': zone }
+const { errorText, ApiError, NetworkError } = load('api.ts', apiImports)
 const logged = []
 const realConsoleError = console.error
 console.error = (...args) => { logged.push(args) }
@@ -77,11 +83,11 @@ try {
 
 // reach(): only a rejection from fetch() itself becomes a NetworkError. Timeouts keep their name.
 async function reachTests() {
-  const failing = load('api.ts', {}, { fetch: async () => { throw new TypeError('Failed to fetch') } })
+  const failing = load('api.ts', apiImports, { fetch: async () => { throw new TypeError('Failed to fetch') } })
   await assert.rejects(failing.reach('/x'), error => error instanceof failing.NetworkError && error.cause instanceof TypeError)
-  const timing = load('api.ts', {}, { fetch: async () => { throw new DOMException('signal timed out', 'TimeoutError') } })
+  const timing = load('api.ts', apiImports, { fetch: async () => { throw new DOMException('signal timed out', 'TimeoutError') } })
   await assert.rejects(timing.reach('/x'), error => error.name === 'TimeoutError')
-  const offline = load('api.ts', {}, { fetch: async () => { throw new TypeError('Failed to fetch') } })
+  const offline = load('api.ts', apiImports, { fetch: async () => { throw new TypeError('Failed to fetch') } })
   await assert.rejects(offline.request('sessions'), error => offline.errorText(error) === 'Tether cannot reach the server. Check the connection.')
 }
 
@@ -90,8 +96,9 @@ async function main() {
   let now = 10000
   const timers = [], h = harness()
   const Spinner = () => null, RotateCw = () => null
+  const retryImports = { 'lucide-react': { RotateCw }, './Skeleton': { Spinner }, './Retry.css': {}, './zone': zone }
   const { RetryButton, MIN_BUSY } = load('Retry.tsx', {
-    react: h.hooks, 'lucide-react': { RotateCw }, './Skeleton': { Spinner }, './Retry.css': {},
+    react: h.hooks, ...retryImports,
   }, { Date: class extends Date { static now() { return now } }, setTimeout(fn, delay) { timers.push({ fn, at: now + delay }) } })
   assert.equal(MIN_BUSY, 600)
   const advance = async ms => { now += ms; for (const timer of timers.splice(0)) { if (timer.at <= now) timer.fn(); else timers.push(timer) }; await flush() }
@@ -114,7 +121,12 @@ async function main() {
   await advance(1)
   tree = h.render(RetryButton, props)
   assert.equal(find(tree, 'button').props.disabled, false)
-  assert.match(text(tree), /Still failing\. Tried at /)
+  for (const timeZone of ['Asia/Kolkata', 'America/New_York']) {
+    zone.setTetherZone(timeZone)
+    tree = h.render(RetryButton, props)
+    const expected = new Date(now).toLocaleTimeString(undefined, { timeZone, hour: 'numeric', minute: '2-digit', second: '2-digit' })
+    assert.ok(text(tree).includes(`Still failing. Tried at ${expected}.`), text(tree))
+  }
   assert.ok(nodes(tree).some(n => n.props?.role === 'status'))
 
   const slow = deferred(), slowProps = { onRetry: () => slow.promise }
@@ -126,7 +138,7 @@ async function main() {
 
   h.unmount()
   const busyHost = harness()
-  const BusyRetry = load('Retry.tsx', { react: busyHost.hooks, 'lucide-react': { RotateCw }, './Skeleton': { Spinner }, './Retry.css': {} }, { Date }).RetryButton
+  const BusyRetry = load('Retry.tsx', { react: busyHost.hooks, ...retryImports }, { Date }).RetryButton
   const hostProps = { onRetry() {}, busy: false, label: 'Retry', className: 'secondary' }
   tree = busyHost.render(BusyRetry, hostProps)
   assert.doesNotMatch(text(tree), /Still failing/)
@@ -170,6 +182,7 @@ async function main() {
   await hostCycle('TerminalPanel.tsx', 'TerminalPanel', { pane: { id: '%fake' }, item: { id: 'fixture' }, onItem() {} }, { './Terminal': { LiveTerminal: 'terminal' } })
   await hostCycle('Terminal.tsx', 'LiveTerminal', { paneId: '%fake', onChat() {} }, {
     'lucide-react': { SquareTerminal: 'icon' }, './Messages': {}, './clipboard': {}, './terminalRows': {}, './terminalMouse': {},
+    './terminalIme': {},
   })
   console.log('retry tests passed: errorText (network vs code errors), reach, immediate feedback, minimum duration, pending promise, busy transition, mounted host retries (mocked hooks; no DOM or network)')
 }

@@ -2,6 +2,7 @@ import { RotateCw } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Spinner } from './Skeleton'
 import './Retry.css'
+import { fmtTime, useTetherZone } from './zone'
 
 // One Retry for the whole UI. A press must always show that something happened:
 // 1. The button sinks at once (:active).
@@ -13,7 +14,7 @@ import './Retry.css'
 export const MIN_BUSY = 600
 
 export function clock(at: number) {
-  return new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })
+  return fmtTime(at, { hour: 'numeric', minute: '2-digit', second: '2-digit' })
 }
 
 export function RetryButton({ onRetry, busy, label = 'Try again', className = 'link-button', note = true }: {
@@ -23,6 +24,7 @@ export function RetryButton({ onRetry, busy, label = 'Try again', className = 'l
   className?: string
   note?: boolean
 }) {
+  useTetherZone()
   const [running, setRunning] = useState(false)
   const [failedAt, setFailedAt] = useState<number | null>(null)
   const alive = useRef(true)

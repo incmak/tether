@@ -6,10 +6,10 @@
 // Run: cd ui && npm run test:ui (or DIST=<build> node test_host_view_ui.cjs).
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, shotsDir } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-17/host-view/shots')
+const SHOTS = shotsDir('host-view')
 const sizes = [[320, 720], [1280, 900]]
 const paneA = { id: '%1', tmux_session: '$1', label: 'project:0.0', pane_name: 'Fix login', agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: 't1', approval: null }
 const paneB = { id: '%2', tmux_session: '$1', label: 'project:0.1', pane_name: 'Docs pass', agent: 'codex', dir: '/srv/docs', state: 'Idle', writable: true, thread: 't2', approval: null }
@@ -185,7 +185,10 @@ async function main() {
     }
     // The server's own window, opened from that link: Settings shows the notification switch.
     await page.goto(`${HOME}/chat/?go=notifications`, { waitUntil: 'load' })
-    const push = page.getByRole('switch', { name: /Push notifications/ })
+    const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
+    const notifications = settings.locator('[data-setting="notifications"]')
+    const push = notifications.getByRole('switch', { name: /Push notifications/ })
+    await settings.getByRole('heading', { name: 'Notifications', exact: true }).waitFor()
     await push.waitFor()
     check('?go=notifications opens the notification setting', await push.isVisible() && new URL(page.url()).search === '')
     await page.keyboard.press('Escape')

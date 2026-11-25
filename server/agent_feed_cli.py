@@ -9,21 +9,22 @@ file, mode 600. No token is ever on the command line or in the board.
 The Entra app: Authentication > Add a platform > Mobile and desktop applications > custom redirect URI
 http://localhost (Entra ignores the port of a localhost redirect). It needs no client secret. Delegated
 permissions: offline_access and User.Read; Mail.ReadBasic for an email feed; Team.ReadBasic.All,
-Channel.ReadBasic.All and ChannelMessage.Read.All (admin consent) for a Teams feed."""
+Channel.ReadBasic.All and ChannelMessage.Read.All (admin consent) for a Teams feed; Tasks.Read for task sources."""
 import argparse
 import secrets
 import sys
 import time
 
 import graph_client
+import tether_zone
 import work_feeds
 import work_items
 
 
 def _kinds(text):
     kinds = {k.strip() for k in (text or '').split(',') if k.strip()}
-    if not kinds or kinds - {'mail', 'teams'}:
-        raise ValueError('--feeds takes mail, teams, or mail,teams.')
+    if not kinds or kinds - graph_client.SCOPES.keys():
+        raise ValueError('--feeds takes a comma-separated combination of mail, teams, and tasks.')
     return kinds
 
 
@@ -34,7 +35,13 @@ WAIT = 300  # seconds for the sign-in in the browser
 def connect(args, open_url=None, listen=None):
     try:
         tenant, client = graph_client.check(args.tenant, args.client)
-        scopes = graph_client.scopes_for(_kinds(args.feeds))
+        kinds = _kinds(args.feeds)
+        connection = graph_client.load()
+        previous, _ = connection
+        if previous and (previous['tenant'], previous['client']) == (tenant, client):
+            shown = graph_client.status(connection)
+            kinds.update(kind for kind in graph_client.SCOPES if shown[kind])
+        scopes = graph_client.scopes_for(kinds)
         port = int(args.port)
         if port != 0 and not 1024 <= port <= 65535:
             raise ValueError('--port takes a number from 1024 to 65535 (0: any free port).')
@@ -48,7 +55,7 @@ def connect(args, open_url=None, listen=None):
         state = secrets.token_urlsafe(24)
         print(f'1. If your browser is on another computer, run there first: ssh -N -L {port}:127.0.0.1:{port} '
               '<this host>\n'
-              '2. Open this page and sign in with the account whose mail and Teams the feeds read:\n'
+              '2. Open this page and sign in with the Microsoft 365 account to connect:\n'
               f'{graph_client.authorize_url(tenant, client, scopes, port, state, challenge)}\n'
               f'Waiting up to {WAIT // 60} minutes for the sign-in.', flush=True)
         code = listener.wait(state, WAIT)
@@ -62,19 +69,18 @@ def connect(args, open_url=None, listen=None):
         return 1
     granted = str(answer.get('scope') or '').split()
     config = {'tenant': tenant, 'client': client, 'refresh': refresh, 'scopes': scopes, 'granted': granted}
+    try:
+        me = graph_client.Client(config, open_url=open_url, deadline=30).get(
+            '/me?$select=displayName,userPrincipalName', access=access)
+        if not isinstance(me, dict):
+            raise graph_client.GraphError('Microsoft gave an invalid account response.')
+    except graph_client.GraphError as exc:
+        print(f'Microsoft did not show the account ({exc}). Nothing saved.', file=sys.stderr)
+        return 1
+    config.update(account=str(me.get('userPrincipalName') or '')[:256], name=str(me.get('displayName') or '')[:128])
     graph_client.save(config)
     graph_client._ACCESS.clear()
     graph_client._ACCESS[(tenant, client, refresh)] = (access, time.time() + max(60, int(answer.get('expires_in') or 3600)))
-    try:
-        me = graph_client.Client(config, open_url=open_url, deadline=30).get('/me?$select=displayName,userPrincipalName')
-    except graph_client.GraphError as exc:
-        graph_client.remove()
-        print(f'Microsoft did not show the account ({exc}). Nothing saved.', file=sys.stderr)
-        return 1
-    if not graph_client.update({'account': str(me.get('userPrincipalName') or '')[:256],
-                                'name': str(me.get('displayName') or '')[:128]}):
-        print('The connection was removed while it was being saved. Run tether graph connect again.', file=sys.stderr)
-        return 1
     return show(args)
 
 
@@ -86,12 +92,13 @@ def show(_args):
     print(f'Connected to Microsoft 365 as {shown["account"] or "your account"}.')
     print('Email feeds: ' + ('on' if shown['mail'] else 'off (no Mail.ReadBasic)'))
     print('Teams feeds: ' + ('on' if shown['teams'] else 'off (no ChannelMessage.Read.All)'))
+    print('Task sources: ' + ('on' if shown['tasks'] else 'off (no Tasks.Read)'))
     return 0
 
 
 def disconnect(_args):
     graph_client.remove()
-    print('Microsoft 365 disconnected. Teams and email feeds stop.')
+    print('Microsoft 365 disconnected. Teams, email, and task sync stop.')
     return 0
 
 
@@ -102,7 +109,8 @@ def graph_main(argv=None):
     made.add_argument('--tenant', required=True, help='the directory (tenant) id of your Entra app, or your domain')
     made.add_argument('--client', required=True, help='the application (client) id of your Entra app')
     made.add_argument('--feeds', default='mail',
-                      help='mail (default), teams, or mail,teams. Teams needs admin consent for ChannelMessage.Read.All')
+                      help='comma-separated combination of mail (default), teams, and tasks. '
+                           'Teams needs admin consent for ChannelMessage.Read.All')
     made.add_argument('--port', default=PORT, help=f'the local port for the sign-in answer (default {PORT})')
     made.set_defaults(run=connect)
     commands.add_parser('status', help='show the connection').set_defaults(run=show)
@@ -129,7 +137,7 @@ def feed_status(args):
             if state['by'] == 'agent':
                 print(f'{name}: {feed}, read by the project\'s own agent')
                 continue
-            when = time.strftime('%H:%M', time.localtime(state['at'])) if state.get('at') else 'not yet'
+            when = tether_zone.stamp(state['at'], '%H:%M') if state.get('at') else 'not yet'
             line = f'{name}: {feed}, {state["status"]} (last read {when}, {state["items"]} items)'
             print(line + (f': {state["error"]}' if state.get('error') else ''))
     return 0

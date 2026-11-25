@@ -1,7 +1,7 @@
 """The daily ops report (B212): once a day, Tether writes yesterday's facts to a postmortem note and starts one
 cheap agent tab per project to say what to learn from them.
 
-Off by default: the tab spends tokens every day, so each person turns it on (Settings › Agents › Daily ops report).
+Off by default: the tab spends tokens every day, so each person turns it on (Settings › Learning & upkeep › Daily ops report).
 
 What one run does, for each open session that has a project folder and work from yesterday:
 1. Tether itself reads the facts. No model is involved:
@@ -25,7 +25,7 @@ import re
 import subprocess
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import delegate
@@ -33,8 +33,9 @@ import factory
 import lesson_candidates
 import paths
 import projects
+import tether_zone
 
-HOUR = 7             # local time: the run starts at the first monitor tick after this hour
+HOUR = 7             # Tether time: the run starts at the first monitor tick at or after this hour
 MODEL = 'haiku'
 EFFORT = 'low'
 MODEL_LABEL = 'Claude Haiku, low effort'
@@ -232,9 +233,9 @@ def stamp(text):
 
 
 def day_bounds(day):
-    """(start, end) in epoch seconds of a local calendar day 'YYYY-MM-DD'."""
-    start = datetime.strptime(day, '%Y-%m-%d')
-    return start.timestamp(), (start + timedelta(days=1)).timestamp()
+    """(start, end) in epoch seconds of a calendar day in the Tether zone 'YYYY-MM-DD'."""
+    start = date.fromisoformat(day)
+    return tether_zone.day_start(start), tether_zone.day_start(start + timedelta(days=1))
 
 
 def commits(root, start, end, run=subprocess.run):
@@ -262,8 +263,8 @@ def commits(root, start, end, run=subprocess.run):
     return sorted(found, key=lambda item: item['at'])
 
 
-def deploys(root, start, end):
-    """The DEPLOYED.md lines of a repository's main checkout with start <= time < end."""
+def deploys(root, day, start, end):
+    """The main checkout's deploys within the report day, using the written day for untimed lines."""
     try:
         lines = (Path(root) / 'DEPLOYED.md').read_text(encoding='utf-8', errors='replace').splitlines()
     except OSError:
@@ -271,9 +272,13 @@ def deploys(root, start, end):
     found = []
     for line in lines:
         parsed = factory.parse_deployed_line(line)
-        if parsed and start <= parsed['at'] < end:
+        if not parsed:
+            continue
+        in_day = start <= parsed['at'] < end if parsed['timed'] else parsed['day'] == day
+        if in_day:
             kind, text = stamp(line)
-            found.append({'at': parsed['at'], 'commit': parsed['commit'] or '', 'stamp': kind, 'stamp_text': text[:200],
+            found.append({'at': parsed['at'], 'day': parsed['day'], 'timed': parsed['timed'],
+                          'commit': parsed['commit'] or '', 'stamp': kind, 'stamp_text': text[:200],
                           'text': FOUND.split(parsed['text'])[0].rstrip(' ·')[:200], 'repo': Path(root).name})
     return found
 
@@ -282,7 +287,7 @@ def gather(day, roots, paused, run=subprocess.run):
     """The facts of one day for one project: {'day', 'commits', 'deploys', 'paused', 'reverts', 'problems'}."""
     start, end = day_bounds(day)
     found_commits = [item for root in roots for item in commits(root, start, end, run)]
-    found_deploys = [item for root in roots for item in deploys(root, start, end)]
+    found_deploys = [item for root in roots for item in deploys(root, day, start, end)]
     facts = {'day': day, 'commits': found_commits, 'deploys': found_deploys, 'paused': paused,
              'reverts': [item for item in found_commits if item['revert']]}
     facts['problems'] = (sum(item['stamp'] != 'verified' for item in found_commits + found_deploys)
@@ -304,7 +309,7 @@ def _rows(rows, line):
 
 
 def _clock(at):
-    return datetime.fromtimestamp(at).strftime('%H:%M')
+    return tether_zone.stamp(at, '%H:%M')
 
 
 def _why(row):
@@ -326,7 +331,8 @@ def note_text(facts, name, learn=PLACEHOLDER):
              '## Commits without verification',
              *_rows(unverified_commits, lambda row: f'- `{row["hash"]}` {_clock(row["at"])} {row["subject"]} ({_why(row)}; {row["repo"]})'), '',
              '## Deploys without verification',
-             *_rows(unverified_deploys, lambda row: f'- {_clock(row["at"])} {row["text"]} ({_why(row)}; {row["repo"]})'), '',
+             *_rows(unverified_deploys, lambda row: f'- {_clock(row["at"]) if row["timed"] else row["day"]} '
+                   f'{row["text"]} ({_why(row)}; {row["repo"]})'), '',
              '## Paused reviews',
              *_rows(facts['paused'], lambda row: f'- {_clock(row["at"])} {row["text"]}'), '',
              '## Reverts',
@@ -478,7 +484,7 @@ def run_day(day, entries, folder_of, run=subprocess.run, lock=None, start=delega
 class Ops:
     """Starts the daily run from the monitor loop, in its own thread."""
 
-    def __init__(self, clock=datetime.now):
+    def __init__(self, clock=tether_zone.now):
         self.clock = clock
         self.gate = threading.Lock()
         self.busy = False     # the worker looks or runs

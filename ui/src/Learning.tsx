@@ -10,6 +10,7 @@ import { useAutonomy } from './Autonomy'
 import type { Learning, Lesson } from './Autonomy'
 import { LessonsReview } from './LessonsReview'
 import { reviewReason } from './lessonsReview'
+import { fmtDate, useTetherZone } from './zone'
 
 // Learning from feedback (server: lessons.py, agent_lessons_cli.py). When the user corrects an agent, the agent writes
 // an "avoid" lesson; when the user confirms a choice, a "keep" lesson. The autonomy hook gives the best lessons to
@@ -20,7 +21,7 @@ const SOURCE: Record<Lesson['source'], string> = { user: 'From your feedback', r
 const AGENT: Record<string, string> = { claude: 'Claude', codex: 'Codex' }
 
 function when(seconds: number) {
-  return new Date(seconds * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
+  return fmtDate(seconds * 1000, { day: 'numeric', month: 'short' })
 }
 
 function meta(lesson: Lesson, where?: string) {
@@ -32,7 +33,7 @@ function meta(lesson: Lesson, where?: string) {
   return parts.join(' · ')
 }
 
-/** Settings › Agents: the switch and the lessons for all projects. */
+/** Settings › Learning & upkeep: the switch and the lessons for all projects. */
 export function LearningSettings({ api }: { api: Api }) {
   const { data, error, refresh } = useAutonomy(api)
   const [busy, setBusy] = useState('')
@@ -69,6 +70,7 @@ export function LearningSettings({ api }: { api: Api }) {
 }
 
 export function LessonText({ lesson, now, where }: { lesson: Lesson; now: number; where?: string }) {
+  useTetherZone()
   const fresh = now - lesson.created < DAY
   const trial = lesson.status === 'trial'
   return <span className="lesson-text">
@@ -101,7 +103,7 @@ export function ProjectLessons({ api, project, learning, onChange }: { api: Api;
     finally { setBusy('') }
   }
   return <section className="settings-group" aria-labelledby="project-lessons"><h3 id="project-lessons">Lessons</h3>
-    <p className="setting-note">{learning.enabled ? 'Agents saved these from your feedback in this project. They get the most important ones with each prompt.' : 'Learning is off in Settings › Agents, so agents do not get these lessons now.'}</p>
+    <p className="setting-note">{learning.enabled ? 'Agents saved these from your feedback in this project. They get the most important ones with each prompt.' : 'Learning is off in Settings › Learning & upkeep, so agents do not get these lessons now.'}</p>
     {error && <p className="error" role="alert">{error}</p>}
     {lessons.length ? <ul className="lesson-list">{lessons.map(lesson => <li key={lesson.id} className="lesson">
       {editing?.id === lesson.id ? <form className="lesson-edit" onSubmit={event => { event.preventDefault(); void send(lesson.id, { project, edit: lesson.id, text: editing.text }) }}>

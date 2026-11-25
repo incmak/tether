@@ -1,35 +1,41 @@
-/* Settings is a searchable index on phones and a two-column workspace on desktop. */
+/* Settings: on desktop, a header with search, then the nav beside one page. On a phone, an index, then one page. */
 .preferences.sheet { width: min(960px, calc(100vw - 48px)); max-width: none; height: min(780px, calc(100dvh - 64px)); max-height: none; padding: 0; margin: auto; overflow: hidden; border: 1px solid var(--line); border-radius: 20px; background: var(--surface); color: var(--text); font-family: system-ui, -apple-system, sans-serif; }
 .preferences.sheet :is(h2, h3, h4) { font-family: system-ui, -apple-system, sans-serif; }
 .preferences[open] { display: flex; flex-direction: column; }
-.preferences-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 22px 28px 14px; flex: none; }
+.preferences-header { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 400px) auto; align-items: center; gap: 16px; padding: 14px 16px 14px 24px; flex: none; }
+.preferences-title { min-width: 0; }
+.preferences-title p { margin: 2px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .preferences-eyebrow { display: block; color: var(--muted); font-size: 10px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; }
-.preferences .preferences-header h2 { margin: 3px 0 0; font: 600 25px/1.2 system-ui, -apple-system, sans-serif; letter-spacing: -.65px; }
+.preferences .preferences-header h2 { margin: 0; font: 600 21px/1.25 system-ui, -apple-system, sans-serif; letter-spacing: -.4px; }
 .preferences-header .icon-button { width: 44px; height: 44px; }
-.preferences-search { display: flex; align-items: center; gap: 10px; flex: none; min-height: 44px; margin: 0 28px 20px; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--muted); }
+.preferences-search { display: flex; align-items: center; gap: 10px; flex: none; min-height: 44px; margin: 0; padding: 0 4px 0 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--muted); }
 .preferences-search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-.preferences-search input { flex: 1; width: 100%; min-width: 0; min-height: 44px; padding: 8px 0; border: 0; background: transparent; color: var(--text); font: inherit; font-size: 15px; box-shadow: none; border-radius: 0; }
+.preferences-search input { flex: 1; width: 100%; min-width: 0; min-height: 40px; padding: 6px 0; border: 0; background: transparent; color: var(--text); font: inherit; font-size: 15px; box-shadow: none; border-radius: 0; }
 .preferences-search input:focus-visible { outline: 0; }
 .preferences-search input::-webkit-search-cancel-button { display: none; }
-.preferences-search .icon-button { width: 44px; height: 44px; flex: none; }
-.preferences-search kbd { flex: none; padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-size: 10px; line-height: 1.2; font-family: inherit; white-space: nowrap; }
+.preferences-search .icon-button { width: 36px; height: 36px; flex: none; }
+.preferences-search kbd { flex: none; margin-right: 6px; padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-size: 10px; line-height: 1.2; font-family: inherit; white-space: nowrap; }
 .preferences-layout { display: grid; grid-template-columns: 230px minmax(0, 1fr); flex: 1; min-height: 0; border-top: 1px solid var(--line); }
-.preferences-layout > aside { padding: 18px 12px; overflow-y: auto; border-right: 1px solid var(--line); background: var(--sidebar); }
-.preferences-nav { display: grid; gap: 4px; }
-.preferences-nav button { display: flex; align-items: center; gap: 11px; width: 100%; min-height: 64px; padding: 12px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); text-align: left; }
+.preferences-layout > aside { padding: 8px 10px 16px; overflow-y: auto; border-right: 1px solid var(--line); background: var(--sidebar); }
+/* Desktop nav: one 36 px row per page, names only, under a small section label. The page shows the description. */
+.preferences-nav { display: grid; gap: 2px; }
+.preferences-nav > div { display: grid; gap: 2px; }
+.preferences-section { margin: 14px 10px 4px; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .06em; line-height: 1.4; text-transform: uppercase; }
+.preferences-nav > div:first-child .preferences-section { margin-top: 6px; }
+.preferences-nav button { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 36px; padding: 6px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); text-align: left; }
 .preferences-nav button > svg { flex: none; }
-.preferences-nav button > svg:last-child { width: 12px; margin-left: auto; }
 .preferences-nav button > span { min-width: 0; }
-.preferences-nav strong { display: block; color: var(--text); font-size: 13px; font-weight: 550; line-height: 1.4; }
-.preferences-nav small { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; line-height: 1.5; }
-.preferences-nav button:hover { background: var(--hover); color: var(--text); }
+.preferences-nav strong { display: block; color: var(--text); font-size: 13px; font-weight: 500; line-height: 1.4; }
+.preferences-nav small, .preferences-nav button > svg:last-child { display: none; }
+@media (hover: hover) { .preferences-nav button:hover { background: var(--hover); color: var(--text); } }
 .preferences-nav button[aria-current="page"] { background: var(--bubble); color: var(--accent-ink); }
 .preferences-nav button[aria-current="page"] strong { font-weight: 650; }
-.preferences-layout > aside > p { margin: 24px 12px 0; color: var(--muted); font-size: 11px; line-height: 1.7; }
 .preferences-content { min-width: 0; overflow-y: auto; overflow-wrap: anywhere; overscroll-behavior-y: contain; padding: 26px 30px 36px; scroll-padding-block: 20px; }
 .preferences-content-heading { margin-bottom: 20px; }
-.preferences-content-heading h3, .preferences-overview > h3 { margin: 5px 0 8px; font-size: 22px; font-weight: 600; letter-spacing: -.5px; line-height: 1.3; }
-.preferences-content-heading > p, .preferences-overview > p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.preferences-content-heading h3 { margin: 5px 0 8px; font-size: 22px; font-weight: 600; letter-spacing: -.5px; line-height: 1.3; }
+.preferences-content-heading h3:focus { outline: 0; }
+.preferences-content-heading h3:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.preferences-content-heading > p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
 .preferences-back { display: none; }
 .preferences-entry { padding: 18px 0; border-top: 1px solid var(--line); min-width: 0; }
 .preferences-entry:first-child { border-top: 0; padding-top: 0; }
@@ -38,7 +44,7 @@
 .preferences .segmented { margin: 0; width: fit-content; max-width: 100%; flex-wrap: wrap; }
 .preferences .segmented label { min-width: 0; flex: 1 0 auto; }
 .preferences .segmented span { min-height: 40px; padding: 8px 15px; display: flex; align-items: center; justify-content: center; font-size: 13px; }
-.preferences-scope { display: block; margin-top: 8px; color: var(--muted); font-size: 10px; line-height: 1.4; }
+.preferences-scope { display: block; margin-top: 8px; color: var(--muted); font-size: 11px; line-height: 1.4; }
 .preferences .switch-row { min-height: 50px; gap: 18px; padding: 0; margin: 0; border: 0; }
 .preferences .switch-row > span { min-width: 0; }
 .preferences .switch-row strong { display: block; color: var(--text); font-size: 14px; font-weight: 550; line-height: 1.4; }
@@ -83,15 +89,10 @@
 .preferences-colors label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
 .preferences-colors input { position: absolute; opacity: 0; width: 1px; height: 1px; }
 .preferences-color { width: 16px; height: 16px; border: 4px solid; border-radius: 50%; flex: none; }
-.preferences-result-group { display: inline-flex; align-items: center; gap: 4px; min-height: 36px; margin-bottom: 12px; padding: 0; color: var(--accent-ink); font-size: 11px; }
+.preferences-result-group { display: inline-flex; align-items: center; gap: 4px; min-height: 36px; margin-bottom: 0; padding: 0; color: var(--accent-ink); font-size: 12px; }
 .preferences-empty { margin: 48px 0; color: var(--muted); }
 .preferences-empty h4 { margin: 14px 0 6px; color: var(--text); font-size: 16px; }
 .preferences-empty p { font-size: 13px; line-height: 1.6; margin: 0 0 16px; }
-.preferences-mobile-index { display: none; }
-.preferences-quick { display: grid; gap: 3px; margin-top: 32px; }
-.preferences-quick h4 { margin: 0 0 8px; color: var(--muted); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; }
-.preferences-quick button { display: flex; align-items: center; justify-content: space-between; min-height: 44px; padding: 0; text-align: left; font-size: 13px; border-bottom: 1px solid var(--line); }
-.preferences-quick button:hover { color: var(--accent-ink); }
 .preferences .codex-run-options { margin-top: 20px; }
 .preferences .notification-delivery { margin-top: 16px; }
 .preferences .notification-delivery fieldset { margin-block: 14px; }
@@ -101,26 +102,29 @@
 .preferences .look-actions .link-button { min-height: 24px; }
 @media (max-width: 799px) {
   .preferences.sheet { width: 100%; height: 100dvh; max-height: 100dvh; margin: 0; inset: 0; border: 0; border-radius: 0; }
-  .preferences-header { padding: max(18px, env(safe-area-inset-top)) 20px 14px; }
-  .preferences .preferences-header h2 { font-size: 24px; }
-  .preferences-search { margin: 0 20px 18px; }
+  .preferences-header { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title close" "search search"; gap: 10px 12px; padding: max(14px, env(safe-area-inset-top)) 12px 14px 20px; }
+  .preferences-title { grid-area: title; }
+  .preferences-close { grid-area: close; width: 44px; height: 44px; }
+  .preferences-search { grid-area: search; margin-right: 8px; }
+  .preferences .preferences-header h2 { font-size: 22px; }
   .preferences-search kbd { display: none; }
-  .preferences-search input { font-size: 16px; }
+  .preferences-search input { font-size: 16px; min-height: 44px; }
+  .preferences-search .icon-button { width: 44px; height: 44px; }
   .preferences-layout { display: flex; flex-direction: column; }
   .preferences-layout > aside { display: none; }
-  .preferences-content { flex: 1; padding: 22px 20px max(24px, env(safe-area-inset-bottom)); }
-  .preferences-overview > .preferences-eyebrow, .preferences-overview > h3, .preferences-overview > p { display: none; }
-  .preferences-mobile-index { display: block; margin-top: -10px; }
-  .preferences-nav { gap: 0; }
-  .preferences-nav button { min-height: 82px; padding: 14px 0; border-radius: 0; border-bottom: 1px solid var(--line); gap: 14px; }
-  .preferences-nav button > svg:first-child { width: 21px; height: 21px; color: var(--muted); }
-  .preferences-nav button > svg:last-child { width: 16px; }
-  .preferences-nav strong { font-size: 15px; }
-  .preferences-nav small { margin-top: 5px; font-size: 12px; }
-  .preferences-quick { margin-top: 28px; }
-  .preferences-content-heading { margin-bottom: 20px; }
+  .preferences-content { flex: 1; padding: 18px 20px max(24px, env(safe-area-inset-bottom)); }
+  /* Phone index: a row per page with its one-line description, under the same section labels. */
+  .preferences-index .preferences-nav, .preferences-index .preferences-nav > div { gap: 0; }
+  .preferences-index .preferences-section { margin: 22px 0 2px; }
+  .preferences-index .preferences-nav > div:first-child .preferences-section { margin-top: 0; }
+  .preferences-index .preferences-nav button { min-height: 60px; padding: 10px 0; border-radius: 0; border-bottom: 1px solid var(--line); gap: 14px; }
+  .preferences-index .preferences-nav > div > button:last-child { border-bottom: 0; }
+  .preferences-index .preferences-nav button > svg:first-child { width: 20px; height: 20px; color: var(--muted); }
+  .preferences-index .preferences-nav button > svg:last-child { display: block; width: 16px; margin-left: auto; }
+  .preferences-index .preferences-nav strong { font-size: 15px; }
+  .preferences-index .preferences-nav small { display: block; margin-top: 2px; font-size: 12px; line-height: 1.45; }
   .preferences-content-heading h3 { font-size: 22px; }
-  .preferences-back { display: inline-flex; gap: 7px; align-items: center; min-height: 40px; padding: 0; margin: -10px 0 12px; color: var(--muted); font-size: 12px; }
+  .preferences-back { display: inline-flex; gap: 7px; align-items: center; min-height: 44px; padding: 0; margin: -10px 0 4px; color: var(--muted); font-size: 13px; }
   .preferences-colors { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .preferences-entry { padding-block: 18px; }
 }
@@ -235,3 +239,4 @@
 .auto-merge-pass { color: var(--muted); font-weight: 600; }
 .auto-merge-fail { color: var(--error); font-weight: 600; }
 .auto-merge-heading:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.preferences .time-zone-device { margin-top: 12px; }

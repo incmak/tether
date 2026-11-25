@@ -6,6 +6,7 @@ question renderer at 318764000, checkbox glyph table at 289538072.
 Claude resume renderer at 324513007; qE filter at 301747028 (⌕ prefix).
 Fixtures use public dummy labels. Every width is a physical terminal layout.
 """
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 from pathlib import Path
 import subprocess
@@ -98,8 +99,9 @@ class ChoiceStateTests(unittest.TestCase):
                 self.assertEqual(result['focus'], 0)
                 found = self.attention(screen, 'claude')
                 self.assertEqual(found['reason'], 'menu')
-                self.assertEqual([i['id'] for i in found['options']], [1, 2, 3])
-                self.assertEqual(found['choice'], result)
+                self.assertFalse(found['menu_verified'])
+                self.assertNotIn('options', found)
+                self.assertNotIn('choice', found)
 
     def test_claude_resume_uses_the_source_filter_and_footer(self):
         for width in (23, 40, 80):
@@ -113,12 +115,15 @@ class ChoiceStateTests(unittest.TestCase):
                 self.assertEqual(result['filter'], 'release')
                 self.assertEqual(result['focus'], 0)
                 self.assertEqual(len(result['items']), 2)
-                self.assertEqual(self.attention(screen, 'claude')['choice'], result)
+                found = self.attention(screen, 'claude')
+                self.assertFalse(found['menu_verified'])
+                self.assertNotIn('choice', found)
 
     def test_numbered_menu_over_nine_keeps_ids_and_existing_fields(self):
         screen = frame(80, [styled('› 1. One')] + [f'  {i}. Option {i}' for i in range(2, 13)],
-                       'Enter to select · Esc to cancel')
+                       'enter select · esc back', [styled('Select Model and Effort', '1'), ''])
         found = self.attention(screen, 'codex')
+        self.assertTrue(found['menu_verified'])
         self.assertEqual([i['id'] for i in found['options']], list(range(1, 13)))
         self.assertEqual([i['id'] for i in found['choice']['items']], list(range(1, 13)))
         self.assertEqual(found['options'][0]['text'], 'One')

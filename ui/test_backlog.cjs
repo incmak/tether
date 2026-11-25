@@ -1,6 +1,7 @@
 // The backlog's Markdown rules: every change keeps the other lines exactly as they were.
 const { strict: assert } = require('node:assert')
 const { readFileSync } = require('node:fs')
+const { test } = require('node:test')
 const { runInNewContext } = require('node:vm')
 const ts = require('typescript')
 
@@ -10,6 +11,16 @@ runInNewContext(ts.transpileModule(readFileSync('src/backlogItems.ts', 'utf8'), 
 }).outputText, { exports: output.exports })
 const b = output.exports
 const plain = value => JSON.parse(JSON.stringify(value))
+
+for (const stamp of ['2026-11-22 02:10 +0530', '2026-11-01 01:30 -04:00']) {
+  test(`Backlog shows the result and author of a Done line with ${stamp}`, () => {
+    const raw = `  - Done: ${stamp} · fixed in abc123 (codex · pane %12)`
+    const [row] = plain(b.parseBacklog(`- [x] Old #B7\n${raw}`))
+    assert.equal(row.status.text, 'fixed in abc123')
+    assert.deepEqual(row.status.source, { agent: 'codex', pane: '%12' })
+    assert.equal(row.status.raw, raw)
+  })
+}
 
 const file = '- [ ] Mine\n  - why\n  - [x] sub\n- [x] Old\n\nfree text\n\n## tether\n- [ ] Fix (codex · tmux $3 · pane %12 · chat 019a)\n'
 const rows = plain(b.parseBacklog(file))

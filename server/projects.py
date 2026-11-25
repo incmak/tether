@@ -6,9 +6,9 @@ paths.TETHER/projects/<id>/:
   INSTRUCTIONS.md   what the person wrote
   files/            pinned copies; links.json holds pins that point at files that exist elsewhere
   notes/            agent notes that the person reviews; a deleted note goes to notes/.trash/
-render() builds the text an agent gets at start, resume, clear and compact. It stays inside the budget. An
-empty project gives only the short Notes part, so agents learn where notes go. Rename, cd, split and close do not change the id. A bundle folder exists only after the
-first write."""
+render() builds the text an agent gets at start, resume, clear and compact. Built-in guidance has its own
+allowance. The project budget covers the remaining content, and the whole prompt has a hard cap.
+Rename, cd, split and close do not change the id. A bundle folder exists only after the first write."""
 import json
 import os
 import re
@@ -110,6 +110,14 @@ def meta(pid):
             'budget': budget if isinstance(budget, int) and BUDGET_MIN <= budget <= BUDGET_MAX else BUDGET,
             'seen': data.get('seen') if isinstance(data.get('seen'), (int, float)) else 0,
             'archived_from': data.get('archived_from') if isinstance(data.get('archived_from'), list) else []}
+
+
+def audit_name(pid):
+    """Use the saved project name when the audit log can read it."""
+    try:
+        return meta(pid)['name'] or None
+    except Exception:  # Optional audit metadata must not affect the change being recorded.
+        return None
 
 
 def _save_meta(pid, data):
@@ -317,91 +325,118 @@ def mark_seen(pid):
 # ---- what an agent gets ----
 
 def _fit(parts, budget):
-    """Join the parts in order. The first part that does not fit is cut, and the rest are left out."""
-    out, used = [], 0
-    for part in parts:
-        if used + len(part) <= budget:
-            out.append(part)
-            used += len(part)
+    """Fit (priority, text) parts by ascending priority and keep their original reading order.
+
+    Priorities are (tier, sort key), with negative mtime as the sort key for excerpts.
+    Ties fit in input order. Cut the first overflow at a line end and omit the rest.
+    Returns one string per part, in the input order ('' for a part left out).
+    """
+    out = [''] * len(parts)
+    for index in sorted(range(len(parts)), key=lambda index: parts[index][0]):
+        _, part = parts[index]
+        if len(part) <= budget:
+            out[index] = part
+            budget -= len(part)
             continue
         note = '\n[Cut to fit the project size limit. The full text is in the project folder.]\n'
-        room = budget - used - len(note)
+        room = budget - len(note)
         if room > 200:
-            out.append(part[:room].rsplit('\n', 1)[0] + note)
-        elif budget - used >= len(note):
-            out.append(note)
+            out[index] = part[:room].rpartition('\n')[0] + note
+        elif budget >= len(note):
+            # Too little room for the body. Keep the part's heading line when it fits, so the agent knows what was cut.
+            end = part.find('\n', 1) + 1
+            heading = part[:end] if part.startswith('\n#') and end and end + len(note) <= budget else ''
+            out[index] = heading + note
         break
-    return ''.join(out)
+    return out
+
+
+def _note_parts(pid, level):
+    """A notes block in reading order, with its heading attached to the first part."""
+    found = notes(pid)
+    folder = bundle(pid) / 'notes'
+    heading = f'\n### {level} notes\n'
+    parts = []
+    for item in found[:NEWEST]:
+        body = _read(folder / item['name'], EXCERPT + 1).strip()
+        excerpt = f'\n#### {item["name"]}\n{body[:EXCERPT]}{" …" if len(body) > EXCERPT else ""}\n'
+        parts.append(((4, -item['mtime']), heading + excerpt))
+        heading = ''
+    if older := found[NEWEST:]:
+        lines = ''.join(f'- {item["name"]}: {item["title"]}\n' for item in older)
+        parts.append(((5, 0), heading + '\nOlder notes:\n' + lines))
+    return parts
 
 
 def _group_parts(group, home):
-    """A group's context in three tiers, most important first: (main part, notes list, note excerpts)."""
+    """A stack's identity and guidance, and its separate notes block in reading order."""
     gpid, name = group['pid'], group['name']
     text = instructions(gpid).strip()
     pinned = pins(gpid, home)
-    found = notes(gpid)
     folder = bundle(gpid)
-    main = (f'\n## Stack: {name}\nThis tab is in the stack "{name}" of this tmux session. '
-            + ('The user wrote this guidance for agents in the stack. Follow it.\n' if text or pinned else '\n')
-            + f'Stack folder: {folder}\n'
-            + f'Save a fact that only this stack needs as a Markdown note in {folder}/notes/ (same rules as project notes). '
-            'Facts for the whole session go in the project notes folder.\n')
+    parts = [((1, 0), f'\n## Stack: {name}\nThis tab is in the stack "{name}" of this tmux session. '
+              + ('The user wrote this guidance for agents in the stack. Follow it.\n' if text or pinned else '\n')
+              + f'Stack folder: {folder}\n'
+              + f'Save a fact that only this stack needs as a Markdown note in {folder}/notes/ (same rules as project notes). '
+              'Facts for the whole session go in the project notes folder.\n')]
     if text:
-        main += f'\n### Stack instructions\n{text}\n'
+        parts.append(((2, 0), f'\n### Stack instructions\n{text}\n'))
     if pinned:
         lines = '\n'.join(f'- {item["name"]}: {item["path"]}{" (gone)" if item["missing"] else ""}' for item in pinned)
-        main += f'\n### Stack pinned files\nRead a file when the task needs it.\n{lines}\n'
-    listing = ('\n### Stack notes\n' + ''.join(f'- {item["name"]}: {item["title"]}\n' for item in found)) if found else ''
-    excerpts = []
-    for item in found[:NEWEST]:
-        body = _read(folder / 'notes' / item['name'], EXCERPT + 1).strip()
-        excerpts.append(f'\n#### {item["name"]}\n{body[:EXCERPT]}{" …" if len(body) > EXCERPT else ""}\n')
-    return main, listing, excerpts
+        parts.append(((2, 0), f'\n### Stack pinned files\nRead a file when the task needs it.\n{lines}\n'))
+    return parts, _note_parts(gpid, 'Stack')
 
 
 def render(pid, agent='claude', home=None, group=None, backlog_project=None):
-    """The text an agent gets. An empty project still gets the Notes part: without it no agent knows the notes folder,
-    so no note is ever written. Claude keeps its own auto memory where it is: Tether does not move it, so Claude's
-    notes from before stay in reach. Both agents get the same text. Reading never makes the bundle folder.
-    The project header, notes directions, instructions, pinned files, and stack guidance come first. The fixed
-    Tether rules follow, then open backlog items, note lists, and note excerpts. _fit keeps this order when it cuts.
-    group: {'pid', 'name'} for a tab in a group (groups.py). Stack note lists and excerpts follow the project's.
+    """The text an agent gets. Reading never makes the bundle folder.
+    group: {'pid', 'name'} for a tab in a group (groups.py). Stack notes follow the project notes.
+    Tether's rules are always whole. The budget goes to the rest by priority: the project name and stack identity,
+    then user instructions and pins, then the open backlog, then the newest excerpts across project and stack,
+    then older note titles. Output keeps its reading order.
     backlog_project: the agent's repository name (backlog.project_name). With it, the open backlog items for the inbox
     and that project are listed. The project preview has no tab, so it passes none."""
-    data = meta(pid)
+    prompt, _ = _render(pid, meta(pid), home, group, backlog_project)
+    return prompt
+
+
+def _render(pid, data, home, group=None, backlog_project=None):
+    """Build the prompt and count the characters that do not use the project budget."""
     text = instructions(pid).strip()
     pinned = pins(pid, home)
-    found = notes(pid)
     folder = bundle(pid)
-    parts = [f'# Tether project{": " + data["name"] if data["name"] else ""}\n'
-             + ('Project guidance from Tether. The user wrote it for every agent in this tmux session. Follow it.\n'
-                if text or pinned else 'Agents in this tmux session share this project folder.\n')
-             + f'Project folder: {folder}\n']
-    parts.append(f'\n## Notes\nSave a project fact that other agents in this session need as a Markdown file in {folder}/notes/ '
-                 '(one topic per file, a "# Title" first line). Keep your own memory as before. The user reviews notes in Tether.\n')
+    heading = '# Tether project'
+    intro = (('\nProject guidance from Tether. The user wrote it for every agent in this tmux session. Follow it.\n'
+              if text or pinned else '\nAgents in this tmux session share this project folder.\n')
+             + f'Project folder: {folder}\n'
+             + f'\n## Notes\nSave a project fact that other agents in this session need as a Markdown file in {folder}/notes/ '
+             '(one topic per file, a "# Title" first line). Keep your own memory as before. The user reviews notes in Tether.\n')
+    content = [((1, 0), ': ' + data['name'] if data['name'] else '')]
     if text:
-        parts.append(f'\n## Instructions\n{text}\n')
+        content.append(((2, 0), f'\n## Instructions\n{text}\n'))
     if pinned:
         lines = '\n'.join(f'- {item["name"]}: {item["path"]}{" (gone)" if item["missing"] else ""}' for item in pinned)
-        parts.append(f'\n## Pinned files\nRead a file when the task needs it.\n{lines}\n')
+        content.append(((2, 0), f'\n## Pinned files\nRead a file when the task needs it.\n{lines}\n'))
+    stack_notes = []
     if group:
-        main, group_listing, group_excerpts = _group_parts(group, home)
-        parts.append(main)
-    parts.append('\n## Tab icon\nOnce the task is clear, run `tmux set-option -p -t "$TMUX_PANE" @chat_icon NAME`. NAME: a lucide.dev '
-                 f'icon name, or svg-X after you write a 24x24 stroke SVG to {paths.TETHER}/icons/X.svg. Skip it if @chat_icon_by is "user" or "tether".\n')
-    parts.append('\n## Naming tabs\nIn replies, write the visible name of a tab in backticks, like `B69 review`: Tether links it. Never write a pane id like %71 unless the user must type it.\n')
-    parts.append('\n## Claims of absence\nBefore you say that something does not exist, cannot work, or has no fix, read the primary source for the exact version in use: '
+        group_parts, stack_notes = _group_parts(group, home)
+        content.extend(group_parts)
+    fixed = ['\n## Tab icon\nOnce the task is clear, run `tmux set-option -p -t "$TMUX_PANE" @chat_icon NAME`. NAME: a lucide.dev '
+             f'icon name, or svg-X after you write a 24x24 stroke SVG to {paths.TETHER}/icons/X.svg. Skip it if @chat_icon_by is "user" or "tether".\n']
+    fixed.append('\n## Naming tabs\nIn replies, write the visible name of a tab in backticks, like `B69 review`: Tether links it. Never write a pane id like %71 unless the user must type it.\n')
+    fixed.append('\n## Claims of absence\nBefore you say that something does not exist, cannot work, or has no fix, read the primary source for the exact version in use: '
                  'source code, official docs, or the real config. A failed search on guessed names, or a page that did not load, is not evidence of absence. '
                  'If you did not read the primary source, write "not checked", name what you did not read, and keep looking when the answer can change what the user does.\n')
-    parts.append('\n## Watchers\nTo watch for events (messages, CI, logs), use Monitor: a script prints one line per new event, no message bodies. '
+    fixed.append('\n## Watchers\nTo watch for events (messages, CI, logs), use Monitor: a script prints one line per new event, no message bodies. '
                  'Re-arm it when it expires. Use CronCreate only for work due at a set time, never to poll.\n')
     cli = Path(__file__).resolve().with_name('agent_tab_cli.py')
-    parts.append(f'\n## New tabs and reviewers\nUse your own subagents for searches, research and side work. '
+    fixed.append(f'\n## New tabs and reviewers\nUse your own subagents for searches, research and side work. '
                  'Give separate user tasks to worker tabs. Send a full spec, use `--worktree` for code, then `wait`. '
                  'Other tabs are for reviewers, advisors or work the user wants to steer.\n'
                  f'To start a new tab or session, or a reviewer, run `{sys.executable} {cli} start ...`, not raw tmux. '
                  'Options: `--review-it` (this tab reviews each turn of the new tab), `--reviews-me` (the new tab reviews this tab), '
-                 '`--agent claude|codex`, `--name NAME`, `--cwd DIR`, `--worktree BRANCH` (new branch and folder), `--context`, `--stack GOAL` (1–3 words; names the new tab. It opens in this tab\'s stack, or in none; `--stack Unstacked` = none). '
+                 '`--agent claude|codex`, `--name NAME`, `--cwd DIR`, `--worktree BRANCH` (new branch and folder), `--context`, '
+                 '`--owner self|%N` (who owns the new tab: self = a separate task, not a helper; default: this tab), '
+                 '`--stack GOAL` (1–3 words; names the new tab. A helper opens in its owner\'s stack; `--stack Unstacked` = none). '
                  '`stop --worker %N [--reviewer %N]` ends a review; `list` shows this tab\'s links. '
                  '`escalate --pane %N` sends a helper tab\'s paused review to Mak. '
                  '`link --worker %N --reviewer %N` makes one open tab review another. '
@@ -411,40 +446,50 @@ def render(pid, agent='claude', home=None, group=None, backlog_project=None):
                  'Exit: 0 finished, 3 timeout (still working), 4 gone, 5 needs_input (with prompt), 6 no_turn (none in 60 s; message may be lost). '
                  'When a tab you started or review is done, save a note in notes/ (what it did, outcome, findings), '
                  'then run `close --pane %N`. Busy tabs stay open. '
-                 'Asked to close this tab: run `close --self` (exit 0 = it closes after your reply).\n')
+                 'Asked to close this tab: run `close --self` (exit 0 = it closes after your reply). '
+                 'To coordinate this session\'s tabs: `agent_coordinator_cli.py claim` (same folder).\n')
     backlog = f'{sys.executable} {Path(__file__).resolve().with_name("agent_backlog_cli.py")}'
-    parts.append(f'\n## Backlog\nOne backlog serves all sessions. Change it only with `{backlog}`, never edit its file. '
+    fixed.append(f'\n## Backlog\nOne backlog serves all sessions. Change it only with `{backlog}`, never edit its file. '
                  'Commands: `list`, `add "title" --detail "why"`, `detail B12 "text"`, `start B12`, `done B12 "result"`, `move B12 PROJECT`. '
                  '`--project NAME` files elsewhere. `list`: the inbox and this project\'s open items. `show B12`: its details.\n'
                  '- Add an item, without asking, for real work outside your task over about 5 minutes. No style nits or steps of your task.\n'
-                 '- Work on an item only when the user asks. Run `start` first. When finished, run `done` with the commit, PR, or outcome.\n'
-                 '- Reminders for the user, only when asked: `agent_reminder_cli.py` in the same folder, `add "text" --at "tomorrow 10:00"` (IST), `list`, `done R3`.\n')
-    listing, excerpts, waiting = [], [], []
+                 '- Work on an item when the user asks, or when your autonomy level tells you to work the backlog. '
+                 'Run `start` first. When finished, run `done` with the commit, PR, or outcome.\n'
+                 '- An item that is not the task this tab was started for goes to a new tab, at every autonomy level, also mid-work. '
+                 'Write a handoff note in the work-notes folder (goal, state, decisions, evidence, files, open PRs and branches, what not to redo). '
+                 'Run `agent_tab_cli.py start --owner self --name "B12 two to four words" --cwd ITEM_REPO "TASK"`; TASK gives the note path and says to run `start B12` first. '
+                 'Then leave the item and report the new tab name. Hand off one item, then stop.\n'
+                 '- Reminders for the user, only when asked: `agent_reminder_cli.py` in the same folder, `add "text" --at "tomorrow 10:00"` (Tether time zone), `list`, `done R3`.\n')
+    waiting = []
     if backlog_project is not None:
         import backlog as backlog_store  # backlog imports this module
         items, count = backlog_store.summary(backlog_project)
         if items:
             shown = ''.join(f'- {item[:100]}\n' for item in items)
             more = f'{count - len(items)} more: run `list`.\n' if count > len(items) else ''
-            waiting.append(f'\n### Open backlog items ({count})\n{shown}{more}')
-    if found:
-        listing.append('\n### Project notes\n' + ''.join(f'- {item["name"]}: {item["title"]}\n' for item in found))
-        for item in found[:NEWEST]:
-            body = _read(folder / 'notes' / item['name'], EXCERPT + 1).strip()
-            excerpts.append(f'\n### {item["name"]}\n{body[:EXCERPT]}{" …" if len(body) > EXCERPT else ""}\n')
-    if group:
-        listing += [group_listing] if group_listing else []
-        excerpts += group_excerpts
-    return _fit(parts + waiting + listing + excerpts, data['budget'])
+            waiting.append(((3, 0), f'\n### Open backlog items ({count})\n{shown}{more}'))
+    project_notes = _note_parts(pid, 'Project')
+    rules = ''.join(fixed)
+    fixed_chars = len(heading) + len(intro) + len(rules)
+    limit = min(data['budget'], BUDGET_MAX - fixed_chars)
+    fitted = _fit(content + waiting + project_notes + stack_notes, limit)
+    # Keep the project name on the heading line and the backlog list after the built-in rules.
+    title = ''.join(fitted[:1])
+    main = ''.join(fitted[1:len(content)])
+    extra = ''.join(fitted[len(content):])
+    prompt = heading + title + intro + main + rules + extra
+    return prompt, fixed_chars
 
 
 def state(pid, home=None):
     """What the Project sheet shows."""
     data = meta(pid)
-    preview = render(pid, 'claude', home)
+    preview, fixed_chars = _render(pid, data, home)
     return {'id': pid, 'name': data['name'], 'revision': data['revision'], 'budget': data['budget'],
-            'budget_min': BUDGET_MIN, 'budget_max': BUDGET_MAX, 'instructions': instructions(pid),
-            'pins': pins(pid, home), 'notes': notes(pid), 'preview': preview, 'chars': len(preview),
+            'budget_min': BUDGET_MIN, 'budget_max': BUDGET_MAX,
+            'usable_budget_max': max(BUDGET_MIN, BUDGET_MAX - fixed_chars), 'instructions': instructions(pid),
+            'pins': pins(pid, home), 'notes': notes(pid), 'preview': preview,
+            'chars': len(preview) - fixed_chars, 'fixed_chars': fixed_chars,
             'folder': str(bundle(pid))}
 
 

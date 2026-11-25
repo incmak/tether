@@ -5,6 +5,7 @@ so two devices never undo each other's Done marks. 'drafts' ({pane: {text, at}})
 cleared draft, kept for two days so an old copy on another device cannot bring it back.
 'repos' ({folder: [repo, ...]}) is the Changes panel's repository choice per parent folder; it merges per folder.
 'hosts' ([{name, url}, ...]) is the host menu's other Tether servers; the newest list wins.
+'timeZone' is the shared IANA time zone for Tether's clocks and schedules.
 'files.pinned' ([~/folder, ...]) is the Files explorer's pinned places; the newest list wins. Device-only choices (open pane, text size) never come here.
 """
 import json
@@ -14,14 +15,18 @@ import threading
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
-import paths
+
+if __package__:
+    from . import paths
+else:
+    import paths
 
 FILE = paths.CACHE / 'prefs.json'
 KEYS = {'pinned': list, 'sidePins': list, 'order': list, 'paneOrder': dict, 'sort': str, 'seen': dict, 'collapsed': dict,
         'showPaths': bool, 'tmuxWords': bool, 'liveReplyPreview': bool, 'voiceOff': bool, 'voiceSound': bool, 'theme': str, 'scheme': str, 'drafts': dict,
-        'archived': dict, 'archivedTabs': dict, 'autoResume': bool, 'layout': dict, 'repos': dict, 'files.pinned': list, 'hosts': list, 'sessionFolder': str,
+        'archived': dict, 'archivedTabs': dict, 'hideHelpers': bool, 'shownHelpers': dict, 'autoResume': bool, 'layout': dict, 'repos': dict, 'files.pinned': list, 'hosts': list, 'sessionFolder': str,
         'colors': dict, 'groups': list, 'groupOf': dict, 'groupBy': str, 'waitingOrder': str, 'attention': bool, 'imagePromptTuned': bool, 'mainModel': str,
-        'activity': bool, 'activityAgents': bool, 'uiUsage': bool}
+        'activity': bool, 'activityAgents': bool, 'uiUsage': bool, 'fridayActs': bool, 'task_auto_close': bool, 'timeZone': str}
 GROUP_ID = re.compile(r'[a-z0-9-]{1,40}')
 MAX_SEEN = 500
 MAX_DRAFTS = 200
@@ -39,7 +44,8 @@ def load():
     except (OSError, ValueError):
         data = {}
     prefs = data.get('prefs') if isinstance(data, dict) else None
-    return {'prefs': {key: value for key, value in (prefs or {}).items() if isinstance(value, KEYS.get(key, ()))},
+    prefs = prefs if isinstance(prefs, dict) else {}
+    return {'prefs': {key: value for key, value in prefs.items() if isinstance(value, KEYS.get(key, ()))},
             'version': data.get('version', 0) if isinstance(data, dict) and isinstance(data.get('version'), int) else 0}
 
 
@@ -75,7 +81,7 @@ def session_folder(value=None):
         if not folder.is_absolute():
             raise ValueError('Use an absolute folder path or a path that starts with ~/.')
     if not folder.is_dir() or not os.access(folder, os.R_OK | os.X_OK):
-        raise ValueError('The default session folder is unavailable. Choose an existing, accessible folder in Settings > Sessions.')
+        raise ValueError('The default session folder is unavailable. Choose an existing, accessible folder in Settings › General.')
     return str(folder.resolve())
 
 
@@ -88,6 +94,13 @@ def save(changes):
             session_folder(value)
         if key not in KEYS or not isinstance(value, KEYS[key]) or (KEYS[key] is int and isinstance(value, bool)):
             raise ValueError('Invalid preference: %s.' % key)
+        if key == 'timeZone':
+            if __package__:
+                from . import tether_zone
+            else:
+                import tether_zone
+            if not tether_zone.valid(value):
+                raise ValueError('Invalid preference: timeZone.')
         if key == 'files.pinned' and not (len(value) <= MAX_PINNED_FILES and all(isinstance(item, str) and 0 < len(item) <= 1024 for item in value)):
             raise ValueError('Invalid preference: %s.' % key)
         if key == 'sidePins':

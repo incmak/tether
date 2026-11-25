@@ -8,10 +8,12 @@ import { registerShareWorker } from './shared'
 import { reloadOnStaleChunk } from './staleChunk'
 import { guardFileDrops } from './chatDrop'
 import { HostView } from './HostView'
+import { trackFocus } from './hooks'
 
 registerShareWorker()
 reloadOnStaleChunk()
 guardFileDrops()
+trackFocus()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

@@ -1,7 +1,10 @@
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import unittest
+import io
 import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from urllib.parse import quote
 
@@ -113,6 +116,105 @@ class PushTests(unittest.TestCase):
         self.clock.return_value = 111
         notifier.observe(self.entry, {'state': 'Input needed', 'attention': {'id': 'second'}})
         self.assertEqual(send.call_args.args[0]['session'], '%7')
+
+
+class HelperPushTests(unittest.TestCase):
+    def setUp(self):
+        self.send = Mock()
+        self.clock = Mock(return_value=100)
+        self.status = self.enterContext(patch.object(server, 'shared_status', return_value={'state': 'Working'}))
+        self.prefs = self.enterContext(patch.object(server.prefs_sync, 'load', return_value={'prefs': {}}))
+        self.folder = Path.home() / 'project'
+        self.enterContext(patch.object(server.shell_log, 'moved', return_value=None))
+        self.entries = [
+            {'id': pane, 'agent': 'claude', 'thread': 'current', 'cwd': str(self.folder),
+             'owner_pid': 1, 'writable': True}
+            for pane in ('%1', '%2', '%3')
+        ]
+        helper = {'owner_pane': '%2', 'sent_at': 0, 'kind': 'helper'}
+        own = dict(helper, kind='own')
+        listing = ''.join(f'{pane}\t{group_by}\t\t{json.dumps(record)}\t$1\t\t\t\n'
+                          for pane, group_by, record in (('%1', '', helper), ('%2', '', own), ('%3', 'user', helper)))
+        self.listing = SimpleNamespace(returncode=0, stdout=listing)
+        self.run = self.enterContext(patch.object(server.subprocess, 'run', return_value=self.listing))
+        self.context = Mock(return_value=('', []))
+        self.finished_low = Mock(return_value=False)
+        self.notifier = server.NOTIFIER
+        self.enterContext(patch.object(server, '_QUIET_HELPERS', set()))
+        self.enterContext(patch.multiple(self.notifier, send=self.send, clock=self.clock, seen={},
+                                         watching=lambda _: False, levels=lambda: {}, context=self.context,
+                                         finished_low=self.finished_low, delivery=lambda: dict(push.DEFAULT_DELIVERY, low='silent')))
+
+    def finish(self, state='Idle'):
+        self.clock.return_value = 100
+        self.status.return_value = {'state': 'Working'}
+        server._observe_push(self.entries)
+        self.clock.return_value = 106
+        self.status.return_value = {'state': state}
+        server._observe_push(self.entries)
+        self.clock.return_value = 110
+        server._observe_push(self.entries)
+        return {payload['session']: (payload['priority'], urgent) for payload, urgent in
+                (call.args for call in self.send.call_args_list)}
+
+    def test_only_hidden_helpers_skip_important_completion(self):
+        self.assertEqual(self.finish(), {'%2': ('important', False), '%3': ('important', False)})
+        self.assertEqual(self.run.call_count, 3)  # one listing read per pass for all three panes
+        self.assertEqual(self.prefs.call_count, 3)
+
+    def test_hidden_helper_skips_low_completion_even_with_low_delivery_enabled(self):
+        self.finished_low.return_value = True
+        self.assertEqual(self.finish(), {'%2': ('low', False), '%3': ('low', False)})
+
+    def test_hidden_helper_sends_urgent_notifications(self):
+        self.entries = self.entries[:1]
+        cases = [
+            ('Idle', 'Please choose a branch.\n\nNeeds you: yes', 'Finished: Please choose a branch.'),
+            ('Approval', '', 'Needs approval'),
+            ('Input needed', '', 'Needs your input'),
+        ]
+        for state, reply, body in cases:
+            with self.subTest(state=state):
+                self.notifier.seen.clear()
+                self.send.reset_mock()
+                self.context.return_value = (reply, [])
+                self.assertEqual(self.finish(state), {'%1': ('urgent', True)})
+                self.send.assert_called_once()
+                self.assertEqual(self.send.call_args.args[0]['body'], body)
+
+    def test_preferences_use_the_listing_conversation_and_display_folder(self):
+        self.entries = self.entries[:1]
+        cases = [
+            ({'hideHelpers': False}, 'current', True),
+            ({'hideHelpers': 'false'}, 'current', False),
+            ({'shownHelpers': {'%1': {'dir': '~/project', 'thread': 'current'}}}, 'current', True),
+            ({'shownHelpers': {'%1': {'dir': '~/project', 'thread': 'other'}}}, 'current', False),
+            ({'shownHelpers': {'%1': {'dir': '~/other', 'thread': 'current'}}}, 'current', False),
+            ({'shownHelpers': {'%1': {'dir': '~/project', 'thread': None}}}, 'current', True),
+            ({'shownHelpers': {'%1': {'dir': '~/project', 'thread': 'other'}}}, None, True),
+            ({'shownHelpers': {'%1': {'dir': '~/project'}}}, None, False),
+            ({'shownHelpers': {'%1': {'dir': '~/project', 'thread': 3}}}, None, False),
+            ({'shownHelpers': {'%1': ['~/project', None]}}, None, False),
+        ]
+        for prefs, thread, should_send in cases:
+            with self.subTest(prefs=prefs, thread=thread):
+                self.notifier.seen.clear()
+                self.send.reset_mock()
+                self.entries[0]['thread'] = thread
+                self.prefs.return_value = {'prefs': prefs}
+                self.assertEqual(self.finish(), {'%1': ('important', False)} if should_send else {})
+
+    def test_visibility_read_failure_clears_previous_quiet_helpers(self):
+        self.entries = self.entries[:1]
+        for read, value in ((self.run, self.listing), (self.prefs, {'prefs': {}})):
+            with self.subTest(read='listing' if read is self.run else 'preferences'):
+                self.notifier.seen.clear()
+                self.send.reset_mock()
+                read.side_effect = [value, value, RuntimeError('unavailable')]
+                with patch('server.sys.stderr', new_callable=io.StringIO) as stderr:
+                    self.assertEqual(self.finish(), {'%1': ('important', False)})
+                self.assertEqual(stderr.getvalue(), "helper notification visibility failed: RuntimeError('unavailable')\n")
+                read.side_effect = None
 
 
 class ReplyPreviewTests(unittest.TestCase):

@@ -7,7 +7,7 @@ import type { Prefs } from './prefs'
 import { SortButton } from './Attention'
 import { ReminderRows } from './Attention'
 import type { DueReminders, ReviewEntry } from './Attention'
-import { LATE, waitingAsks } from './attention'
+import { LATE } from './attention'
 import { age } from './needs'
 import { SkeletonRows } from './Skeleton'
 import { catchUpGoals, finishedPanes, waitedSince, waitsOnYou } from './catchUp'
@@ -52,8 +52,8 @@ export function CatchUp({ sessions, prefs, update, selected, loaded, error, now,
   const keptPane = kept && kept.id === selected && !unread.some(pane => pane.id === kept.id) ? sessions.flatMap(session => session.panes)
     .find(pane => pane.id === kept.id && pane.finished === kept.finished && pane.state !== 'Working' && !waitsOnYou(pane, now, prefs.attention)) : undefined
   const finished = keptPane ? [...unread, keptPane].sort((a, b) => (b.finished ?? 0) - (a.finished ?? 0)) : unread
-  // The deck answers asks. A tab that waits only by its state (an approval with no ask) opens from its row.
-  const asks = prefs.attention ? waitingAsks(goals.flatMap(goal => goal.panes), now).length : 0
+  // The deck shows each tab that waits: an ask as its card, a wait by state only (an approval with no ask) as a card that opens the tab.
+  const asks = prefs.attention ? waiting : 0
   const working = runningPanes(sessions).filter(item => item.pane.state === 'Working')
   const markRead = () => update(current => ({ seen: { ...current.seen, ...Object.fromEntries(unread.map(pane => [pane.id, pane.finished ?? now])) } }))
   // The open row always shows, also past the first five.

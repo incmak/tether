@@ -1,4 +1,5 @@
 """Unnumbered Claude pickers use panel text and never receive an automatic Esc."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
@@ -83,13 +84,13 @@ class CursorPickerTests(unittest.TestCase):
         self.assertNotIn('Earlier chat', found['text'])
         self.assertNotIn('Worked for 9s', found['text'])
 
-    def test_numbered_menu_keeps_its_existing_fields(self):
+    def test_unverified_numbered_menu_keeps_the_question(self):
         screen = (Path(__file__).parent / 'fixtures' / 'claude_question_narrow.txt').read_text()
         found = self.attention(screen)
         self.assertEqual(found['reason'], 'menu')
         self.assertEqual(found['question'], 'Which data for the live screenshots?')
-        self.assertEqual([option['id'] for option in found['options']], [1, 2, 3, 4, 5])
-        self.assertEqual([option['text'] for option in found['options'] if option['selected']], ['Mask the real org'])
+        self.assertFalse(found['menu_verified'])
+        self.assertNotIn('options', found)
         self.assertNotIn('items', found)
         self.assertNotIn('title', found)
 

@@ -1,4 +1,5 @@
 """Codex hooks use isolated cache/config files and mocked terminal reads."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from datetime import datetime, timezone
 import contextlib
 import io

@@ -16,6 +16,7 @@ import { pickRowKey } from './pickKeys'
 import { rovingRows, useRovingStop } from './rovingRows'
 import type { PickKey } from './ChoiceExtras'
 import './InfoPanel.css'
+import { fmtDateTime, useTetherZone } from './zone'
 
 
 
@@ -52,8 +53,8 @@ function InfoPanel({ info, disabled, onAction }: { info: Attention; disabled: bo
   </div>
 }
 
-export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoose, onKey, onAction, onDialog, onAsk, onAskEngage, onType, onFocusReply, onPick, permissionsTab }: { onDialog?: (action: DialogAction) => Promise<string | null>; plan?: ChatData['plan']; approval: Approval | null; attention: Attention | null; agent: string; disabled: boolean; permissionsTab?: string | null
-  onChoose: (kind: 'approval' | 'menu', option: Choice, approval: Approval | null, feedback?: string) => Promise<void>; onKey: (key: string) => unknown; onAction?: (action: PromptAction) => Promise<string | null>; onAsk?: (ask: AskBridge, answers: Record<string, string | string[]> | null) => Promise<string | null>; onAskEngage?: (ask: AskBridge) => Promise<number | null>; onType?: (text: string, loginUrl?: string) => Promise<boolean>; onFocusReply?: () => void; onPick?: (row: number, labels: string[], then: PickKey) => Promise<unknown> }) {
+export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoose, onKey, onAction, onDialog, onAsk, onAskEngage, onType, onFocusReply, onPick, onOpenTerminal, permissionsTab }: { onDialog?: (action: DialogAction) => Promise<string | null>; plan?: ChatData['plan']; approval: Approval | null; attention: Attention | null; agent: string; disabled: boolean; permissionsTab?: string | null; onOpenTerminal?: () => void
+  onChoose: (kind: 'approval' | 'menu', option: Choice, approval: Approval | null, feedback?: string) => Promise<void>; onKey: (key: string) => unknown; onAction?: (action: PromptAction) => Promise<string | null>; onAsk?: (ask: AskBridge, answers: Record<string, string | string[]> | null) => Promise<string | null>; onAskEngage?: (ask: AskBridge) => Promise<number | null>; onType?: (text: string, loginUrl?: string) => Promise<boolean>; onFocusReply?: () => void; onPick?: (row: number | undefined, labels: string[] | undefined, then: PickKey, revision?: string, ticked?: boolean) => Promise<unknown> }) {
   const [feedback, setFeedback] = useState('')
   const [feedbackVoiceBusy, setFeedbackVoiceBusy] = useState(false)
   const feedbackId = useId()
@@ -73,17 +74,21 @@ export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoos
   const multiBox = current ? current.multi : choice?.selection === 'multi'
   const spaceKey = choice?.selection === 'multi' && choice.hints.some(hint => /\bspace\b/i.test(hint))
   const multiPick = choice?.selection === 'multi'
-  // A numbered list with boxes to tick (Space ticks the marked row): a click on a row ticks it, and Done sends Enter.
-  const tickPick = spaceKey && !!onPick && !approval
-  const tick = async (at: number) => { if (onPick && picked === null) await onPick(at, options.map(pickRowKey), 'Space') }
+  // A numbered list binds both ticking and submitting to the question shown.
+  const numberedMulti = !approval && !bridge && attention?.reason === 'menu' && multiBox
+  const pickRevision = numberedMulti ? attention.menu_verified || undefined : undefined
+  const tickPick = !!pickRevision && !!onPick
+  const tick = async (at: number) => { if (onPick && picked === null) await onPick(at, options.map(pickRowKey), 'Space', pickRevision, pickRevision ? !!checkedById.get(options[at]?.id) : undefined) }
   const roving = useRovingStop()
   const options = (approval ? (approval.actionable ? approval.options : undefined) : attention?.options) ?? []
-  // Done in a list with boxes: Enter on the marked row, through the checked pick route. The server refuses when the list
-  // closed or changed, so a late click never sends Enter to whatever the terminal shows next.
   const done = async () => {
-    const rows = picker?.items ?? options
+    if (numberedMulti) {
+      if (pickRevision) await onPick?.(undefined, options.filter(option => checkedById.get(option.id)).map(pickRowKey), 'Enter', pickRevision)
+      return
+    }
+    const rows = picker?.items ?? []
     const at = rows.findIndex(row => row.selected)
-    if (onPick && at >= 0) await onPick(at, rows.map(pickRowKey), 'Enter')
+    if (at >= 0) await onPick?.(at, rows.map(pickRowKey), 'Enter')
   }
   const keepPlanning = plan && approval?.actionable ? options.find(option => /^No,?\s+keep planning\b/i.test(option.text)) : undefined
   const panel = !approval && attention?.reason === 'panel'
@@ -106,6 +111,8 @@ export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoos
   const focusBox = () => { if (onFocusReply) onFocusReply(); else root.current?.closest('.chat-panel')?.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus() }
   // "Chat about this" closes the question so the user can talk it through: put them in the message box after it.
   const chat = (option: Choice) => !approval && option.text === 'Chat about this'
+  const optionRows = options.map((option, at) => ({ option, at, key: `row-${at}` }))
+    .filter(({ option }) => !numberedMulti || (!option.free && !chat(option)))
   const pick = async (option: Choice) => {
     if (feedbackVoiceBusy) return
     if (option.free) { focusBox(); return }
@@ -113,6 +120,15 @@ export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoos
     if (chat(option)) focusBox() }
   // A Claude slash-command dialog (/mcp, /config, /resume ...): its rows, tabs and keys as controls.
   const dialog = !approval && !plan && attention?.reason === 'dialog' ? attention.dialog : undefined
+  if (!approval && !plan && !bridge && attention && (attention.menu_verified === false || numberedMulti && !tickPick)) {
+    const questions = attention.question ? [attention.question] : attention.ask?.questions.map(item => item.question) ?? [attention.text]
+    return <section className="choice-dock open" aria-label={`${agent} asks`}>
+      <div className="choice-head"><span className="choice-mark" />{agent} asks</div>
+      <div className="choice-text">{questions.map((question, index) => <p key={index}><Linked text={question} /></p>)}</div>
+      <p className="choice-text">Answer this in the terminal.</p>
+      {onOpenTerminal && <div className="choice-keys"><button type="button" onClick={onOpenTerminal}>Open terminal</button></div>}
+    </section>
+  }
   if (dialog) return <section ref={root} className="choice-dock dialog-dock open" aria-label={`${agent} · ${dialog.title}`}>
     <div className="choice-head"><span className="choice-mark" />{agent} · {dialog.title}</div>
     <DialogCard dialog={dialog} disabled={disabled} onAction={onDialog ?? (async action => { await onKey(action.action === 'key' ? action.key : 'Escape'); return null })} />
@@ -160,7 +176,7 @@ export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoos
       </div>}
       {current && current.total > 1 && options.length > 0 && <p className="ask-progress">Question {current.index + 1} of {current.total} · {current.header}{current.multi ? ' · choose one or more' : ''}</p>}
       {!picker && choice && options.length > 0 && <ChoiceMeta choice={choice} />}
-      {options.length > 0 && <div className="choice-options" role="group" aria-label={attention?.question || 'Options'} onKeyDown={rovingRows} onFocus={roving.onFocus}>{options.map((option, at) => <button key={option.id} type="button" data-row={`row-${at}`} tabIndex={roving.tabFor(`row-${at}`, options.map((_, row) => `row-${row}`), `row-${Math.max(0, options.findIndex(item => item.selected))}`)} className={[option.selected ? 'current' : '', approval ? /^yes\b/i.test(option.text) ? 'accept' : /^no\b/i.test(option.text) ? 'decline' : '' : ''].filter(Boolean).join(' ')} disabled={disabled || picked !== null || feedbackVoiceBusy} onClick={() => void (tickPick ? tick(at) : pick(option))}>
+      {optionRows.length > 0 && <div className="choice-options" role="group" aria-label={attention?.question || 'Options'} onKeyDown={rovingRows} onFocus={roving.onFocus}>{optionRows.map(({ option, at, key }) => <button key={option.id} type="button" data-row={key} tabIndex={roving.tabFor(key, optionRows.map(row => row.key), optionRows.find(row => row.option.selected)?.key ?? optionRows[0].key)} className={[option.selected ? 'current' : '', approval ? /^yes\b/i.test(option.text) ? 'accept' : /^no\b/i.test(option.text) ? 'decline' : '' : ''].filter(Boolean).join(' ')} disabled={disabled || picked !== null || feedbackVoiceBusy} onClick={() => void (tickPick ? tick(at) : pick(option))}>
         <span className="choice-number">{picked === option.id ? '…' : option.id}</span>{checkedById.has(option.id) && <Box checked={checkedById.get(option.id)!} multi={multiBox} />}{option.free
           ? <span><strong>Type your own answer</strong><small>{option.text === 'Type something.' ? 'Write it in the message box below, then send.' : `In the terminal now: “${option.text}”. Your answer from the message box replaces it.`}</small></span>
           : <span><strong>{checkedById.has(option.id) ? option.text.replace(/^\[[ ✔xX]\]\s+/, '') : option.text}</strong>{chat(option) ? <small>Close the question and talk it through in the message box.</small> : option.detail && <small>{option.detail}</small>}</span>}</button>)}</div>}
@@ -172,7 +188,7 @@ export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoos
       {bridge || perms ? null : info ? <div className="choice-keys">{(info.body ?? text) && <CopyButton text={info.body ?? text} label="Copy panel text" className="copy-chip" />}</div> : <div className="choice-keys">
         {!options.length && !panel && !login && (picker && onPick ? multiPick ? ['Enter'] : [] : [...(picker ? [] : keys), ...(ask ? [] : ['Up', 'Down']), ...(spaceKey ? ['Space'] : []), ...(ask ? [] : ['Enter'])]).map(key => <button key={key} type="button" disabled={disabled} onClick={() => void (key === 'Enter' && picker && onPick ? done() : onKey(key))} aria-label={ask?.length === 1 && /^\d$/.test(key) ? `Choose ${key}: ${ask[0].options[Number(key) - 1]?.label ?? (Number(key) === ask[0].options.length + 1 ? 'Type something' : 'Chat about this')}` : undefined}>{key === 'Up' ? '↑' : key === 'Down' ? '↓' : key === 'Left' ? '← Question' : key === 'Tab' ? 'Question →' : key === 'Enter' && picker && onPick ? 'Done (Enter)' : key}</button>)}
         {!!options.length && current && current.total > 1 && ['Left', 'Tab'].map(key => <button key={key} type="button" disabled={disabled} onClick={() => onKey(key)}>{key === 'Left' ? '← Previous question' : 'Next question →'}</button>)}
-        {!!options.length && spaceKey && (tickPick ? ['Enter'] : ['Up', 'Down', 'Space', 'Enter']).map(key => <button key={key} type="button" disabled={disabled} onClick={() => void (key === 'Enter' && tickPick ? done() : onKey(key))}>{key === 'Up' ? '↑' : key === 'Down' ? '↓' : key === 'Enter' && tickPick ? 'Done (Enter)' : key}</button>)}
+        {!!options.length && tickPick && <button type="button" disabled={disabled} onClick={() => void done()}>Done (Enter)</button>}
         <button type="button" disabled={disabled} onClick={() => onKey('Escape')}>{options.length || picker ? 'Cancel (Esc)' : 'Close (Esc)'}</button>
         {!options.length && !login && !picker && text && <CopyButton text={text} label="Copy panel text" className="copy-chip" />}
       </div>}
@@ -235,7 +251,7 @@ function CronList({ crons, scheduled }: { crons: FooterCron[]; scheduled?: Recor
     const last = scheduled?.[job.id]
     return <li key={job.id}>
       <p className="live-task-title"><CalendarClock size={15} /><strong>{job.label}</strong></p>
-      <p className="live-meta">{job.every}{job.every !== job.schedule && <> · <code>{job.schedule}</code></>}{job.recurring ? '' : ' · runs once'}</p>
+      <p className="live-meta">{job.every}{!job.every.startsWith(job.schedule) && <> · <code>{job.schedule}</code></>}{job.recurring ? '' : ' · runs once'}</p>
       <p className="live-meta">{job.next != null ? `Next run about ${cronTime(job.next)}` : 'Next run: unknown for this schedule'}</p>
       <p className="live-label">Last run</p>
       {last ? <><p className="live-meta">{runTime(last.at)}</p>{last.result ? <p className="live-reason">{last.result}</p> : <p className="live-meta">No reply in that run yet.</p>}</> : <p className="live-meta">Not run yet in the loaded conversation.</p>}
@@ -245,6 +261,7 @@ function CronList({ crons, scheduled }: { crons: FooterCron[]; scheduled?: Recor
 
 // The goal's last check, the conversation's background tasks and their latest output, or its scheduled jobs.
 export function LiveSheet({ api, pane, show, taskDetails, crons, scheduled, onClose, onTerminal }: { api: Api; pane: Pane; show: 'goal' | 'tasks' | 'crons'; taskDetails?: FooterTask[]; crons?: FooterCron[]; scheduled?: Record<string, ScheduledRun>; onClose: () => void; onTerminal: () => void }) {
+  useTetherZone()
   const modal = useModal(true, onClose)
   const [stopping, setStopping] = useState<string | null>(null)
   const [stopError, setStopError] = useState('')
@@ -282,7 +299,7 @@ export function LiveSheet({ api, pane, show, taskDetails, crons, scheduled, onCl
     </li>)}</ul> : <p className="live-empty">No background tasks in this conversation.</p>)}
     {!hookTasks && state && show === 'tasks' && (state.tasks.length ? <ul className="live-tasks">{[...state.tasks.filter(task => task.state === 'running').reverse(), ...state.tasks.filter(task => task.state !== 'running').reverse().slice(0, 5)].map(task => <li key={task.id}>
       <p className="live-task-title">{task.kind === 'monitor' ? <Gauge size={15} /> : <Terminal size={15} />}<strong>{task.title || task.command}</strong></p>
-      <p className="live-meta">{task.kind === 'monitor' ? 'Monitor' : 'Shell'} · {task.state === 'running' ? 'Running' : 'Ended'} · {task.id}{task.started ? ` · started ${new Date(task.started * 1000).toLocaleString()}` : ''}</p>
+      <p className="live-meta">{task.kind === 'monitor' ? 'Monitor' : 'Shell'} · {task.state === 'running' ? 'Running' : 'Ended'} · {task.id}{task.started ? ` · started ${fmtDateTime(task.started * 1000)}` : ''}</p>
       {task.title && <code className="live-command">{task.command}</code>}
       {task.output ? <pre className="live-output">{task.output}</pre> : <p className="live-meta">No output yet.</p>}
       {task.kind === 'shell' && task.state === 'running' && <div className="live-actions"><button type="button" disabled={stopping !== null} onClick={() => void stop(task.id)}>{stopping === task.id ? 'Stopping…' : 'Stop'}</button></div>}
@@ -290,7 +307,7 @@ export function LiveSheet({ api, pane, show, taskDetails, crons, scheduled, onCl
     <div className="live-actions"><button type="button" className="secondary" onClick={() => { onClose(); onTerminal() }}><SquareTerminal size={16} />Open terminal</button></div>
   </dialog>
 }
-interface SearchMatch { id: string; role: string; kind?: string; time?: string; from_end: number; snippet: string }
+interface SearchMatch { id: string; role: string; source?: 'tether'; kind?: string; time?: string; from_end: number; snippet: string }
 // Finds words in the whole conversation (not only the loaded part). Tapping a result loads enough of the chat and scrolls to it.
 export function SearchSheet({ api, pane, shell, onClose, onPick }: { api: Api; pane: Pane; shell: boolean; onClose: () => void; onPick: (match: SearchMatch, maxLimit: number) => void }) {
   const modal = useModal(true, onClose)
@@ -325,7 +342,7 @@ export function SearchSheet({ api, pane, shell, onClose, onPick }: { api: Api; p
     {result && <p className="search-count" role="status">{result.total === 0 ? 'No messages found.' : `${result.total} ${result.total === 1 ? 'message' : 'messages'}${result.total > result.matches.length ? `, newest ${result.matches.length} shown` : ''}`}</p>}
     {result && !!result.matches.length && <ul className="search-results">{result.matches.map(match => <li key={match.id}>
       <button type="button" disabled={match.from_end > result.max_limit} onClick={() => onPick(match, result.max_limit)}>
-        <small>{match.kind === 'actions' ? 'Tools' : match.role === 'user' ? 'You' : 'Agent'}{match.time ? ` · ${since(Date.parse(match.time) / 1000)}` : ''}{match.from_end > result.max_limit ? ' · too far back to open' : ''}</small>
+        <small>{match.source === 'tether' ? 'Tether' : match.kind === 'advisor' ? 'Advisor' : match.kind === 'actions' ? 'Tools' : match.role === 'user' ? 'You' : 'Agent'}{match.time ? ` · ${since(Date.parse(match.time) / 1000)}` : ''}{match.from_end > result.max_limit ? ' · too far back to open' : ''}</small>
         <span>{marked(match.snippet)}</span>
       </button></li>)}</ul>}
   </dialog>

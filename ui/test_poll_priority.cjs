@@ -50,7 +50,7 @@ const advance = async ms => {
 
 async function requestPriority() {
   const seen = []
-  const { request } = load('api.ts', {}, { fetch: async (url, init) => { seen.push({ url, init }); return { ok: true, status: 200, headers: new Headers(), json: async () => ({}) } } })
+  const { request } = load('api.ts', { './zone': {} }, { fetch: async (url, init) => { seen.push({ url, init }); return { ok: true, status: 200, headers: new Headers(), json: async () => ({}) } } })
   await request('browser/agents', undefined, undefined, undefined, undefined, 'low')
   await request('sessions')
   await request('send', { text: 'x' })
@@ -111,7 +111,7 @@ async function projectMarks() {
   const effects = []
   const react = { useCallback: fn => fn, useEffect: fn => effects.push(fn), useState: init => [init, () => {}] }
   const stub = {}
-  const mod = load('Project.tsx', { react, './Skeleton': stub, './VoiceField': stub, './SelectMenu': stub, './api': { ApiError: Error, errorText: String }, './hooks': stub, './CodexLevel': stub, './CommitGate': stub, './ClaudeAdvisor': stub, './Autonomy': stub, './AdvisorLog': stub },
+  const mod = load('Project.tsx', { react, './Skeleton': stub, './VoiceField': stub, './SelectMenu': stub, './api': { ApiError: Error, errorText: String }, './hooks': stub, './CodexLevel': stub, './CommitGate': stub, './ClaudeAdvisor': stub, './Autonomy': stub, './AdvisorLog': stub, './LevelUndo': stub, './zone': stub },
     { setInterval: () => 1, clearInterval() {} })
   const seen = []
   mod.useProjectMarks((path, body, signal, method, timeout, priority) => { seen.push([path, priority]); return Promise.resolve({}) }, true)

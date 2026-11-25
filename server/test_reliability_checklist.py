@@ -1,4 +1,5 @@
 """Reliability checklist (B209): row parsing, diff triggers, and the three results on real temporary repositories."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import contextlib
 import io
 import json
@@ -12,6 +13,7 @@ from unittest.mock import patch
 
 import reliability_checklist as checklist
 import review_scope
+from unittest_environment import isolate
 
 ROOT = Path(__file__).resolve().parent.parent
 ROWS = '''# Checklist
@@ -128,6 +130,7 @@ class HitTests(unittest.TestCase):
 
 class RepositoryTests(unittest.TestCase):
     def setUp(self):
+        isolate()
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -334,7 +337,9 @@ class RepositoryTests(unittest.TestCase):
         self.commit('Stop script')
         run(self.repo, 'mv', 'tools/stop.sh', 'tools/old.sh')
         self.write('tools/stop.sh', 'echo stop\n')
-        self.assertIn('R1', [row['id'] for row in self.check()['rows']])
+        # tools/old.sh holds the trigger too: the hit must still name the committed path, not only the moved copy.
+        rows = {row['id']: row['files'] for row in self.check()['rows']}
+        self.assertIn('tools/stop.sh', rows.get('R1', []), rows)
         run(self.repo, 'reset', '-q', '--hard')
         run(self.repo, 'rm', '-q', '--cached', 'tools/stop.sh')  # the same, with git rm --cached
         self.write('tools/stop.sh', 'echo stop\n')

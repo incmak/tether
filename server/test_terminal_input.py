@@ -1,4 +1,5 @@
 """Permissions attention and guarded retry keys use saved screens and mocked writes."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 from pathlib import Path
@@ -87,6 +88,17 @@ class NumberedDraftTests(unittest.TestCase):
         with patch.object(terminal, 'capture', return_value=self.screen):
             self.assertEqual(terminal.prompt_draft(self.entry),
                              ['1. waiiting on me inside the chat i guess', '2. yes'])
+
+    def test_named_rule_distinguishes_a_claude_numbered_draft_from_a_menu(self):
+        lines = ['───────── Name ─', '❯ 1. text', '  2. more text', '────────────────']
+        self.assertTrue(terminal.claude_input_box(lines, 1))
+        self.assertFalse(terminal.menu_open('claude', lines))
+        lines[1] = '› 1. text'
+        self.assertTrue(terminal.menu_open('codex', lines))
+
+    def test_named_rule_rejects_a_numbered_menu_with_a_heavy_rule(self):
+        lines = ['───────── Name ─', '❯ 1. a', '  2. b', '━' * 16, '─' * 16]
+        self.assertFalse(terminal.claude_input_box(lines, 1))
 
     def test_chat_about_this_under_rule_stays_a_menu(self):
         rule = '─' * 80

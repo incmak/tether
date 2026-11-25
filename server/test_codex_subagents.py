@@ -1,4 +1,5 @@
 """Codex 0.170 worker rollouts and thread index, with synthetic text and IDs."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from datetime import datetime, timezone
 import json
 from pathlib import Path

@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 
 import graph_client
 import paths
+import tether_zone
 import work_fix
 import work_items
 from projects import ProjectError
@@ -247,7 +248,7 @@ def _activity(root):
 
 
 def _stamp(epoch):
-    return time.strftime('%d %b %H:%M', time.localtime(epoch))
+    return tether_zone.stamp(epoch, '%d %b %H:%M')
 
 
 def teams(target, since, state, client=None):

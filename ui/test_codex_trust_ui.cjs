@@ -3,10 +3,10 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, shotsDir, prefsStore } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-15/b82-codex-trust/shots')
+const SHOTS = shotsDir('b82-codex-trust')
 const sizes = [[320, 700], [1280, 900]]
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json', '.webmanifest': 'application/manifest+json' }
 const FOLDER = '/workspace/app/packages/web'
@@ -19,7 +19,7 @@ const fixture = {
   chat: { messages: [], busy: false, thread: 't2', agent: 'codex', writable: true, session: '%2', earlier: 0, limit: 100, state: 'Idle', approval: null },
   footer: { observed: true, model: 'gpt-test', mode: 'default', notices: [] },
   subagents: { main: { model: null, context: null, title: null }, agents: [], tasks: [] },
-  prefs: { prefs: {}, version: 1 }, 'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
+  'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
   update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Test server', office: false },
   catalog: { commands: [], plugins: [], mcp: [], note: '' }, stream: {}, 'codex-runs': { pane: '%2', running: 0, runs: [] },
   'browser/agents': { enabled: false, available: false, reason: 'off', agents: [], asks: [] },
@@ -60,11 +60,13 @@ async function main() {
     page.on('console', message => { if (message.type() === 'error' && !message.text().startsWith('Failed to load resource')) pageErrors.push(message.text()) })
     await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'light' })
     await page.routeWebSocket('**/*', socket => socket.close())
+    const prefs = prefsStore()
     await page.route('**/*', async route => {
       const request = route.request(), url = new URL(request.url())
       if (url.pathname.endsWith('/sw.js')) return route.fulfill({ status: 404, body: '' })
       if (url.pathname.includes('/api/')) {
         const endpoint = url.pathname.split('/api/')[1]
+        if (endpoint === 'prefs') return route.fulfill({ json: request.method() === 'GET' ? prefs.get() : prefs.post(request.postDataJSON()) })
         if (request.method() !== 'GET') {
           const body = request.postDataJSON(); posts.push({ endpoint, body })
           if (endpoint === 'passkeys' && body.op === 'options') return route.fulfill({ json: { challenge_id: `c${posts.length}`,

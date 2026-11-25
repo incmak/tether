@@ -1,5 +1,6 @@
 """Lesson checks use temporary files and mocked models, never live agents or tmux."""
-from datetime import datetime
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -9,6 +10,7 @@ from threading import Barrier, Thread
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import advisor
 import autonomy
@@ -16,6 +18,7 @@ import decisions
 import lessons
 import lessons_check as check
 import paths
+import tether_zone
 
 PID = 'abcdef012345'
 LABEL = 'Claude, Fable 5.2 (latest), high effort'
@@ -99,7 +102,7 @@ class LessonsCheck(unittest.TestCase):
 
     def test_start_refuses_disabled_empty_and_running(self):
         self.settings.return_value = {'main': advisor.OFF}
-        with self.assertRaisesRegex(ValueError, 'Turn on the advisor in Settings › Agents first.'):
+        with self.assertRaisesRegex(ValueError, 'Turn on the advisor in Settings › Models & helpers first.'):
             check.start()
         self.settings.return_value = {'main': self.main}
         with self.assertRaisesRegex(ValueError, 'There are no lessons to check.'):
@@ -186,13 +189,16 @@ class LessonsCheck(unittest.TestCase):
         self.assertFalse(check._running)
 
     def test_prompt_has_only_requested_lesson_fields_and_bounded_project_evidence(self):
-        row = self.add(quote='The user said this.')
+        created = datetime(2026, 11, 21, 20, tzinfo=timezone.utc)
+        with patch.object(lessons.time, 'time', return_value=created.timestamp()):
+            row = self.add(quote='The user said this.')
         lessons.dispute(PID, row['id'], '%1', 'The notes say otherwise.')
         global_row = self.add('When global checks fail, read the notes.')
         lessons.keep(PID, global_row['id'])
         lessons.promote(PID, global_row['id'])
         answers = [dict(question='q' * 350, answer='a' * 500) for _ in range(25)]
-        with patch.object(decisions, 'entries', return_value=answers) as entries:
+        with (patch.object(decisions, 'entries', return_value=answers) as entries,
+              patch.object(tether_zone, 'zone', return_value=ZoneInfo('Asia/Kolkata'))):
             text = check._prompt(lessons.all_entries()['lessons'])
         entries.assert_called_once_with(PID)
         self.assertIn('Never guess', text)
@@ -207,7 +213,7 @@ class LessonsCheck(unittest.TestCase):
         project_row = payload[1]
         self.assertEqual(set(project_row), {'id', 'project_name', 'kind', 'text', 'status', 'hits',
                                            'created', 'quote', 'disputes'})
-        self.assertEqual(project_row['created'], datetime.fromtimestamp(row['created']).strftime('%Y-%m-%d'))
+        self.assertEqual(project_row['created'], '2026-11-22')
         self.assertEqual(project_row['disputes'], ['The notes say otherwise.'])
         self.assertEqual(project_row['quote'], 'The user said this.')
         with patch.object(decisions, 'entries', side_effect=OSError('bad answers')):

@@ -2,7 +2,8 @@
 """Apply tagged Tether releases with a health check and automatic rollback; message many agent panes (broadcast);
 change work board items (item: run `tether item --help`), keep a triage ledger as items (triage: run `tether triage
 --project P --view FILE help`), connect Jira (jira: run `tether jira --help`), connect
-Microsoft 365 for feeds (graph: run `tether graph --help`) and show the feeds (feed: run `tether feed --help`)."""
+Microsoft 365 for feeds (graph: run `tether graph --help`), show the feeds (feed: run `tether feed --help`),
+and read Microsoft task sources (tasks: run `tether tasks --help`)."""
 import argparse
 import contextlib
 import fcntl
@@ -41,10 +42,19 @@ def run(command, quiet=False):
     if not quiet:
         subprocess.run(command, check=True, timeout=600)
         return
-    # Hide the long plan on success; show it when the command fails. Warnings stay on stderr.
+    # Keep the JSON plan quiet; show failed checks or plain text on failure.
     result = subprocess.run(command, stdout=subprocess.PIPE, text=True, timeout=600)
     if result.returncode:
-        sys.stdout.write(result.stdout)
+        try:
+            plan = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            plan = None
+        if isinstance(plan, dict) and isinstance(plan.get('checks'), list):
+            for check in plan['checks']:
+                if isinstance(check, dict) and check.get('ok') is False and 'name' in check:
+                    print(f'FAIL: {check["name"]}')
+        else:
+            sys.stdout.write(result.stdout)
         raise subprocess.CalledProcessError(result.returncode, command)
 
 
@@ -253,17 +263,25 @@ def migrate(args, root, state_file, state):
             shutil.rmtree(target)
         raise RuntimeError(f'{error}; rolled back to checkout {checkout}') from error
     print(f'Migrated to v{target.name}. Checkout {checkout} is no longer used and can be removed by you.')
+    print(f'Result: PASS (migrated to v{target.name})')
     return 0
 
 
-def activate(root, target, state_file, state):
+def activate(root, target, state_file, state, verbose=False):
     link = root / 'current'
     old = link.resolve(strict=True)
     backup = snapshot(state_file)
     try:
         # Stage stable unit paths before changing the running release.
-        run([sys.executable, str(target / 'install.py'), '--apply', '--no-build-ui',
-             '--release-current', str(link), '--defer-restart'])
+        installer = target / 'install.py'
+        command = [sys.executable, str(installer), '--apply', '--no-build-ui',
+                   '--release-current', str(link), '--defer-restart']
+        if verbose:
+            if '--verbose' in installer.read_text():
+                command.append('--verbose')
+            else:
+                print(f'Note: v{target.name} install.py has no --verbose; showing its default output.', flush=True)
+        run(command)
         switch(link, target)
         new_state = json.loads(state_file.read_text())
         restart(new_state)
@@ -428,9 +446,12 @@ def main(argv=None):
     if argv[:1] == ['jira']:  # Jira on Done for the work board: the token is asked for, never on the command line
         import agent_jira_cli
         return agent_jira_cli.main(argv[1:])
-    if argv[:1] in (['graph'], ['feed']):  # work board feeds: Microsoft 365 sign-in (device code), feed state
+    if argv[:1] in (['graph'], ['feed']):
         import agent_feed_cli
         return (agent_feed_cli.graph_main if argv[0] == 'graph' else agent_feed_cli.feed_main)(argv[1:])
+    if argv[:1] == ['tasks']:
+        import task_sources
+        return task_sources.main(argv[1:])
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
     update = commands.add_parser('update')
@@ -438,8 +459,10 @@ def main(argv=None):
     update.add_argument('--yes', action='store_true')
     update.add_argument('--auto', action='store_true')
     update.add_argument('--report', action='store_true', help='Save the update result for the web UI.')
+    update.add_argument('--verbose', action='store_true')
     update.add_argument('--to')
-    commands.add_parser('rollback')
+    rollback = commands.add_parser('rollback')
+    rollback.add_argument('--verbose', action='store_true')
     for name in ('install', 'migrate'):
         command = commands.add_parser(name, help='Prepare a release' if name == 'install' else 'Move a checkout install to a release')
         command.add_argument('--to')
@@ -490,8 +513,8 @@ def main(argv=None):
                 target = releases / previous
                 if not target.is_dir() or target.is_symlink() or target == old:
                     raise ValueError('No previous release is available')
-                activate(root, target, state_file, state)
-                print('Rolled back to v' + target.name)
+                activate(root, target, state_file, state, verbose=args.verbose)
+                print(f'Result: PASS (rolled back to v{target.name})')
                 return 0
             if args.auto and updates.mode() != 'auto':
                 print('Automatic updates are disabled')
@@ -524,7 +547,7 @@ def main(argv=None):
                 try:
                     shutil.copytree(stage, partial)
                     partial.rename(target)
-                    activate(root, target, state_file, state)
+                    activate(root, target, state_file, state, verbose=args.verbose)
                 except Exception:
                     if partial.exists():
                         shutil.rmtree(partial)
@@ -532,10 +555,11 @@ def main(argv=None):
                         if target.exists():
                             shutil.rmtree(target)
                     raise
-            print('Updated to v' + ver)
+            print(f'Result: PASS (updated to v{ver})')
             return 0
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, EOFError, subprocess.SubprocessError, tarfile.TarError) as error:
         print(str(error), file=sys.stderr)
+        print('Result: FAIL (see the error above)')
         return 1
 
 

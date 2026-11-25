@@ -74,3 +74,26 @@ diff is ignored.
 - Text: `rounds|paused|restart|agent_prompt|turn_source`
 - Check: A background turn or a prompt from another agent does not reset the round counts or remove the pause. The third failed review goes to the user. Run `test_review_links`.
 - Incident: B189, commit 0d540df (a review ran 14 rounds)
+
+## R11: Server tests use private state and store reads leave files unchanged
+- Paths: ^server/(paths|unittest_environment|review_links)\.py$
+- Check: Run test_xplat_paths.TestStoreIsolation and the legacy store read and backup test in test_review_links. Each store path stays outside the account home. A read leaves the original file unchanged. The first write preserves the original bytes in a rollback copy.
+- Incident: B278, 2026-11-18, two test runs rewrote the live review store during migration
+
+## R12: UI tests never default to a dated release folder
+- Paths: ^ui/.*\.cjs$
+- Text: release-work/20
+- Check: The test gets its screenshot folder from `shotsDir()` in `ui/browser_test_helper.cjs`. Without `SHOTS` it writes to a scratch folder. Only `SHOTS` or an explicit flag such as `verify.cjs --shots` points a run at a dated `.release-work` folder.
+- Incident: B219, 2026-11-17, a run of test_responsive_chat_ui.cjs replaced the 2026-11-16 release screenshots
+
+## R13: A review checks the worktree named in its request
+- Paths: `^server/(server|review_links)\.py$`
+- Text: `\breview_(folder|gate_records)\b|\b_review_entry\b`
+- Check: Run `test_review_scope`. A worker that commits in another worktree gets a review of that worktree. The approval checks its HEAD and status even if a later gate record names a different folder.
+- Incident: B363, 2026-11-19, reviews named the worker tab's start folder after the worker committed in another worktree.
+
+## R14: Tests stop their private tmux servers
+- Paths: `^server/test_.*\.py$`
+- Text: `new-session`
+- Check: Use `private_tmux` from `server/test_tmux_isolation.py`. The detached watcher starts each server as its own foreground child on a private socket with `-f /dev/null`. Clients use `-N` to prevent replacement servers. The watcher reaps its children before it removes their folders, even if `timeout` kills the test process.
+- Incident: B465; note test-tmux-leak.md

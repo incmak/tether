@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.331
+▝▜██████▀  Opus 5.5 with medium effort · Claude Ultra
+ ▝▝   ▝▝   ~/apps/tether
+
+
+❯ Do not run any tools. Reply with exactly these lines and nothing else:
+  Status table: the tab status is Working (ui/src/Chat.tsx:1190).
+  Footer text says esc to interrupt when busy.
+  ✻ Working… (3m 2s · ↓ 1.2k tokens)
+  ● Reviewing… the fixture
+  - Loading… more
+    Needs you: no
+
+● Status table: the tab status is Working (ui/src/Chat.tsx:1190).
+  Footer text says esc to interrupt when busy.
+  ✻ Working… (3m 2s · ↓ 1.2k tokens)
+  ● Reviewing… the fixture
+  - Loading… more
+    Needs you: no
+
+✻ Cogitated for 3s · done 8:32 AM
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 5.5 | ctx 6% (56k/1000k) | 7d 56% | tether | main
+  ⏵⏵ auto mode on (shift+tab to cycle)

@@ -24,10 +24,28 @@ const REDIRECTS = new Set([301, 302, 303, 307, 308])
 // shows. A shot counts only when the landmark is visible and exposed. ctx: { width, phone, pane, thread, url }.
 const SURFACES = {
   chat: {
-    about: 'The fixture chat: four messages and the composer',
+    about: 'The fixture chat and the composer',
     open: async () => {},
     landmark: '.app-shell .composer-area form.composer',
     ready: async page => { await page.locator('.chat-page').getByText('The mock conversation stays with this test.').first().waitFor() },
+  },
+  'chat-advisor': {
+    about: 'An expanded advisor answer and an advisor error',
+    open: async page => {
+      const rows = page.locator('.chat-page .advisor-call')
+      await rows.filter({ hasText: '1m 15s · Fable 5.2' }).locator('summary').press('Enter')
+      await rows.filter({ has: page.locator('.tool-error') }).scrollIntoViewIfNeeded()
+    },
+    landmark: '.chat-page .advisor-call[open] .advisor-call-body',
+  },
+  'chat-review': {
+    about: 'A review request card, opened: the commit, the reply format and the rules',
+    open: async page => {
+      const card = page.locator('.chat-page details.review-message').first()
+      await card.locator('summary').press('Enter')
+      await card.locator('.review-meta code').first().scrollIntoViewIfNeeded()
+    },
+    landmark: '.chat-page details.review-message[open] .review-meta code >> nth=0',
   },
   settings: {
     about: 'The Settings dialog',
@@ -399,14 +417,47 @@ function landmarkCover(landmark) {
 async function useContext(context, info) {
   const existing = new Set(context.pages())
   const pages = new Set()
+  const pageNavigation = new Map()
+  const observedRequests = new WeakMap()
   const requestShots = new WeakMap()
   const origin = new URL(info.url).origin
-  let shot, opening
+  let shot, opening, order = 0
+  const setAwaiting = (request, awaiting) => {
+    const observed = observedRequests.get(request)
+    const navigation = observed?.mainNavigation && pageNavigation.get(observed.page)
+    if (navigation) navigation.awaiting = awaiting
+  }
   const events = {
     page(page) {
       if (page.isClosed() || existing.has(page)) return
       pages.add(page)
-      page.once('close', () => pages.delete(page))
+      const navigation = { awaiting: false, commit: 0, stop }
+      const pageEvents = {
+        framenavigated(frame) {
+          if (frame !== page.mainFrame() || !navigation.awaiting) return
+          navigation.awaiting = false
+          navigation.commit = ++order
+        },
+        domcontentloaded() {
+          if (!navigation.commit) return
+          // A replaced document may never report request completion, so stop waiting for its requests.
+          if (shot) {
+            for (const request of shot.pending) {
+              const observed = observedRequests.get(request)
+              if (observed?.page === page && observed.order < navigation.commit) shot.pending.delete(request)
+            }
+          }
+          navigation.commit = 0
+        },
+        close: stop,
+      }
+      function stop() {
+        for (const [event, handler] of Object.entries(pageEvents)) page.off(event, handler)
+        pageNavigation.delete(page)
+        pages.delete(page)
+      }
+      pageNavigation.set(page, navigation)
+      for (const [event, handler] of Object.entries(pageEvents)) page.on(event, handler)
     },
     weberror(error) {
       const page = error.page()
@@ -415,15 +466,17 @@ async function useContext(context, info) {
       }
     },
     request(request) {
+      let frame
+      try { frame = request.frame() } catch { /* A popup's first navigation can precede its frame. Worker requests have no page. */ }
+      const page = frame?.page()
+      const isNavigation = request.isNavigationRequest()
+      const mainNavigation = isNavigation && page && frame === page.mainFrame()
+      observedRequests.set(request, { page, order: ++order, mainNavigation })
+      setAwaiting(request, false)
       if (!shot || shot.closing) return
       const url = new URL(request.url())
       if (url.origin !== origin) return
-      try {
-        if (existing.has(request.frame().page())) return
-      } catch {
-        // A popup's first navigation can precede its frame. Worker requests have no page.
-        if (!request.isNavigationRequest() || request.serviceWorker()) return
-      }
+      if (existing.has(page) || (!page && (!isNavigation || request.serviceWorker()))) return
       requestShots.set(request, shot)
       shot.requests.add(request.method() + ' ' + url.pathname)
       if (url.pathname.startsWith(API)) shot.pending.add(request)
@@ -432,6 +485,7 @@ async function useContext(context, info) {
       requestShots.get(request)?.pending.delete(request)
     },
     requestfailed(request) {
+      setAwaiting(request, false)
       const current = requestShots.get(request)
       const pending = current?.pending.delete(request)
       // The page cancels a poll when a newer one starts (ERR_ABORTED). That is not a failed answer.
@@ -441,6 +495,7 @@ async function useContext(context, info) {
     },
     response(response) {
       const request = response.request()
+      setAwaiting(request, true)
       const current = requestShots.get(request)
       if (current && !current.closing) {
         current.answer(request.method(), new URL(request.url()).pathname, response.status(), response.headers()['x-tether-verify-blocked'] === '1')
@@ -450,6 +505,7 @@ async function useContext(context, info) {
   for (const [event, handler] of Object.entries(events)) context.on(event, handler)
   const stopObserving = () => {
     for (const [event, handler] of Object.entries(events)) context.off(event, handler)
+    for (const navigation of pageNavigation.values()) navigation.stop()
   }
   let unroute
   try {
@@ -475,7 +531,7 @@ async function useContext(context, info) {
         if (opening) await opening.catch(() => {})
         while (pages.size) await Promise.all([...pages].map(async page => {
           await page.close().catch(error => { if (!/has been closed/.test(error.message)) throw error })
-          pages.delete(page)
+          pageNavigation.get(page)?.stop()
         }))
       })(), 5000, 'The verify pages did not close.')
     },

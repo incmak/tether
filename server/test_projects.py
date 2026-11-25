@@ -1,3 +1,4 @@
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 import os
@@ -15,6 +16,7 @@ import projects
 import projects_api
 
 PID = 'a1b2c3d4e5f6'
+STACK = {'pid': 'b1b2c3d4e5f6', 'name': 'Docs'}
 
 
 class Run:
@@ -82,13 +84,14 @@ class ProjectTests(unittest.TestCase):
         self.assertIn('## Notes', text)
         self.assertIn(str(projects.bundle(PID) / 'notes'), text)
         self.assertNotIn('## Instructions', text)
+        self.assertNotIn('\n### Project notes\n', text)
         self.assertIn('@chat_icon', text)  # agents learn to set their tab icon
         # Count the notes and code paths at a typical install length, not the test or CI folder length.
         code = str(Path(projects.__file__).resolve().parent.parent)
-        real = text.replace(str(projects.bundle(PID)), f'/srv/user/.tether/projects/{PID}')
+        real = text.replace(str(paths.TETHER), '/srv/user/.tether')
         real = real.replace(code, '/srv/user/apps/tether')
         real = real.replace(sys.executable, '/usr/bin/python3')  # CI's interpreter path is about 36 characters longer
-        self.assertLess(len(real), 3770)  # +150 subagents-first rule, +150 worker tab for a separate task (2026-11-14), +100 close --self (2026-11-15), +220 watchers use Monitor (2026-11-17), +145 reminders CLI (2026-11-18)
+        self.assertLess(len(real), 4500)  # Keep the built-in guidance below half of the prompt cap.
         self.assertIn('use Monitor', text)
         self.assertLess(text.index('## Claims of absence'), text.index('## Watchers'))
         self.assertLess(text.index('## Watchers'), text.index('## New tabs and reviewers'))
@@ -102,7 +105,7 @@ class ProjectTests(unittest.TestCase):
         self.assertIn('Use your own subagents', text[text.index('## New tabs and reviewers'):text.index('## Backlog')])
         self.assertIn(str(Path(projects.__file__).with_name('agent_tab_cli.py')), text)
         for option in ('--review-it', '--reviews-me', '--agent claude|codex', '--name NAME',
-                       '--cwd DIR', '--worktree BRANCH', '--context', 'stop --worker %N [--reviewer %N]', '`list`',
+                       '--cwd DIR', '--worktree BRANCH', '--context', '--owner self|%N', 'stop --worker %N [--reviewer %N]', '`list`',
                        '`escalate --pane %N` sends a helper tab\'s paused review to Mak.',
                        '`link --worker %N --reviewer %N` makes one open tab review another.', 'Start your review reply with APPROVED when nothing is wrong.',
                        'send --pane %N "text"', 'wait --pane %N [--timeout SECONDS]',
@@ -112,7 +115,7 @@ class ProjectTests(unittest.TestCase):
             'not raw tmux. Options: `--review-it` '
             '(this tab reviews each turn of the new tab), '
             '`--reviews-me` (the new tab reviews this tab), ', text)
-        self.assertIn("`--stack GOAL` (1–3 words; names the new tab. It opens in this tab's stack, or in none; `--stack Unstacked` = none)", text)
+        self.assertIn("`--stack GOAL` (1–3 words; names the new tab. A helper opens in its owner's stack; `--stack Unstacked` = none)", text)
         self.assertIn(
             'Start your review reply with APPROVED when nothing is wrong. '
             '`send --pane %N "text"` (`-` = stdin) steers a tab you started. '
@@ -123,10 +126,27 @@ class ProjectTests(unittest.TestCase):
         self.assertIn('Asked to close this tab: run `close --self`', text)
         self.assertFalse(projects.has_context(PID, self.home))
         state = projects.state(PID, self.home)
-        self.assertEqual((state['chars'] > 0, state['revision']), (True, 0))
+        self.assertEqual((state['chars'], state['fixed_chars'], state['revision']), (0, len(text), 0))
         projects.set_name(PID, 'web')
         projects.mark_seen(PID)
         self.assertFalse(projects.bundle(PID).exists())
+
+    def test_backlog_guidance_defers_to_autonomy(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                text = projects.render(PID, agent)
+                backlog_section = text.split('\n## Backlog\n', 1)[1]
+                self.assertIn(
+                    '- Work on an item when the user asks, or when your autonomy level tells you to work the backlog. '
+                    'Run `start` first. When finished, run `done` with the commit, PR, or outcome.',
+                    backlog_section.splitlines(),
+                )
+                handoff = next(line for line in backlog_section.splitlines()
+                               if line.startswith('- An item that is not the task this tab was started for goes to a new tab'))
+                for part in ('at every autonomy level, also mid-work', 'handoff note in the work-notes folder',
+                             'what not to redo', '`agent_tab_cli.py start --owner self --name "B12 two to four words" --cwd ITEM_REPO "TASK"`',
+                             'run `start B12` first', 'report the new tab name', 'Hand off one item, then stop.'):
+                    self.assertIn(part, handoff)
 
     def test_instructions_count_revisions_and_refuse_a_stale_save(self):
         projects.set_instructions(PID, 'Use pnpm.', 0)
@@ -139,20 +159,135 @@ class ProjectTests(unittest.TestCase):
         self.assertIn('## Instructions\nUse pnpm.', text)
         self.assertIn('Project guidance from Tether', text)
 
-    def test_render_stays_inside_the_budget(self):
-        projects.set_instructions(PID, 'x' * 20000, 0)
+    def test_small_budget_cuts_instructions_and_keeps_all_builtin_guidance(self):
+        projects.set_instructions(PID, 'Use pnpm.', 0)
         projects.set_name(PID, 'web')
-        text = projects.render(PID)
-        self.assertTrue(text.startswith('# Tether project: web\n'))
-        self.assertIn(f'Project folder: {projects.bundle(PID)}\n', text)
-        self.assertIn('\n## Notes\n', text)
-        self.assertLessEqual(len(text), projects.BUDGET)
+        full = projects.render(PID)
+        projects.set_budget(PID, 1000, 1)
+        instructions = 'Use pnpm.\n' * 1000 + 'End of instructions.'
+        projects.set_instructions(PID, instructions, 2)
+        state = projects.state(PID, self.home)
+        preview = state['preview']
+        intro, rules = full.split('\n## Instructions\nUse pnpm.\n')
+        self.assertTrue(preview.startswith(intro))
+        self.assertTrue(preview.endswith(rules))
+        self.assertIn('\n## Instructions\nUse pnpm.\n', preview)
+        self.assertIn('Cut to fit', preview)
+        self.assertNotIn('End of instructions.', preview)
+        self.assertLessEqual(state['chars'], 1000)
+        self.assertEqual(state['chars'] + state['fixed_chars'], len(preview))
+        self.assertEqual(state['budget'], 1000)
+        self.assertEqual(projects.instructions(PID), instructions + '\n')
+
+    def test_full_prompt_stays_under_the_cap_with_the_largest_budget(self):
+        projects.set_instructions(PID, 'Use pnpm.\n' * 1000, 0)
         projects.set_budget(PID, 10000, 1)
-        text = projects.render(PID)
-        self.assertLessEqual(len(text), 10000)
-        self.assertIn('Cut to fit', text)
+        state = projects.state(PID, self.home)
+        self.assertLessEqual(len(state['preview']), 10000)
+        self.assertGreater(len(state['preview']), 9900)
+        self.assertIn('Cut to fit', state['preview'])
+        self.assertIn('\n## Backlog\n', state['preview'])
+        self.assertEqual(projects.meta(PID)['budget'], 10000)
         with self.assertRaises(projects.ProjectError):
             projects.set_budget(PID, 50000, 2)
+
+    def test_default_budget_keeps_notes_and_instructions_with_long_paths(self):
+        short_tether = paths.TETHER
+        # Fixed paths of a typical install, so the real checkout and interpreter paths of the test run do not count (B291).
+        short_checkout, short_python = Path('/srv/user/apps/tether'), Path('/usr/bin/python3')
+        # About 150 more characters per path, 7 path copies in all. The guidance stays under BUDGET_MAX - BUDGET,
+        # so the default budget must stay whole. Before 8127a1b the guidance used the budget and cut the notes.
+        long_tether = short_tether / ('state-' + 'x' * 144)
+        long_checkout = short_checkout / ('checkout-' + 'x' * 141)
+        long_python = short_python.parent / ('python-' + 'x' * 143) / short_python.name
+        stack = {'pid': 'b1b2c3d4e5f6', 'name': 'Docs'}
+        instructions = 'Use pnpm.'
+        project_note = '# Setup\nRun make.'
+        stack_note = '# Chart\nUse the bar chart.'
+
+        for tether in (short_tether, long_tether):
+            with mock.patch.object(paths, 'TETHER', tether):
+                projects.set_instructions(PID, instructions, 0)
+                projects.write_note(PID, 'setup.md', project_note)
+                projects.write_note(stack['pid'], 'chart.md', stack_note)
+
+        for group in (None, stack):
+            with self.subTest(group=group):
+                rendered = {}
+                for name, tether, checkout, python in (('short', short_tether, short_checkout, short_python),
+                                                       ('long', long_tether, long_checkout, long_python)):
+                    with (
+                        mock.patch.object(projects, '__file__', str(checkout / 'server/projects.py')),
+                        mock.patch.object(sys, 'executable', str(python)),
+                        mock.patch.object(paths, 'TETHER', tether),
+                    ):
+                        rendered[name] = projects.render(PID, home=self.home, group=group)
+                short, long = rendered['short'], rendered['long']
+
+                self.assertNotIn('Cut to fit', long)
+                self.assertNotIn('Cut to fit', short)
+                self.assertIn(f'\n## Instructions\n{instructions}\n', short)
+                self.assertIn(f'\n#### setup.md\n{project_note}\n', short)
+                if group:
+                    self.assertIn(f'\n#### chart.md\n{stack_note}\n', short)
+                normalized = long.replace(str(long_tether), str(short_tether))
+                normalized = normalized.replace(str(long_checkout), str(short_checkout))
+                normalized = normalized.replace(str(long_python), str(short_python))
+                self.assertEqual(normalized, short)
+
+    def _content(self, group=None):
+        """The rendered text and the part of it that uses the project budget."""
+        prompt, fixed = projects._render(PID, projects.meta(PID), self.home, group)
+        return prompt, len(prompt) - fixed
+
+    def test_long_instructions_leave_room_for_the_stack_identity(self):
+        opening = 'Use the shared test fixtures.\n'
+        projects.set_instructions(PID, opening + ('x\n' * 10000)[:20000 - len(opening)], 0)
+        projects.set_instructions(STACK['pid'], 'Stack rule.', 0)
+        for budget in (1000, 4000):
+            with self.subTest(budget=budget):
+                projects.set_budget(PID, budget, projects.meta(PID)['revision'])
+                text, used = self._content(STACK)
+                self.assertLessEqual(used, budget)
+                self.assertIn('## Instructions\n' + opening, text)
+                self.assertIn('Cut to fit', text)
+                self.assertIn('## Stack: Docs\n', text)
+                self.assertIn(f'Stack folder: {projects.bundle(STACK["pid"])}\n', text)
+                self.assertIn(f'{projects.bundle(PID)}/notes/', text)
+                self.assertIn('## Backlog\n', text)  # Tether's rules stay whole
+
+    def test_large_budget_keeps_the_heading_order(self):
+        projects.set_budget(PID, 10000, 0)
+        projects.set_instructions(PID, 'Project rule.', 1)
+        projects.set_instructions(STACK['pid'], 'Stack rule.', 0)
+        (self.home / 'spec.md').write_text('Spec')
+        projects.pin(PID, '~/spec.md', 'link', 2, self.home)
+        projects.pin(STACK['pid'], '~/spec.md', 'link', 1, self.home)
+        text = projects.render(PID, home=self.home, group=STACK)
+        self.assertNotIn('Cut to fit', text)
+        self.assertEqual([line for line in text.splitlines() if line.startswith('#')], [
+            '# Tether project', '## Notes', '## Instructions', '## Pinned files',
+            '## Stack: Docs', '### Stack instructions', '### Stack pinned files',
+            '## Tab icon', '## Naming tabs', '## Claims of absence', '## Watchers', '## New tabs and reviewers', '## Backlog',
+        ])
+
+    def test_state_reports_the_usable_maximum_without_rewriting_the_budget(self):
+        for saved in (4000, 8000):
+            with self.subTest(saved=saved):
+                projects.set_budget(PID, saved, projects.meta(PID)['revision'])
+                metadata = projects.bundle(PID) / 'project.json'
+                before = metadata.read_bytes()
+                state = projects.state(PID, self.home)
+                self.assertEqual(state['usable_budget_max'], projects.BUDGET_MAX - state['fixed_chars'])
+                self.assertEqual(state['budget'], saved)
+                self.assertEqual(metadata.read_bytes(), before)
+
+    def test_state_keeps_the_usable_maximum_at_least_the_minimum(self):
+        fixed_chars = len(projects.render(PID, home=self.home))
+        with mock.patch.object(projects, 'BUDGET_MAX', fixed_chars + 500):
+            state = projects.state(PID, self.home)
+        self.assertEqual(state['usable_budget_max'], projects.BUDGET_MIN)
+        self.assertLessEqual(len(state['preview']), fixed_chars + 500)
 
     def test_pins_link_and_copy_and_refuse_secrets(self):
         (self.home / 'docs').mkdir()
@@ -186,11 +321,9 @@ class ProjectTests(unittest.TestCase):
         self.assertTrue(names['build.md']['new'])
         projects.mark_seen(PID)
         self.assertFalse(any(item['new'] for item in projects.notes(PID)))
-        # Note excerpts come last. Give them space independent of the launch command path lengths.
-        projects.set_budget(PID, projects.BUDGET_MAX, 0)
         claude, codex = projects.render(PID, 'claude'), projects.render(PID, 'codex')
         self.assertEqual(claude, codex)
-        self.assertIn('### MEMORY.md', claude)
+        self.assertIn('\n#### MEMORY.md\n', claude)
         self.assertIn('Run make.', claude)
         self.assertIn('Keep your own memory as before.', claude)
         projects.delete_note(PID, 'build.md')
@@ -201,15 +334,66 @@ class ProjectTests(unittest.TestCase):
                 projects.write_note(PID, bad, 'x')
 
     def test_only_five_newest_notes_have_text(self):
-        # Test the excerpt count separately from truncation by the launch budget.
-        projects.set_budget(PID, projects.BUDGET_MAX, 0)
         for at in range(7):
             projects.write_note(PID, f'n{at}.md', f'# Note {at}\nbody {at}\n')
             os.utime(projects.bundle(PID) / f'notes/n{at}.md', (time.time() + at, time.time() + at))
         text = projects.render(PID, 'codex')
-        self.assertEqual(text.count('\n### n'), 5)  # five excerpts; the list has its own '### Project notes' heading
+        self.assertEqual(text.count('\n#### n'), 5)
         self.assertIn('- n0.md: Note 0', text)
         self.assertNotIn('body 0', text)
+
+    def test_a_cut_with_little_room_keeps_the_heading_line(self):
+        note = '\n[Cut to fit the project size limit. The full text is in the project folder.]\n'
+        for heading in ('\n### Project notes\n', '\n### Stack notes\n', '\n## Instructions\n'):
+            with self.subTest(heading=heading):
+                part = heading + '\n#### a.md\n' + 'body\n' * 200
+                for room in (len(heading) + len(note), 150, 200):
+                    fitted = projects._fit([((1, 0), 'x' * 100), ((4, 0), part), ((5, 0), 'later')], 100 + room)
+                    self.assertEqual(fitted, ['x' * 100, heading + note, ''])
+        # No heading, or no room for it: the marker alone still says that text was cut.
+        self.assertEqual(projects._fit([((4, 0), 'plain\n' + 'body\n' * 100)], 150), [note])
+        self.assertEqual(projects._fit([((4, 0), '\n### Project notes\n' + 'body\n' * 100)], len(note) + 5), [note])
+
+    def test_default_budget_fits_all_five_excerpts_before_the_older_notes_list(self):
+        for at in range(30):
+            projects.write_note(PID, f'n{at}.md', f'# Note {at}\n' + f'body {at} ' * 100)
+            mtime = 1700000000 + at
+            os.utime(projects.bundle(PID) / f'notes/n{at}.md', (mtime, mtime))
+        items = [f'B{at} ' + 'Backlog item. ' * 7 for at in range(5)]
+        with mock.patch('backlog.summary', return_value=(items, len(items))):
+            text = projects.render(PID, home=self.home, backlog_project='tether')
+        self.assertIn('### Open backlog items (5)', text)
+        for at in range(25, 30):
+            self.assertIn(f'\n#### n{at}.md\n# Note {at}\nbody {at} ', text)
+        self.assertIn('[Cut to fit the project size limit.', text)
+        self.assertLessEqual(len(text) - projects.state(PID, self.home)['fixed_chars'], projects.BUDGET)
+
+    def test_default_budget_fits_instructions_pin_five_excerpts_and_two_older_titles(self):
+        instructions = 'Use the project notes. ' * 9
+        projects.set_instructions(PID, instructions, 0)
+        (self.home / 'guide.md').write_text('Guide')
+        projects.pin(PID, '~/guide.md', 'link', 1, self.home)
+        for at in range(7):
+            projects.write_note(PID, f'n{at}.md', f'# Note {at}\n' + f'body {at} ' * 100)
+            mtime = 1700000000 + at
+            os.utime(projects.bundle(PID) / f'notes/n{at}.md', (mtime, mtime))
+        text = projects.render(PID, home=self.home)
+        self.assertIn(f'\n## Instructions\n{instructions.strip()}\n', text)
+        self.assertIn('\n- guide.md: ~/guide.md\n', text)
+        self.assertIn('\n### Project notes\n\n#### n6.md\n', text)
+        for at in range(2, 7):
+            self.assertIn(f'\n#### n{at}.md\n# Note {at}\nbody {at} ', text)
+        self.assertTrue(text.endswith('\nOlder notes:\n- n1.md: Note 1\n- n0.md: Note 0\n'))
+
+    def test_long_instructions_win_the_default_budget_over_note_excerpts(self):
+        opening = 'Use the project guide.\n'
+        instructions = opening + 'x' * (20000 - len(opening))
+        projects.set_instructions(PID, instructions, 0)
+        projects.write_note(PID, 'setup.md', '# Setup\nRun make.')
+        text = projects.render(PID, home=self.home)
+        self.assertIn(f'\n## Instructions\n{opening}[Cut to fit the project size limit.', text)
+        self.assertNotIn(instructions, text)
+        self.assertNotIn('\n#### setup.md\n', text)
 
     def test_archive_moves_the_bundle(self):
         projects.set_instructions(PID, 'x', 0)

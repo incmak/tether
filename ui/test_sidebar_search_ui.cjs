@@ -3,10 +3,10 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal, shotsDir } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-14/sidebar-search/shots')
+const SHOTS = shotsDir('sidebar-search')
 const ids = { tether: '$1', blender: '$2', notes: '$3' }
 const pane = (id, session, name, extra = {}) => ({ id, tmux_session: ids[session], label: `${session}:0.${id.slice(1)}`, ask: null, agent: 'claude', dir: `/srv/${session}`, state: 'Idle', writable: true, thread: `t${id.slice(1)}`, approval: null, pane_name: name, ...extra })
 const fixture = {
@@ -141,8 +141,13 @@ async function main() {
     await page.getByRole('button', { name: 'Open sessions' }).first().click()
     const search = root.getByRole('searchbox', { name: 'Search sessions' })
     await search.fill('')
-    await search.pressSequentially('latency', { delay: 30 })
-    await page.waitForTimeout(600)
+    await Promise.all([
+      page.waitForResponse(response => {
+        const { pathname, searchParams } = new URL(response.url())
+        return response.request().method() === 'GET' && pathname.endsWith('/api/history') && searchParams.get('q') === 'latency'
+      }),
+      search.pressSequentially('latency', { delay: 30 }),
+    ])
     const typed = history.filter(q => q && q !== 'voice')
     check('past chats wait for a pause in typing', typed.length <= 2 && typed.at(-1) === 'latency', JSON.stringify(history))
     check('no page errors', !pageErrors.length, pageErrors.join('; '))

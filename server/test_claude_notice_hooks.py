@@ -1,4 +1,5 @@
 """Claude notice hooks use fixture payloads and an isolated cache, never tmux."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import os
 from pathlib import Path

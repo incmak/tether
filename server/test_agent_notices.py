@@ -1,4 +1,5 @@
 """Regression checks for native quota notices and fresh-session allowance reports."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 from pathlib import Path
 import tempfile
@@ -137,6 +138,7 @@ class AgentNoticeTests(unittest.TestCase):
             def inspect(item):
                 quota_notices.capture(item, "⎿ You're out of extra usage · resets tomorrow\n")
             with patch.object(server, 'sessions', return_value=[entry]), patch.object(server, 'live_status', side_effect=inspect), \
+                    patch.object(server.helper_tabs, 'listing_fields', return_value={}), \
                     patch.object(server.review_links, 'observe'), \
                     own_time(server, sleep=Mock(side_effect=StopIteration)):
                 with self.assertRaises(StopIteration):

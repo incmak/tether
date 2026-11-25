@@ -1,19 +1,21 @@
-// Advisor tabs in the pane tab strip: a distinct name per tab, the advisor icon, and the glow while the advisor works.
+// Advisor chips in the helper row, and an advisor moved out as a separate task.
 // Every API request stays in this page's fixtures; no terminal is touched.
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal, shotsDir } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-14/advisor-names/shots')
+const SHOTS = shotsDir('advisor-names')
 const pane = (id, name, extra) => ({ id, tmux_session: '$1', label: `project:0.${id.slice(1)}`, pane_name: name, agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: `t${id.slice(1)}`, approval: null, ask: null, ...extra })
 const owner = pane('%1', 'Deploy fix')
-const advising = pane('%2', 'Advisor: Deploy fix', { role: 'advisor', state: 'Working' })
-const second = pane('%3', 'Advisor 2: Deploy fix', { role: 'advisor', agent: 'codex' })
-const helper = pane('%4', 'Docs pass', { state: 'Working' })
+const child = { task: owner.id, task_depth: 1 }
+const advising = pane('%2', 'Advisor: Deploy fix', { ...child, task_role: 'Advisor', role: 'advisor', state: 'Working' })
+const second = pane('%3', 'Advisor 2: Deploy fix', { ...child, task_role: 'Second advisor', role: 'advisor', agent: 'codex' })
+const helper = pane('%4', 'Docs pass', { ...child, task_role: 'Worker', state: 'Working' })
+const separate = pane('%5', 'Advisor: Rollout', { role: 'advisor', state: 'Working', from: { pane: owner.id, name: owner.pane_name } })
 const fixture = {
-  sessions: { sessions: [owner, advising, second, helper], default_thread: 't1' },
+  sessions: { sessions: [owner, advising, second, helper, separate], default_thread: 't1' },
   chat: { messages: [], busy: false, thread: 't1', agent: 'claude', writable: true, session: '%1', earlier: 0, limit: 100, state: 'Idle', approval: null },
   footer: { observed: true, model: 'Opus 5.5', mode: 'default', notices: [] },
   subagents: { main: { model: null, context: null, title: null }, agents: [], tasks: [] },
@@ -68,26 +70,35 @@ async function main() {
       localStorage.setItem('tmux-chat.prefs.synced', '1')
       localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'system', voiceOff: true, voiceSound: false }))
     })
-    const tab = id => page.locator(`[role="tab"][data-pane="${id}"]`).first()
+    const chips = page.getByRole('tablist', { name: 'Tabs in Deploy fix' })
+    const chip = id => chips.locator(`[role="tab"][data-chip="${id}"]`)
     for (const [width, height, scheme, motion] of [[1280, 900, 'light', 'no-preference'], [390, 844, 'dark', 'no-preference'], [320, 700, 'light', 'reduce']]) {
       const where = `${width}px ${scheme} ${motion}`
       await page.setViewportSize({ width, height })
       await page.emulateMedia({ colorScheme: scheme, reducedMotion: motion })
       await page.goto(`${origin}/chat/?session=%251`, { waitUntil: 'load' })
-      await tab('%2').waitFor({ state: 'visible' })
-      await tab('%2').waitFor({ state: 'attached' })
-      const names = await page.locator('[role="tab"][data-pane] .pane-tab-name').allTextContents()
-      check(`${where}: each advisor tab has its own name`, names.includes('Advisor: Deploy fix') && names.includes('Advisor 2: Deploy fix'), names.join(' | '))
-      check(`${where}: advisor tabs show the advisor icon`, await tab('%2').locator('.tab-advisor').count() === 1 && await tab('%3').locator('.tab-advisor').count() === 1)
-      check(`${where}: other tabs have no advisor icon`, await tab('%1').locator('.tab-advisor').count() === 0 && await tab('%4').locator('.tab-advisor').count() === 0)
-      const style = id => tab(id).evaluate(node => { const s = getComputedStyle(node); return { glow: node.classList.contains('advising'), animation: s.animationName, shadow: s.boxShadow } })
-      const working = await style('%2'), idle = await style('%3'), plain = await style('%4')
-      check(`${where}: the working advisor glows`, working.glow && working.shadow !== 'none', JSON.stringify(working))
-      check(`${where}: glow ${motion === 'reduce' ? 'is static' : 'pulses'}`, motion === 'reduce' ? working.animation === 'none' : working.animation === 'advise-glow', working.animation)
+      await chip('%2').waitFor({ state: 'visible' })
+      const names = await chips.locator('[role="tab"] > span:first-of-type').allTextContents()
+      check(`${where}: each advisor chip has its own name`, names.includes('Advisor: Deploy fix') && names.includes('Advisor 2: Deploy fix'), names.join(' | '))
+      check(`${where}: advisors in the helper row have no top-level tab`, await page.locator('.pane-tabs [role="tab"][data-pane="%2"], .pane-tabs [role="tab"][data-pane="%3"]').count() === 0)
+      check(`${where}: advisor chips show the advisor icon`, await chip('%2').locator('.lucide-lightbulb').count() === 1 && await chip('%3').locator('.lucide-lightbulb').count() === 1)
+      check(`${where}: other chips have no advisor icon`, await chip('%1').locator('.lucide-lightbulb').count() === 0 && await chip('%4').locator('.lucide-lightbulb').count() === 0)
+      const style = tab => tab.evaluate(node => { const s = getComputedStyle(node); return { glow: node.classList.contains('advising'), animation: s.animationName, shadow: s.boxShadow } })
+      const working = await style(chip('%2')), idle = await style(chip('%3')), plain = await style(chip('%4'))
+      // B474, concept D: the glow was decoration. The working advisor chip keeps its state class and dot, with no shadow or pulse.
+      check(`${where}: the working advisor chip has no glow`, working.glow && working.shadow === 'none' && working.animation === 'none', JSON.stringify(working))
       check(`${where}: an idle advisor and a working helper do not glow`, !idle.glow && idle.shadow === 'none' && !plain.glow && plain.shadow === 'none', JSON.stringify([idle, plain]))
-      check(`${where}: the working dot says Advising`, await tab('%2').locator('[aria-label="Advising"]').count() === 1 && await tab('%4').locator('[aria-label="Working"]').count() === 1)
+      check(`${where}: the working dot says Advising`, await chip('%2').locator('.task-dot[aria-label="Advising"]').count() === 1 && await chip('%4').locator('.task-dot[aria-label="Working"]').count() === 1)
+      check(`${where}: the advisor chip name includes its role and status`, await chips.getByRole('tab', { name: 'Advisor: Deploy fix, Advisor, Advising', exact: true }).count() === 1)
+      if (width === 1280) {
+        const moved = page.locator('.pane-tabs [role="tab"][data-pane="%5"]')
+        const movedStyle = await style(moved)
+        check('an advisor moved out keeps the advisor icon, pulse, and dot label', await moved.locator('.lucide-lightbulb').count() === 1
+          && movedStyle.glow && movedStyle.shadow !== 'none' && movedStyle.animation === 'advise-glow'
+          && await moved.locator('.task-dot[aria-label="Advising"]').count() === 1)
+      }
       check(`${where}: no horizontal page scroll`, !(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)))
-      await tab('%2').scrollIntoViewIfNeeded().catch(() => {})
+      await chip('%2').scrollIntoViewIfNeeded().catch(() => {})
       await page.screenshot({ path: path.join(SHOTS, `advisor-tabs-${width}-${scheme}-${motion}.png`) })
     }
     check('no page errors', !pageErrors.length, pageErrors.join('; '))

@@ -14,6 +14,9 @@ function load(name, imports = {}) {
   return exports
 }
 const { fridayChatFolder } = load('fridayFolders', { './fridaySessions': load('fridaySessions') })
+const { fridayHomePane } = load('fridayNames', { './Sidebar': {
+  sessionName: pane => pane.label.includes(':') ? pane.label.slice(0, pane.label.lastIndexOf(':')) : pane.label,
+} })
 const folder = (panes, target, project) => JSON.parse(JSON.stringify(fridayChatFolder(panes, target, project, 'Friday chats')))
 const panes = ['~/apps/tether', '~/apps/acme', '~'].map(dir => ({ dir }))
 for (const project of ['tether', 'TETHER', 'teather', 'teth', 'ether', ' tether ']) {
@@ -22,8 +25,8 @@ for (const project of ['tether', 'TETHER', 'teather', 'teth', 'ether', ' tether 
 assert.deepEqual(folder(panes, undefined, 'Ac me'), { dir: '~/apps/acme', project: 'acme' })
 assert.deepEqual(folder(panes, { dir: '~/apps/acme' }), { dir: '~/apps/acme', project: 'acme' })
 for (const dir of ['~', '~/']) {
-  for (const tmux_session of ['Friday chats', 'Other']) {
-    assert.match(folder([...panes, { dir }], { dir, tmux_session }).error, /^Which project\?/)
+  for (const label of ['Friday chats', 'Other']) {
+    assert.match(folder([...panes, { dir }], { dir, tmux_session: '$1', label }).error, /^Which project\?/)
   }
 }
 assert.deepEqual(folder(panes, undefined, 'zebra'), { error: 'Which project? Known projects: tether, acme' })
@@ -56,21 +59,28 @@ function visit(node) {
 }
 visit(liveSource)
 assert.ok(createMethod && newChatHandler)
-async function testLive(hasSession, project, target) {
+async function testLive(hasSession, project, target, timeZone = 'Asia/Kolkata', name = 'New chat', expectedName = name) {
   const calls = []
+  const zone = load('zone', { react: {} })
+  zone.setTetherZone(timeZone)
+  let created = false
   const api = async (path, body) => {
     calls.push({ path, body })
     if (path === 'sessions') return { sessions: hasSession
-      ? [{ id: '%1', tmux_session: 'Friday chats' }]
-      : [{ id: '%2', label: 'Friday chats' }] }
+      ? [{ id: '%1', tmux_session: '$1', label: 'Friday chats' }]
+      : created ? [{ id: '%2', tmux_session: '$2', label: 'Friday chats' }] : [] }
     if (path === 'split') return { pane: '%2' }
-    if (path === 'tmux-sessions') return { session: '$2', name: 'Friday chats' }
+    if (path === 'tmux-sessions') {
+      created = true
+      return { session: '$2', name: 'Friday chats' }
+    }
     return {}
   }
   const context = {
-    fridayChatFolder, live: { current: { panes, target, api } },
+    fridayChatFolder, fridayHomePane, live: { current: { panes, target, api } },
+    zoneParts: zone.zoneParts, Date: { now: () => Date.parse('2026-11-22T02:15:00Z') },
     FRIDAY_SESSION: 'Friday chats', SESSION_NAME: /^[A-Za-z0-9 _-]+$/,
-    setTargetId: () => {}, flow: { current: {} },
+    setTargetId: () => {}, flow: { current: {} }, wait: async () => assert.fail('Unexpected wait'),
   }
   runInNewContext(ts.transpileModule(
     `globalThis.create = ({${createMethod.getText(liveSource)}}).create; globalThis.newChat = ${newChatHandler.getText(liveSource)}`, {
@@ -82,15 +92,21 @@ async function testLive(hasSession, project, target) {
     assert.deepEqual(calls, [])
     return
   }
-  const result = await context.newChat({ name: 'New chat', project })
-  assert.deepEqual(JSON.parse(JSON.stringify(result)), { ok: true, chat: 'New chat', folder: '~/apps/tether' })
+  const result = await context.newChat({ name, project })
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { ok: true, chat: expectedName, folder: '~/apps/tether' })
   const write = calls.find(call => call.path === (hasSession ? 'split' : 'tmux-sessions'))
   assert.equal(write.body.cwd, '~/apps/tether')
+  assert.deepEqual(calls.slice(-2).map(({ path, body }) => [path, { ...body }]), [
+    ['pane-name', { pane: '%2', name: expectedName, keep_session: true }],
+    ['start', { session: '%2', thread: null, agent: 'claude' }],
+  ])
 }
 Promise.all([
   testLive(true, 'tether'), testLive(false, 'tether'),
   testLive(true, undefined, panes[0]), testLive(true, 'zebra'),
-]).then(() => console.log('Friday creation: both session paths pass cwd, report the folder, and reject unknown projects before API calls'))
+  testLive(true, 'tether', undefined, 'Asia/Kolkata', '', 'claude 0745'),
+  testLive(true, 'tether', undefined, 'America/New_York', '', 'claude 2115'),
+]).then(() => console.log('Friday creation: both paths pass cwd, preserve the session name, reject unknown projects, and use Tether time in default names'))
   .catch(error => { console.error(error); process.exitCode = 1 })
 // A parent folder wins over its subfolders; a repo with nested folders.
 const nested = ['~/acme-v2', '~/acme-v2/acme-release-bot',

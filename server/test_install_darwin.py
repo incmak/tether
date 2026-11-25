@@ -1,4 +1,5 @@
 """LaunchAgent plans and applies use temporary homes and mocked processes."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import contextlib
 import importlib.machinery
 import importlib.util
@@ -266,10 +267,17 @@ class DarwinInstallTests(unittest.TestCase):
         plan = self.plan()
         with contextlib.redirect_stdout(io.StringIO()) as output:
             installer.print_plan(plan)
-        self.assertIn('Write ~/Library/LaunchAgents/local.tether.chat.plist:', output.getvalue())
+        self.assertIn('Write ~/Library/LaunchAgents/local.tether.chat.plist', output.getvalue().splitlines())
+        self.assertNotIn('<?xml', output.getvalue())
+        self.assertNotIn('<plist', output.getvalue())
         self.assertIn('LaunchAgents run while you are logged in to the Mac desktop.', output.getvalue())
         self.assertNotIn('loginctl', output.getvalue())
         self.apply(plan)
+        for verbose in (False, True):
+            with self.subTest(verbose=verbose), contextlib.redirect_stdout(io.StringIO()) as output:
+                installer.print_plan(plan, verbose=verbose)
+            self.assertIn('Keep ~/Library/LaunchAgents/local.tether.chat.plist', output.getvalue().splitlines())
+            self.assertEqual(plan['units']['tether.service'] in output.getvalue(), verbose)
         with contextlib.redirect_stdout(io.StringIO()) as output:
             installer.print_plan(self.plan('--uninstall'))
         self.assertIn('Remove ~/Library/LaunchAgents/local.tether.chat.plist', output.getvalue())

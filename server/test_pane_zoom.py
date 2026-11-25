@@ -1,6 +1,8 @@
 """Zoom uses mocks or a private tmux server; no commands reach a user's terminal."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import os
+import time
 from pathlib import Path
 import select
 import signal
@@ -12,6 +14,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import pane_view
+from test_tmux_isolation import private_tmux
 
 
 class ZoomExit(unittest.TestCase):
@@ -92,29 +95,46 @@ class EmptyZoomCache(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which('tmux'), 'tmux is not installed')
 class IsolatedZoom(unittest.TestCase):
+    pane_program = 'timeout 120 tail -f /dev/null </dev/null'
+
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
-        self.socket = str(Path(self.folder.name) / 's')
-        self.env = {key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE')}
-        self.env.update(HOME=self.folder.name, CLAUDE_CONFIG_DIR=self.folder.name + '/claude',
-                        CODEX_HOME=self.folder.name + '/codex')
+        env = dict(HOME=self.folder.name, CLAUDE_CONFIG_DIR=self.folder.name + '/claude',
+                   CODEX_HOME=self.folder.name + '/codex')
+        self.private = private_tmux(self, 'tzoom-', env)
+        self.socket = self.private.socket
+        self.env = self.private.env
+        self.tmux = self.private.tmux
         self.binary = shutil.which('tmux')
-        self.tmux('new-session', '-d', '-s', 'zoom-test', '-x', '120', '-y', '40').check_returncode()
-        self.addCleanup(self.tmux, 'kill-server')
+        self.tmux('new-session', '-d', '-s', 'zoom-test', '-x', '120', '-y', '40',
+                  self.pane_program).check_returncode()
+        self.addCleanup(self.stop_server)
         self.pane = self.tmux('display-message', '-p', '-t', 'zoom-test', '#{pane_id}').stdout.strip()
         self.home = self.tmux('display-message', '-p', '-t', self.pane, '#{window_id}').stdout.strip()
-        self.tmux('split-window', '-h', '-t', self.pane).check_returncode()
-        self.tmux('split-window', '-h', '-t', self.pane).check_returncode()
+        self.tmux('split-window', '-h', '-t', self.pane, self.pane_program).check_returncode()
+        self.tmux('split-window', '-h', '-t', self.pane, self.pane_program).check_returncode()
         self.other = self.tmux('display-message', '-p', '-t', self.home, '#{pane_id}').stdout.strip()
         for replacement in (patch.object(pane_view, 'tmux', side_effect=self.tmux),
                             patch.object(pane_view.paths, 'CACHE', Path(self.folder.name) / 'cache')):
             replacement.start()
             self.addCleanup(replacement.stop)
 
-    def tmux(self, *args):
-        return subprocess.run([self.binary, '-f', '/dev/null', '-S', self.socket, *args],
-                              env=self.env, capture_output=True, text=True, timeout=5)
+    def stop_server(self):
+        # The panes run a fixed program without a login shell. Wait so no pane process outlives
+        # the temporary folder.
+        listed = self.tmux('list-panes', '-a', '-F', '#{pane_pid}').stdout.split()
+        self.tmux('kill-server')
+        deadline = time.monotonic() + 5
+        for pid in map(int, listed):
+            while True:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                if time.monotonic() > deadline:
+                    self.fail(f'tmux pane process {pid} did not exit after kill-server')
+                os.sched_yield()
 
     def dimensions(self):
         return self.tmux('display-message', '-p', '-t', self.pane, '#{window_width} #{window_height}').stdout.strip()
@@ -147,7 +167,7 @@ from pathlib import Path
 import pane_view
 binary, socket, cache = sys.argv[1:]
 pane_view.tmux = lambda *args: subprocess.run(
-    [binary, '-S', socket, *args], capture_output=True, text=True, timeout=5)
+    [binary, '-N', '-S', socket, '-f', '/dev/null', *args], capture_output=True, text=True, timeout=5)
 pane_view.paths.CACHE = Path(cache)
 pane_view.zoom_repair_all()
 '''
@@ -156,7 +176,7 @@ pane_view.zoom_repair_all()
                        capture_output=True, timeout=10, check=True)
 
     def test_five_narrow_panes_restore_exactly_after_exit_or_restart(self):
-        program = 'timeout 120 tail -f /dev/null </dev/null'
+        program = self.pane_program
         self.home, self.pane = self.tmux('new-window', '-d', '-t', 'zoom-test:', '-n', 'arranged',
                                         '-P', '-F', '#{window_id} #{pane_id}', program).stdout.split()
         right = self.pane
@@ -259,7 +279,7 @@ from pathlib import Path
 import pane_view
 binary, socket, cache, pane = sys.argv[1:]
 def tmux(*args):
-    return subprocess.run([binary, '-f', '/dev/null', '-S', socket, *args],
+    return subprocess.run([binary, '-N', '-f', '/dev/null', '-S', socket, *args],
                           capture_output=True, text=True, timeout=5)
 pane_view.tmux = tmux
 pane_view.paths.CACHE = Path(cache)
@@ -443,7 +463,8 @@ pane_view.zoom_leave(view)
         self.assertEqual(self.home_layout(), before)
 
     def test_control_client_ignores_size_for_whole_zoom(self):
-        client = subprocess.Popen([self.binary, '-S', self.socket, '-C', 'attach-session', '-f', 'ignore-size', '-t', 'zoom-test'],
+        client = subprocess.Popen([self.binary, '-N', '-S', self.socket, '-f', '/dev/null',
+                                   '-C', 'attach-session', '-f', 'ignore-size', '-t', 'zoom-test'],
                                   env=self.env, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             # Establish the fake client's size before arranging the fixture. Explicit

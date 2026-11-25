@@ -2,10 +2,10 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal, shotsDir, prefsStore } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-11/overlay-regression/shots')
+const SHOTS = shotsDir('overlay-regression')
 const floating = '.status-stack, .attach-menu, .mode-menu, .notice-stack, .jump-button, .composer, .live-chips, .prompt-suggestion, .agent-bubble, .agent-pop'
 const states = ['heads-open', 'heads-tasks', 'approval', 'queue', 'attach-sheet', 'mode-menu', 'jump', 'toast', 'quiet']
 const sizes = [[390, 844], [820, 1180], [1280, 900]]
@@ -36,7 +36,6 @@ function fixtures(state) {
       ...(state === 'heads-tasks' ? { goal: 'Review overlays', tasks: ['1 shell', '1 monitor'] } : {}),
       notices: state === 'toast' ? ['Fixture notice: Review the overlay result.'] : [],
     },
-    prefs: { prefs: {}, version: 1 },
     'projects/marks': {},
     'projects/backlog': { text: '' },
     'work/board': { revision: 1, projects: [], items: [], stages: [] },  // Home and the sidebar read the work board
@@ -252,12 +251,14 @@ async function main() {
       page.on('pageerror', error => pageErrors.push(error.message))
       await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'light' })
       await page.routeWebSocket('**/*', socket => socket.close())
+      const prefs = prefsStore()
       await page.route('**/*', async route => {
         const request = route.request(), url = new URL(request.url())
         // The random origin has no existing worker; never let this page install one.
         if (url.pathname.endsWith('/sw.js')) return route.fulfill({ status: 404, body: '' })
         if (url.pathname.includes('/api/')) {
           const endpoint = url.pathname.split('/api/')[1]
+          if (endpoint === 'prefs') return route.fulfill({ json: request.method() === 'GET' ? prefs.get() : prefs.post(request.postDataJSON()) })
           endpoints.add(`${request.method()} ${url.pathname}`)
           if (request.method() !== 'GET') return route.fulfill({ json: { ok: true } })
           if (!(endpoint in fixture)) unexpected.add(endpoint)
@@ -291,7 +292,8 @@ async function main() {
       fixture = fixtures(state)
       cases++
       try {
-        // Each case gets a fresh page to contain stray history.back() from the previous case.
+        // A viewport change can close the previous case's menu. Its history.back() can still be pending
+        // when the next goto starts and abort it. See B33 and test_back_nav_leave.cjs.
         if (page) await page.close().catch(() => {})
         page = await openPage()
         await page.setViewportSize({ width, height })

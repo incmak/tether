@@ -1,4 +1,5 @@
 """The Codex provider switch: new Codex panes start with `codex -p foundry` only when Foundry is chosen; the plan is the default."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from pathlib import Path
 import subprocess
 import tempfile
