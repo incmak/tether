@@ -65,9 +65,12 @@ async function main() {
       let misses = 0
       const run = await open(browser, { width: 1280, height: 900 }, 'light', chunk => /\/dynamic-[^/]+\.js$/.test(chunk) && misses++ === 0)
       try {
+        // The first page shows the session name before its icon chunk fails, so the name alone cannot prove the reload
+        // (B449). Wait for the chunk to load: only the reloaded page gets it, because the first request got a 404.
+        const loaded = run.page.waitForResponse(response => /\/dynamic-[^/]+\.js$/.test(new URL(response.url()).pathname) && response.ok(), { timeout: 20000 })
         await run.page.goto(`${ORIGIN}/chat/`)
+        await loaded
         await run.page.getByText('Crash test').first().waitFor({ timeout: 20000 })
-        await run.page.waitForLoadState('networkidle')
         assert.equal(misses, 2, 'chunk asked for again after the reload')
         assert.equal(run.navigations(), 2, 'exactly one reload')
         assert.equal(await stopped(run.page).count(), 0)
@@ -94,8 +97,10 @@ async function main() {
             await alert.locator('summary').click()
             await run.page.screenshot({ path: path.join(SHOTS, `crash-${label.replaceAll(' ', '-')}.png`), fullPage: true })
           }
+          // Wait for the new document, so the old page's alert cannot pass for the reloaded one (B449).
+          const reloaded = run.page.waitForEvent('framenavigated', { predicate: frame => frame === run.page.mainFrame(), timeout: 20000 })
           await alert.getByRole('button', { name: 'Reload' }).click()
-          await alert.waitFor({ state: 'detached', timeout: 10000 }).catch(() => {})
+          await reloaded
           await stopped(run.page).waitFor({ timeout: 20000 })
           assert.equal(run.navigations(), 3, 'Reload loads the page again')
         } finally { await run.context.close() }
