@@ -92,6 +92,125 @@ class FakeTransport:
         self.closed = True
 
 
+def chunk(device, ident, seq, total, data):
+    return dict(type='chunk', epoch=device.epoch, id=ident, seq=seq, total=total, data=data)
+
+
+class ChunkReplyTests(unittest.TestCase):
+    def setUp(self):
+        self.transport = FakeTransport()
+        self.device = mac.Device(Mock(), 'device', self.transport)
+        self.addCleanup(self.device.close)
+
+    def request(self, method='Runtime.evaluate', timeout=15):
+        return self.device.request(dict(type='command', id='command', method=method), timeout)
+
+    def result(self, result):
+        return dict(type='result', epoch=self.device.epoch, id='command', result=result)
+
+    def round_trip(self, method, result):
+        expected = self.result(result)
+        data = json.dumps(expected, ensure_ascii=False)
+        parts = [data[start:start + 1_000_000] for start in range(0, len(data), 1_000_000)]
+
+        def respond(message):
+            self.assertEqual(message['method'], method)
+            for seq, part in enumerate(parts):
+                self.device.handle(chunk(self.device, message['id'], seq, len(parts), part))
+
+        with patch.object(self.transport, 'message', side_effect=respond):
+            self.assertEqual(self.request(method), expected)
+        self.assertFalse(self.device.closed)
+
+    def test_40_mib_screenshot_and_followup(self):
+        self.round_trip('Page.captureScreenshot', {'data': 'A' * (40 * 1024 * 1024)})
+        self.transport.device = self.device
+        self.assertEqual(self.request()['result'], {})
+        self.assertFalse(self.device.closed)
+
+    def test_too_large_error_reaches_the_agent_and_keeps_the_link(self):
+        def respond(message):
+            self.device.handle(dict(type='error', epoch=self.device.epoch, id=message['id'], code='TOO_LARGE',
+                                    message='Reply is 71 MB; the limit is 64 MB. Capture a smaller area (clip) or use JPEG.'))
+
+        with patch.object(self.transport, 'message', side_effect=respond):
+            with self.assertRaisesRegex(browser.BrowserError, 'limit is 64 MB'):
+                self.request('Page.captureScreenshot')
+        self.assertFalse(self.device.closed)
+
+    def test_large_unicode_evaluate(self):
+        self.round_trip('Runtime.evaluate', {'result': {'type': 'string', 'value': 'é😀' * 600_000}})
+
+    def clocked_request(self, arrivals, timeout):
+        elapsed = 0
+        event = Mock(wraps=threading.Event())
+        arrivals = iter(arrivals)
+        arrival = next(arrivals, None)
+
+        def wait(delay):
+            nonlocal elapsed, arrival
+            until = elapsed + delay
+            while arrival and arrival[0] < until and not event.is_set():
+                elapsed, seq, total, data = arrival
+                self.device.handle(chunk(self.device, 'command', seq, total, data))
+                arrival = next(arrivals, None)
+            if not event.is_set():
+                elapsed = until
+            return event.is_set()
+
+        event.wait.side_effect = wait
+        with (patch.object(mac, 'time', Mock(monotonic=lambda: elapsed)),
+              patch.object(mac, 'threading', Mock(Event=lambda: event)),
+              patch.object(self.transport, 'message')):
+            try:
+                result = self.request(timeout=timeout)
+            except browser.BrowserError as exc:
+                result = str(exc)
+        return result, elapsed
+
+    def test_each_chunk_extends_reply_deadline(self):
+        expected = self.result({'value': 42})
+        text = json.dumps(expected)
+        result, elapsed = self.clocked_request([(8, 0, 3, text[:10]), (16, 1, 3, text[10:20]),
+                                                (24, 2, 3, text[20:])], timeout=10)
+        self.assertEqual((result, elapsed), (expected, 24))
+        self.assertFalse(self.device.closed)
+
+    def test_stalled_partial_reply_closes_device(self):
+        result, elapsed = self.clocked_request([(8, 0, 2, '{'), (19, 1, 2, '}')], timeout=10)
+        self.assertIn('timed out', result)
+        self.assertEqual(elapsed, 18)
+        self.assertTrue(self.device.closed)
+
+    def test_trickle_reply_hits_hard_deadline(self):
+        result, elapsed = self.clocked_request(
+            [(8 * (seq + 1), seq, 20, ' ') for seq in range(20)], timeout=10)
+        self.assertIn('timed out', result)
+        self.assertEqual(elapsed, 120)
+        self.assertTrue(self.device.closed)
+
+    def test_late_chunk_is_dropped(self):
+        self.transport.device = self.device
+        self.request()
+        self.device.handle(chunk(self.device, 'command', 1, 2, '}'))
+        self.assertFalse(self.device.closed)
+        self.assertEqual(self.request()['result'], {})
+
+    def test_partial_assembly_byte_cap_applies_across_waiters(self):
+        def respond(message):
+            ident = message['id']
+            self.device.handle(chunk(self.device, ident, 0, 2, 'é' * 4))
+            if ident == 'command':
+                self.device.request(dict(type='command', id='other', method='Page.printToPDF'))
+
+        with (patch.object(mac, 'MAX_ASSEMBLY', 12, create=True),
+              patch.object(self.transport, 'message', side_effect=respond)):
+            with self.assertRaisesRegex(ValueError, 'assembly'):
+                self.request()
+        self.transport.device = self.device
+        self.round_trip('Runtime.evaluate', {'value': 'A' * 1_000_000})
+
+
 class ChromiumTransport(FakeTransport):
     """One real debugger session, shared by every synthetic Mac session."""
     def __init__(self):
@@ -864,6 +983,57 @@ class GrantTests(GrantHarness, unittest.TestCase):
         self.assertTrue(errors)
         self.assertFalse(self.device.closed)
 
+    def test_end_during_chunked_reply_wakes_waiter_without_disconnect(self):
+        asked = threading.Event()
+        with patch.object(self.access, 'notifier', side_effect=lambda *args, **kwargs: asked.set()):
+            asker = threading.Thread(target=self.access.ask, args=('Test task', '%12', 1))
+            self.waiters.append(asker)
+            asker.start()
+            self.assertTrue(asked.wait(1))
+            ident = self.access.state()['requests'][0]['id']
+            self.access.allow(ident)
+            asker.join(timeout=1)
+            self.assertFalse(asker.is_alive())
+        grant = self.access.grants[ident]
+        sent = threading.Event()
+        ended = threading.Event()
+        errors = []
+        original = self.transport.message
+
+        def respond(message):
+            if message['type'] == 'command':
+                self.device.handle(chunk(self.device, message['id'], 0, 2, '{'))
+                sent.set()
+            else:
+                original(message)
+
+        def command():
+            try:
+                with self.broker.browser.lock:
+                    self.broker.browser.conn.call('Runtime.evaluate', {},
+                                                  self.broker.browser.tab(grant.row['tab']).session)
+            except browser.BrowserError as exc:
+                errors.append(str(exc))
+
+        def end():
+            self.access.end(grant.row['id'])
+            ended.set()
+
+        with patch.object(self.transport, 'message', side_effect=respond):
+            waiter = threading.Thread(target=command)
+            self.waiters.append(waiter)
+            waiter.start()
+            self.assertTrue(sent.wait(1))
+            ender = threading.Thread(target=end)
+            self.waiters.append(ender)
+            ender.start()
+            self.assertTrue(ended.wait(1))
+            waiter.join(timeout=1)
+            self.assertFalse(waiter.is_alive())
+            self.assertEqual(errors, ['Chrome command refused or grant ended.'])
+            self.assertFalse(grant.active)
+            self.assertFalse(self.device.closed)
+
     def test_cross_browser_pending_replacement_and_global_grant_limit(self):
         server = signed.Access(browser.Browser(signed=True), request_seconds=3)
         self.addCleanup(server.stop)
@@ -911,6 +1081,14 @@ console.log(JSON.stringify([...ALLOWED].sort()));'''
         run = subprocess.run(['node', 'server/fixtures/extension_backpressure.mjs'], cwd=root,
                              capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
         self.assertEqual(run.returncode, 0, run.stderr)
+
+    def test_extension_large_reply(self):
+        root = Path(__file__).resolve().parents[1]
+        for case in ('paced', 'event', 'draining', 'stuck', 'too-large', 'legacy', 'surrogate', 'ended'):
+            with self.subTest(case=case):
+                run = subprocess.run(['node', 'server/fixtures/extension_large_reply.mjs', case], cwd=root,
+                                     capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
+                self.assertEqual(run.returncode, 0, run.stderr)
 
 
 if __name__ == '__main__':
@@ -988,3 +1166,58 @@ class WebSocketAuthTests(unittest.TestCase):
         self.assertIsNone(self.broker.connected())
         _, result, _ = self.websocket(self.pair['token'])
         self.assertIsNone(result)
+
+    def test_ready_advertises_chunks(self):
+        _, result, _ = self.websocket(self.pair['token'])
+        self.assertIs(result.get('chunks'), True)
+
+    def test_malformed_chunks_close_websocket(self):
+        from test_browser_cdp import masked
+
+        for case in ('sequence', 'size', 'total', 'changed-total', 'boolean', 'final-id', 'final-epoch', 'final-type'):
+            with self.subTest(case=case):
+                _, ready, sock = self.websocket(self.pair['token'])
+                device = self.broker.connected()
+                self.assertEqual(ready['epoch'], device.epoch)
+                sent = threading.Event()
+                finished = threading.Event()
+                original = device.transport.message
+
+                def send(message):
+                    original(message)
+                    sent.set()
+
+                def request():
+                    with self.assertRaises(browser.BrowserError):
+                        device.request(dict(type='command', id='command', method='Runtime.evaluate'))
+                    finished.set()
+
+                with patch.object(device.transport, 'message', side_effect=send):
+                    waiter = threading.Thread(target=request)
+                    waiter.start()
+                    try:
+                        self.assertTrue(sent.wait(1))
+                        first = chunk(device, 'command', 0, 2, '{')
+                        changes = {'sequence': {'seq': 1}, 'size': {'data': 'A' * 1_000_001},
+                                   'total': {'total': 69}, 'boolean': {'seq': False}}
+                        if case in changes:
+                            messages = [dict(first, **changes[case])]
+                        elif case == 'changed-total':
+                            messages = [first, chunk(device, 'command', 1, 3, '}')]
+                        else:
+                            inner = dict(type='result', epoch=device.epoch, id='command', result={})
+                            field = case.removeprefix('final-')
+                            inner[field] = 'unexpected'
+                            messages = [first, chunk(device, 'command', 1, 2, json.dumps(inner)[1:])]
+                        try:
+                            sock.sendall(b''.join(masked(1, json.dumps(message).encode()) for message in messages))
+                            while sock.recv(4096):
+                                pass
+                        except ConnectionResetError:
+                            pass
+                        self.assertTrue(finished.wait(1))
+                        self.assertTrue(device.closed)
+                    finally:
+                        device.close()
+                        waiter.join(timeout=2)
+                        self.assertFalse(waiter.is_alive())

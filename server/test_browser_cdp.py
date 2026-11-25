@@ -218,6 +218,20 @@ class TransportTests(unittest.TestCase):
             self.assertFalse(self.transport.closed)
             self.receive(cdp.frame(1, payload))
 
+    def test_64_mib_reply_passes_through_empty_transport(self):
+        block = b'A' * (1024 * 1024)
+        prefix = b'{"id": 1, "result": {"data": "'
+        suffix = b'"}}'
+        self.transport.message({'id': 1, 'result': {'data': 'A' * (64 * len(block))}})
+        self.assertFalse(self.transport.closed)
+        length = len(prefix) + 64 * len(block) + len(suffix)
+        with self.peer.makefile('rb') as stream:
+            self.assertEqual(stream.read(10), struct.pack('!BBQ', 0x81, 127, length))
+            self.assertEqual(stream.read(len(prefix)), prefix)
+            for _ in range(64):
+                self.assertEqual(stream.read(len(block)), block)
+            self.assertEqual(stream.read(len(suffix)), suffix)
+
 
 class ConfigTests(unittest.TestCase):
     def test_new_config_port_is_in_range(self):

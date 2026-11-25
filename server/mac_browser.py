@@ -17,6 +17,11 @@ import signed_access as signed
 
 PREFIX = '/mobile/api/browser/extension/'
 ORIGIN = re.compile(r'chrome-extension://[a-p]{32}')
+CHUNK_CHARS = 1_000_000
+MAX_REPLY = 64 * 1024 * 1024
+# A chunk may give up its last UTF-16 code unit to keep a surrogate pair together.
+MAX_CHUNKS = (MAX_REPLY + CHUNK_CHARS - 2) // (CHUNK_CHARS - 1)
+MAX_ASSEMBLY = MAX_REPLY + 1024 * 1024
 PAGE_ALLOWED = (signed.PAGE_ALLOWED - {'Network.getCookies', 'DOM.setFileInputFiles'}) | {
     'Page.startScreencast', 'Page.stopScreencast', 'Page.screencastFrameAck'}
 # Passive event domains share the extension's single debugger attachment. Fetch has
@@ -160,6 +165,8 @@ class Device:
         self.epoch = secrets.token_urlsafe(16)
         self.lock = threading.RLock()
         self.waiters = {}
+        self.assemblies = {}
+        self.assembly_bytes = 0
         self.ended = set()
         self.closed = False
 
@@ -170,24 +177,76 @@ class Device:
 
     def request(self, message, timeout=15):
         ident = message.get('id') or secrets.token_urlsafe(16)
-        slot = {'event': threading.Event(), 'reply': None, 'grant': message.get('grant', ident)}
+        now = time.monotonic()
+        event = threading.Event()
+        slot = {'event': event, 'reply': None, 'grant': message.get('grant', ident), 'timeout': timeout,
+                'deadline': now + timeout, 'hard_deadline': now + max(timeout, 120)}
         with self.lock:
             if len(self.waiters) >= 128:
                 raise browser.BrowserError('Too many Chrome commands.')
             self.waiters[ident] = slot
         try:
             self.send(dict(message, id=ident))
-            if not slot['event'].wait(timeout):
-                # Uncertain delivery must never leave authority available for a retry.
-                self.close()
-                raise browser.BrowserError('Chrome command timed out. Ask again.')
+            while not event.is_set():
+                with self.lock:
+                    left = slot['deadline'] - time.monotonic()
+                    if event.is_set():
+                        break
+                if left <= 0:
+                    # Uncertain delivery must never leave authority available for a retry.
+                    self.close()
+                    raise browser.BrowserError('Chrome command timed out. Ask again.')
+                event.wait(left)
             reply = slot['reply']
+            if reply and reply.get('type') == 'error' and reply.get('code') == 'TOO_LARGE':
+                raise browser.BrowserError(str(reply.get('message') or 'Chrome reply is too large.')[:200])
             if not reply or reply.get('type') in ('error', 'ended'):
                 raise browser.BrowserError('Chrome command refused or grant ended.')
             return reply
         finally:
             with self.lock:
                 self.waiters.pop(ident, None)
+                self._drop_assembly(ident)
+
+    def _drop_assembly(self, ident):
+        assembly = self.assemblies.pop(ident, None)
+        if assembly:
+            self.assembly_bytes -= assembly['bytes']
+
+    def _chunk(self, message):
+        # Called with Device.lock held, including delivery of the completed reply.
+        ident = message.get('id')
+        if not isinstance(ident, str):
+            raise ValueError('Invalid chunk id.')
+        slot = self.waiters.get(ident)
+        now = time.monotonic()
+        if not slot or slot['event'].is_set() or now >= slot['deadline']:
+            return None
+        seq, total, data = message.get('seq'), message.get('total'), message.get('data')
+        if (type(seq) is not int or type(total) is not int or not 1 < total <= MAX_CHUNKS
+                or not isinstance(data, str) or len(data) > CHUNK_CHARS):
+            raise ValueError('Invalid reply chunk.')
+        assembly = self.assemblies.get(ident)
+        if assembly is None:
+            assembly = {'total': total, 'parts': [], 'bytes': 0}
+        if total != assembly['total'] or seq != len(assembly['parts']):
+            raise ValueError('Out-of-order reply chunk.')
+        size = len(data.encode('utf-8'))
+        if self.assembly_bytes + size > MAX_ASSEMBLY:
+            raise ValueError('Reply assembly exceeds the byte limit.')
+        self.assemblies[ident] = assembly
+        assembly['parts'].append(data)
+        assembly['bytes'] += size
+        self.assembly_bytes += size
+        slot['deadline'] = min(slot['hard_deadline'], max(slot['deadline'], now + slot['timeout']))
+        if seq + 1 < total:
+            return None
+        reply = json.loads(''.join(assembly['parts']))
+        self._drop_assembly(ident)
+        if (not isinstance(reply, dict) or reply.get('type') != 'result'
+                or reply.get('id') != ident or reply.get('epoch') != self.epoch):
+            raise ValueError('Invalid assembled reply.')
+        return reply
 
     def cancel_grant(self, ident):
         with self.lock:
@@ -206,8 +265,12 @@ class Device:
                 if self.ident in self.broker.load():
                     self.broker.devices[self.ident]['lastSeen'] = self.broker.clock()
             self.send({'type': 'pong'})
-        elif kind in ('result', 'granted', 'error', 'ended'):
+        elif kind in ('result', 'granted', 'error', 'ended', 'chunk'):
             with self.lock:
+                if kind == 'chunk':
+                    message = self._chunk(message)
+                    if message is None:
+                        return
                 if kind == 'ended':
                     self.cancel_grant(message.get('id'))
                 slot = self.waiters.get(message.get('id'))
@@ -233,6 +296,8 @@ class Device:
             if self.closed:
                 return
             self.closed = True
+            self.assemblies.clear()
+            self.assembly_bytes = 0
             for slot in self.waiters.values():
                 slot['event'].set()
         self.transport.abort()
@@ -740,7 +805,7 @@ def upgrade(handler, broker=None):
             raise ValueError('Authenticate first.')
         ident = broker.authenticate(hello.get('token'), origin)
         device = broker.register(ident, transport, hello.get('chrome', ''))
-        device.send({'type': 'ready'})
+        device.send({'type': 'ready', 'chunks': True})
         handler.connection.settimeout(30)
         for raw in messages:
             device.handle(json.loads(raw))
