@@ -1224,7 +1224,8 @@ class StatusTests(unittest.TestCase):
         folder = tempfile.mkdtemp()
         self.addCleanup(lambda: __import__('shutil').rmtree(folder, ignore_errors=True))
         path = Path(folder) / 'r.jsonl'
-        path.write_text('\n'.join(__import__('json').dumps({'type': 'event_msg', 'payload': {'type': kind}}) for kind in events))
+        path.write_text(''.join(__import__('json').dumps({'type': 'event_msg', 'payload': {'type': kind}}) + '\n'
+                                for kind in events))
         return str(path)
 
     def test_transcript_busy_follows_the_last_lifecycle_event(self):

@@ -9,6 +9,10 @@ Tether is a browser chat UI for Claude Code, Codex, and Antigravity in tmux, for
 - `server/index.html` and `server/app.js`: legacy UI, served at `/mobile/chat/`.
 - Server checks: `cd server && python3 -m unittest discover -q`.
   If you run a suite with `timeout`, add `-k 10s` so a leaked child cannot keep it alive after SIGTERM.
+- Run agent load tests, full test suites, builds and benchmarks in a low-weight scope.
+  Use `systemd-run --user --scope --quiet --collect -p CPUWeight=20 -- COMMAND`.
+  On cgroup v2, `nice -n 19` only orders tasks inside the agent's own cgroup.
+  Use `CPUWeight=idle` for synthetic CPU hogs. If `systemd-run --user` is unavailable, run the command directly.
 - UI checks: `cd ui && npm ci && npx tsc -b && npx eslint .`. Build from a clean checkout before deployment.
 - Before a commit that changes `ui/`, run `node ui/tools/verify.cjs --surface NAME` for each changed surface and look at every screenshot. Add the printed `screenshots(...)` item to the `Verified:` line only when the driver builds the UI, the source ID matches before and after the run, and all shots pass at both 320 px and 1280 px. See [.claude/skills/verify/SKILL.md](.claude/skills/verify/SKILL.md).
 - Deployment and configuration: see [README.md](README.md).

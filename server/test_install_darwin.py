@@ -76,6 +76,7 @@ class DarwinInstallTests(unittest.TestCase):
         self.assertTrue(all(check['ok'] for check in plan['checks']))
         self.assertEqual(self.plist(plan)['ProgramArguments'][:2],
                          [os.path.abspath(sys.executable), str(self.repo / 'server/server.py')])
+        self.assertEqual(self.plist(plan)['ProcessType'], 'Interactive')
         for name in plan['units']:
             data = self.plist(plan, name)
             label = installer.launchd_label(name)

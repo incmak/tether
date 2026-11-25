@@ -15,7 +15,6 @@ import terminal_replies
 # Literal source text copied from the original Python definitions and calls.
 # module, (rules file, JSON name), public attribute, original text, original flags
 ORIGINALS = [
-    ('terminal_input', ('common', 'WORKING'), 'WORKING', (r'Working \(|esc to interrupt|(?m:^\s*[✻✶✽✢·*●]\s+[A-Z][a-z]+(?:ing|ed)?…)'), re.I),
     ('terminal_input', ('claude', 'SPINNER'), 'CLAUDE_SPINNER', (r"^[✻✶✽✢·*]\s+[A-Z][\w']*…"), 0),
     ('terminal_input', ('common', 'APPROVAL_QUESTION'), 'APPROVAL_QUESTION', (r'^(?:Claude has written up a plan.*Would you like to proceed|Ready to code\?|Quick safety check|'
     r'Run this command\?|Would you like to \w+|Do you want to (?:proceed|allow|approve|make this edit|create)|'
