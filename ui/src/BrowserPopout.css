@@ -1,0 +1,21 @@
+.browser-popout-page {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  color: var(--text);
+  background: var(--bg);
+}
+.browser-popout-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--sidebar);
+}
+.browser-popout-head h1 { font-size: 14px; font-weight: 650; }
+.browser-popout-head > span { min-width: 0; overflow-wrap: anywhere; font-size: 13px; color: var(--muted); }
+.browser-popout-head > button { padding-inline: 8px; }
+.browser-popout-page > .browser-popout-note { margin: auto; padding: 16px; text-align: center; color: var(--muted); }
+.browser-popout-page > .browser-panel { flex: 1; }
