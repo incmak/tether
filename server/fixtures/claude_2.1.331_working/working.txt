@@ -1,0 +1,40 @@
+
+● Status: reading the Working detection rule in server/detection/common.json and _live_status. Next: look at the real
+  screens to scope the match to Claude's status line.
+
+  Searched for 1 pattern, read 1 file, listed 1 directory, ran 3 shell commands
+
+● B490's WORKING check scans the whole screen at server/terminal_input.py:1244, which is the cause. I'm narrowing it to
+  the status area around each agent's input box, then handing the implementation to Codex. · summary
+
+  Searched for 1 pattern, ran 2 shell commands
+
+● Advising using Fable 5.2
+  ⎿  ✔ Advisor has reviewed the conversation and will apply the feedback
+
+  Ran 5 shell commands
+
+● The B400 helper tab filter tab is closed, so a live capture is not possible. Next: check if Claude's registry status
+  is reliable, using the open Claude tabs.
+
+  Ran 2 shell commands
+
+● Registry is reliable here (busy mid-turn), but I keep the screen as a second signal and scope it. Next: make a real
+  idle capture with a throwaway Claude tab whose reply quotes the bad strings.
+
+  Ran 2 shell commands
+
+● Reproduced live: the idle probe tab reads as Working. Saving its screen and my own mid-turn screen as fixtures.
+
+  Saving idle and working fixtures, checking registry
+  ⎿  $ d=server/fixtures/claude_2.1.331_working && mkdir -p $d && tmux capture-pane -p -t %970 >
+     $d/idle_reply_quotes_status.txt && tmux capture-pane -p -e -t %970 > $d/idle_reply_quotes_status.ansi && tmux
+     capture-pane -p -t "$TMUX_PANE" > $d/working.txt && tmux capture-pane -p -e -t "$TMUX_PANE" > $d/…
+
+✻ Beboppin'… (8m 43s · ↓ 9.6k tokens · thought for 1s)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 5.5 | ctx 10% (101k/1000k) | 7d 56% | tether | main
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt
