@@ -13,6 +13,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -458,8 +459,14 @@ def _render(pid, data, home, group=None, backlog_project=None):
                  '- An item that is not the task this tab was started for goes to a new tab, at every autonomy level, also mid-work. '
                  'Write a handoff note in the work-notes folder (goal, state, decisions, evidence, files, open PRs and branches, what not to redo). '
                  'Run `agent_tab_cli.py start --owner self --name "B12 two to four words" --cwd ITEM_REPO "TASK"`; TASK gives the note path and says to run `start B12` first. '
-                 'Then leave the item and report the new tab name. Hand off one item, then stop.\n'
-                 '- Reminders for the user, only when asked: `agent_reminder_cli.py` in the same folder, `add "text" --at "tomorrow 10:00"` (Tether time zone), `list`, `done R3`.\n')
+                 'Then leave the item and report the new tab name. Hand off one item, then stop.\n')
+    reminder = shlex.join((sys.executable, str(Path(__file__).resolve().with_name('agent_reminder_cli.py'))))
+    tools = ('\n## Tether tools\n'
+             'If a Tether tool can do what the user asks, use it first. Use outside apps (Outlook, Microsoft To Do, '
+             'calendar events, cron, or CronCreate) only if the user names them.\n'
+             f'- Reminders ("remind me", "set a reminder", "follow up on <day>"): `{reminder} add "text" --at "YYYY-MM-DD HH:MM"` (Tether time zone).\n'
+             '- Times like `in 2h`, `tomorrow 10:00`, and `10:00` also work. Use `list`, `done R3`, `snooze R3 --until "in 2h"`, or `--help` for repeats.\n'
+             '- `tether tools` lists every Tether agent command with its full path and purpose.\n')
     waiting = []
     if backlog_project is not None:
         import backlog as backlog_store  # backlog imports this module
@@ -470,14 +477,17 @@ def _render(pid, data, home, group=None, backlog_project=None):
             waiting.append(((3, 0), f'\n### Open backlog items ({count})\n{shown}{more}'))
     project_notes = _note_parts(pid, 'Project')
     rules = ''.join(fixed)
-    fixed_chars = len(heading) + len(intro) + len(rules)
+    fixed_chars = len(heading) + len(intro) + len(rules) + len(tools)
     limit = min(data['budget'], BUDGET_MAX - fixed_chars)
     fitted = _fit(content + waiting + project_notes + stack_notes, limit)
-    # Keep the project name on the heading line and the backlog list after the built-in rules.
+    # Keep the project name on the heading line and the backlog list under its own heading.
     title = ''.join(fitted[:1])
-    main = ''.join(fitted[1:len(content)])
-    extra = ''.join(fitted[len(content):])
-    prompt = heading + title + intro + main + rules + extra
+    main_end = len(content)
+    backlog_end = main_end + len(waiting)
+    main = ''.join(fitted[1:main_end])
+    open_items = ''.join(fitted[main_end:backlog_end])
+    extra = ''.join(fitted[backlog_end:])
+    prompt = heading + title + intro + main + rules + open_items + tools + extra
     return prompt, fixed_chars
 
 

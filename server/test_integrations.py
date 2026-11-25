@@ -69,6 +69,28 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(SKILLS[0].with_name('bootstrap.py').read_bytes(),
                          SKILLS[1].with_name('bootstrap.py').read_bytes())
 
+    def test_tether_tools_lists_agent_commands(self):
+        result = subprocess.run([sys.executable, str(ROOT / 'tether'), 'tools'],
+                                capture_output=True, text=True, check=True, timeout=10)
+        for filename, purpose in (
+            ('agent_reminder_cli.py', "Set and manage reminders for Mak from an agent's tab."),
+            ('agent_backlog_cli.py', "Read and change the shared backlog from an agent's tab."),
+        ):
+            with self.subTest(filename=filename):
+                self.assertIn(f'{filename}  {purpose}\n', result.stdout)
+                self.assertIn(str(ROOT / 'server' / filename), result.stdout)
+        for script in (ROOT / 'server').glob('agent_*_cli.py'):
+            self.assertIn(str(script), result.stdout)
+
+    def test_tether_help_points_to_tools_and_reminders(self):
+        for args, expected in ((['--help'], ('tether tools', 'tether remind')),
+                               (['remind', '--help'], ('Set and manage reminders',))):
+            with self.subTest(args=args):
+                result = subprocess.run([sys.executable, str(ROOT / 'tether'), *args],
+                                        capture_output=True, text=True, check=True, timeout=10)
+                for text in expected:
+                    self.assertIn(text, result.stdout)
+
 
 if __name__ == '__main__':
     unittest.main()
