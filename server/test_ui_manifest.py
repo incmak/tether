@@ -1,6 +1,8 @@
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import unittest
 
@@ -9,6 +11,13 @@ from layout_generate import built_ins
 from test_custom_layouts import GOOD, changed
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def browser_dependencies_available():
+    return bool(shutil.which('node')) and subprocess.run(
+        ['node', '-e', "require.resolve('typescript')"], cwd=ROOT / 'ui',
+        capture_output=True, timeout=30,
+    ).returncode == 0
 
 
 def browser_check(data):
@@ -56,7 +65,9 @@ const restored = api.lookLayout({layout:'custom:fixture', surface:'flat', backdr
 })().catch(error => { console.error(error); process.exit(1); });
 """
     result = subprocess.run(['node', '-e', script], cwd=ROOT / 'ui', input=json.dumps(data),
-                            capture_output=True, text=True, timeout=30, check=True)
+                            capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        raise AssertionError(f'Node exited with code {result.returncode}\n{result.stderr}')
     return json.loads(result.stdout)
 
 
@@ -70,6 +81,12 @@ class ManifestTests(unittest.TestCase):
         self.assertIn(manifest['devices']['phone']['default'], manifest['devices']['phone']['options'])
         self.assertEqual(len(manifest['features']), 8)
 
+
+@unittest.skipUnless(
+    os.environ.get('CI') or os.environ.get('GITHUB_ACTIONS') or browser_dependencies_available(),
+    'Node and ui/npm ci are required (typescript not found)',
+)
+class BrowserManifestTests(unittest.TestCase):
     def test_builtins_match_the_browser_and_validate_as_custom_fixtures(self):
         actual = browser_check([GOOD])['builtins']
         self.assertEqual(actual, built_ins())
