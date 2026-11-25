@@ -70,7 +70,7 @@ function DeviceIcon({ preset }: { preset: string }) {
 const PICTURE_KEY = 'tether-browser-picture'
 const PICTURES = [
   { id: 'sharp', label: 'Sharp text', hint: 'Full color. Best for reading', icon: Type },
-  { id: 'standard', label: 'Standard', hint: 'Selkies default', icon: Image },
+  { id: 'standard', label: 'Standard', hint: 'Less work for this device', icon: Image },
   { id: 'light', label: 'Low data', hint: '30 fps, lower bitrate. For slow links', icon: Gauge },
 ] as const
 type Picture = typeof PICTURES[number]['id']
