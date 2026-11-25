@@ -191,10 +191,13 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
   const liveOffline = liveView && liveReach === 'down'
   const liveSrc = liveBase ? `${location.protocol}//${location.hostname}:${liveBase.port}${liveBase.path}` : ''
   // Selkies sizes the remote display from the iframe's viewport. Scale the iframe without changing that viewport.
-  const livePreset = tab && tab.preset !== 'desktop' && !windowView ? tab : null
-  const liveScale = livePreset ? Math.min(1, stage.width / livePreset.width, stage.height / livePreset.height) : 1
+  // Native Wayland Chromium needs 500 CSS px to show the full window, even on a narrower panel.
+  const liveViewport = windowView
+    ? stage.width > 0 && stage.width < 500 && stage.height > 0 ? { width: 500, height: stage.height } : null
+    : tab && tab.preset !== 'desktop' ? tab : null
+  const liveScale = liveViewport ? Math.min(1, stage.width / liveViewport.width, stage.height / liveViewport.height) : 1
   // Selkies draws its canvas with pixelated sampling. Scaled down, that drops whole pixel columns from thin glyph
-  // strokes, so a scaled preset asks the live page for smooth sampling (tether-wheel.js).
+  // strokes, so a scaled frame asks the live page for smooth sampling (tether-wheel.js).
   const liveSmooth = liveScale < 1
   const syncLiveInput = useCallback(() => {
     if (liveSrc) liveFrameRef.current?.contentWindow?.postMessage({ tether: 'wheel-mode', relay: !windowView, smooth: liveSmooth }, new URL(liveSrc).origin)
@@ -963,8 +966,8 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
           onChange={event => setLabel({ ...label, text: event.target.value })} onBlur={commitLabel}
           onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); commitLabel() } else if (event.key === 'Escape') { event.stopPropagation(); setLabel(null) } }} />}
       </div>
-      {liveMode && liveReach === 'ok' && <iframe key={liveBase?.run} ref={liveFrameRef} className={livePreset ? 'browser-live browser-live-preset' : 'browser-live'} src={liveSrc} hidden={noting} inert={watching}
-        style={livePreset ? { width: livePreset.width, height: livePreset.height, transform: `translate(-50%, -50%) scale(${liveScale})` } : undefined}
+      {liveMode && liveReach === 'ok' && <iframe key={liveBase?.run} ref={liveFrameRef} className={liveViewport ? 'browser-live browser-live-preset' : 'browser-live'} src={liveSrc} hidden={noting} inert={watching}
+        style={liveViewport ? { width: liveViewport.width, height: liveViewport.height, transform: `translate(-50%, -50%) scale(${liveScale})` } : undefined}
         title={`Page: ${tab?.title || tab?.url || 'New tab'}`} sandbox="allow-scripts allow-same-origin" allow="clipboard-read; clipboard-write"
         referrerPolicy="no-referrer" onLoad={() => { setLiveReady(true); syncLiveInput() }} />}
       {liveView && liveReach === 'ok' && watching && <div className="browser-live-block" aria-hidden="true" />}

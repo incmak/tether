@@ -424,22 +424,35 @@ class AgentClient:
                     self.proxy.log_denied(method)
                     self.error(message, 'Not allowed through Tether.', -32601)
                     return
-        if session and method in browser.AGENT_EMULATION:
+        target = self.sessions.get(session)
+        slot = browser.AGENT_EMULATION.get(method) if session else None
+        live_page = session and self.proxy.browser.container is not None and self.targets.get(target, {}).get('type') == 'page'
+        if slot or (live_page and 'metrics' not in self.emulation.get(target, {})):
             # Serialize these commands with panel handoffs. Never wait with self.lock held: the reader uses it.
             with self.proxy.browser.lock:
-                target = self.sessions.get(session)
                 tab = self.proxy.browser.tabs.get(target)
-                if tab is not None and tab.controller == 'user':
+                user_controls_viewport = tab is not None and tab.controller == 'user'
+                if slot and user_controls_viewport:
                     self.error(message, "The user controls this tab's viewport. Return control to the agent first.")
                     return
                 try:
-                    result = self.conn.call(method, params, session)
+                    saved = self.emulation.get(target, {})
+                    if live_page and not user_controls_viewport and slot != 'metrics' and 'metrics' not in saved:
+                        # Initialize before the agent can inspect the page or take its first screenshot.
+                        self.conn.call(*browser.LIVE_AGENT_METRICS, session=session)
+                        self.emulation.setdefault(target, {})['metrics'] = browser.AGENT_DEFAULTS['metrics']
+                    if slot:
+                        if live_page and method == 'Emulation.clearDeviceMetricsOverride':
+                            result = browser.reset_live_agent_metrics(self.conn, session)
+                        else:
+                            result = self.conn.call(method, params, session)
+                        self.emulation.setdefault(target, {})[slot] = (method, params)
+                        self.transport.message({'id': message['id'], 'sessionId': session, 'result': result})
                 except browser.BrowserError as exc:
                     self.error(message, str(exc))
                     return
-                self.emulation.setdefault(target, {})[browser.AGENT_EMULATION[method]] = (method, params)
-                self.transport.message({'id': message['id'], 'sessionId': session, 'result': result})
-            return
+            if slot:
+                return
         outgoing = dict(message, params=params, sessionId=session or self.root)
         completed = threading.Event() if root and method == 'Target.createTarget' else None
         def answered(reply):

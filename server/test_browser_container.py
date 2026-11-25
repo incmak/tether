@@ -1,5 +1,6 @@
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import base64
+import concurrent.futures
 import socket
 import tempfile
 import threading
@@ -376,6 +377,59 @@ class BrowserInContainerTests(unittest.TestCase):
         self.assertTrue(self.fake.sent('Page.bringToFront'))
         with self.assertRaises(browser.BrowserError):
             self.browser.show('gone')
+
+    def test_show_clears_fit_only_in_whole_window_view(self):
+        signed = browser.Browser(signed=True, container=self.container)
+        self.addCleanup(signed.stop)
+        first = signed.list_tabs()['tabs'][0]['id']
+        second = signed.new_tab()['id']
+        self.fake.screen_size = (470, 1260)
+        self.fake.window_size = (500, 1260)
+        for target in (first, second):
+            signed.show(target)
+            signed.refresh(signed.tab(target))
+        signed.show(first)
+        self.assertEqual(signed.tab(first).fullscreen_viewport, (470, 1260))
+        self.assertEqual(signed.tab(second).fullscreen_viewport, (470, 1260))
+        signed.set_window_view(first, True)
+        self.assertIsNone(signed.tab(first).fullscreen_viewport)
+        signed.show(second)
+        self.assertIsNone(signed.tab(second).fullscreen_viewport)
+        self.assertEqual(self.fake.sent('Emulation.clearDeviceMetricsOverride')[-1]['sessionId'],
+                         signed.tab(second).session)
+
+    def test_fit_drops_stale_geometry_after_a_window_view_round_trip(self):
+        signed = browser.Browser(signed=True, container=self.container)
+        self.addCleanup(signed.stop)
+        tab = signed.tab(signed.list_tabs()['tabs'][0]['id'])
+        self.fake.screen_size = (470, 1260)
+        self.fake.window_size = (500, 1260)
+        read = threading.Event()
+        changed = threading.Event()
+        call = signed.conn.call
+
+        def pause_read(method, *args, **kwargs):
+            result = call(method, *args, **kwargs)
+            if method == 'Emulation.getScreenInfos':
+                read.set()
+                if not changed.wait(3):
+                    raise AssertionError('The mode change waited for the geometry read.')
+            return result
+
+        with mock.patch.object(signed.conn, 'call', side_effect=pause_read):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                fit = executor.submit(signed.refresh, tab)
+                try:
+                    self.assertTrue(read.wait(3))
+                    signed.set_window_view(tab.target, True)
+                    signed.set_window_view(tab.target, False)
+                finally:
+                    changed.set()
+                fit.result(timeout=3)
+        self.assertIsNone(tab.fullscreen_viewport)
+        self.assertFalse(self.fake.sent('Emulation.setDeviceMetricsOverride'))
+        signed.refresh(tab)
+        self.assertEqual(tab.fullscreen_viewport, (470, 1260))
 
     def test_tabs_are_never_minimized(self):
         self.browser.list_tabs()

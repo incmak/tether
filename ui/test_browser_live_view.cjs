@@ -50,7 +50,8 @@ async function main() {
     if (req.url === '/browser/live/tether-wheel.js') { res.setHeader('Content-Type', 'text/javascript'); res.end(readFileSync(resolve(__dirname, '../server/selkies/tether-wheel.js'))); return }
     res.setHeader('Content-Type', 'text/html')
     res.end('<!doctype html><script src="tether-wheel.js"></script><title>Selkies fixture</title><body style="margin:0;background:#dee9fb;font:20px sans-serif"><p style="margin:24px">Live video fixture</p><input aria-label="Fixture input" style="margin:24px">'
-      + '<script>window.selkiesWheels = 0; window.addEventListener("wheel", () => window.selkiesWheels++)</script></body>')
+      + '<button style="position:absolute;right:4px;top:4px" onclick="this.textContent=\'Menu opened\'">Chrome menu</button>'
+      + '<script>window.selkiesWheels = 0; window.addEventListener("wheel", event => { window.selkiesWheels++; window.selkiesWheelX = event.clientX })</script></body>')
   })
   await new Promise(done => liveServer.listen(0, '127.0.0.1', done))
   const livePort = liveServer.address().port
@@ -108,6 +109,7 @@ async function main() {
     for (const [width, height, touch, agent, down, giveBack, signed] of [
       [1280, 900, false], [320, 700, true], [768, 1024, true, true], [1280, 900, false, false, true], [320, 700, true, false, true],
       [1280, 900, false, false, false, true], [1280, 900, false, false, false, false, true], [320, 700, true, false, false, false, true],
+      [470, 900, false, false, false, false, true],
     ]) {
       const dpr = width === 320 ? 2 : 1
       const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: dpr, hasTouch: touch, serviceWorkers: 'block' })
@@ -210,12 +212,29 @@ async function main() {
         const frameLoads = liveLoads
         await toggle.press('Enter')
         await page.getByRole('button', { name: 'Show the whole Chrome window', pressed: true }).waitFor()
-        assert.equal(await frame.getAttribute('class'), 'browser-live')
+        const windowStage = await page.locator('.browser-stage').boundingBox()
+        const viewportWidth = Math.max(500, Math.floor(windowStage.width))
+        const windowFrame = await (await frame.elementHandle()).contentFrame()
+        assert.equal(await windowFrame.evaluate(() => innerWidth), viewportWidth)
+        const windowBox = await frame.boundingBox()
+        assert(Math.abs(windowBox.width - windowStage.width) < 1)
+        assert(Math.abs(windowBox.height - windowStage.height * windowStage.width / viewportWidth) < 1)
+        assert(Math.abs(windowBox.y - (windowStage.y + (windowStage.height - windowBox.height) / 2)) < 1)
+        await windowFrame.waitForFunction(smooth =>
+          [...document.querySelectorAll('style')].some(style => style.textContent.includes('image-rendering: auto')) === smooth,
+        windowStage.width < 500)
+        const menu = windowFrame.getByRole('button', { name: 'Chrome menu' })
+        const menuBox = await menu.boundingBox()
+        assert(menuBox.x + menuBox.width <= windowStage.x + windowStage.width)
+        await page.mouse.click(menuBox.x + menuBox.width / 2, menuBox.y + menuBox.height / 2)
+        await windowFrame.getByRole('button', { name: 'Menu opened' }).waitFor()
         assert(await notes.isDisabled())
         assert.equal(await notes.getAttribute('aria-description'), 'Notes are available in page view.')
         await page.screenshot({ path: resolve(evidence, `window-${width}.png`) })
-        await wheelOver(page, await frame.boundingBox(), 1)
-        assert.equal(await page.frameLocator('iframe.browser-live').locator('body').evaluate(() => window.selkiesWheels), 1)
+        await wheelOver(page, windowBox, 1)
+        const [wheelCount, wheelX] = await windowFrame.evaluate(() => [window.selkiesWheels, window.selkiesWheelX])
+        assert.equal(wheelCount, 1)
+        assert(Math.abs(wheelX - viewportWidth / 4) <= 1)
         assert.deepEqual(await wheelCalls(page), [])
         const input = page.frameLocator('iframe.browser-live').getByRole('textbox', { name: 'Fixture input' })
         await input.fill('Direct input')
