@@ -7597,8 +7597,10 @@ class ServerWatcherTests(unittest.TestCase):
                     self.assertEqual(server.review_reply(entry, 'a1b2c3d4'), expected)
             entry['transcript'] = str(Path(directory) / 'missing.jsonl')
             self.assertIsNone(server.review_reply(entry, 'a1b2c3d4'))
-        with patch.object(server.history, 'read', side_effect=RuntimeError('no history')):
-            self.assertIsNone(server.review_reply(entry, 'a1b2c3d4'))
+            entry['transcript'] = str(path)
+            with patch.object(server.history, 'advance', side_effect=RuntimeError('no history')) as advance:
+                self.assertIsNone(server.review_reply(entry, 'a1b2c3d4'))
+                advance.assert_called_once()
 
     def test_last_reply_uses_latest_nonempty_assistant_text(self):
         messages = [{'role': 'assistant', 'text': 'old'}, {'role': 'assistant', 'text': 'latest'},

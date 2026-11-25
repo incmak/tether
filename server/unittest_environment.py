@@ -26,6 +26,7 @@ def isolate():
         ('MOBILE_TMUX_HOME', 'home'),
         ('MOBILE_TMUX_CACHE', 'cache'),
         ('MOBILE_TMUX_CONFIG', 'config'),
+        ('TETHER_PARSERS', 'parsers'),
         ('TETHER_HOME', 'tether'),
     ):
         location = root / folder
