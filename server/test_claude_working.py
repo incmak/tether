@@ -56,7 +56,9 @@ class ClaudeWorkingTests(unittest.TestCase):
         # Review r1: an indented rule typed in the draft must not end the box, and a status line that quotes the
         # hint is not the hint.
         idle = fixture('idle_reply_quotes_status.txt').splitlines()
-        anchor = next(index for index, row in enumerate(idle) if row.startswith('❯'))
+        import footer
+        anchor = footer.input_anchor(idle)  # the live input, not a sent prompt higher up
+        self.assertTrue(idle[anchor - 1].startswith('─'))
         width = len(idle[anchor - 1].rstrip())
         for draft in (['  ' + '─' * (width - 2), '  esc to interrupt is the hint'],
                       ['  ' + '─' * width, '  esc to interrupt'],
@@ -66,7 +68,8 @@ class ClaudeWorkingTests(unittest.TestCase):
                 self.assertIs(terminal.claude_screen_working('\n'.join(frame)), False)
                 self.assertEqual(terminal._live_status(self.entry, self.run, '\n'.join(frame))['state'], 'Idle')
         bottom = max(index for index, row in enumerate(idle) if row.startswith('─'))
-        for status in ('  Opus 5.5 | esc to interrupt is the hint', '  esc to interrupt is the hint · main'):
+        for status in ('  Opus 5.5 | esc to interrupt is the hint', '  esc to interrupt is the hint · main',
+                       '  Opus 5.5 · esc to interrupt · main', '  esc to interrupt · main'):
             with self.subTest(status=status):
                 frame = idle[:bottom + 1] + [status] + idle[bottom + 1:]
                 self.assertIs(terminal.claude_screen_working('\n'.join(frame)), False)
