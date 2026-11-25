@@ -64,6 +64,18 @@
 .browser-bar { position: relative; flex: none; }
 .browser-bar .browser-menu-anchor { position: static; }
 .browser-bar .browser-menu.end { right: 6px; }
+.browser-panel .browser-menu.browser-bookmarks { width: min(320px, calc(100cqw - 12px)); }
+.browser-bookmarks button[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
+.browser-bookmarks-note { margin: 0; padding: 6px 10px; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.browser-bookmarks-note p { margin: 0; color: var(--error); }
+.browser-bookmark { display: flex; align-items: center; }
+.browser-bookmark > button:first-child { flex: 1; min-width: 0; }
+.browser-bookmark > button > span > :is(span, small) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browser-bookmark > button.browser-bookmark-remove { flex: none; justify-content: center; width: 34px; padding: 0; }
+@media (pointer: coarse) {
+  .browser-panel .browser-bookmarks button { min-height: 44px; }
+  .browser-bookmark > button.browser-bookmark-remove { width: 44px; height: 44px; }
+}
 .browser-panel :is(.browser-empty, .browser-saved, .mac-pairing) { overflow-wrap: anywhere; }
 .browser-saved > svg { flex: none; }
 
