@@ -35,8 +35,9 @@
 .browser-sheet-full[open] { inset: 0; border-radius: 0; padding: 0; }
 /* The body is the fullscreen element, so it keeps the page clear of the notch and the gesture bar itself. */
 .browser-sheet-full .browser-sheet-body { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+/* The Notes toolbar stays: it holds the only Send and Close for notes. */
 .browser-sheet-full > .browser-sheet-head,
-.browser-sheet-full .browser-sheet-body > .browser-panel > :is(.browser-tabs, .browser-bar, .browser-saved, .browser-agent, .browser-status:empty) { display: none; }
+.browser-sheet-full .browser-sheet-body > .browser-panel > :is(.browser-tabs, .browser-bar:not(.browser-notes), .browser-saved, .browser-agent, .browser-status:empty) { display: none; }
 .browser-sheet-full .browser-status { height: auto; line-height: 1.4; padding-block: 4px; white-space: normal; overflow-wrap: anywhere; }
 /* Keep the status clear of the pill's resting corner. */
 .browser-sheet-full:has(.browser-full-controls[data-corner^="b"]) .browser-status { order: -1; }

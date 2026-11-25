@@ -115,7 +115,7 @@ async function main() {
     const url = `http://127.0.0.1:${server.httpServer.address().port}/chat/fullscreen-fixture/`
     browser = await getBrowser({ local: true })
     let passed = 0
-    async function scenario(name, test, { panel = 'normal', mode = 'accept', saved } = {}) {
+    async function scenario(name, test, { panel = 'normal', mode = 'accept', saved, frame } = {}) {
       const context = await browser.newContext({ viewport: { width: 360, height: 780 }, hasTouch: true, serviceWorkers: 'block' })
       try {
         const page = await context.newPage()
@@ -131,6 +131,16 @@ async function main() {
           addEventListener('resize', report);
           report();
         </script>` }))
+        if (frame) {
+          // One still frame on the fallback stream, so the panel can take notes on it.
+          const jpeg = await page.evaluate(() => {
+            const canvas = Object.assign(document.createElement('canvas'), { width: 360, height: 600 })
+            canvas.getContext('2d').fillRect(0, 0, 360, 600)
+            return canvas.toDataURL('image/jpeg').split(',')[1]
+          })
+          await page.route('**/mobile/api/browser/stream?*', route => route.fulfill({ contentType: 'text/event-stream',
+            body: `retry: 60000\nevent: frame\ndata: ${JSON.stringify({ seq: 1, width: 360, height: 600, jpeg })}\n\n` }))
+        }
         await page.goto(`${url}?panel=${panel}`)
         await button(page, 'Open fixture').tap()
         await layer(page, 1)
@@ -226,6 +236,18 @@ async function main() {
       assert.equal(await pill(page).getByRole('button').count(), 2)
       assert.equal(await sheet(page).locator('.browser-agent').isVisible(), false)
     }, { panel: 'watching' })
+
+    await scenario('the Notes toolbar stays in full screen so notes can be sent or closed', async page => {
+      await button(page, 'Add notes to this frame').tap()
+      const notes = sheet(page).getByRole('toolbar', { name: 'Notes' })
+      await notes.waitFor()
+      await enters(page)
+      assert.equal(await notes.isVisible(), true)
+      assert.equal(await sheet(page).locator('.browser-bar:not(.browser-notes)').first().isVisible(), false)
+      await notes.getByRole('button', { name: 'Close notes' }).tap()
+      await notes.waitFor({ state: 'detached' })
+      assert.equal(await pill(page).isVisible(), true)
+    }, { frame: true })
 
     await scenario('native fullscreen reserves a Back step and the live stage refits', async page => {
       const frame = sheet(page).locator('.browser-live')
