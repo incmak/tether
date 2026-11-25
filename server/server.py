@@ -1072,7 +1072,8 @@ FACTORY_READERS = {
 
 
 def codex_state():
-    return {'messages': [], 'dropped': 0, 'busy': False, 'usage': None, 'model': '', 'effort': '', 'tier': '', 'credits': None}
+    return {'messages': [], 'dropped': 0, 'busy': False, 'busy_since': None,
+            'usage': None, 'model': '', 'effort': '', 'tier': '', 'credits': None}
 
 
 def transcript_time(stamp, *, require_timezone=False):
@@ -1156,8 +1157,10 @@ def codex_consume(state, index, entry, *, offset=None):
                 state['credits'] = rates.get('credits')
         if kind == 'task_started':
             state['busy'] = True
+            state['busy_since'] = transcript_time(entry.get('timestamp'))
         elif kind in ('task_complete', 'turn_aborted'):
             state['busy'] = False
+            state['busy_since'] = None
     if entry.get('type') == 'compacted' or (entry.get('type') == 'response_item' and kind == 'compaction'):
         messages.append(activity.notice(index, entry.get('timestamp'), 'Context compacted.'))
         return
@@ -2659,15 +2662,22 @@ class Handler(BaseHTTPRequestHandler):
                     result = codex_footer(config, codex_metrics(config, state['usage'], state['model'], state.get('effort', ''),
                                                                 state.get('credits'), tier=state.get('tier', '')))
                     live = claude_hooks.codex_live(config)
+                    now = time.time()
+                    working = live is not None and live['busy'] and not live['waiting']
                     if live is not None:
                         result.update(spinner=None, running=None)
-                        if live['busy'] and not live['waiting']:
-                            now = time.time()
-                            result['spinner'] = {'verb': 'Working…', 'detail': claude_hooks.elapsed(live['started'], now)}
-                            if live['tool']:
-                                tool = live['tool']
-                                result['running'] = {'title': tool['title'], 'command': tool['command'],
-                                                     'elapsed': claude_hooks.elapsed(tool['started'], now)}
+                    if working and live['tool']:
+                        tool = live['tool']
+                        result['running'] = {'title': tool['title'], 'command': tool['command'],
+                                             'elapsed': claude_hooks.elapsed(tool['started'], now)}
+                    # The rollout's task_started is the turn start: a mid-turn prompt resets the hook's clock.
+                    # Before the rollout writes it, the live hook's start is the best value.
+                    if (state['busy'] and live is None) or working:
+                        started = state.get('busy_since') if state['busy'] else None
+                        if started is None and working:
+                            started = live['started']
+                        if isinstance(started, (int, float)) and started <= now:
+                            result['spinner'] = {'verb': 'Working…', 'detail': claude_hooks.elapsed(started, now)}
                 if config['agent'] == 'claude' and not config.get('ambiguous'):
                     result['heads_up'] = footer.card_note(result.get('heads_up'), config.get('thread'), screen=screen)
                     result['model'] = agents.claude_model(config.get('thread'))
