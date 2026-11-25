@@ -54,6 +54,15 @@ const PLACEMENT = () => {
   return { left, top, right, bottom, viewWidth: view.width * view.scale, viewHeight: view.height * view.scale, open: el.matches(':popover-open') }
 }
 const placement = page => page.evaluate(PLACEMENT)
+// What the badge says and whether it shows, with the zoom and the viewport meta.
+const BADGE_STATE = () => {
+  const el = document.querySelector('.zoom-badge')
+  return { scale: visualViewport.scale, shown: el.matches(':popover-open'), label: el.getAttribute('aria-label'), meta: document.querySelector('meta[name="viewport"]').content }
+}
+const badgeState = page => page.evaluate(BADGE_STATE)
+// Waits in the page until test(BADGE_STATE(), arg) holds. The default timeout only catches a hang, so on a timeout
+// it returns and the assertion that follows reports the state the badge stopped in.
+const settle = (page, test, arg) => page.waitForFunction(`(${test})((${BADGE_STATE})(), ${JSON.stringify(arg)})`).catch(() => {})
 
 async function zoom(run, scale) {
   await run.cdp.send('Emulation.setPageScaleFactor', { pageScaleFactor: scale })
@@ -80,10 +89,13 @@ async function main() {
         const run = await open(browser, viewport, theme)
         try {
           await zoom(run, 1.5)
-          const badge = run.page.getByRole('button', { name: 'Zoomed to 150%. Reset to 100%.' })
+          const name = 'Zoomed to 150%. Reset to 100%.'
           // Wait on the badge state in the page, not on a polled role locator: under load each locator retry costs
-          // seconds, so a timed locator fails while the badge is already right. The default timeout only catches a hang.
-          await run.page.waitForFunction(() => { const el = document.querySelector('.zoom-badge'); return el.matches(':popover-open') && el.getAttribute('aria-label') === 'Zoomed to 150%. Reset to 100%.' })
+          // seconds, so a timed locator fails while the badge is already right.
+          await settle(run.page, (s, name) => s.shown && s.label === name, name)
+          const zoomed = await badgeState(run.page)
+          assert.deepEqual([zoomed.shown, zoomed.label], [true, name], `the badge opens with the 150% name (${JSON.stringify(zoomed)})`)
+          const badge = run.page.getByRole('button', { name })
           assert.equal(await badge.count(), 1, 'the badge has the 150% name')
           assert.equal((await badge.textContent()).trim(), '150%')
           const box = await placement(run.page)
@@ -109,25 +121,34 @@ async function main() {
       await check(`${label}: a tap on the badge returns to 100% or says to pinch out`, async () => {
         const run = await open(browser, viewport, theme)
         try {
+          const original = (await badgeState(run.page)).meta
+          // The reset ends when the original meta is back and the badge shows the result: hidden at 100%, or
+          // Pinch out above it. Frames and the reset timer run late on a loaded host, so wait for that state.
+          const done = (s, want) => s.meta === want.original
+            && (s.scale < 1.01 ? !s.shown : s.shown && s.label === `Zoomed to ${want.percent}%. Pinch out to return to 100%.`)
+          const ended = async (percent, step) => {
+            const want = { original, percent }
+            await settle(run.page, done, want)
+            const end = await badgeState(run.page)
+            assert.ok(done(end, want), `${step} ends with the original meta and a matching badge (${JSON.stringify(end)}, original meta ${original})`)
+            results.push(`   ${label}: ${step} ${end.scale < 1.01 ? 'returned to 100%' : `kept ${end.scale}, badge says Pinch out`}`)
+          }
+          // A real tap: hit testing and touch input must reach the badge.
           await zoom(run, 1.3)
-          // A double tap must not save the temporary clamp as the original meta.
           await run.page.locator('.zoom-badge').tap()
-          await run.page.locator('.zoom-badge').tap().catch(() => {})
-          // The reset ends when the meta is back and the badge shows the result: hidden at 100%, or Pinch out.
-          // Frames and the reset timer can run late on a loaded host, so wait for that state, not for a fixed time.
-          await run.page.waitForFunction(() => {
+          await ended(130, 'tap')
+          // A double tap must not save the temporary clamp as the original meta. Both clicks run in one page task,
+          // so the second always meets the active clamp, however slow the host. A new zoom offers the reset again.
+          await zoom(run, 1.4)
+          const clamped = await run.page.evaluate(() => {
             const el = document.querySelector('.zoom-badge')
-            return !document.querySelector('meta[name="viewport"]').content.includes('maximum-scale')
-              && (!el.matches(':popover-open') || el.getAttribute('aria-label').includes('Pinch out'))
-          }).catch(() => {})
-          const end = await run.page.evaluate(() => {
-            const el = document.querySelector('.zoom-badge')
-            return { scale: visualViewport.scale, shown: el.matches(':popover-open'), label: el.getAttribute('aria-label'), meta: document.querySelector('meta[name="viewport"]').content }
+            el.click()
+            const during = document.querySelector('meta[name="viewport"]').content
+            el.click()
+            return during
           })
-          if (end.scale < 1.01) assert.equal(end.shown, false, 'badge hides at 100%')
-          else assert.deepEqual([end.shown, end.label], [true, 'Zoomed to 130%. Pinch out to return to 100%.'], 'badge says Pinch out')
-          results.push(`   ${label}: reset ${end.scale < 1.01 ? 'returned to 100%' : `kept ${end.scale}, badge says Pinch out`}`)
-          assert.equal(end.meta.includes('maximum-scale'), false, 'meta restored')
+          assert.ok(clamped.includes('maximum-scale=1'), `the first tap clamps the zoom (${clamped})`)
+          await ended(140, 'double tap')
         } finally { await run.context.close() }
       })
     }
