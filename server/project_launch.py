@@ -606,36 +606,43 @@ def codex_args(pid, args, group=None, cwd=None):
     block = autonomy.codex_standing_rules(autonomy.resolve(pid), codex_level.resolve(pid))
     folder_args = codex_folders(args) if pid else []
 
-    # Replace the last CLI instruction in place so its scope and precedence are preserved on resume/fork.
+    cli_instruction = None
     for i, prefix in reversed(list(_option_locations(options, '-c', '--config'))):
         key, sep, value = options[i][len(prefix):].partition('=')
         if sep and key.strip() == 'developer_instructions':
             user = _override(value)
-            if isinstance(user, str):
-                args = list(args)
-                args[i] = prefix + 'developer_instructions=' + toml_string(user + '\n\n' + block)
+            if not isinstance(user, str):
+                return [*folder_args, *args]
+            cli_instruction = i, prefix
+            break
+    else:
+        config = _instruction_config(options, cwd)
+        if config is None:
+            return [*folder_args, *args]
+        user = config.get('developer_instructions')
+        if user is not None and not isinstance(user, str):
             return [*folder_args, *args]
 
-    config = _instruction_config(options, cwd)
-    if config is None:
-        return [*folder_args, *args]
-    if 'developer_instructions' in config:
-        user = config['developer_instructions']
-        root_args = ['-c', 'developer_instructions=' + toml_string(user + '\n\n' + block)] if isinstance(user, str) else []
-        return [*root_args, *folder_args, *args]
-
-    text = ''
+    parts = [] if user is None else [user]
     if pid:
         import backlog
         import projects
-        text = projects.render(pid, 'codex', group=group, backlog_project=backlog.project_name())
+        parts.append(projects.render(pid, 'codex', group=group, backlog_project=backlog.project_name()))
         record_revision(pid, group)
+    browser_args = []
     if os.environ.get('TETHER_CDP_URL'):
         from agent_browser_cli import note
-        text = text + '\n\n' + note() if text else note()
-        args = [*codex_browser_env_args(), *args]
-    text = text + '\n\n' + block if text else block
-    return ['-c', 'developer_instructions=' + toml_string(text), *folder_args, *args]
+        parts.append(note())
+        browser_args = codex_browser_env_args()
+    parts.append(block)
+    override = 'developer_instructions=' + toml_string('\n\n'.join(parts))
+    if cli_instruction is not None:
+        # Replace the last CLI instruction in place so its scope and precedence are preserved on resume/fork.
+        i, prefix = cli_instruction
+        args = list(args)
+        args[i] = prefix + override
+        return [*folder_args, *browser_args, *args]
+    return ['-c', override, *folder_args, *browser_args, *args]
 
 
 def codex_browser_env_args():

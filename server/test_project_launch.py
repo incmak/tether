@@ -449,6 +449,8 @@ class UnitTests(unittest.TestCase):
     def test_codex_keeps_home_and_cli_instructions_with_standing_rules(self):
         home = 'Keep "quotes" and \\slashes.\nNext line 🙂'
         self.config('"developer_instructions" = \'\'\'\n' + home + "'''\n")
+        projects.set_instructions(PID, 'Use the project guide.', 0)
+        project_text = projects.render(PID, 'codex', backlog_project=backlog.project_name())
         cli = 'Keep "CLI" and \\slashes.\nTake precedence 🙂'
         value = 'developer_instructions=' + project_launch.toml_string(cli)
         for args, expected in (([], home), (['-c', value], cli), (['-c' + value], cli),
@@ -457,15 +459,17 @@ class UnitTests(unittest.TestCase):
                                  '--', 'developer_instructions=prompt'], cli),
                                (['--', '--config=developer_instructions=prompt'], home),
                                (['-c', 'developer_instructions=unquoted CLI text'], 'unquoted CLI text')):
-            with self.subTest(args=args), mock.patch.dict(os.environ, TETHER_CDP_URL='ws://127.0.0.1:1/cdp/x'):
+            with self.subTest(args=args), mock.patch.dict(os.environ, TETHER_CDP_URL='ws://127.0.0.1:1/cdp/x'), \
+                    mock.patch.object(project_launch, 'record_revision') as record_revision:
                 argv = project_launch.codex_args(PID, args)
                 overrides = self.standing_instructions(argv)
                 self.assertEqual(overrides['developer_instructions'],
-                                 expected + '\n\n' + self.block(PID))
+                                 '\n\n'.join((expected, project_text, note(), self.block(PID))))
+                record_revision.assert_called_once_with(PID, None)
                 folders = ['--add-dir', str(backlog.folder()), '--add-dir', str(paths.items()),
                            '--add-dir', str(paths.reminders())]
                 self.assertIn(folders, [argv[i:i+len(folders)] for i in range(len(argv))])
-                self.assertFalse(any(arg.startswith('shell_environment_policy.set.TETHER_CDP_URL') for arg in argv))
+                self.assertIn('shell_environment_policy.set.TETHER_CDP_URL="ws://127.0.0.1:1/cdp/x"', argv)
 
     def instruction_repo(self, name='repo'):
         repo = self.temp / name
