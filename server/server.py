@@ -1734,7 +1734,7 @@ def _review_record(state, index, record, agent, *, request_key=None, clean=displ
             state['draft'] = text
 
 
-REVIEW_PARSER_VERSION = 1  # Bump when the review parser state or transcript interpretation changes.
+REVIEW_PARSER_VERSION = 2  # Bump when the review parser state or transcript interpretation changes.
 REVIEW_PARSERS = parser_store.ParserStore('review', REVIEW_PARSER_VERSION, pending=review_links.REPLY_PENDING)
 
 

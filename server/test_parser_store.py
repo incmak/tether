@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import stat
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -120,20 +121,25 @@ class ParserCheckpoints(unittest.TestCase):
                 elif change.startswith('rewrite'):
                     self.path.write_bytes(new + (lines(CLAUDE_END) if change.endswith('append') else b''))
                 restart = parser_store.ParserStore(store.name, 2 if change == 'version' else 1)
-                native_open = open
+                self.assertEqual(set(restart.records), set() if change == 'version' else {'%1', '%2'})
+                open_fd = os.open
 
-                def read(path, *args, **kwargs):
+                def read(path, flags, *args):
                     if change == 'read error' and path == str(self.path):
                         raise PermissionError('closed transcript')
-                    return native_open(path, *args, **kwargs)
+                    return open_fd(path, flags, *args)
 
-                with patch('builtins.open', side_effect=read):
-                    self.assertEqual(set(restart.records), set() if change == 'version' else {'%2'})
-                with patch.object(coordinator, '_claude_turn', wraps=coordinator._claude_turn) as consume:
+                with patch.object(parser_store.os, 'open', side_effect=read), \
+                        patch.object(coordinator, '_claude_turn', wraps=coordinator._claude_turn) as consume:
                     state = self.advance(restart, consume=consume)['state']
                     self.assertEqual(consume.call_args_list[0].args[1], 0)
                 self.assertEqual(state['text'], 'New verdict' if change in (
                     'inode', 'truncated', 'rewrite', 'rewrite and append') else 'Old verdict')
+                if change != 'version':
+                    with patch.object(self, 'path', other), \
+                            patch.object(coordinator, '_claude_turn', wraps=coordinator._claude_turn) as consume:
+                        self.assertEqual(self.advance(restart, pane='%2', consume=consume)['state']['text'], 'Old verdict')
+                        consume.assert_not_called()
 
     def test_atomic_checkpoints_are_private_throttled_and_flush_on_exit(self):
         now = 0
@@ -170,15 +176,22 @@ class ParserCheckpoints(unittest.TestCase):
         self.assertEqual(parser_store.ParserStore(store.name, 1).records, {})
 
     def test_rewrite_before_first_save_cannot_checkpoint_stale_state(self):
-        store = parser_store.ParserStore('feed', 1)
-        self.path.write_bytes(lines(claude('assistant', 'Old reply')))
-        self.advance(store)
-        self.path.write_bytes(lines(claude('assistant', 'New reply')))
-        store.save()
-        restart = parser_store.ParserStore(store.name, 1)
-        self.assertEqual(self.advance(restart)['state']['text'], 'New reply')
+        original = lines(claude('assistant', 'Old reply'))
+        for number, suffix in enumerate((b'', lines(CLAUDE_END))):
+            with self.subTest(append=bool(suffix)):
+                store = parser_store.ParserStore(f'rewrite-{number}', 1)
+                self.path.write_bytes(original)
+                self.advance(store)
+                self.path.write_bytes(original.replace(b'Old reply', b'New reply') + suffix)
+                with patch.object(parser_store, '_digest', wraps=parser_store._digest) as digest:
+                    store.save(force=True)
+                    digest.assert_not_called()
+                saved = json.loads(store.path.read_text())['records']['%1']
+                self.assertEqual(saved['sha256'], hashlib.sha256(original).hexdigest())
+                restart = parser_store.ParserStore(store.name, 1)
+                self.assertEqual(self.advance(restart)['state']['text'], 'New reply')
 
-    def test_append_during_checkpoint_keeps_the_previous_valid_offset(self):
+    def test_append_before_save_persists_the_latest_parsed_offset(self):
         store = parser_store.ParserStore('feed', 1)
         first = lines(claude('assistant', 'First reply'))
         second = lines(CLAUDE_END, claude('assistant', 'Second reply'))
@@ -192,8 +205,176 @@ class ParserCheckpoints(unittest.TestCase):
             stream.write(lines(CLAUDE_END))
         store.save(force=True)
         restart = parser_store.ParserStore(store.name, 1)
-        self.assertEqual(restart.records['%1'][1]['offset'], len(first))
+        self.assertEqual(restart.records['%1'][1]['offset'], len(first + second))
         self.assertEqual(self.advance(restart)['state']['text'], 'Second reply')
+
+    def test_rewrite_after_load_or_advance_discards_old_feed_state(self):
+        original = lines(claude('assistant', 'Old reply'))
+        for resumed in (False, True):
+            with self.subTest(resumed=resumed):
+                self.path.write_bytes(original)
+                feed = coordinator.Feed()
+                entry = {'id': '%1', 'agent': 'claude', 'transcript': self.path}
+                self.assertEqual(feed.latest_outcome(entry)['text'], 'Old reply')
+                feed.parser_store.save()
+                restart = coordinator.Feed()
+                self.assertIn('%1', restart.parsers)
+                if resumed:
+                    self.assertEqual(restart.latest_outcome(entry)['text'], 'Old reply')
+                self.path.write_bytes(original.replace(b'Old reply', b'New reply') + lines(CLAUDE_END))
+                self.assertEqual(restart.latest_outcome(entry)['text'], 'New reply')
+
+    def test_feed_checks_a_same_size_rewrite_with_unchanged_mtime(self):
+        original = lines(claude('assistant', 'Old reply'))
+        self.path.write_bytes(original)
+        os.utime(self.path, ns=(0, 0))
+        feed = coordinator.Feed()
+        entry = {'id': '%1', 'agent': 'claude', 'transcript': self.path}
+        self.assertEqual(feed.latest_outcome(entry)['text'], 'Old reply')
+        self.path.write_bytes(original.replace(b'Old reply', b'New reply'))
+        os.utime(self.path, ns=(0, 0))
+        self.assertEqual(feed.latest_outcome(entry)['text'], 'New reply')
+
+    def test_feed_reparses_invalid_saved_state(self):
+        self.path.write_bytes(lines(claude('assistant', 'Done.')))
+        entry = {'id': '%1', 'agent': 'claude', 'transcript': self.path}
+        feed = coordinator.Feed()
+        expected = feed.latest_outcome(entry)
+        feed.parser_store.save()
+        path = feed.parser_store.path
+        saved = path.read_text()
+        for key, value in (('kind', None), ('text', [])):
+            with self.subTest(key=key):
+                malformed = json.loads(saved)
+                state = malformed['records']['%1']['record']['state']
+                if key == 'kind':
+                    del state[key]
+                else:
+                    state[key] = value
+                path.write_text(json.dumps(malformed))
+                self.assertEqual(coordinator.Feed().latest_outcome(entry), expected)
+
+    def test_review_reparses_saved_state_without_a_reply_map(self):
+        self.path.write_bytes(lines(claude('user', REQUEST), claude('assistant', 'APPROVED', stop_reason='end_turn'),
+                                    CLAUDE_END))
+        entry = {'id': '%1', 'agent': 'claude', 'transcript': self.path}
+        store = parser_store.ParserStore('review', 1, pending=review_links.REPLY_PENDING)
+        with patch.object(server, 'REVIEW_PARSERS', store):
+            self.assertEqual(server.review_reply(entry, REQUEST_ID), 'APPROVED')
+        store.save()
+        saved = json.loads(store.path.read_text())
+        saved['records']['%1']['record']['state']['replies'] = []
+        store.path.write_text(json.dumps(saved))
+        restart = parser_store.ParserStore(store.name, 1, pending=review_links.REPLY_PENDING)
+        with patch.object(server, 'REVIEW_PARSERS', restart):
+            self.assertEqual(server.review_reply(entry, REQUEST_ID), 'APPROVED')
+
+    def test_consume_error_on_resume_replays_from_zero(self):
+        first = lines(claude('assistant', 'Done.', stop_reason='tool_use'))
+        for error in (ValueError, TypeError):
+            with self.subTest(error=error):
+                self.path.write_bytes(first)
+                store = parser_store.ParserStore('resume', 1)
+                self.advance(store)
+                store.save(force=True)
+                saved = json.loads(store.path.read_text())
+                saved['records']['%1']['record']['state']['draft'] = 'invalid draft'
+                store.path.write_text(json.dumps(saved))
+                with self.path.open('ab') as stream:
+                    stream.write(lines(CLAUDE_END))
+                calls = []
+
+                def consume(state, index, record):
+                    calls.append(index)
+                    if state.get('draft') == 'invalid draft':
+                        raise error('invalid draft')
+                    coordinator._claude_turn(state, index, record)
+
+                restart = parser_store.ParserStore(store.name, 1)
+                self.assertEqual(self.advance(restart, consume=consume)['state']['text'], 'Done.')
+                self.assertEqual(calls, [1, 0, 1])
+
+    def test_split_crlf_matches_uninterrupted_parse(self):
+        first = lines(CLAUDE_END)[:-1]
+        turn = lines(claude('user', 'Task'), claude('assistant', 'Done.'))
+        data = first + b'\r\n' + turn
+        self.path.write_bytes(data)
+        expected = self.advance(parser_store.ParserStore('baseline', 1))
+        self.assertEqual(expected['state']['identity'], '1')
+        for prefix, appends in ((first, [b'\r\n' + turn]), (first + b'\r', [b'\n' + turn]),
+                                (first, [b'\r', b'\n' + turn])):
+            with self.subTest(prefix=len(prefix), writes=len(appends)):
+                self.path.write_bytes(prefix)
+                store = parser_store.ParserStore('crlf', 1)
+                self.advance(store)
+                store.save(force=True)
+                restart = parser_store.ParserStore(store.name, 1)
+                for append in appends:
+                    with self.path.open('ab') as stream:
+                        stream.write(append)
+                    record = self.advance(restart)
+                self.assert_same_record(record, expected)
+
+    def test_load_and_prune_do_not_open_a_transcript_replaced_with_a_fifo(self):
+        self.path.write_bytes(lines(claude('assistant', 'Done.')))
+        store = parser_store.ParserStore('fifo', 1)
+        self.advance(store)
+        store.save()
+        fifo = self.path.with_suffix('.fifo')
+        os.mkfifo(fifo)
+        fifo.replace(self.path)
+
+        def load(restart):
+            return set(restart.records)
+
+        def prune(restart):
+            with patch.object(restart, '_load', wraps=restart._load) as load_store:
+                restart.prune(set())
+            return load_store.call_count
+
+        checkpoint_key = store.records['%1'][0]
+        info = self.path.stat()
+        fifo_key = (checkpoint_key[0], str(self.path), info.st_dev, info.st_ino)
+        for action, expected in ((load, {'%1'}), (prune, 0),
+                                 (lambda _: parser_store._digest(checkpoint_key, 0), None),
+                                 (lambda _: parser_store._digest(fifo_key, 0), None)):
+            with self.subTest(action=action):
+                restart = parser_store.ParserStore(store.name, 1)
+                results = []
+                thread = threading.Thread(target=lambda: results.append(action(restart)), daemon=True)
+                thread.start()
+                thread.join(timeout=1)
+                self.assertFalse(thread.is_alive(), 'The checkpoint store blocked on the FIFO')
+                self.assertEqual(results, [expected])
+
+        restart = parser_store.ParserStore(store.name, 1)
+        restart.prune(set())
+        restart.save()
+        self.assertEqual(json.loads(store.path.read_text())['records'], {})
+
+    def test_digest_failure_stays_dirty_until_a_forced_save(self):
+        self.path.write_bytes(lines(claude('assistant', 'Done.')))
+        store = parser_store.ParserStore('retry', 1)
+        with patch.object(parser_store, '_digest', return_value=None):
+            self.advance(store)
+            store.save()
+        self.assertFalse(store.path.exists())
+        store.save(force=True)
+        saved = json.loads(store.path.read_text())['records']['%1']
+        self.assertEqual(saved['sha256'], hashlib.sha256(self.path.read_bytes()).hexdigest())
+        self.assertEqual(saved['record']['state']['text'], 'Done.')
+
+    def test_digest_retry_does_not_bind_old_state_to_a_rewrite(self):
+        self.path.write_bytes(lines(claude('assistant', 'Old reply')))
+        store = parser_store.ParserStore('retry', 1)
+        with patch.object(parser_store, '_digest', return_value=None):
+            self.advance(store)
+        self.path.write_bytes(lines(claude('assistant', 'New reply'), CLAUDE_END))
+        store.save(force=True)
+        self.assertFalse(store.path.exists())
+        self.assertEqual(self.advance(store)['state']['text'], 'New reply')
+        store.save(force=True)
+        self.assertEqual(self.advance(parser_store.ParserStore(store.name, 1))['state']['text'], 'New reply')
 
     def test_feed_restarts_at_the_saved_offset_even_after_a_revision(self):
         feed = coordinator.Feed()

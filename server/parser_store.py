@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import stat
 import tempfile
 import threading
 import time
@@ -17,14 +18,15 @@ def _signature(info):
     return info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
-def _digest(key, offset, observed=None):
+def _digest(key, offset, expected_signature=None):
     _, path, dev, inode, *_ = key
     length = min(offset, ANCHOR_BYTES)
     try:
-        with open(path, 'rb') as stream:
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK), 'rb', buffering=0) as stream:
             info = os.fstat(stream.fileno())
-            if ((info.st_dev, info.st_ino) != (dev, inode) or info.st_size < offset
-                    or observed is not None and _signature(info) != observed):
+            if (not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != (dev, inode)
+                    or info.st_size < offset
+                    or expected_signature is not None and _signature(info) != expected_signature):
                 return None
             stream.seek(offset - length)
             data = stream.read(length)
@@ -35,6 +37,15 @@ def _digest(key, offset, observed=None):
     return None
 
 
+def _valid_state(state, fresh):
+    for key, value in fresh.items():
+        # The Feed's initial null kind becomes a text outcome when a turn ends.
+        types = (type(None), str) if value is None else (type(value),)
+        if key not in state or type(state[key]) not in types:
+            return False
+    return True
+
+
 class ParserStore:
     def __init__(self, name, version, *, clock=time.monotonic, pending=None):
         self.name = name
@@ -43,8 +54,10 @@ class ParserStore:
         self.pending = pending
         self.lock = threading.Lock()
         self._records = None
+        self._prune_to = None
         self._saved = {}
-        self._observed = {}  # changed pane -> file signature at its last advance
+        self._anchors = {}  # pane -> (signature at last advance, digest); loaded signatures start as None
+        self._changed = set()
         self._dirty = False
         self._last_save = float('-inf')
 
@@ -64,6 +77,9 @@ class ParserStore:
         """The pane map. Access it under the store lock."""
         if self._records is None:
             self._records = self._load()
+            if self._prune_to is not None:
+                self._prune_records(self._prune_to)
+                self._prune_to = None
         return self._records
 
     def _load(self):
@@ -86,57 +102,105 @@ class ParserStore:
                         or type(offset) is not int or offset < 0 or type(record['index']) is not int
                         or record['index'] < 0 or record['inode'] != key[3]
                         or not isinstance(record['state'], dict) or not isinstance(digest, str)
-                        or not isinstance(record.get('unterminated', False), bool)
-                        or _digest(key, offset) != digest):
+                        or not isinstance(record.get('unterminated', False), bool)):
                     continue
-                state = self._state(record['state'], None, self.pending)
-            except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError):
+            except (KeyError, IndexError, TypeError):
                 continue
-            records[pane] = key, dict(record, state=state)
+            records[pane] = key, record
+            self._anchors[pane] = None, digest
             self._saved[pane] = dict(entry, key=key)
         return records
 
+    def _discard(self, pane):
+        del self.records[pane]
+        del self._anchors[pane]
+        self._changed.discard(pane)
+        self._dirty = True
+
     def advance(self, pane, key, info, fresh, consume):
         """Advance under the store lock and history's path lock."""
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError('The transcript is not a regular file.')
         previous_key, previous = self.records.get(pane, (None, None))
         cached = previous if previous_key == key else None
+        signature = _signature(info)
+        old_signature, digest = self._anchors.get(pane, (None, None))
+        if cached is not None:
+            offset = cached['offset']
+            if old_signature is None or old_signature != signature and offset > 0:
+                if digest is None or _digest(key, offset) != digest:
+                    cached = None
+            if cached is not None and old_signature is None:
+                state = cached['state']
+                if (not _valid_state(state, fresh())
+                        or self.pending is not None and not isinstance(state.get('replies'), dict)):
+                    cached = None
+                else:
+                    cached = dict(cached, state=self._state(state, None, self.pending))
+        if previous is not None and cached is None:
+            self._discard(pane)
         progress = (cached['offset'], cached.get('unterminated')) if cached is not None else None
-        record = history.advance(key[1], cached, fresh, consume, trim=False, info=info)
-        if record is not previous or progress != (record['offset'], record.get('unterminated')):
-            self.records[pane] = key, record
-            self._observed[pane] = _signature(info)
+        try:
+            record = history.advance(key[1], cached, fresh, consume, trim=False, info=info,
+                                     strict_consume=cached is not None)
+        except history.ConsumeError:
+            self._discard(pane)
+            record = history.advance(key[1], None, fresh, consume, trim=False, info=info)
+        except OSError:
+            if cached is not None:
+                self._discard(pane)
+            raise
+        if record is not cached or progress != (record['offset'], record.get('unterminated')):
+            digest = _digest(key, record['offset'], signature)
+            self._changed.add(pane)
             self._dirty = True
+        self.records[pane] = key, record
+        self._anchors[pane] = signature, digest
         return record['state']
 
     def prune(self, panes):
         with self.lock:
-            for pane in self.records.keys() - panes:
-                del self.records[pane]
-                self._observed.pop(pane, None)
-                self._dirty = True
+            if self._records is not None:
+                self._prune_records(panes)
+            elif self._prune_to is None:
+                self._prune_to = set(panes)
+            else:
+                self._prune_to.intersection_update(panes)
+
+    def _prune_records(self, panes):
+        for pane in self._records.keys() - panes:
+            self._discard(pane)
 
     def save(self, *, force=False):
         with self.lock:
             try:
+                if not self._dirty and self._prune_to is None:
+                    return
+                current = self.records  # apply any prune deferred until the checkpoint opened
                 now = self.clock()
                 if not self._dirty or not force and now - self._last_save < SAVE_INTERVAL:
                     return
                 self._last_save = now
                 records = {pane: entry for pane, entry in self._saved.items()
-                           if pane in self.records and self.records[pane][0] == entry['key']}
-                for pane, observed in self._observed.items():
-                    key, record = self.records[pane]
-                    digest = _digest(key, record['offset'], observed)
-                    # Keep the previous checkpoint if the transcript changed since the parser read it.
+                           if pane in current and current[pane][0] == entry['key']}
+                missing = set()
+                for pane in self._changed:
+                    key, record = current[pane]
+                    signature, digest = self._anchors[pane]
                     if digest is None:
+                        # Retry only against the file version this state describes.
+                        digest = _digest(key, record['offset'], signature)
+                    if digest is None:
+                        missing.add(pane)
                         continue
+                    self._anchors[pane] = signature, digest
                     state = self._state(record['state'], self.pending, None)
                     records[pane] = dict(key=key, record=dict(record, state=state), sha256=digest)
                 if records != self._saved:
                     self._write(dict(version=self.version, records=records))
                 self._saved = records
-                self._observed.clear()
-                self._dirty = False
+                self._changed = missing
+                self._dirty = bool(missing)
             except Exception:
                 # Checkpoint failures must never interrupt the monitor or stop an exit.
                 pass

@@ -38,7 +38,7 @@ ROLE_PATH = '/mobile/api/coordinator-role'
 OPTION = '@tether_role'
 MODES = ('all', 'needs', 'off')
 AGENTS = ('claude', 'codex')
-PARSER_VERSION = 1  # Bump when the Feed parser state or transcript interpretation changes.
+PARSER_VERSION = 2  # Bump when the Feed parser state or transcript interpretation changes.
 PANE = re.compile(r'%[0-9]+')
 MARK = '[Tether status]'
 MAX_REPLY = 20000
@@ -579,7 +579,7 @@ class Feed:
             with self.parser_store.lock, history._lock_for(path):
                 info = os.stat(path)
                 key = (agent, path, info.st_dev, info.st_ino)
-                signature = (info.st_size, info.st_mtime_ns)
+                signature = (info.st_size, info.st_mtime_ns, info.st_ctime_ns)
                 previous_key, _ = self.parsers.get(pane, ((), None))
                 revision = previous_key[-1] if previous_key[:-1] == key else 0
                 cached = self.outcomes.get(pane)

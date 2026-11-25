@@ -59,7 +59,11 @@ def records(stream, start, end=None):
         offset += len(line)
 
 
-def advance(path, cached, fresh, consume, trim, *, info=None, with_offset=False):
+class ConsumeError(Exception):
+    """A parser rejected a record while resuming a checkpoint."""
+
+
+def advance(path, cached, fresh, consume, trim, *, info=None, with_offset=False, strict_consume=False):
     """Advance a caller-owned parser record under the path lock. Return None if stat fails."""
     if info is None:
         try:
@@ -73,8 +77,15 @@ def advance(path, cached, fresh, consume, trim, *, info=None, with_offset=False)
     if info.st_size > cached['offset']:
         with open(path, 'rb') as stream:
             stream.seek(cached['offset'])
-            if cached.pop('unterminated', False) and stream.read(1) == b'\n':
-                cached['offset'] += 1  # the newline that finished a record already consumed
+            if cached.pop('unterminated', False):
+                # Skip the newline that finished a record we already consumed.
+                ending = stream.read(1)
+                if ending == b'\r':
+                    ending += stream.read(1)
+                if ending in (b'\n', b'\r\n'):
+                    cached['offset'] += len(ending)
+                elif ending == b'\r':
+                    cached['unterminated'] = True  # the next write may finish the CRLF
             since_trim = 0
             for offset, record, complete, length in records(stream, cached['offset']):
                 cached['offset'] += length
@@ -86,8 +97,12 @@ def advance(path, cached, fresh, consume, trim, *, info=None, with_offset=False)
                             consume(cached['state'], index, record, offset=offset)
                         else:
                             consume(cached['state'], index, record)
-                    except (AttributeError, TypeError):  # one odd record (an unexpected null) must not break the whole chat
-                        pass
+                    except Exception as exc:
+                        if strict_consume:
+                            raise ConsumeError from exc
+                        if not isinstance(exc, (AttributeError, TypeError)):
+                            raise
+                        # One odd record (an unexpected null) must not break the whole chat.
                     since_trim += 1
                     if trim and since_trim >= 2000:  # keep the first load of a huge file bounded too
                         trim(cached['state'])
