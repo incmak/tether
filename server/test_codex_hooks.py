@@ -22,6 +22,9 @@ import terminal_input as terminal
 from own_time import own_time
 
 
+WORKING_FIXTURES = Path(__file__).parent / 'fixtures/codex_0.170.0_working'
+
+
 class CodexHooksTests(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
@@ -149,7 +152,7 @@ class CodexHooksTests(unittest.TestCase):
         self.feed('Stop')
         with own_time(hooks, time=Mock(return_value=110)), \
                 patch.object(terminal, 'transcript_busy', side_effect=AssertionError('hooks must win')):
-            self.assertEqual(self.status('Working (8s)\n› ')['state'], 'Idle')
+            self.assertEqual(self.status((WORKING_FIXTURES / 'working_tool.ansi').read_text())['state'], 'Idle')
 
     def test_waiting_without_screen_options_shows_read_only_card(self):
         self.tool()
@@ -168,7 +171,8 @@ class CodexHooksTests(unittest.TestCase):
         self.tool()
         self.permission()
         with own_time(hooks, time=Mock(return_value=110)):
-            self.assertEqual(self.status('Working (8s • esc to interrupt)\n› ')['state'], 'Working')
+            screen = (WORKING_FIXTURES / 'working_after_approval.ansi').read_text()
+            self.assertEqual(self.status(screen)['state'], 'Working')
 
     def test_claude_mode_ignores_interrupt(self):
         hooks.capture({'session_id': 'abc-1', 'hook_event_name': 'Interrupt'}, 100)
@@ -181,10 +185,12 @@ class CodexHooksTests(unittest.TestCase):
             self.assertEqual(self.status('approval screen')['approval'], pending)
 
     def test_no_hooks_preserves_screen_and_transcript_fallback(self):
-        self.assertEqual(self.status('Working (8s)\n› ')['state'], 'Working')
-        self.assertEqual(self.status('› ')['state'], 'Idle')
+        screen = (WORKING_FIXTURES / 'working_tool.ansi').read_text()
+        idle = (WORKING_FIXTURES / 'idle_reply_is_status_line.ansi').read_text()
+        self.assertEqual(self.status(screen)['state'], 'Working')
+        self.assertEqual(self.status(idle)['state'], 'Idle')
         self.transcript.write_text(self.rollout('task_started'))
-        self.assertEqual(self.status('› ')['state'], 'Working')
+        self.assertEqual(self.status(idle)['state'], 'Working')
 
     def test_consume_tracks_turn_start_until_complete_or_aborted(self):
         state = server.codex_state()

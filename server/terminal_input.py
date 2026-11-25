@@ -12,7 +12,7 @@ import time
 import unicodedata
 import uuid
 
-from antigravity import process_start, ROOT as AGY_ROOT, CACHE as AGY_CACHE, capture_notices
+from antigravity import process_start, ROOT as AGY_ROOT, CACHE as AGY_CACHE, capture_notices, current_report, BUSY_STATES
 from quota_notices import capture as capture_quota_notices
 from codex_provider import PROFILE_NAME
 import detection_rules
@@ -1208,7 +1208,6 @@ def live_status(entry, run=subprocess.run):
     return status
 
 
-WORKING = detection_rules.pattern('common', 'WORKING')
 CLAUDE_SPINNER = detection_rules.pattern('claude', 'SPINNER')
 
 
@@ -1235,6 +1234,38 @@ def claude_screen_working(plain_screen):
             break
         if CLAUDE_SPINNER.match(line):
             return True
+    return False
+
+
+def codex_screen_working(plain_screen):
+    """Read the area above Codex's composer. Return None if the composer cannot be verified."""
+    lines = plain_screen.splitlines()
+    start = next((i for i in range(len(lines) - 1, -1, -1) if lines[i].startswith('›')), None)
+    if start is None or re.match(r'^›\s*\d+[.)]\s', lines[start]):
+        return None
+    end = next((i for i in range(start + 1, len(lines)) if not lines[i].strip()), len(lines))
+    last = next((i for i in range(len(lines) - 1, end, -1) if lines[i].strip()), None)
+    if last is not None and lines[last].rstrip() == '  tab to queue message':
+        # This hint replaces the usual hint for a draft typed mid-turn. Check the rest of the footer as usual.
+        lines[last] = '  ← for agents'
+    if not codex_input_box(lines, end):
+        return None
+
+    queued_row = re.compile(r'^(?:  ↳ |    \S)')
+    i = start - 1
+    while i >= 0:
+        row = lines[i]
+        if not row.strip() or row.startswith('  └ '):
+            i -= 1
+            continue
+        if queued_row.match(row):
+            while i >= 0 and queued_row.match(lines[i]):
+                i -= 1
+            if i < 0 or lines[i].rstrip() != '• Queued follow-up inputs':
+                return False
+            i -= 1
+            continue
+        return bool(re.match(r'^[•◦] \S.*?\((?:\d+h )?(?:\d+m )?\d+s(?: •|\)|…)', row))
     return False
 
 
@@ -1274,8 +1305,9 @@ def _live_status(entry, run, screen, login_screen=None, styled_screen=None):
             pending['text'] = reflow_prompt(pending['text'])
         return {'state': 'Approval', 'approval': {k: v for k, v in pending.items() if not k.startswith('_')}}
     live = claude_hooks.codex_live(entry) if entry['agent'] == 'codex' else None
-    # No hook reports an answered approval, so a screen that shows Codex working again overrides "waiting".
-    if live is not None and live['waiting'] and WORKING.search(screen):
+    # No hook reports an answered approval. Require the live status row to override "waiting":
+    # a reply can quote the status line (B559).
+    if live is not None and live['waiting'] and codex_screen_working(screen) is True:
         live = dict(live, waiting=False, busy=True)
     if live is not None and live['waiting']:
         prompt_actions.ledger.forget(entry['id'])
@@ -1289,18 +1321,15 @@ def _live_status(entry, run, screen, login_screen=None, styled_screen=None):
         working = claude_screen_working(screen) is True or registry.get('status') == 'busy'
     elif live is not None:
         working = live['busy'] and not live['waiting']
+    elif entry['agent'] == 'codex':
+        working = codex_screen_working(screen) is True or transcript_busy(entry.get('transcript'))
+    elif entry['agent'] == 'antigravity':
+        report = current_report(entry)
+        working = report.get('agent_state') in BUSY_STATES
+        if report.get('tool_confirmation_pending'):
+            return {'state': 'Approval', 'approval': {'id': None, 'text': screen.strip(), 'actionable': False}}
     else:
-        working = bool(WORKING.search(screen))
-        if entry['agent'] == 'codex':
-            working = working or transcript_busy(entry.get('transcript'))
-    if entry['agent'] == 'antigravity':
-        try:
-            metrics = json.loads((AGY_CACHE / (entry['thread'] + '.json')).read_text())
-            working = working or metrics.get('agent_state') in ('thinking', 'working', 'tool_use', 'running')
-            if metrics.get('tool_confirmation_pending'):
-                return {'state': 'Approval', 'approval': {'id': None, 'text': screen.strip(), 'actionable': False}}
-        except (OSError, ValueError):
-            pass
+        working = False
     info = None
     # Check chrome before any extra tmux call. The action route brackets its
     # single fresh styled capture with metadata reads under SEND_LOCK.

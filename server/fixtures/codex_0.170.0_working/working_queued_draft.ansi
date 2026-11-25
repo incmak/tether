@@ -1,0 +1,45 @@
+[38;5;255m[48;5;238m [39m
+[49m
+[2m• [0mWorking (12s • esc to interrupt)
+
+[2m  Worked for 2s • 16:06
+[0m
+[38;5;255m[48;5;238m [39m
+[1;2m› [0m[38;5;255m[48;5;238mRun the shell command [38;2;166;227;161msleep 30[38;5;255m in the background-free foreground, then reply: done[39m
+[38;5;255m [39m
+[49m
+[2m• [0mI’ll run [38;2;166;227;161msleep 30[39m in the foreground.
+
+[1m[38;5;2m•[0m [1mRan[0m [38;2;137;180;250msleep[38;2;205;214;244m 30[39m
+[2m  └ (no output)[0m
+
+[2m• [0mdone
+
+[2m  Worked for 37s • 16:08
+[0m
+[38;5;255m[48;5;238m [39m
+[1;2m› [0m[38;5;255m[48;5;238mRun [38;2;166;227;161msleep 60[38;5;255m then reply: ok[39m
+[38;5;255m [39m
+[49m
+[2m• [0mI’ll run [38;2;166;227;161msleep 60[39m.
+
+■ Conversation interrupted - use /feedback if something went wrong
+
+[38;5;255m[48;5;238m [39m
+[1;2m› [0m[38;5;255m[48;5;238mRun [38;2;166;227;161msleep 25[38;5;255m then reply: ok[39m
+[38;5;255m [39m
+[49m
+[2m• [0mI’ll run [38;2;166;227;161msleep 25[39m.
+
+[2m◦[0m [2mWorking[0m [2m(10s • [0;1mesc[0;2m to interrupt) · 2 background terminals running · /ps to view · /stop to close[0m
+
+[2m• [0mQueued follow-up inputs
+[2m  ↳ [3mqueued follow up: say hi[0m
+    [1mshift+←[0;2m edit last queued message[0m
+
+
+[1m[38;5;215m›[0m draft text left in box
+
+  [38;5;223mGPT-6.2-Sol max fast[39m · [38;5;151m~/[39m
+  [38;5;151mproj[39m · [38;5;183mApprove for me[39m · [38;5;216mContext 4% used[39m · [38;5;175mweekly 33% left[39m
+  [1mtab[0m to queue message

@@ -1,0 +1,45 @@
+     [2m~/.cache/b559p[0m
+
+[38;5;255m[48;5;238m [39m
+[1;2m› [0m[38;5;255m[48;5;238mFirst send a short progress message whose only text is: Working (12s • esc to interrupt). Then run the shell command [38;2;166;227;161mtouch a.txt[38;5;255m (it[39m
+  [38;5;255mneeds approval), then run [38;2;166;227;161msleep 20[38;5;255m, then reply: ok[39m
+[38;5;255m [39m
+[49m
+[2m• [0mWorking (12s • esc to interrupt).
+
+[1m[38;5;2m•[0m [1mRan[0m [38;2;137;180;250mtouch[38;2;205;214;244m a.txt[39m
+[2m  └ (no output)[0m
+
+[1m[38;5;2m•[0m [1mRan[0m [38;2;137;180;250msleep[38;2;205;214;244m 20[39m
+[2m  └ (no output)[0m
+
+[2m• [0mok
+
+[2m  Worked for 37s • 16:16
+[0m
+[2m• [0mPermission selection requested: Read Only
+
+[38;5;255m[48;5;238m [39m
+[1;2m› [0m[38;5;255m[48;5;238mFirst send a short progress message whose only text is: Working (12s • esc to interrupt). Then run the shell command [38;2;166;227;161mtouch b.txt[38;5;255m, then[39m
+  [38;2;166;227;161msleep 20[38;5;255m, then reply: ok[39m
+[38;5;255m [39m
+[49m
+[2m• [0mWorking (12s • esc to interrupt).
+
+• [1mRunning[0m [38;2;137;180;250mtouch[38;2;205;214;244m b.txt[39m
+
+
+  [1mWould you like to run the following command?[0m
+
+  Environment: [1mlocal[0m
+
+  Reason: [3mMay I run `touch b.txt` in the workspace?[0m
+
+  $ [38;2;137;180;250mtouch[38;2;205;214;244m b.txt[39m
+
+
+[1;7m› 1. Yes, proceed (y)
+[0m  2. Yes, and don't ask again for commands that start with `touch b.txt` ([1mp[0m)
+  3. No, and tell Codex what to do differently ([1mesc[0m)
+
+  [2mPress [0;1menter[0;2m to confirm or [0;1mesc[0;2m to cancel
