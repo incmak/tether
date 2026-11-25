@@ -118,28 +118,35 @@ async function main() {
           assert.deepEqual(run.errors, [])
         } finally { await run.context.close() }
       })
+      // The reset ends when the original meta is back and the badge shows the result: hidden at 100%, or Pinch out
+      // above it. Frames and the reset timer run late on a loaded host, so each check waits for that state.
+      const done = (s, want) => s.meta === want.original
+        && (s.scale < 1.01 ? !s.shown : s.shown && s.label === `Zoomed to ${want.percent}%. Pinch out to return to 100%.`)
+      const ended = async (run, original, percent, step) => {
+        const want = { original, percent }
+        await settle(run.page, done, want)
+        const end = await badgeState(run.page)
+        assert.ok(done(end, want), `${step} ends with the original meta and a matching badge (${JSON.stringify(end)}, original meta ${original})`)
+        results.push(`   ${label}: ${step} ${end.scale < 1.01 ? 'returned to 100%' : `kept ${end.scale}, badge says Pinch out`}`)
+      }
       await check(`${label}: a tap on the badge returns to 100% or says to pinch out`, async () => {
         const run = await open(browser, viewport, theme)
         try {
           const original = (await badgeState(run.page)).meta
-          // The reset ends when the original meta is back and the badge shows the result: hidden at 100%, or
-          // Pinch out above it. Frames and the reset timer run late on a loaded host, so wait for that state.
-          const done = (s, want) => s.meta === want.original
-            && (s.scale < 1.01 ? !s.shown : s.shown && s.label === `Zoomed to ${want.percent}%. Pinch out to return to 100%.`)
-          const ended = async (percent, step) => {
-            const want = { original, percent }
-            await settle(run.page, done, want)
-            const end = await badgeState(run.page)
-            assert.ok(done(end, want), `${step} ends with the original meta and a matching badge (${JSON.stringify(end)}, original meta ${original})`)
-            results.push(`   ${label}: ${step} ${end.scale < 1.01 ? 'returned to 100%' : `kept ${end.scale}, badge says Pinch out`}`)
-          }
           // A real tap: hit testing and touch input must reach the badge.
           await zoom(run, 1.3)
           await run.page.locator('.zoom-badge').tap()
-          await ended(130, 'tap')
+          await ended(run, original, 130, 'tap')
+        } finally { await run.context.close() }
+      })
+      // Its own page: after a reset to 100%, a new emulated zoom in the same page can stay at 100% under load.
+      await check(`${label}: a double tap keeps the original viewport meta`, async () => {
+        const run = await open(browser, viewport, theme)
+        try {
+          const original = (await badgeState(run.page)).meta
+          await zoom(run, 1.3)
           // A double tap must not save the temporary clamp as the original meta. Both clicks run in one page task,
-          // so the second always meets the active clamp, however slow the host. A new zoom offers the reset again.
-          await zoom(run, 1.4)
+          // so the second always meets the active clamp, however slow the host.
           const clamped = await run.page.evaluate(() => {
             const el = document.querySelector('.zoom-badge')
             el.click()
@@ -148,7 +155,7 @@ async function main() {
             return during
           })
           assert.ok(clamped.includes('maximum-scale=1'), `the first tap clamps the zoom (${clamped})`)
-          await ended(140, 'double tap')
+          await ended(run, original, 130, 'double tap')
         } finally { await run.context.close() }
       })
     }
