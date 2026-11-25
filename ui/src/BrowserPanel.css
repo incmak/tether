@@ -3,7 +3,7 @@
 .browser-switch:hover { background: var(--hover, #0000000a); }
 .browser-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .browser-switch > svg:last-child { color: var(--muted); }
-.browser-menu button:disabled { opacity: .55; cursor: not-allowed; }
+.browser-menu button:is(:disabled, [aria-disabled="true"]) { opacity: .55; cursor: not-allowed; }
 .browser-signed .browser-saved { flex-wrap: wrap; }
 .browser-signed .browser-saved > svg { flex: none; }
 .browser-signed .browser-saved > span { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
@@ -59,6 +59,8 @@
 .browser-panel .browser-menu { min-width: min(220px, calc(100cqw - 12px)); width: max-content; max-height: min(360px, calc(100dvh - 180px)); overflow: auto; }
 .browser-menu button > span { min-width: 0; overflow-wrap: anywhere; }
 .browser-menu button > svg { flex: none; }
+.browser-menu-separator { margin: 4px; border: 0; border-top: 1px solid var(--line); }
+.browser-menu-heading { padding: 4px 10px 2px; color: var(--muted); font-size: 12px; font-weight: 600; }
 .browser-bar { position: relative; flex: none; }
 .browser-bar .browser-menu-anchor { position: static; }
 .browser-bar .browser-menu.end { right: 6px; }

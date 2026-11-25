@@ -101,7 +101,12 @@ def get(handler, the_browser=None, the_proxy=None, the_setup=None, signed_browse
             state = the_browser.list_tabs()
             target = query.get('tab', [''])[0]
             if target and target in the_browser.tabs:  # the live view has no stream, so its poll asks for these
-                the_browser.refresh(the_browser.tabs[target])
+                tab = the_browser.tabs[target]
+                size = re.fullmatch(r'([1-9][0-9]{0,3})x([1-9][0-9]{0,3})', query.get('live_size', [''])[0])
+                if size and browser_id != 'chrome':
+                    the_browser.refresh(tab, live_size=(int(size[1]), int(size[2])))
+                else:
+                    the_browser.refresh(tab)
                 state = the_browser.state()
                 try:
                     state['nav'] = the_browser.nav_state(target)

@@ -3,8 +3,10 @@
 change work board items (item: run `tether item --help`), keep a triage ledger as items (triage: run `tether triage
 --project P --view FILE help`), connect Jira (jira: run `tether jira --help`), connect
 Microsoft 365 for feeds (graph: run `tether graph --help`), show the feeds (feed: run `tether feed --help`),
-and read Microsoft task sources (tasks: run `tether tasks --help`)."""
+read Microsoft task sources (`tether tasks --help`), list agent commands (`tether tools`),
+and manage reminders (`tether remind --help`)."""
 import argparse
+import ast
 import contextlib
 import fcntl
 import importlib.util
@@ -12,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -452,8 +455,12 @@ def main(argv=None):
     if argv[:1] == ['tasks']:
         import task_sources
         return task_sources.main(argv[1:])
+    if argv[:1] == ['remind']:
+        import agent_reminder_cli
+        return agent_reminder_cli.main(argv[1:])
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
+    commands.add_parser('tools', help='List Tether agent commands with their full paths and purposes.')
     update = commands.add_parser('update')
     update.add_argument('--check', action='store_true')
     update.add_argument('--yes', action='store_true')
@@ -476,6 +483,14 @@ def main(argv=None):
     send.add_argument('--master', help='A Claude pane id: it gets the text and the target list, and delivers with its peer messaging.')
     send.add_argument('--json', action='store_true', help='Print the server reply as JSON.')
     args = parser.parse_args(argv)
+    if args.command == 'tools':
+        server = Path(__file__).resolve().parent / 'server'
+        for script in sorted(server.glob('agent_*_cli.py')):
+            module = ast.parse(script.read_text(encoding='utf-8'), filename=str(script))
+            doc = ast.get_docstring(module) or ''
+            purpose = re.split(r'(?<=[.!?])\s+', ' '.join(doc.split()), maxsplit=1)[0]
+            print(f'{script.name}  {purpose}\n  {shlex.join((sys.executable, str(script)))}')
+        return 0
     if args.command == 'broadcast':
         return broadcast(args)
     if args.command == 'install':

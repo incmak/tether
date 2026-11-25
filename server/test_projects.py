@@ -2,6 +2,7 @@ import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 import os
+import shlex
 import sys
 import tempfile
 import time
@@ -91,7 +92,7 @@ class ProjectTests(unittest.TestCase):
         real = text.replace(str(paths.TETHER), '/srv/user/.tether')
         real = real.replace(code, '/srv/user/apps/tether')
         real = real.replace(sys.executable, '/usr/bin/python3')  # CI's interpreter path is about 36 characters longer
-        self.assertLess(len(real), 4500)  # Keep the built-in guidance below half of the prompt cap.
+        self.assertLess(len(real), projects.BUDGET_MAX // 2)  # Keep the built-in guidance below half of the prompt cap.
         self.assertIn('use Monitor', text)
         self.assertLess(text.index('## Claims of absence'), text.index('## Watchers'))
         self.assertLess(text.index('## Watchers'), text.index('## New tabs and reviewers'))
@@ -135,7 +136,7 @@ class ProjectTests(unittest.TestCase):
         for agent in ('claude', 'codex'):
             with self.subTest(agent=agent):
                 text = projects.render(PID, agent)
-                backlog_section = text.split('\n## Backlog\n', 1)[1]
+                backlog_section = text.split('\n## Backlog\n', 1)[1].split('\n## Tether tools\n', 1)[0]
                 self.assertIn(
                     '- Work on an item when the user asks, or when your autonomy level tells you to work the backlog. '
                     'Run `start` first. When finished, run `done` with the commit, PR, or outcome.',
@@ -147,6 +148,18 @@ class ProjectTests(unittest.TestCase):
                              'what not to redo', '`agent_tab_cli.py start --owner self --name "B12 two to four words" --cwd ITEM_REPO "TASK"`',
                              'run `start B12` first', 'report the new tab name', 'Hand off one item, then stop.'):
                     self.assertIn(part, handoff)
+
+    def test_tether_tools_guidance_is_separate_from_backlog(self):
+        reminder_cli = Path(projects.__file__).resolve().with_name('agent_reminder_cli.py')
+        command = shlex.join((sys.executable, str(reminder_cli)))
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                text = projects.render(PID, agent, home=self.home)
+                backlog_text, heading, tools = text.partition('\n## Tether tools\n')
+                self.assertTrue(heading)
+                self.assertNotIn('agent_reminder_cli.py', backlog_text.split('\n## Backlog\n', 1)[1])
+                self.assertIn(f'`{command} add "text" --at "YYYY-MM-DD HH:MM"`', tools)
+                self.assertIn('`tether tools`', tools)
 
     def test_instructions_count_revisions_and_refuse_a_stale_save(self):
         projects.set_instructions(PID, 'Use pnpm.', 0)
@@ -269,6 +282,7 @@ class ProjectTests(unittest.TestCase):
             '# Tether project', '## Notes', '## Instructions', '## Pinned files',
             '## Stack: Docs', '### Stack instructions', '### Stack pinned files',
             '## Tab icon', '## Naming tabs', '## Claims of absence', '## Watchers', '## New tabs and reviewers', '## Backlog',
+            '## Tether tools',
         ])
 
     def test_state_reports_the_usable_maximum_without_rewriting_the_budget(self):
@@ -362,7 +376,8 @@ class ProjectTests(unittest.TestCase):
         items = [f'B{at} ' + 'Backlog item. ' * 7 for at in range(5)]
         with mock.patch('backlog.summary', return_value=(items, len(items))):
             text = projects.render(PID, home=self.home, backlog_project='tether')
-        self.assertIn('### Open backlog items (5)', text)
+        self.assertLess(text.index('## Backlog'), text.index('### Open backlog items (5)'))
+        self.assertLess(text.index('### Open backlog items (5)'), text.index('## Tether tools'))
         for at in range(25, 30):
             self.assertIn(f'\n#### n{at}.md\n# Note {at}\nbody {at} ', text)
         self.assertIn('[Cut to fit the project size limit.', text)
