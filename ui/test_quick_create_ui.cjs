@@ -32,7 +32,8 @@ async function main() {
   // Each test sets how the quick-tab endpoints answer.
   let routeAnswer = { place: audio, source: 'ai' }, routeDelay = 0, startFails = 0
   let backlogPending
-  let routeGate
+  // Held answers: routeGate for quick-tab/route, startGate for the start of startGate.message.
+  let routeGate, startGate
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
   try {
     await fs.mkdir(SHOTS, { recursive: true })
@@ -78,6 +79,7 @@ async function main() {
           return route.fulfill({ json: routeAnswer }).catch(() => {})
         }
         if (endpoint === 'quick-tab/start') {
+          if (startGate && body.message === startGate.message) await startGate.held
           if (startFails > 0) { startFails--; return route.fulfill({ status: 503, json: { error: 'tmux did not answer.' } }) }
           return route.fulfill({ status: 201, json: { pane: '%50', name: body.message, agent: 'claude', place: body.default ? triage : { ...audio, ...(body.group ? {} : { group: '', groupName: '' }), session: body.session, sessionName: body.session === '$2' ? 'blender' : 'tether' } } })
         }
@@ -220,8 +222,11 @@ async function main() {
 
     // An older action that finishes late must not bring back a toast after a newer one was dismissed.
     calls.length = 0
+    // Hold both answers of the older action, so its start can only finish after the newer action began.
     let release
-    routeGate = new Promise(resolve => { release = resolve })
+    const held = new Promise(resolve => { release = resolve })
+    routeGate = held
+    startGate = { message: 'Slow first task', held }
     await searchFor('Slow first task', 'Start a new tab for “Slow first task”')
     await page.keyboard.press('Enter')
     await toast.getByText(/Choosing a place for “Slow first task”/).waitFor()
@@ -233,7 +238,7 @@ async function main() {
     await toast.getByRole('button', { name: 'Dismiss' }).click()
     await toast.waitFor({ state: 'detached' })
     await page.locator('.quick-toast-running[data-running="1"]').waitFor({ state: 'attached' })
-    routeGate = undefined
+    routeGate = startGate = undefined
     release()
     await page.locator('.quick-toast-running[data-running="0"]').waitFor({ state: 'attached' })
     check('a late older result shows no toast', (await toast.count()) === 0 && calls.filter(call => call.endpoint === 'quick-tab/start').length === 2, JSON.stringify(calls.map(call => call.endpoint)))
