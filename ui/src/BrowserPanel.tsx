@@ -250,6 +250,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
   useLayoutEffect(() => { watchingRef.current = watching }, [watching])
   // While an agent controls the tab, the live view takes no keys either: inert keeps Tab out, and focus already in it leaves.
   const liveFrameRef = useRef<HTMLIFrameElement>(null)
+  const pendingPicture = useRef<Picture | null>(null)
   useLayoutEffect(() => { if (watching && document.activeElement === liveFrameRef.current) liveFrameRef.current?.blur() }, [watching])
   const owner = usePaneLabel(tab?.owner?.pane)
   const liveMode = !!liveBase && !!tab
@@ -269,11 +270,6 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
     if (liveSrc) liveFrameRef.current?.contentWindow?.postMessage({ tether: 'wheel-mode', relay: !windowView, smooth: liveSmooth }, new URL(liveSrc).origin)
   }, [liveSrc, windowView, liveSmooth])
   useEffect(syncLiveInput, [syncLiveInput])
-  const syncLivePicture = useCallback(() => {
-    if (hasPicture && liveSrc) liveFrameRef.current?.contentWindow?.postMessage({ tether: 'picture', preset: picture }, new URL(liveSrc).origin)
-  }, [hasPicture, liveSrc, picture])
-  useEffect(syncLivePicture, [syncLivePicture])
-
   const stageRef = useRef<HTMLDivElement | null>(null)
   // The stage mounts late in Your Chrome (after the pairing card), so observe the element itself, not the load.
   const [stageBox, setStageBox] = useState<HTMLDivElement | null>(null)
@@ -946,10 +942,19 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
   const presetLabel = presets.find(item => item.id === tab?.preset)?.label ?? 'Desktop'
   const pictureLabel = PICTURES.find(item => item.id === picture)?.label
   const displayLabel = hasPicture ? `Display: ${presetLabel} · ${pictureLabel}` : `Device: ${presetLabel}`
+  function sendPendingPicture() {
+    const preset = pendingPicture.current
+    const frame = liveFrameRef.current?.contentWindow
+    if (!preset || !liveSrc || !frame) return
+    pendingPicture.current = null
+    frame.postMessage({ tether: 'picture', preset }, new URL(liveSrc).origin)
+  }
   function setPicture(id: Picture) {
     if (id === 'sharp' && !sharpSupported) return
     deviceMenu.close()
     onPicture(id)
+    pendingPicture.current = id
+    if (liveReady) sendPendingPicture()
   }
   async function changeWindowView(enabled: boolean) {
     if (!tab || grabbing || viewChange.current.pending) return
@@ -1077,7 +1082,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, onAttach, which, on
       {liveMode && liveReach === 'ok' && <iframe key={liveBase?.run} ref={liveFrameRef} className={liveViewport ? 'browser-live browser-live-preset' : 'browser-live'} src={liveSrc} hidden={noting} inert={watching}
         style={liveViewport ? { width: liveViewport.width, height: liveViewport.height, transform: `translate(-50%, -50%) scale(${liveScale})` } : undefined}
         title={`Page: ${tab?.title || tab?.url || 'New tab'}`} sandbox="allow-scripts allow-same-origin" allow="clipboard-read; clipboard-write"
-        referrerPolicy="no-referrer" onLoad={() => { setLiveReady(true); syncLiveInput(); syncLivePicture() }} />}
+        referrerPolicy="no-referrer" onLoad={() => { setLiveReady(true); syncLiveInput(); sendPendingPicture() }} />}
       {liveView && liveReach === 'ok' && watching && <div className="browser-live-block" aria-hidden="true" />}
       {liveOffline && <div className="browser-empty browser-live-error">
         <p role="alert">Could not connect to live video on port {liveBase?.port}.</p>

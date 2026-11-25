@@ -111,6 +111,9 @@ class Container:
                 '-e', 'SELKIES_AUDIO_ENABLED=false', '-e', 'SELKIES_MICROPHONE_ENABLED=false',
                 '-e', 'SELKIES_WEBCAM_ENABLED=false', '-e', 'NO_GAMEPAD=true', '-e', 'SELKIES_SECOND_SCREEN=false',
                 '-e', 'SELKIES_ENABLE_BINARY_CLIPBOARD=false',
+                # Sharp text is the initial picture. Keep the settings unlocked for the Picture menu.
+                '-e', 'SELKIES_VIDEO_FULLCOLOR=true', '-e', 'SELKIES_FRAMERATE=60,8-240',
+                '-e', 'SELKIES_VIDEO_BITRATE=8000,100-1000000',
                 # B89: Selkies on the socket only, with its login on and its Origin rule back to same-origin. The
                 # image sets SELKIES_ENABLE_BASIC_AUTH=false and SELKIES_ALLOWED_ORIGINS=*; an empty value means
                 # the Selkies default (same-origin only). It serves the dashboard that init-nginx prepares.

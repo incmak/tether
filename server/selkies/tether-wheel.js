@@ -16,6 +16,15 @@
     standard: { video_fullcolor: false, framerate: 60, video_bitrate: 8000 },
     light: { video_fullcolor: false, framerate: 30, video_bitrate: 3000 },
   }
+  // The pinned Selkies client saves these keys on a settings message. If they survive a page load, its
+  // handshake can restore a stale preset to the shared display. Use the same primary-display key prefix.
+  try {
+    var prefix = (location.origin + location.pathname).replace(/[^a-zA-Z0-9._-]/g, '_')
+    Object.keys(pictures.sharp).forEach(function (name) {
+      localStorage.removeItem(prefix + '_' + name)
+      localStorage.removeItem(prefix + '_' + name + '_pick')
+    })
+  } catch { /* Storage can be disabled. */ }
   var pictureReady = false
   var pendingPicture = null
   var observedTransport = null

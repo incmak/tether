@@ -12,6 +12,7 @@ const os = require('node:os')
 const path = require('node:path')
 const { spawn, execFileSync } = require('node:child_process')
 const { getBrowser } = require('../browser_test_helper.cjs')
+const { displaySurfaces } = require('../responsive_tools/browser_display.cjs')
 
 const UI = path.resolve(__dirname, '..'), REPO = path.resolve(UI, '..')
 const HEIGHTS = { 320: 640, 1280: 800 }
@@ -21,8 +22,10 @@ const API = '/mobile/api/'
 const REDIRECTS = new Set([301, 302, 303, 307, 308])
 
 // A surface: `open` brings it on screen from the loaded chat page, `landmark` is a selector that only this surface
-// shows. A shot counts only when the landmark is visible and exposed. ctx: { width, phone, pane, thread, url }.
+// shows. Use prepare(page, ctx) to install routes before navigation. A shot counts only when the landmark is visible
+// and exposed. ctx: { width, phone, pane, thread, url }.
 const SURFACES = {
+  ...displaySurfaces(),
   chat: {
     about: 'The fixture chat and the composer',
     open: async () => {},
@@ -577,6 +580,7 @@ async function shoot(run, info, name, surface, width, folder, signal) {
       if (await page.locator('.crash-actions').count()) throw new Error('the crash screen is showing')
     }
     const landmark = page.locator(surface.landmark).first()
+    if (surface.prepare) await surface.prepare(page, ctx)
     await page.goto(info.url + '?session=' + encodeURIComponent(info.pane), { waitUntil: 'load', timeout: 30000 })
     await checkPage()
     await page.locator('.app-shell').first().waitFor({ state: 'visible' })

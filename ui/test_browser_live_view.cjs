@@ -57,15 +57,32 @@ async function assertPicture(frame, preset) {
   })
   if (beforeReady !== null) assert.equal(beforeReady, 0, 'the first preset waits for the Selkies settings receiver')
   await frame.waitForFunction(settings => JSON.stringify(window.selkiesSettings.at(-1)?.settings) === JSON.stringify(settings), settings)
-  const [message, mapped] = await frame.evaluate(() => [window.pictureMessages.at(-1), window.selkiesSettings.at(-1)])
-  assert.deepEqual(message, { tether: 'picture', preset })
-  assert.deepEqual(mapped, { type: 'settings', settings })
+  const [messages, mapped] = await frame.evaluate(() => [window.pictureMessages, window.selkiesSettings])
+  assert.deepEqual(messages, [{ tether: 'picture', preset }])
+  assert.deepEqual(mapped, [{ type: 'settings', settings }])
+}
+
+async function assertNoPicture(page, frame) {
+  await page.locator('.browser-wait').waitFor({ state: 'detached' })
+  // A message sent after onLoad arrives after any Picture message from that load.
+  await page.locator('iframe.browser-live').evaluate(iframe => {
+    iframe.contentWindow.postMessage({ tether: 'fixture-load-check' }, new URL(iframe.src).origin)
+  })
+  await frame.waitForFunction(() => window.fixtureLoadChecked)
+  assert.deepEqual(await frame.evaluate(() => window.pictureMessages), [])
+  assert.deepEqual(await frame.evaluate(() => window.selkiesSettings), [])
+  const stored = await frame.evaluate(keys => {
+    const prefix = (location.origin + location.pathname).replace(/[^a-zA-Z0-9._-]/g, '_')
+    return keys.map(key => [localStorage.getItem(prefix + '_' + key), localStorage.getItem(prefix + '_' + key + '_pick')])
+  }, Object.keys(pictureSettings.sharp))
+  assert.deepEqual(stored, [[null, null], [null, null], [null, null]], 'Selkies cannot reapply an old picture on load')
+  assert.equal(await frame.evaluate(() => localStorage.getItem('fixture-unrelated-setting')), 'keep')
 }
 
 async function exercisePictureMenu(page, frame, width) {
   const display = page.getByRole('button', { name: /^Display: Desktop · / })
   const supported = width === 1280
-  await assertPicture(frame, supported ? 'sharp' : 'standard')
+  await assertNoPicture(page, frame)
   await display.press('Enter')
   const menu = page.getByRole('menu').filter({ has: page.getByRole('group', { name: 'Picture' }) })
   const group = menu.getByRole('group', { name: 'Picture' })
@@ -98,6 +115,12 @@ async function exercisePictureMenu(page, frame, width) {
     return
   }
 
+  await low.press('Enter')
+  await assertPicture(frame, 'light')
+  const lowDisplay = page.getByRole('button', { name: 'Display: Desktop · Low data', exact: true })
+  assert(await lowDisplay.evaluate(button => document.activeElement === button))
+  assert.equal(await page.evaluate(() => localStorage.getItem('tether-browser-picture')), 'light')
+
   // The bridge ignores unknown names and messages which did not come from the parent.
   await frame.evaluate(() => {
     window.selkiesSettings.length = 0
@@ -112,29 +135,36 @@ async function exercisePictureMenu(page, frame, width) {
   })
   await frame.waitForFunction(() => window.selkiesSettings.some(message => message.settings?.video_fullcolor === false))
   assert.deepEqual(await frame.evaluate(() => window.selkiesSettings), [{ type: 'settings', settings: pictureSettings.standard }])
-  await low.press('Enter')
-  await assertPicture(frame, 'light')
-  const lowDisplay = page.getByRole('button', { name: 'Display: Desktop · Low data', exact: true })
-  assert(await lowDisplay.evaluate(button => document.activeElement === button))
-  assert.equal(await page.evaluate(() => localStorage.getItem('tether-browser-picture')), 'light')
   await page.reload()
   await lowDisplay.waitFor()
-  await assertPicture(await (await page.locator('iframe.browser-live').elementHandle()).contentFrame(), 'light')
+  await assertNoPicture(page, await (await page.locator('iframe.browser-live').elementHandle()).contentFrame())
   await page.getByRole('button', { name: 'Browser: Test', exact: true }).click()
   await page.getByRole('menuitemradio', { name: /^Signed in browser/ }).click()
   await lowDisplay.waitFor()
-  await assertPicture(await (await page.locator('iframe.browser-live').elementHandle()).contentFrame(), 'light')
+  await assertNoPicture(page, await (await page.locator('iframe.browser-live').elementHandle()).contentFrame())
   await page.getByRole('button', { name: 'Browser: Signed in', exact: true }).click()
   await page.getByRole('menuitemradio', { name: /^Your Chrome browser/ }).click()
   await page.getByRole('button', { name: 'Device: Desktop', exact: true }).click()
   assert.equal(await page.getByRole('group', { name: 'Picture' }).count(), 0)
   assert.equal(await page.locator('iframe.browser-live').count(), 0)
-  await page.getByRole('button', { name: 'Browser: Your Chrome', exact: true }).click()
-  await page.getByRole('menuitemradio', { name: /^Test browser/ }).click()
-  await lowDisplay.click()
-  await page.getByRole('menuitemradio', { name: /^Standard/ }).press('Enter')
+  let releaseFrame
+  const frameGate = new Promise(resolve => { releaseFrame = resolve })
+  await page.route('**/browser/live/', async route => {
+    if (route.request().resourceType() === 'document') await frameGate
+    await route.continue()
+  })
+  try {
+    await page.getByRole('button', { name: 'Browser: Your Chrome', exact: true }).click()
+    await page.getByRole('menuitemradio', { name: /^Test browser/ }).click()
+    await page.locator('.browser-wait').waitFor()
+    await lowDisplay.click()
+    await page.getByRole('menuitemradio', { name: /^Standard/ }).press('Enter')
+  } finally {
+    releaseFrame()
+  }
+  await page.locator('.browser-wait').waitFor({ state: 'detached' })
   await assertPicture(await (await page.locator('iframe.browser-live').elementHandle()).contentFrame(), 'standard')
-  console.log('Browser live view: Picture keyboard, fixed settings, sender and preset checks, reload and browser switch pass')
+  console.log('Browser live view: Picture sends only on explicit choice, with fixed settings, keyboard and sender checks')
 }
 
 async function exerciseFloatResize(browser, url) {
@@ -144,6 +174,8 @@ async function exerciseFloatResize(browser, url) {
     await page.route('**/mobile/**', route => route.fulfill({ json: { name: 'fixture' } }))
     await page.addInitScript(() => {
       if (window !== window.top) return
+      // The standalone fixture has no main-window controller. Exercise its in-page fallback.
+      Object.defineProperty(navigator, 'locks', { value: undefined })
       window.calls = []
       window.resizeFixture = true
       window.fixtureDisplayWidth = 470
@@ -211,6 +243,7 @@ async function main() {
          });
         window.addEventListener('message', ({ source, data }) => {
           if (source === window.parent && data?.tether === 'picture') window.pictureMessages.push(data);
+          if (source === window.parent && data?.tether === 'fixture-load-check') window.fixtureLoadChecked = true;
           if (source === window && data?.type === 'settings') window.selkiesSettings.push(data);
         });
       </script></body>`)
@@ -300,6 +333,15 @@ async function main() {
         window.fixtureTab = { mode: 'saved' }
       })
       if (down && width === 1280) await page.clock.install()
+      await context.addInitScript(keys => {
+        if (window === window.top || location.pathname !== '/browser/live/') return
+        const prefix = (location.origin + location.pathname).replace(/[^a-zA-Z0-9._-]/g, '_')
+        for (const key of keys) {
+          localStorage.setItem(prefix + '_' + key, 'old')
+          localStorage.setItem(prefix + '_' + key + '_pick', 'old')
+        }
+        localStorage.setItem('fixture-unrelated-setting', 'keep')
+      }, Object.keys(pictureSettings.sharp))
       await page.addInitScript(decoderMode => {
         window.calls = []; window.sockets = []; window.sources = []
         window.decoderProbes = []

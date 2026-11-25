@@ -63,6 +63,17 @@ class ContainerTests(unittest.TestCase):
         self.assertNotIn('FRAME_ANCESTORS', joined)  # Tether sets frame-ancestors on the live origin itself
         self.assertIn('@sha256:', browser_container.IMAGE)  # pinned, not :latest
 
+    def test_both_browsers_start_with_sharp_text_and_allow_picture_changes(self):
+        for persistent in (False, True):
+            with self.subTest(persistent=persistent):
+                runner = Runner()
+                container = browser_container.Container('t', root=self.container.root, persistent=persistent, runner=runner)
+                container.start()
+                args = runner.ran('run')[0]
+                self.assertIn('SELKIES_VIDEO_FULLCOLOR=true', args)
+                self.assertIn('SELKIES_FRAMERATE=60,8-240', args)
+                self.assertIn('SELKIES_VIDEO_BITRATE=8000,100-1000000', args)
+
     def test_selkies_listens_only_on_its_socket_with_login_and_origin_checks(self):
         # B89: the image turns Selkies' login off, allows any Origin and puts it on TCP 8082 behind nginx.
         self.container.start()
