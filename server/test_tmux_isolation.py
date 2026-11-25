@@ -1,6 +1,7 @@
 """Private tmux servers and checks for their test lifecycle."""
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import ast
+import contextlib
 from collections import defaultdict
 from io import StringIO
 import json
@@ -144,24 +145,41 @@ def _stop_tmux_child(child):
         child.wait()
 
 
+def _descendants(parents, root):
+    children = defaultdict(list)
+    for pid, ppid in parents.items():
+        children[ppid].append(pid)
+    pending, found = list(children[root]), []
+    while pending:
+        pid = pending.pop()
+        found.append(pid)
+        pending.extend(children[pid])
+    return found
+
+
 def _snapshot_descendants(parent_pid):
+    """(pid, start time) of every process under parent_pid."""
+    if procinfo.DARWIN:
+        # ps gives the parent and sysctl the start time. Fresh tables: the cached one can miss a new pane. The
+        # second table confirms each parent link after the start time read, so a reused pid is dropped.
+        first = {pid: ppid for pid, (ppid, _) in procinfo.table(fresh=True).items()}
+        found = []
+        for pid in _descendants(first, parent_pid):
+            try:
+                found.append((pid, procinfo.start_ticks(pid)))
+            except OSError:
+                pass
+        second = procinfo.table(fresh=True)
+        return [(pid, ticks) for pid, ticks in found if pid in second and second[pid][0] == first[pid]]
     # One stat read per process gives its parent and start time together. No ps: it can time out under load.
-    processes = {}
+    stats = {}
     for pid in procinfo.pids():
         try:
             fields = procinfo.stat_fields(pid)
         except OSError:
             continue
-        processes[pid] = int(fields[1]), fields[19]
-    children = defaultdict(list)
-    for pid, (ppid, _) in processes.items():
-        children[ppid].append(pid)
-    pending, found = list(children[parent_pid]), []
-    while pending:
-        pid = pending.pop()
-        found.append((pid, processes[pid][1]))
-        pending.extend(children[pid])
-    return found
+        stats[pid] = int(fields[1]), fields[19]
+    return [(pid, stats[pid][1]) for pid in _descendants({pid: ppid for pid, (ppid, _) in stats.items()}, parent_pid)]
 
 
 def _process_is_alive(pid, ticks):
@@ -192,7 +210,17 @@ def watch(requests, replies):
     def snapshot(folder):
         # Take it while the server lives: its panes reparent when it exits.
         if folder in children:
-            descendants[folder] = _snapshot_descendants(children[folder].pid)
+            try:
+                descendants[folder] = _snapshot_descendants(children[folder].pid)
+            except Exception:
+                descendants[folder] = None  # unknown processes: keep the folder
+                raise
+
+    def wait(folder):
+        processes = descendants.get(folder, ())
+        if processes is None:
+            raise RuntimeError(f'could not list the tmux processes, kept {folder}')
+        _wait_for_processes(processes)
 
     def reap(folder):
         if folder in children:
@@ -219,9 +247,11 @@ def watch(requests, replies):
                 if op == 'stop':
                     if folder not in folders:
                         raise RuntimeError('folder is not owned')
-                    snapshot(folder)
-                    reap(folder)
-                    _wait_for_processes(descendants.get(folder, ()))
+                    try:
+                        snapshot(folder)
+                    finally:
+                        reap(folder)
+                    wait(folder)
                     remove(folder)
                     reply = {'ok': True}
                 elif op in ('own', 'start'):
@@ -272,7 +302,7 @@ def watch(requests, replies):
         for folder in list(folders):
             if folder not in children:
                 try:
-                    _wait_for_processes(descendants.get(folder, ()))
+                    wait(folder)
                     remove(folder)
                 except Exception as exc:
                     print(f'Private tmux watcher could not remove {folder}: {exc}', file=sys.stderr)
@@ -522,6 +552,34 @@ while True:
         with mock.patch.object(procinfo, 'pids', return_value=[*stat]), \
                 mock.patch.object(procinfo, 'stat_fields', side_effect=fields):
             self.assertEqual(sorted(_snapshot_descendants(10)), [(11, 't11'), (12, 't12')])
+
+    def test_darwin_snapshot_drops_a_pid_reused_before_the_second_table(self):
+        first = {10: (1, 'tmux'), 11: (10, 'sh'), 12: (11, 'python3'), 20: (1, 'other')}
+        second = {**first, 12: (20, 'reused')}
+        with mock.patch.object(procinfo, 'DARWIN', True), \
+                mock.patch.object(procinfo, 'table', side_effect=[first, second]) as table, \
+                mock.patch.object(procinfo, 'start_ticks', side_effect=lambda pid: f't{pid}'):
+            self.assertEqual(_snapshot_descendants(10), [(11, 't11')])
+        self.assertEqual(table.call_args_list, [mock.call(fresh=True)] * 2)
+
+    @unittest.skipUnless(shutil.which(paths.TMUX), 'tmux is not installed')
+    def test_a_failed_snapshot_reaps_the_server_and_keeps_the_folder(self):
+        for stop in (True, False):
+            with self.subTest(stop=stop):
+                folder = self.folder()
+                private = PrivateTmux(folder)
+                requests = [json.dumps({'op': 'start', 'folder': private.folder, 'env': private.env})]
+                if stop:
+                    requests.append(json.dumps({'op': 'stop', 'folder': private.folder}))
+                replies, log = StringIO(), StringIO()
+                with mock.patch(f'{__name__}._snapshot_descendants', side_effect=OSError('no process table')), \
+                        contextlib.redirect_stderr(log):
+                    watch((line + '\n' for line in requests), replies)
+                started, *stopped = [json.loads(line) for line in replies.getvalue().splitlines()]
+                self.assertEqual(stopped, [{'ok': False, 'error': 'no process table'}] if stop else [])
+                self.assertFalse(procinfo.stat_exists(started['pid']), 'The watcher must reap its server.')
+                self.assertTrue(folder.is_dir(), 'The folder must stay while its processes are unknown.')
+                self.assertIn(f'could not list the tmux processes, kept {folder}', log.getvalue())
 
     def test_wait_treats_a_reused_pid_or_zombie_as_gone(self):
         for state, ticks in (('S', '200'), ('Z', '100')):
