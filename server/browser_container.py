@@ -48,6 +48,9 @@ DASHBOARD = '/usr/share/selkies/selkies-dashboard'
 # tailscale serve, publish it too: tailscale serve --bg --https=7698 http://127.0.0.1:7698
 LIVE_PORT = int(os.environ.get('MOBILE_TMUX_BROWSER_LIVE_PORT', '7698'))
 SIGNED_LIVE_PORT = int(os.environ.get('MOBILE_TMUX_BROWSER_SIGNED_LIVE_PORT', '7699'))
+# Docker 29 maps 16384 shares to cgroup cpu.weight 942 (1024 maps to the default 100).
+# Give live browsers priority over proof and test containers in system.slice.
+LIVE_CPU_SHARES = 16384
 
 
 class ContainerError(RuntimeError):
@@ -65,11 +68,13 @@ def _run(args, timeout=60):
 class Container:
     """One Selkies container for one panel browser. Thread-safe; Browser calls launch() and stop()."""
 
-    def __init__(self, name, *, persistent=False, live_port=LIVE_PORT, root=None, runner=_run, image=IMAGE, files=FILES):
+    def __init__(self, name, *, persistent=False, live_port=LIVE_PORT, root=None, runner=_run, image=IMAGE, files=FILES,
+                 cpu_shares=None):
         self.name = 'tether-selkies-' + name
         self.root = Path(root) if root is not None else paths.CACHE / 'selkies' / name
         self.persistent = persistent
         self.live_port = live_port
+        self.cpu_shares = cpu_shares
         self.runner, self.image, self.files = runner, image, files
         self.lock = threading.RLock()
         self.password = None
@@ -127,6 +132,8 @@ class Container:
                 '-v', '%s:/tether:ro' % self.files,
                 '-v', '%s:/usr/bin/wrapped-chromium:ro' % (self.files / 'wrapped-chromium'),
                 '-v', '%s:/sock' % self.sock_dir]
+        if self.cpu_shares is not None:
+            args.append(f'--cpu-shares={self.cpu_shares}')
         if self.persistent:
             args += ['-v', '%s:/config' % (self.root / 'config')]
         return args + [self.image]
@@ -215,4 +222,5 @@ def default(name):
     if result.returncode != 0:
         return None
     signed = name == 'signed'
-    return Container(name, persistent=signed, live_port=SIGNED_LIVE_PORT if signed else LIVE_PORT)
+    return Container(name, persistent=signed, live_port=SIGNED_LIVE_PORT if signed else LIVE_PORT,
+                     cpu_shares=LIVE_CPU_SHARES)

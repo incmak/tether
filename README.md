@@ -93,6 +93,8 @@ The checkout installer builds the UI when needed.
 Each Linux user runs the installer separately. It selects the first free chat port from 7683 and separate optional service ports.
 Ports occupied by other users count as taken.
 The units are `tether.service`, `tether-terminal.service`, and `tether-voice.service`; optional units exist only when enabled.
+`install.py` gives `tether.service` `CPUWeight=1000`.
+For an existing install, run `systemctl --user set-property tether.service CPUWeight=1000` to apply and save the weight without a restart.
 Existing `mobile-tmux*.service` units stay untouched unless you add `--replace-legacy`, which disables and stops them.
 The old `server/deploy/install.py` entry point still works.
 To run without a service, use `python3 server/server.py` after the UI build.

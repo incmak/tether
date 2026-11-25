@@ -52,6 +52,7 @@ class ContainerTests(unittest.TestCase):
         joined = ' '.join(args)
         self.assertNotIn('-p', args)
         self.assertNotIn('--publish', joined)
+        self.assertNotIn('--cpu-shares', joined)
         self.assertNotIn('--privileged', joined)
         self.assertNotIn('SYS_ADMIN', joined)
         self.assertIn('seccomp=' + str(browser_container.FILES / 'seccomp-chromium.json'), args)
@@ -228,6 +229,8 @@ class ContainerTests(unittest.TestCase):
         config = root / 'selkies' / 'signed' / 'config'
         self.assertEqual(config.stat().st_mode & 0o777, 0o700)
         test_args, signed_args = self.runner.ran('run')
+        self.assertIn('--cpu-shares=16384', test_args)
+        self.assertIn('--cpu-shares=16384', signed_args)
         self.assertIn(f'{config}:/config', signed_args)
         self.assertFalse(any(arg.endswith(':/config') for arg in test_args))
 
