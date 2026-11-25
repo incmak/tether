@@ -702,7 +702,7 @@ class Browser:
             self.conn.call('Page.navigateToHistoryEntry', {'entryId': entries[index]['id']}, tab.session)
         return tab.row()
 
-    def refresh(self, tab):
+    def refresh(self, tab, *, live_size=None):
         """Read the tab's title and URL again. After a navigation that swaps the renderer (about:blank to a site),
         Chromium 147 sends no targetInfoChanged for later title changes, so the stream asks about once a second."""
         try:
@@ -713,10 +713,15 @@ class Browser:
             tab.url, tab.title = info.get('url') or tab.url, info.get('title') or ''
             self._bump()
         if self.container is not None:
-            self._fit_live_desktop(tab)
+            # Selkies can publish its capture size before Chromium's display sees the mode change.
+            deadline = time.monotonic() + 1
+            while self._fit_live_desktop(tab, live_size) is False:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)  # wait for the announced display size without holding the browser lock
 
-    def _fit_live_desktop(self, tab):
-        """Native Wayland Chromium can keep its minimum window size even in fullscreen."""
+    def _fit_live_desktop(self, tab, live_size=None):
+        """Fit Chromium's minimum fullscreen window. Return False while an announced resize is pending."""
         with self.lock:
             if (self.tabs.get(tab.target) is not tab or self.window_view
                     or tab.controller != 'user' or tab.preset != 'desktop'):
@@ -727,10 +732,14 @@ class Browser:
             screen = next((output for output in outputs if output.get('isPrimary')), None)
             if not screen or not screen.get('width') or not screen.get('height'):
                 return
+            width, height = screen['width'], screen['height']
+            scale = screen.get('devicePixelRatio') or 1
+            # CDP reports CSS pixels, with rounding at fractional output scales.
+            if live_size and any(abs(css * scale - pixels) > max(2, scale) for css, pixels in zip((width, height), live_size)):
+                return False
             bounds = conn.call('Browser.getWindowForTarget', {'targetId': tab.target}, timeout=5).get('bounds', {})
             if bounds.get('windowState') != 'fullscreen':
                 return
-            width, height = screen['width'], screen['height']
             viewport = (width, height) if bounds.get('width', 0) > width or bounds.get('height', 0) > height else None
             if viewport == previous:
                 return

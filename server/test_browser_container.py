@@ -350,6 +350,28 @@ class BrowserInContainerTests(unittest.TestCase):
         self.browser.refresh(tab)
         self.assertEqual(len(self.fake.sent('Emulation.clearDeviceMetricsOverride')), 2)
 
+    def test_desktop_fit_waits_for_chromiums_display_after_selkies_resizes(self):
+        self.browser.list_tabs()
+        tab = self.browser.tab(self.browser.order[-1])
+        self.fake.screen_size = (470, 572)
+        self.fake.window_size = (500, 572)
+        self.browser.refresh(tab)
+        self.assertEqual(tab.fullscreen_viewport, (470, 572))
+
+        self.fake.window_size = (1190, 614)
+        self.assertIs(self.browser._fit_live_desktop(tab, (2380, 1228)), False)
+        self.assertEqual(tab.fullscreen_viewport, (470, 572))
+
+        self.fake.screen_size = (1190, 614)
+        self.browser.refresh(tab, live_size=(2380, 1228))
+        self.assertIsNone(tab.fullscreen_viewport)
+        self.assertEqual(len(self.fake.sent('Emulation.clearDeviceMetricsOverride')), 2)
+
+        self.fake.screen_size = (470, 1260)
+        self.fake.window_size = (500, 1260)
+        self.browser.refresh(tab, live_size=(940, 2520))
+        self.assertEqual(tab.fullscreen_viewport, (470, 1260))
+
     def test_signed_container_reports_its_port_and_uses_saved_tabs(self):
         fake = WindowChrome()
         self.addCleanup(fake.close)
