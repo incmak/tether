@@ -11,5 +11,7 @@
 .browser-window :is(.browser-window-grip, .browser-icon):focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .browser-window-size { position: absolute; right: 0; bottom: 0; width: 16px; height: 16px; cursor: nwse-resize; touch-action: none; }
 .browser-away { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; height: 100%; color: var(--muted); }
+.browser-away button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.browser-placement-status { flex: none; margin: 0; padding: 6px 10px; color: var(--muted); font-size: 13px; }
 
 .browser-window-size::before { content: ""; position: absolute; right: 0; bottom: 0; width: 44px; height: 44px; }

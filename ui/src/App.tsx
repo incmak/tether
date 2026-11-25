@@ -79,7 +79,7 @@ import { requestUndo, useUndoNext } from './undoState'
 import { ASSISTANT } from './assistant'
 import { Loading } from './Skeleton'
 import { Explorer, ExplorerPhone, Live, prefetchPanels, Share } from './lazyPanels'
-import { BrowserFloat } from './BrowserWindow'
+import { BrowserFloat, forwardBrowserWatch, useBrowserWindow, type BrowserWatch } from './BrowserWindow'
 import { BrowserSheet, WATCH_EVENT, browserAsks, setPaneLabels, useAgentBrowser, watchTab } from './AgentBrowser'
 import { AgentBubble } from './AgentBubble'
 import { SidePins } from './SidePins'
@@ -459,8 +459,18 @@ function App() {
   // "Watch" in a chat's browser card (AgentBrowser.tsx): show the Browser panel, or the full-screen sheet without a workspace.
   const watchRef = useRef({ panel: false, open: false, setPanels })
   useLayoutEffect(() => { watchRef.current = { panel: !!view, open: hasPanel(panelCols(desk), 'browser'), setPanels } })
+  const paneLabels = useMemo(() => panes.map(item => ({ id: item.id, label: [paneTitle(item), shownIndex(item)].filter(Boolean).join(' ') })), [panes])
+  const dockBrowser = () => {
+    const { open, setPanels: change } = watchRef.current
+    if (!open) togglePanelKind(change, 'browser')
+  }
+  const browserInWindow = useBrowserWindow({
+    pane: pane?.id ?? null, label: pane ? paneTitle(pane) : '', labels: paneLabels, theme: themeShown, onDock: dockBrowser,
+  })
   useEffect(() => {
-    const onWatch = () => {
+    const onWatch = (event: Event) => {
+      const detail = (event as CustomEvent<BrowserWatch>).detail
+      if (detail && forwardBrowserWatch(detail)) return
       const { panel, open, setPanels: change } = watchRef.current
       if (!panel) setBrowserSheet(true)
       else if (!open) togglePanelKind(change, 'browser')
@@ -468,7 +478,7 @@ function App() {
     window.addEventListener(WATCH_EVENT, onWatch)
     return () => window.removeEventListener(WATCH_EVENT, onWatch)
   }, [])
-  useEffect(() => setPaneLabels(panes.map(item => ({ id: item.id, label: [paneTitle(item), shownIndex(item)].filter(Boolean).join(' ') }))), [panes])
+  useEffect(() => setPaneLabels(paneLabels), [paneLabels])
   const focusSlot = (index: number) => {
     const target = slotPanes[index]
     if (!view || !target) return
@@ -1064,7 +1074,7 @@ function App() {
       </>}
       panelTools={<PanelTools desk={desk} pane={pane} setPanels={setPanels} onSideChat={() => void sideChat()} />}
       panels={<PanelColumn api={api} desk={desk} pane={pane} setPanels={setPanels} renderChat={id => { const target = panes.find(item => item.id === id); return target ? chatFor(target) : null }} />} /> : chatFor(pane)) : null}
-    {pane && view && wide && <BrowserFloat api={api} pane={pane} onDock={() => { if (!hasPanel(panelCols(desk), 'browser')) togglePanelKind(setPanels, 'browser') }} onClose={() => { if (hasPanel(panelCols(desk), 'browser')) togglePanelKind(setPanels, 'browser') }} />}
+    {pane && view && wide && <BrowserFloat api={api} pane={pane} onDock={dockBrowser} onClose={() => { if (hasPanel(panelCols(desk), 'browser')) togglePanelKind(setPanels, 'browser') }} />}
     {showPanel('waiting') && <WaitingPanel api={api} cards={groups.needs} asks={(prefs.attention && (waiting.length || review)) || reminderEntry ? <WaitingBox items={waiting} sessions={sessions} selected={openId} limit={0} sort={waitSort} review={prefs.attention ? review : undefined} reminder={reminderEntry} onOpen={openPane} onDeck={() => setDeck(true)} /> : undefined} edge={lookShown.grid.columns.some(column => (column.top === 'waiting' || column.bottom === 'waiting') && (column.main !== 'sessions' || desk.sidebar))} onOpen={openPane} onUpdate={() => void refresh()} />}
     {showPanel('status') && <StatusColumn groups={groups} panes={panes} sessions={sessions} selected={openId} onOpen={openPane} />}
     {home && <Home api={api} groups={groups} asks={waiting} later={later} reminders={reminderEntry} sessions={sessions} sort={waitSort} decisions={decisionsGroup()} decisionCount={decisionCount} hasAgents={hasAgents(panes)} loaded={!!data} loading={loading} error={error} onRetry={() => void refresh()} onOpen={openPane} onMarkRead={markRead} onUpdate={() => void refresh()} onNew={() => setNewSession({})} onMenu={() => setDrawer(true)} onBacklog={() => setBacklog({ mode: 'sheet' })} />}
@@ -1091,7 +1101,7 @@ function App() {
         onOpen: () => { const ask = asks.find(item => item.tab); if (ask?.tab && ask.pane) watchTab(ask.tab, ask.pane); else setBrowserSheet(true) },
         busy: !!agentBrowser?.agents.some(agent => agent.tabs.length), asking: asks.length > 0,
       } : undefined} />}
-    {browserSheet && pane && <BrowserSheet api={api} pane={pane} onClose={() => setBrowserSheet(false)} />}
+    {browserSheet && pane && !browserInWindow && <BrowserSheet api={api} pane={pane} onClose={() => setBrowserSheet(false)} />}
     {reviewing && <LessonsReview api={api} onClose={() => { setReviewing(false); void refreshReview() }} />}
     {cleanup && <CleanUp api={api} onClose={() => setCleanup(false)} />}
     {deck && <ActionDeck api={api} items={deckCards} sessions={sessions} review={review} onOpen={openPane} onClose={() => setDeck(false)} onUpdate={() => void refresh()} />}
