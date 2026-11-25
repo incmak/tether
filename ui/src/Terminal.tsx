@@ -4,6 +4,7 @@ import { SquareTerminal } from 'lucide-react'
 import { copyText } from './clipboard'
 import { Linked } from './Messages'
 import { joinRows } from './terminalRows'
+import { installTerminalIme } from './terminalIme'
 import { dragSelect } from './terminalMouse'
 
 
@@ -100,6 +101,7 @@ function attachDragSelect(frame: HTMLIFrameElement, paneCols: { current: number 
     return
   }
   dragSelect(win, term as unknown as Parameters<typeof dragSelect>[1], () => paneCols.current, onCopied)
+  installTerminalIme(win, term)
   hideResizeOverlay(win.document)
 }
 

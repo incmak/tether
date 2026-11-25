@@ -95,11 +95,10 @@ SYSTEM_PROMPT = (
     'and use the prompt to say what the chat should do with it. Do not summarize the call in the prompt instead. '
     'Always write the chat name exactly as in state, for example api-server, even when speech-to-text '
     'misheard it ("docs sight" is docs-site): use the closest name in state. '
-    '1. If the user said send, tell, ask, prompt, instruct, message, forward, have it, or get it to, call the tool now. '
-    'Those words are the consent; do not read back. "Don\'t send" or "not yet" is never consent. '
-    '2. Otherwise call the tool anyway: it reads the task back and asks yes or no. '
+    '1. For every send, call the tool first so Friday reads back the destination and task and asks yes or no. '
     'Never ask "Shall I send" in your own words. '
-    '3. When the user says yes to that read-back, call the tool again with the same chat, task, and attach_call value. '
+    '2. When the user says yes to that read-back, call the tool again with the same chat, task, and attach_call value. '
+    '"Don\'t send" or "not yet" is never consent. '
     'Speech-to-text may hear "suggest to me" as "search to me"; that is not a send word. '
     'Never say you sent, switched, opened, or did anything unless its tool returned ok in this turn. '
     'After a tool error, say plainly that it did not happen. For show tools, give the reason. '
@@ -145,14 +144,6 @@ MAX_REPLY_TOKENS = 120
 BARGE_IN_WORDS = 3
 FRIDAY_HOTWORDS = ('Tether', 'tether')
 HOTWORDS_SCORE = 1.5
-SEND_INTENT = re.compile(
-    r'\b(?:send|tell|ask|instruct|forward)\b'
-    # Prompt and message are send words only as a verb that starts a clause: "message ci-audit" or
-    # "please prompt it", not "the prompt ci-audit got" or "did you message them".
-    r'|(?:^|[.,!;:]\s*|\b(?:please|just|and|then|now|so|(?:can|could|would) you)\s+)'
-    r'(?:prompt|message)\s+(?:it|them|\w+(?:-\w+)*)\b(?![^.!]*\?)'
-    r'|\bhave\s+(?:it|them|\w+(?:-\w+)+)\s+\w+'
-    r'|\bget\s+(?:it|them)\s+to\b', re.I)
 CALL_LOG_INTENT = re.compile(
     r'\b(?:voice logs?|call logs?|transcript|conversation|(?:this|the|our|whole) call|call with (?:you|friday)'
     r'|logs? (?:i had )?with you|(?:what|everything) (?:we|i) (?:said|discussed))\b', re.I)
@@ -172,6 +163,7 @@ CONSENT_TOOLS = (*DELIVERY_TOOLS, 'drop_notes')
 ACTION_TOOLS = (*CONSENT_TOOLS, 'answer_approval', 'new_chat', 'switch_chat', 'show_chat', 'show_session',
                 'backlog_add', 'open_panel', 'reminder_add', 'hold_note', 'make_prompt', 'edit_prompt', 'close_draft')
 READBACK_REQUIRED = 'Read the prompt back and ask the user to confirm before sending.'
+SEND_CHAT_REQUIRED = 'Name the chat to send to.'
 APPROVAL_CONFIRM_REQUIRED = 'Ask the user to confirm this approval decision first.'
 APPROVAL_DECLINED = 'The user said no to the approval question. Nothing was decided; do not ask again.'
 APPROVAL_DECLINED_REPLY = 'Okay. I did not approve or deny it.'
@@ -195,6 +187,10 @@ STT_FIXUPS = {'t third': 'Tether', 'tthird': 'Tether', 'teether': 'Tether',
 _STT_FIXUP = re.compile(r'\b(?:' + '|'.join(re.escape(word) for word in STT_FIXUPS) + r')\b', re.I)
 CLOSE_STEP_TIMEOUT = 2.0
 REQUEST_TIMEOUT = 9.0
+BROWSER_TOOL_TIMEOUT = 30.0
+BROWSER_TIMEOUT_HISTORY = 256
+BROWSER_TIMEOUT_ACTION = "The browser did not answer, so I can't tell if that worked."
+BROWSER_TIMEOUT_READ = 'The browser did not answer, so I stopped waiting.'
 _closing_tasks = set()
 
 
@@ -628,6 +624,8 @@ def send_readback(proposal):
     if proposal.name == 'answer_approval':
         decision = proposal.payload
         return f'{APPROVAL_READBACK_START[decision]} Should I {decision} {chat}{SEND_READBACK_QUESTION_END}'
+    if not chat:
+        return SEND_CHAT_REQUIRED
     if proposal.attach:
         chat += " with this call's transcript"
     if proposal.name == 'backlog_send':
@@ -767,10 +765,6 @@ def norm(text):
     return re.sub(r'[\W_]+', ' ', text.casefold()).strip()
 
 
-def clean_chat(chat):
-    return re.sub(r'^the\s+|\s+(?:chat|session|tab)$', '', chat.strip(), flags=re.I)
-
-
 def same_text(text):
     """Text as compared for consent: case, spacing, quotes and the end mark do not count; all else does ("-10")."""
     text = ' '.join(text.split()).strip('"“”\'‘’ ')
@@ -798,14 +792,12 @@ class _QuestionMark:
 QUESTION_MARK = _QuestionMark()
 
 
-def plain_yes(text, affirmatives=YES_WORDS):
+def plain_yes(text, affirmatives=YES_WORDS, allowed=YES_WORDS | YES_FILLER):
     if QUESTION_MARK.search(text):
         return False  # "That's correct?" asks; it does not consent.
     # "You sure" (STT drops the "?") asks too; "you" is a yes word only in "thank you".
-    # A chat title is free text ("Hold Off", "Tomorrow"): it never stands in for words of a yes, so
-    # "Yes, send it to docs" gets a fresh "Yes or no?" (fail-safe).
-    words = f' {norm(text)} '.replace(' thank you ', ' thanks ')
-    words = words.split()
+    answer = norm(text)
+    words = f' {answer} '.replace(' thank you ', ' thanks ').split()
     # "Ahead" consents only after "go" ("Go ahead", "Go right ahead"). "Correct" consents as an answer
     # ("That's correct, go ahead"); with an object ("correct it", "correct the chat") it asks for a change.
     if any(word == 'ahead' and 'go' not in words[max(0, i - 2):i] for i, word in enumerate(words)):
@@ -813,13 +805,15 @@ def plain_yes(text, affirmatives=YES_WORDS):
     # Read the raw text: "Correct, it sounds good" has a pause before "it" and still consents.
     if re.search(r"\bcorrect\s+(?:%s)\b" % '|'.join(sorted(CORRECTION_OBJECTS)), text, re.I):
         return False
-    allowed = YES_WORDS | YES_FILLER
     return any(word in affirmatives for word in words) and all(word in allowed for word in words)
 
 
 # A delete needs a short, closed yes. "to" is left out: "Correct yes to okay" corrects a word (B496).
 # "send" is left out: it never confirms a delete. "Yes, delete it" confirms; any other word gets a fresh read-back.
 DROP_YES_WORDS = YES_WORDS - {'send'}
+# A yes to a send never names a destination. A chat title is free text ("Hold Off", "Good", "All"), so
+# "Yes, send it to docs", "Yes to hold off" and "Yes, the Good chat" all get a fresh read-back (fail-safe).
+SEND_YES_ALLOWED = YES_WORDS | (YES_FILLER - {'to', 'the', 'chat', 'session', 'tab'})
 PROMPT_YES_WORDS = YES_WORDS - {'send'}
 DROP_YES_ALLOWED = DROP_YES_WORDS | (YES_FILLER - {'to', 'chat', 'session', 'tab'}) | frozenset(
     'delete drop remove clear them'.split())
@@ -892,7 +886,7 @@ def confirms(proposal, text):
     if proposal.name == 'send_prompt':
         return plain_yes(text, PROMPT_YES_WORDS)
     if proposal.name != 'answer_approval':
-        return plain_yes(text)
+        return plain_yes(text, allowed=SEND_YES_ALLOWED)
     if QUESTION_MARK.search(text) or APPROVAL_NEGATION.search(text) or proposal.payload not in APPROVAL_CONFIRM_WORDS:
         return False
     words = re.sub(r'\bgo ahead\b', 'yes', ' '.join(answer_words(text))).split()
@@ -972,28 +966,6 @@ def binds(payload, proposed):
     return bool(same_text(proposed)) and same_text(payload) == same_text(proposed)
 
 
-# "Should I ask docs myself" or "I'll message it": the user plans their own send. STT drops the "?".
-OWN_SEND = re.compile(r"\b(?:i|we)(?:['’](?:ll|d))?(?:\s+\w+){0,2}\s*$"
-                      r"|\b(?:did|have|has)\s+(?:you|it|they)\b"  # "Did you by any chance tell docs"
-                      r"|\b(?:not|never|don['’]?t)(?:\s+\w+)?\s*$", re.I)  # "do not send it yet"
-# "Tell me when it replies": the user is the one told.
-TOLD_USER = re.compile(r"\s+(?:me|us)\b", re.I)
-
-# "But I'll can you ask docs" (STT): "can you" asks Friday, whatever comes before it.
-ASKS_FRIDAY = re.compile(r'\b(?:can|could|would|will)\s+you\s+(?:please\s+|just\s+)?$', re.I)
-
-
-def send_intent(text):
-    """True when the user asks Friday to send, not when they ask about or plan their own send."""
-    for match in SEND_INTENT.finditer(text):
-        if TOLD_USER.match(text, match.end()):
-            continue
-        clause = re.split(r'[.,!;:?]', text[:match.start()])[-1]
-        if ASKS_FRIDAY.search(clause) or not OWN_SEND.search(clause):
-            return True
-    return False
-
-
 def excludes_call(text):
     """Treat an exclusion close to any call mention as a veto."""
     mentions = list(CALL_LOG_INTENT.finditer(text))
@@ -1035,15 +1007,6 @@ def hotword_text(names):
     return '/'.join(entries)
 
 
-def answers_question(previous):
-    """True when Friday's last reply asks something: the next turn may answer it, so it never sends directly.
-
-    Filler ("Um, yes, send it") or a question with no send word ("Shall I do that?") cannot be told
-    apart from a fresh request by its words, so any question counts. A send then gets the fixed read-back.
-    """
-    return '?' in previous
-
-
 def check_tool(name, args, source, last_user_text, used, previous_assistant='', pending=None, user_turn=0,
                *, suggestions=(), readback_debt=False, drop_followup=False, draft_topics=None):
     """Return a short refusal, without changing the originating turn's state."""
@@ -1052,6 +1015,8 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
         return 'Event runs only report news; do not take actions.'
     if source != 'speech' and guarded_action:
         return 'No spoken user turn authorizes this action.'
+    if name in SEND_TOOLS and not str(args.get('chat') or '').strip():
+        return SEND_CHAT_REQUIRED
     # The yes must answer the read-back the user heard last. Two turns keep a yes split over two runs
     # (the first run interrupted before it spoke).
     live = pending is not None and pending.live(user_turn)
@@ -1172,13 +1137,14 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
         # A yes confirms the one send Friday proposed: the same tool and chat, and the read-back text exactly.
         proposal_matches = (has_proposal and name == pending.name and chat == pending.chat.strip().casefold()
                             and attach == pending.attach and binds(payload, pending.payload))
-        yes = plain_yes(last_user_text)
-        if attach and not (CALL_LOG_INTENT.search(last_user_text) or (yes and proposal_matches)):
-            return CALL_NOT_REQUESTED
+        confirmed = proposal_matches and confirms(pending, last_user_text)
+        if attach and not (CALL_LOG_INTENT.search(last_user_text) or confirmed):
+            # The heard proposal already carries the transcript; an unclear yes to it gets a fresh read-back.
+            return READBACK_REQUIRED if proposal_matches else CALL_NOT_REQUESTED
         if suggestions:
             normalized_payload = norm(payload)
             normalized_speech = norm(last_user_text)
-            confirmed_payload = yes and proposal_matches and normalized_payload == norm(pending.payload)
+            confirmed_payload = confirmed and normalized_payload == norm(pending.payload)
             if not confirmed_payload:
                 for suggestion in suggestions:
                     words = norm(suggestion)
@@ -1186,14 +1152,8 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                         continue
                     if words == normalized_payload or (' ' in words and f' {words} ' in f' {normalized_payload} '):
                         return READBACK_REQUIRED
-        # A transcript always requires a heard read-back. Other sends take the direct path
-        # only for a fresh, explicit request, never for an answer that includes a send word.
-        if (not attach and not (live_send or readback_debt or answers_question(previous_assistant))
-                and send_intent(last_user_text)):
-            return None
-        # Only the server's own stored proposal binds a yes. A yes to Friday's free-form words gets
-        # the fixed read-back first, and the next yes sends the stored text once.
-        if not (yes and proposal_matches):
+        # Every send needs a heard read-back of the stored proposal and a yes to it.
+        if not confirmed:
             return READBACK_REQUIRED
     return None
 
@@ -1757,15 +1717,17 @@ def runtime_types():
     from pipecat.audio.vad.vad_analyzer import VADAnalyzer, VADParams
     from pipecat.audio.turn.smart_turn.base_smart_turn import BaseSmartTurn
     from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
-    from pipecat.frames.frames import (BotStartedSpeakingFrame, BotStoppedSpeakingFrame, DataFrame,
+    from pipecat.frames.frames import (AggregatedTextFrame, BotStartedSpeakingFrame, BotStoppedSpeakingFrame,
+        DataFrame, ErrorFrame,
         FunctionCallCancelFrame, FunctionCallResultFrame, FunctionCallResultProperties, FunctionCallsStartedFrame,
         InterruptionFrame, LLMContextFrame,
         LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
         LLMAssistantPushAggregationFrame, MetricsFrame,
-        TTSSpeakFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame, TranscriptionFrame,
+        TTSAudioRawFrame, TTSSpeakFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame, TranscriptionFrame,
         InterimTranscriptionFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame)
     from pipecat.metrics.metrics import TTFBMetricsData
     from pipecat.observers.base_observer import BaseObserver
+    from pipecat.processors.aggregators import async_tool_messages
     from pipecat.processors.aggregators.llm_context import LLMContext
     from pipecat.processors.frame_processor import FrameDirection
     from pipecat.processors.frameworks.rtvi.observer import RTVIFunctionCallReportLevel, RTVIObserverParams
@@ -1778,6 +1740,7 @@ def runtime_types():
     from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import TurnAnalyzerUserTurnStopStrategy
     from pipecat.turns.user_stop.speech_timeout_user_turn_stop_strategy import SpeechTimeoutUserTurnStopStrategy
     from pipecat.turns.user_start.vad_user_turn_start_strategy import VADUserTurnStartStrategy
+    from pipecat.utils.text.base_text_aggregator import TextType
     from pipecat.utils.time import time_now_iso8601
 
     class FridayUserTurnStartStrategy(VADUserTurnStartStrategy):
@@ -1932,6 +1895,8 @@ def runtime_types():
             self._readback_speech = None
             self._readback_marker_id = None
             self._readback_output = None
+            self._readback_audio = None
+            self._readback_voice_count = 0
 
         def begin_voice_turn(self):
             self.voice_turn += 1
@@ -1957,10 +1922,11 @@ def runtime_types():
                     self.session.release_event()
                 return
             if isinstance(frame, FridayToolSpeechCompleteFrame) and self._readback_output:
-                marker_id, voice_turn, count = self._readback_output
+                marker_id, voice_turn, count, server_audio = self._readback_output
                 if marker_id == frame.tool_call_id:
                     frame.readback_ready = not self.voice_cancelled
                     frame.voice_turn, frame.voice_count = voice_turn, count
+                    frame.server_audio = server_audio
                     self._readback_output = None
             await super().process_frame(frame, direction)
 
@@ -1973,15 +1939,17 @@ def runtime_types():
             if not self.voice_open:
                 self.begin_voice_turn()
             if isinstance(frame, FridayReadbackSpeechFrame):
-                self._readback_speech = frame
                 self._readback_marker_id = frame.marker_id
+                if frame.marker_id and not standalone:
+                    # Pipecat can hold the model's last sentence until response end.
+                    # Drain it now so the fixed read-back is the final spoken text.
+                    remaining = await self._text_aggregator.flush()
+                    if remaining:
+                        await self._handle_aggregated_text(self._aggregated_text_frame(remaining))
+                self._readback_speech = frame
+                self._readback_audio = None
+                self._readback_voice_count = self.voice_count
                 try:
-                    if frame.marker_id and not standalone:
-                        # Pipecat can hold the model's last sentence until response end.
-                        # Drain it now so the fixed read-back is the final spoken text.
-                        remaining = await self._text_aggregator.flush()
-                        if remaining:
-                            await self._handle_aggregated_text(self._aggregated_text_frame(remaining))
                     await super()._handle_tts_speak(frame)
                 finally:
                     self._readback_speech = None
@@ -2035,8 +2003,10 @@ def runtime_types():
                 return
             if speech is not None:
                 if not self.voice_cancelled:
-                    voice_turn = self.voice_turn if self.voice_client else None
-                    self._readback_output = (speech.marker_id, voice_turn, self.voice_count)
+                    if self.voice_client and self.voice_count > self._readback_voice_count:
+                        self._readback_output = (speech.marker_id, self.voice_turn, self.voice_count, None)
+                    elif not self.voice_client and self._readback_audio:
+                        self._readback_output = (speech.marker_id, None, 0, self._readback_audio)
                 # Release the device end only after the assistant sees the marker.
                 self.voice_open = False
                 return
@@ -2097,11 +2067,19 @@ def runtime_types():
             preroll = AudioPreroll(float(os.environ.get('TETHER_FRIDAY_PREROLL', '0.15')),
                                    max_hold, max_wait)
             completed = False
+            readback = self._readback_speech is not None and self._readback_speech.marker_id is not None
+            failed = False
+            audio_bytes = 0
             made = worst = 0.0
             underruns = 0
             turn = self.session.turn
             try:
                 async for frame in super().run_tts(text, context_id):
+                    if readback:
+                        if isinstance(frame, ErrorFrame):
+                            failed = True
+                        elif isinstance(frame, TTSAudioRawFrame):
+                            audio_bytes += len(frame.audio)
                     duration = 0.0
                     if first and getattr(frame, 'audio', None):
                         first = False
@@ -2133,7 +2111,13 @@ def runtime_types():
                     preroll_ms = (playback_start - first_audio) * 1000
                 for held in frames:
                     yield held
-                completed = True
+                completed = not failed
+                if readback and completed and audio_bytes:
+                    self._readback_audio = context_id, audio_bytes
+            except Exception as exc:
+                if not readback:
+                    raise
+                yield ErrorFrame(error='Read-back synthesis failed.', exception=exc)
             finally:
                 preroll.close()
                 if made:
@@ -2162,6 +2146,7 @@ def runtime_types():
         readback_ready: bool = False
         voice_turn: int | None = None
         voice_count: int = 0
+        server_audio: tuple[str, int] | None = None
 
     @dataclass
     class FridayReadbackSpeechFrame(TTSSpeakFrame):
@@ -2172,6 +2157,19 @@ def runtime_types():
         text: str
         readback_id: str | None = None
         cue: bool = False
+
+    @dataclass
+    class BrowserToolDeadline:
+        name: str
+        turn: int | None
+        task: asyncio.Task | None = None
+
+    @dataclass
+    class ToolBatch:
+        pending: set[str]
+        run: SimpleNamespace | None
+        acks: dict[str, str]
+        needs_followup: bool = False
 
     class FridayLLM(OpenAILLMService):
         supports_developer_role = False
@@ -2197,7 +2195,11 @@ def runtime_types():
             self._last_reply = (None, ())
             self.tools_in_flight = set()
             self.tool_batches = {}
-            self.tool_batch_runs = {}
+            self.browser_deadlines = {}
+            self._browser_deadline_tasks = set()
+            self._browser_deadlines_closed = False
+            self._timed_out_browser_ids = {}  # Insertion order lets us evict the oldest id.
+            self._browser_timeout_speech = set()
             # An aggregated result awaiting inference, or the context frame that runs it.
             self.tool_followup = None
             self.replay_marker = None
@@ -2208,6 +2210,55 @@ def runtime_types():
         @property
         def tool_work_pending(self):
             return bool(self.tools_in_flight) or self.tool_followup is not None or self.replay_marker is not None
+
+        async def cleanup(self):
+            self._browser_deadlines_closed = True
+            self.browser_deadlines.clear()
+            tasks = tuple(self._browser_deadline_tasks)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await super().cleanup()
+
+        async def browser_deadline(self, tool_call_id):
+            await asyncio.sleep(BROWSER_TOOL_TIMEOUT)
+
+        def settle_browser_deadline(self, tool_call_id):
+            deadline = self.browser_deadlines.pop(tool_call_id, None)
+            if deadline is not None and deadline.task is not None:
+                deadline.task.cancel()
+
+        async def expire_browser_tool(self, tool_call_id, deadline, run):
+            await self.browser_deadline(tool_call_id)
+            if self.browser_deadlines.get(tool_call_id) is not deadline:
+                return
+            del self.browser_deadlines[tool_call_id]
+            name = deadline.name
+            print(f'Friday browser tool timeout {name} {tool_call_id}', file=sys.stderr, flush=True)
+            action = name in ACTION_TOOLS
+            same_turn = deadline.turn == getattr(self.session, 'turn', None)
+            line = (BROWSER_TIMEOUT_ACTION if action else BROWSER_TIMEOUT_READ) if action or same_turn else None
+            self._timed_out_browser_ids[tool_call_id] = line
+            if len(self._timed_out_browser_ids) > BROWSER_TIMEOUT_HISTORY:
+                del self._timed_out_browser_ids[next(iter(self._timed_out_browser_ids))]
+            if run is not None:
+                run.browser_timed_out = True
+            batch = self.tool_batches.get(tool_call_id)
+            siblings_pending = batch is not None and len(batch.pending) > 1
+            last_in_turn = batch is not None and same_turn and not siblings_pending
+            run_llm = bool(last_in_turn and batch.needs_followup and not (run and run.readback_spoken))
+            if line is not None:
+                self.tools_in_flight.add(tool_call_id)
+                if not run_llm:
+                    self._browser_timeout_speech.add(tool_call_id)
+            await self.broadcast_frame(FunctionCallCancelFrame, function_name=name, tool_call_id=tool_call_id,
+                                       run_llm=run_llm)
+            if line is not None and not run_llm:
+                if last_in_turn:
+                    for ack in batch.acks.values():
+                        await self.push_frame(TTSSpeakFrame(ack))
+                await self.push_frame(TTSSpeakFrame(line, append_to_context=not siblings_pending))
+                await self.push_frame(FridayToolSpeechCompleteFrame(tool_call_id))
 
         def _token_usage(self, usage):
             # Usage is metrics only. A provider may send null counts; that must not fail the reply.
@@ -2223,7 +2274,7 @@ def runtime_types():
                 # At the LLM, this reaches the old response before the new speech context.
                 self.replay_marker = None
             if isinstance(frame, LLMContextFrame):
-                if isinstance(self.tool_followup, FunctionCallResultFrame):
+                if isinstance(self.tool_followup, (FunctionCallResultFrame, FunctionCallCancelFrame)):
                     # A new user turn can pick up a deferred result.
                     self.tool_followup = frame
                 turn = getattr(self.session, 'turn', None)
@@ -2231,7 +2282,8 @@ def runtime_types():
                     self.session.waiting_for_read = False
                 response = SimpleNamespace(turn=turn, text=False, tool_output=False,
                                            ttfb=None, completed=False, call_count=0, buffered_text=None,
-                                           held_text=[], plain_text=False, request_messages=(), context_frame=frame)
+                                           held_text=[], plain_text=False, request_messages=(), context_frame=frame,
+                                           timeout_line=getattr(frame, 'friday_timeout_line', None))
                 token = self._active_response.set(response)
                 try:
                     await super().process_frame(frame, direction)
@@ -2250,7 +2302,8 @@ def runtime_types():
             if not call or call.name != frame.function_name:
                 return None
             del run.pending[frame.tool_call_id]
-            if call.name not in ACTION_TOOLS:
+            # A browser timeout leaves the action outcome unknown.
+            if call.name not in ACTION_TOOLS or frame.tool_call_id in self._timed_out_browser_ids:
                 return None
             result = frame.result if isinstance(frame, FunctionCallResultFrame) and not frame.error else None
             ack = action_ack(call.name, call.args, result, call_turn_count=call.call_turn_count)
@@ -2274,9 +2327,12 @@ def runtime_types():
                 self.readback_budget.reset(run.proposal)
                 self.session.pending_proposal = None
                 self.session.readback_debt = False
-            if (call.response.turn == getattr(self.session, 'turn', None) and call.response.call_count == 1
+            if (call.response.turn == getattr(self.session, 'turn', None)
                     and frame.properties is None and frame.run_llm is None):
-                frame.properties = FridaySpokenToolResult(run_llm=False, text=ack)
+                if call.response.call_count == 1:
+                    frame.properties = FridaySpokenToolResult(run_llm=False, text=ack)
+                elif (batch := self.tool_batches.get(frame.tool_call_id)) is not None and len(batch.pending) > 1:
+                    batch.acks[frame.tool_call_id] = ack
 
         async def push_response_text(self, response, frame):
             # Until the reply shows a Latin letter or a digit, hold every chunk: the decision is per reply,
@@ -2303,31 +2359,40 @@ def runtime_types():
             result = isinstance(frame, FunctionCallResultFrame)
             properties = frame.properties if result else None
             final = properties is None or properties.is_final
-            run = self.tool_batch_runs.get(ident)
+            run = batch.run if batch is not None else None
+            configured = properties.run_llm if properties and properties.run_llm is not None else frame.run_llm
+            readback_spoken = run is not None and run.readback_spoken
             if final and batch is not None:
+                if result and frame.result and configured is None and ident not in batch.acks and not readback_spoken:
+                    batch.needs_followup = True
                 del self.tool_batches[ident]
-                batch.remove(ident)
-            if final:
-                self.tool_batch_runs.pop(ident, None)
-            if not result or frame.run_llm is not None or (properties and properties.run_llm is not None):
+                batch.pending.remove(ident)
+            if not result or configured is not None:
                 return
             # Pipecat's group check overlooks siblings that have started but
             # have yet to send their in-progress frame.
-            siblings_pending = batch and len(batch) > (0 if final else 1)
+            siblings_pending = batch is not None and len(batch.pending) > (0 if final else 1)
             # The run that started the batch decides: a late result never reads a newer turn's read-back.
-            if siblings_pending or (run is not None and run.readback_spoken):
+            if siblings_pending or readback_spoken:
                 frame.run_llm = False
 
         async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
+            if (isinstance(frame, FunctionCallResultFrame)
+                    and frame.tool_call_id in self._timed_out_browser_ids):
+                print(f'Friday dropped late browser tool result {frame.function_name} {frame.tool_call_id}',
+                      file=sys.stderr, flush=True)
+                return
             response = self._active_response.get()
             speech = None
             if direction == FrameDirection.DOWNSTREAM:
                 if isinstance(frame, FunctionCallsStartedFrame):
-                    batch = {call.tool_call_id for call in frame.function_calls}
-                    self.tools_in_flight.update(batch)
-                    self.tool_batches.update(dict.fromkeys(batch, batch))
-                    self.tool_batch_runs.update(dict.fromkeys(batch, self.tool_run))
+                    pending = {call.tool_call_id for call in frame.function_calls}
+                    self.tools_in_flight.update(pending)
+                    self.tool_batches.update(dict.fromkeys(pending, ToolBatch(pending, self.tool_run, {})))
                 elif isinstance(frame, (FunctionCallResultFrame, FunctionCallCancelFrame)):
+                    if (isinstance(frame, FunctionCallCancelFrame)
+                            or frame.properties is None or frame.properties.is_final):
+                        self.settle_browser_deadline(frame.tool_call_id)
                     self.finish_browser_tool(frame)
                     self.gate_tool_followup(frame)
                     if (isinstance(frame, FunctionCallResultFrame)
@@ -2343,6 +2408,11 @@ def runtime_types():
                     response.ttfb = next((m.value for m in frame.data if isinstance(m, TTFBMetricsData)
                                           and m.processor == self.name and m.value > 0), None)
             await super().push_frame(frame, direction)
+            if (direction == FrameDirection.DOWNSTREAM and isinstance(frame, LLMFullResponseStartFrame)
+                    and response and response.timeout_line):
+                # Device voice cancels unfinished sentences when a new reply starts.
+                # Speak the fixed line in the same reply as the sibling result.
+                await super().push_frame(AggregatedTextFrame(response.timeout_line, TextType.SENTENCE))
             if speech:
                 if speech.readback_id:
                     proposal = self.session.pending_proposal
@@ -2386,9 +2456,34 @@ def runtime_types():
 
         def track_assistant(self, assistant, context):
             response = None
+            audio_context, audio_bytes = None, 0
             speech_snapshot = ()
             # Pipecat can process a system frame while a data frame is in progress.
             processing = ContextVar('friday_assistant_frame', default=(None, None))
+
+            def replace_timeout_notice(frame, previous_tail):
+                ident = frame.tool_call_id
+                if ident not in self._timed_out_browser_ids:
+                    return
+                line = self._timed_out_browser_ids[ident]
+                if line:
+                    description = (f'The user was already told: {line} Do not repeat it. '
+                                   'Do not say this call failed or succeeded; the outcome is unknown.')
+                else:
+                    description = ('No result will arrive. If the user still needs it, say the browser did not answer; '
+                                   'do not guess the result.')
+                for message in reversed(context.get_messages()):
+                    if message is previous_tail:
+                        break
+                    payload = async_tool_messages.parse_message(message) if isinstance(message, dict) else None
+                    if payload is None or payload.tool_call_id != ident or payload.kind != 'final':
+                        continue
+                    # Pipecat's public final-result builder hardcodes its description.
+                    notice = async_tool_messages._payload_to_message(replace(payload, description=description,
+                        result='TIMEOUT: the browser did not answer in time.'))
+                    message['content'] = notice['content']
+                    return
+                print(f'Friday browser timeout notice not found for {ident}', file=sys.stderr, flush=True)
 
             @assistant.event_handler('on_before_process_frame')
             async def before_process(processor, frame):
@@ -2399,18 +2494,31 @@ def runtime_types():
                     response = getattr(frame, 'friday_response', None)
                 elif isinstance(frame, TTSStartedFrame) and frame.append_to_context and response is None:
                     speech_snapshot = tuple(messages)
+                elif (isinstance(frame, FunctionCallCancelFrame) and frame.run_llm
+                        and frame.tool_call_id in self._timed_out_browser_ids):
+                    # A system cancel can overtake a sibling's data result. Keep
+                    # inference owed so the next result can trigger it in that case.
+                    processor._context_push_owed = True
 
             @assistant.event_handler('on_before_push_frame')
             async def before_push(processor, frame):
                 if not isinstance(frame, LLMContextFrame):
                     return
                 cause, previous_tail = processing.get()
+                if isinstance(cause, FunctionCallCancelFrame):
+                    # An immediate rerun can read context before after_process fires.
+                    replace_timeout_notice(cause, previous_tail)
+                    processing.set((None, previous_tail))
                 # These paths push context upstream to run inference. Take over the
                 # tool gate before the result settles or the request reaches the LLM.
+                pending = self.tool_followup
                 if ((isinstance(cause, (FunctionCallResultFrame, FunctionCallCancelFrame))
                         and cause.tool_call_id in self.tools_in_flight)
                         or (isinstance(cause, BotStoppedSpeakingFrame)
-                            and isinstance(self.tool_followup, FunctionCallResultFrame))):
+                            and isinstance(pending, (FunctionCallResultFrame, FunctionCallCancelFrame)))):
+                    cancel = cause if isinstance(cause, FunctionCallCancelFrame) and cause.run_llm else pending
+                    if isinstance(cancel, FunctionCallCancelFrame):
+                        frame.friday_timeout_line = self._timed_out_browser_ids.get(cancel.tool_call_id)
                     self.tool_followup = frame
                 messages = context.get_messages()
                 if messages:
@@ -2425,9 +2533,18 @@ def runtime_types():
 
             @assistant.event_handler('on_after_process_frame')
             async def after_process(processor, frame):
-                nonlocal response, speech_snapshot
+                nonlocal response, speech_snapshot, audio_context, audio_bytes
+                cause, previous_tail = processing.get()
+                if cause is frame and isinstance(frame, FunctionCallCancelFrame):
+                    replace_timeout_notice(frame, previous_tail)
                 processing.set((None, None))
                 s = self.session
+                # The output transport forwards only the PCM chunks it successfully writes.
+                # Each TTS context flushes its final chunk before the completion marker.
+                if isinstance(frame, TTSStartedFrame):
+                    audio_context, audio_bytes = frame.context_id, 0
+                elif isinstance(frame, TTSAudioRawFrame):
+                    audio_bytes += len(frame.audio)
                 if (isinstance(frame, LLMFullResponseEndFrame) and response is not None
                         and self.tool_followup is response.context_frame):
                     self.tool_followup = None
@@ -2435,27 +2552,35 @@ def runtime_types():
                 if isinstance(frame, (LLMFullResponseEndFrame, InterruptionFrame, LLMAssistantPushAggregationFrame)):
                     response, speech_snapshot = None, ()
                 if isinstance(frame, InterruptionFrame):
+                    audio_context, audio_bytes = None, 0
                     self.tools_in_flight.clear()
+                    self._browser_timeout_speech.clear()
                     self.tool_followup = None
                     s.wake.set()
-                elif (isinstance(frame, FunctionCallResultFrame) and frame.tool_call_id in self.tools_in_flight
+                elif ((isinstance(frame, FunctionCallResultFrame)
+                       or isinstance(frame, FunctionCallCancelFrame) and frame.run_llm)
+                        and frame.tool_call_id in self.tools_in_flight
+                        and not isinstance(self.tool_followup, FunctionCallCancelFrame)
                         and getattr(processor, '_context_push_owed', False)):
-                    # Pipecat 1.15 leaves this set when it defers a result's inference.
+                    # Pipecat 1.15 leaves this set when it defers tool inference.
                     self.tool_followup = frame
-                if isinstance(frame, (FunctionCallCancelFrame, FridayToolSpeechCompleteFrame)) or (
+                cancel_without_speech = (isinstance(frame, FunctionCallCancelFrame)
+                                         and frame.tool_call_id not in self._browser_timeout_speech)
+                if cancel_without_speech or isinstance(frame, FridayToolSpeechCompleteFrame) or (
                         isinstance(frame, FunctionCallResultFrame)
                         and (frame.properties is None or frame.properties.is_final)
                         and not isinstance(frame.properties, FridaySpokenToolResult)):
                     if isinstance(frame, FridayToolSpeechCompleteFrame):
+                        self._browser_timeout_speech.discard(frame.tool_call_id)
                         replay = self.replay_marker == frame.tool_call_id
                         if replay:
                             self.replay_marker = None
                         if (replay or frame.tool_call_id in self.tools_in_flight) and s.tts.device_voice_pending():
                             s.busy = True
                     self.tools_in_flight.discard(frame.tool_call_id)
-                    if (not self.tool_work_pending and self.tool_run and self.tool_run.readback_spoken
-                            and s.waiting_for_read):
-                        # The read-back is the reply, so no new context frame will clear the filler gate.
+                    if (not self.tool_work_pending and s.waiting_for_read and self.tool_run
+                            and (self.tool_run.readback_spoken or self.tool_run.browser_timed_out)):
+                        # Read-back and timeout speech can end the reply without a new context request.
                         s.waiting_for_read = False
                         if not (s.llm_running or s.reply_open or s.bot_speaking or s.tts.device_voice_pending()):
                             s.busy = False
@@ -2464,8 +2589,10 @@ def runtime_types():
                     proposal = getattr(s, 'pending_proposal', None)
                     if (proposal and proposal.marker_id == frame.tool_call_id and not readback_overlapped(s)
                             and self.tool_run and self.tool_run.source == 'speech'):
-                        if frame.voice_turn is None and s.voice_mode == 'server':
-                            self.mark_readback_heard(proposal)
+                        if s.voice_mode == 'server' and frame.server_audio:
+                            context_id, expected_bytes = frame.server_audio
+                            if audio_context == context_id and audio_bytes >= expected_bytes:
+                                self.mark_readback_heard(proposal)
                         elif (s.voice_mode == 'client' and frame.voice_turn == s.tts.voice_turn
                               and not s.tts.voice_cancelled):
                             s.pending_proposal = replace(proposal, voice_turn=frame.voice_turn)
@@ -2611,7 +2738,7 @@ def runtime_types():
                     # Async tool calls keep the transcript as of the spoken request.
                     call_turns=tuple(self.call_log.turns),
                     pending={}, filler_spoken=False, failed_action=False, failed_reason=None,
-                    succeeded_action=False, readback_spoken=False)
+                    succeeded_action=False, readback_spoken=False, browser_timed_out=False)
             else:
                 self.run_source = 'tool'
                 if self.tool_run and self.tool_run.source == 'speech':
@@ -2740,7 +2867,24 @@ def runtime_types():
                     run.filler_spoken = True
                     self.session.waiting_for_read = True
                     await self.push_frame(TTSSpeakFrame(filler, append_to_context=False))
-            await self.session.rtvi.handle_function_call(params)
+            tool_call_id = params.tool_call_id
+            turn = response.turn if response else getattr(self.session, 'turn', None)
+            deadline = BrowserToolDeadline(name, turn)
+            # A result can pass through the LLM while the dispatch still awaits transport.
+            self.settle_browser_deadline(tool_call_id)
+            if not self._browser_deadlines_closed:
+                self.browser_deadlines[tool_call_id] = deadline
+            try:
+                await self.session.rtvi.handle_function_call(params)
+            except (Exception, asyncio.CancelledError):
+                if self.browser_deadlines.get(tool_call_id) is deadline:
+                    del self.browser_deadlines[tool_call_id]
+                raise
+            if self.browser_deadlines.get(tool_call_id) is deadline:
+                create_task = self.create_task if self._task_manager is not None else asyncio.create_task
+                task = deadline.task = create_task(self.expire_browser_tool(tool_call_id, deadline, run))
+                self._browser_deadline_tasks.add(task)
+                task.add_done_callback(self._browser_deadline_tasks.discard)
 
         def browser_observer(self):
             # In-progress frames precede handlers. Only the guarded handler

@@ -182,6 +182,7 @@ async function main() {
   await hostCycle('TerminalPanel.tsx', 'TerminalPanel', { pane: { id: '%fake' }, item: { id: 'fixture' }, onItem() {} }, { './Terminal': { LiveTerminal: 'terminal' } })
   await hostCycle('Terminal.tsx', 'LiveTerminal', { paneId: '%fake', onChat() {} }, {
     'lucide-react': { SquareTerminal: 'icon' }, './Messages': {}, './clipboard': {}, './terminalRows': {}, './terminalMouse': {},
+    './terminalIme': {},
   })
   console.log('retry tests passed: errorText (network vs code errors), reach, immediate feedback, minimum duration, pending promise, busy transition, mounted host retries (mocked hooks; no DOM or network)')
 }
