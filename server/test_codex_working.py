@@ -210,6 +210,24 @@ class CodexRolloutBusyTests(unittest.TestCase):
         self.append(complete)
         self.assertEqual(self.poll(False), len(complete))
 
+    def test_large_append_is_read_in_bounded_blocks(self):
+        write_rollout(self.rollout, lifecycle('task_started'))
+        self.assertTrue(terminal.transcript_busy(self.rollout, window=4096))
+        line = json.dumps({'type': 'response_item', 'payload': {'output': 'x' * 1000}}).encode() + b'\n'
+        complete = json.dumps(lifecycle('task_complete')).encode() + b'\n'
+        self.append(line * 1024 + complete + line * 3)
+        sizes = []
+        read = terminal._rollout_read
+
+        def bounded(stream, size):
+            sizes.append(size)
+            return read(stream, size)
+
+        with patch.object(terminal, '_rollout_read', side_effect=bounded):
+            self.assertIs(terminal.transcript_busy(self.rollout, window=4096), False)
+        self.assertEqual(sum(sizes), len(line) * 1027 + len(complete))
+        self.assertLessEqual(max(sizes), 4096)
+
     def test_incomplete_lifecycle_is_counted_only_after_newline(self):
         write_rollout(self.rollout, lifecycle('task_started'))
         complete = json.dumps(lifecycle('task_complete')).encode()

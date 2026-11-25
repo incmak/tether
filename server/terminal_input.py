@@ -1152,6 +1152,8 @@ def _rollout_lines_backward(stream, size, window):
 
 
 def _rollout_lifecycle(line):
+    if b'"event_msg"' not in line:  # fast skip; JSON escapes any quote inside a string value
+        return None
     try:
         record = json.loads(line)
     except (ValueError, RecursionError):
@@ -1177,11 +1179,15 @@ def transcript_busy(path, window=262144):
                 if info.st_size == offset:
                     return last == 'task_started'
                 stream.seek(offset)
-                lines = (cached['partial'] + _rollout_read(stream, info.st_size - offset)).split(b'\n')
-                partial = lines.pop()
-                for line in lines:
-                    if (kind := _rollout_lifecycle(line)) is not None:
-                        last = kind
+                partial, remaining = cached['partial'], info.st_size - offset
+                while remaining:  # bounded blocks: a large append must not be loaded at once
+                    block = _rollout_read(stream, min(max(1, window), remaining))
+                    remaining -= len(block)
+                    lines = (partial + block).split(b'\n')
+                    partial = lines.pop()
+                    for line in lines:
+                        if (kind := _rollout_lifecycle(line)) is not None:
+                            last = kind
             else:
                 backward = _rollout_lines_backward(stream, info.st_size, max(1, window))
                 partial = next(backward)
