@@ -112,9 +112,12 @@ async function main() {
       window.usageDoc = Math.random().toString(36).slice(2)
       const fetchPage = window.fetch
       window.fetch = (input, init) => {
-        if (input === '/mobile/api/ui-usage' && init?.method === 'POST') {
-          window.usagePosts++
-          init = { ...init, headers: { ...init.headers, 'X-Usage-Doc': window.usageDoc } }
+        // Tag every API write with this document, so the test reads only what the current page sent.
+        if (typeof input === 'string' && input.startsWith('/mobile/api/') && init?.method && init.method !== 'GET') {
+          if (input === '/mobile/api/ui-usage') window.usagePosts++
+          const headers = new Headers(init.headers)
+          headers.set('X-Usage-Doc', window.usageDoc)
+          init = { ...init, headers }
         }
         return fetchPage(input, init)
       }
@@ -123,11 +126,15 @@ async function main() {
       localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'light', voiceOff: true, voiceSound: false, selected: '%1' }))
     })
     const overflow = () => page.evaluate(() => document.documentElement.scrollWidth > innerWidth)
-    const usage = () => posts.filter(post => post.endpoint === 'ui-usage').flatMap(post => post.body.events)
+    // The document the checks read. Each page load gets a new id (window.usageDoc); a late POST from an earlier
+    // document (held, or the pagehide flush on navigation) keeps its own id, so no read below sees it.
+    let doc = null
+    const oldDocs = new Set()
+    const usage = () => posts.filter(post => post.endpoint === 'ui-usage' && post.doc === doc).flatMap(post => post.body.events)
     const waitForPost = (endpoint, match) => page.waitForResponse(response => {
       const request = response.request()
       return new URL(response.url()).pathname === '/mobile/api/' + endpoint && request.method() === 'POST'
-        && match(request.postDataJSON())
+        && match(request.postDataJSON(), request.headers()['x-usage-doc'])
     })
     const flush = () => page.evaluate(() => window.dispatchEvent(new Event('pagehide')))
     // Wait until the current document has sent an event that matches and every ui-usage POST it has sent so far is
@@ -138,9 +145,10 @@ async function main() {
       let state = ''
       for (;;) {
         const answered = nextUsageAnswer()
-        const { doc, sent } = await page.evaluate(() => ({ doc: window.usageDoc, sent: window.usagePosts }))
+        const { current, sent } = await page.evaluate(() => ({ current: window.usageDoc, sent: window.usagePosts }))
+        if (current !== doc) throw new Error(`The page reloaded: document ${current}, the checks read ${doc}`)
         const done = usageAnswered.get(doc) ?? 0
-        const found = posts.some(post => post.endpoint === 'ui-usage' && post.doc === doc && post.body.events.some(matches))
+        const found = usage().some(matches)
         if (done >= sent && found) return
         state = `${found ? 'found' : 'no'} ${what}; ${done} of ${sent} ui-usage POSTs answered`
         const left = deadline - Date.now()
@@ -166,11 +174,14 @@ async function main() {
     for (const [width, height] of sizes) {
       const at = `${width}px`
       prefs = { selected: '%1' }; version++
-      posts.length = 0
+      if (doc) oldDocs.add(doc)
       await page.setViewportSize({ width, height })
-      const generation = waitForPost('ui-usage', body => body.events.length === 0)
+      // The new page's first (empty) ui-usage POST; an earlier document's late POST does not match.
+      const generation = waitForPost('ui-usage', (body, from) => body.events.length === 0 && !!from && !oldDocs.has(from))
       await page.goto(`${origin}/chat/`, { waitUntil: 'load' })
-      await generation
+      const firstFrom = (await generation).request().headers()['x-usage-doc']
+      doc = await page.evaluate(() => window.usageDoc)
+      if (firstFrom !== doc) throw new Error(`${at}: the first ui-usage POST came from document ${firstFrom}, the page is ${doc}`)
       const chat = page.locator('.chat-panel[data-pane="%1"]').first()
       await chat.waitFor()
       const mainSeen = event => event.k === 'seen' && event.d === 0
@@ -230,9 +241,9 @@ async function main() {
       await clear.click()
       await page.getByRole('button', { name: 'Remove' }).click()
       await page.getByText('The UI usage log is empty now.').waitFor()
-      check(`${at} clear posts`, posts.some(post => post.endpoint === 'ui-usage/clear'))
+      check(`${at} clear posts`, posts.some(post => post.endpoint === 'ui-usage/clear' && post.doc === doc))
       // Turning the switch off saves the pref and stops the log.
-      const saveOff = waitForPost('prefs', body => body.changes.uiUsage === false)
+      const saveOff = waitForPost('prefs', (body, from) => from === doc && body.changes.uiUsage === false)
       await toggle.click()
       check(`${at} pref saved`, (await saveOff).ok())
       const before = await page.evaluate(() => window.usagePosts)
