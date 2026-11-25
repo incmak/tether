@@ -40,6 +40,7 @@ interface Options {
 export function useQuickCreate({ api, agent, sessions, onOpen }: Options): { create: Create; toast: ReactNode } {
   const [toast, setToast] = useState<Toast | null>(null)
   const [held, setHeld] = useState(false)
+  const [running, setRunning] = useState(0)
   const next = useRef(0)
   const live = useRef(true)
   useEffect(() => () => { live.current = false }, [])
@@ -79,7 +80,7 @@ export function useQuickCreate({ api, agent, sessions, onOpen }: Options): { cre
       }, failure => show(id, { kind: 'error', text: `“${query}” was not added. ${message(failure)}`, retry: () => backlog(query) }))
     }
 
-    const tab = async (query: string, choice: Choice) => {
+    const startOne = async (query: string, choice: Choice) => {
       const id = ++next.current
       const request = requestId()
       let late: Promise<Routed | null> | null = null
@@ -111,6 +112,11 @@ export function useQuickCreate({ api, agent, sessions, onOpen }: Options): { cre
         }
       }
       await run()
+    }
+    // running counts tab actions until their last show. It is state, so its commit includes every earlier toast update.
+    const tab = async (query: string, choice: Choice) => {
+      setRunning(count => count + 1)
+      try { await startOne(query, choice) } finally { if (live.current) setRunning(count => count - 1) }
     }
 
     return { onBacklog: backlog, onTab: (query, choice) => void tab(query, choice) }
@@ -151,5 +157,6 @@ export function useQuickCreate({ api, agent, sessions, onOpen }: Options): { cre
       <button type="button" className="quick-toast-close" aria-label="Dismiss" onClick={close}><X size={16} aria-hidden="true" /></button>
     </div>}
   </div>
-  return { create, toast: element }
+  // Tests wait for data-running="0" before they check that a late result changed nothing.
+  return { create, toast: <>{element}<span className="quick-toast-running" hidden data-running={running} /></> }
 }
