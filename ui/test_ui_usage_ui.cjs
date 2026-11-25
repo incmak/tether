@@ -40,6 +40,9 @@ const report = {
 async function main() {
   let browser, page, server, failed = 0
   const posts = [], pageErrors = []
+  // Each answered ui-usage POST wakes the waiters, so a test can wait until every POST the page sent is recorded.
+  let usageAnswered = 0, usageWaiters = []
+  const nextUsageAnswer = () => new Promise(resolve => usageWaiters.push(resolve))
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
   try {
     await fs.mkdir(SHOTS, { recursive: true })
@@ -76,7 +79,12 @@ async function main() {
             prefs = { ...prefs, ...body.changes }; version++
             return route.fulfill({ json: { prefs, version } })
           }
-          if (endpoint === 'ui-usage') return route.fulfill({ json: { kept: body.events.length, enabled: true, gen: '1' } })
+          if (endpoint === 'ui-usage') {
+            await route.fulfill({ json: { kept: body.events.length, enabled: true, gen: '1' } })
+            usageAnswered++
+            for (const wake of usageWaiters.splice(0)) wake()
+            return
+          }
           if (endpoint === 'ui-usage/clear') return route.fulfill({ json: { cleared: true, gen: '2' } })
           return route.fulfill({ json: { ok: true } })
         }
@@ -115,13 +123,23 @@ async function main() {
         && match(request.postDataJSON())
     })
     const flush = () => page.evaluate(() => window.dispatchEvent(new Event('pagehide')))
-    const scan = async matches => {
-      // An automatic scan may have sent these controls already. The log sends each one only once per visit.
-      const sent = usage().some(matches) ? null : waitForPost('ui-usage', body => body.events.some(matches))
+    // Wait until an event matches and every ui-usage POST the page has sent so far is answered and recorded. The
+    // page counts POSTs when it calls fetch, so a held or slow POST keeps this waiting.
+    const recorded = async matches => {
+      for (;;) {
+        const answered = nextUsageAnswer()
+        const sent = await page.evaluate(() => window.usagePosts)
+        if (usageAnswered >= sent && usage().some(matches)) return
+        await answered
+      }
+    }
+    // Force a scan of what is on screen now, then wait for its events. One scan logs every control on screen in one
+    // pass, and the flush sends them all at once, so `marker` (a control there in every build) marks the whole scan.
+    const scan = async marker => {
       await page.keyboard.press('Shift')
       await page.clock.runFor(1800) // 800 ms input debounce and the 1000 ms idle deadline, in virtual time.
       await flush()
-      await sent
+      await recorded(marker)
     }
     const scanVisible = async (control, label) => {
       const matches = event => event.k === 'seen' && event.r === 'Settings' && event.l === label
@@ -139,7 +157,7 @@ async function main() {
       const chat = page.locator('.chat-panel[data-pane="%1"]').first()
       await chat.waitFor()
       const mainSeen = event => event.k === 'seen' && event.d === 0
-      await scan(mainSeen)
+      await scan(event => mainSeen(event) && event.c === 'tab')
       const strip = chat.locator('.pane-tabs')
       const stripVisible = await strip.isVisible()
       const mainEvents = usage().filter(mainSeen)
@@ -157,7 +175,8 @@ async function main() {
         await drawer.getByRole('group', { name: 'Sidebar view' }).getByRole('button', { name: 'Sessions', exact: true }).click()
         await drawer.locator('.row-close').first().waitFor()
         const drawerSeen = event => event.k === 'seen' && event.d === 1 && event.r === 'Sessions'
-        await scan(drawerSeen)
+        // A task row of the Sessions view: Catch up has none, and every build logs it.
+        await scan(event => drawerSeen(event) && event.c === 'button' && /, Task, idle$/.test(event.l))
         const seen = usage().filter(drawerSeen)
         check(`${at} logs redacted sidebar close and tab rows`, seen.some(event => event.l === 'Close …') && seen.some(event => event.l === '…, Task, idle'))
         const leaks = nameLeaks(seen)
