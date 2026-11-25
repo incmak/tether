@@ -1,6 +1,7 @@
 """Test the verify server against decoys and a fresh private tmux."""
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from collections import Counter
+from contextlib import suppress
 import errno
 from http.server import BaseHTTPRequestHandler
 from io import BytesIO
@@ -9,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import selectors
 import shutil
 import signal
@@ -49,12 +51,14 @@ class Configuration(unittest.TestCase):
         self.assertEqual(set(live) & set(env), {'PATH', 'HOME', 'MOBILE_TMUX_TMUX'})
 
     def test_child_requires_private_marked_root(self):
-        with tempfile.TemporaryDirectory(prefix='tv-', dir=verify_server.TEMP) as folder:
+        reader, writer = os.pipe()
+        with (os.fdopen(reader, 'rb') as stdin, os.fdopen(writer, 'wb'),
+              tempfile.TemporaryDirectory(prefix='tv-', dir=verify_server.TEMP) as folder):
             root = Path(folder)
             for bad in (Path('/'), verify_server.REAL_HOME, verify_server.REAL_HOME.parent, root / 'nested', root):
                 with self.subTest(root=bad):
                     run = subprocess.run([sys.executable, SCRIPT, '--serve', str(bad)],
-                                         capture_output=True, text=True, timeout=10)
+                                         stdin=stdin, capture_output=True, text=True, timeout=10)
                     self.assertNotEqual(run.returncode, 0)
                     self.assertIn('--serve needs', run.stderr)
             (root / verify_server.MARKER).write_text('fixture marker')
@@ -66,7 +70,7 @@ class Configuration(unittest.TestCase):
             env['TETHER_VERIFY_MARKER'] = 'fixture marker'
             env['MOBILE_TMUX_TMUX'] = '/usr/bin/tmux'
             run = subprocess.run([sys.executable, SCRIPT, '--serve', folder, '--dist', str(dist)],
-                                 env=env, capture_output=True, text=True, timeout=10)
+                                 env=env, stdin=stdin, capture_output=True, text=True, timeout=10)
             self.assertNotEqual(run.returncode, 0)
             self.assertIn('MOBILE_TMUX_TMUX and PATH must select the fixture wrapper', run.stderr)
 
@@ -1084,8 +1088,8 @@ class Boot(unittest.TestCase):
                                    pass_fds=pass_fds)
         return process, root
 
-    def start(self):
-        process, _ = self.launch()
+    def start(self, launcher=(SCRIPT,)):
+        process, _ = self.launch(launcher)
 
         def stop():
             if process.poll() is None:
@@ -1110,6 +1114,70 @@ class Boot(unittest.TestCase):
                 data.extend(block)
         self.assertIn(b'\n', data, stop() if b'\n' not in data else '')
         return process, json.loads(data.splitlines()[0])
+
+    def require_pidfd(self):
+        if not hasattr(os, 'pidfd_open'):
+            self.skipTest('pidfd_open is unavailable')
+        try:
+            os.close(os.pidfd_open(os.getpid()))
+        except OSError as exc:
+            if exc.errno != errno.ENOSYS:
+                raise
+            self.skipTest('pidfd_open is unavailable')
+
+    def assert_child_exits_after_launcher_kill(self, process, pid):
+        child = os.pidfd_open(pid)
+        self.addCleanup(os.close, child)
+        exited = False
+        try:
+            process.kill()
+            self.assertEqual(process.wait(timeout=15), -signal.SIGKILL)
+            exited = bool(select.select([child], [], [], 15)[0])
+            self.assertTrue(exited, 'HTTP child survived the launcher SIGKILL')
+        finally:
+            if not exited:
+                with suppress(ProcessLookupError):
+                    signal.pidfd_send_signal(child, signal.SIGKILL)
+                self.assertTrue(select.select([child], [], [], 5)[0], 'Could not stop the test HTTP child')
+
+    def test_http_child_exits_when_launcher_is_killed(self):
+        self.require_pidfd()
+        process, info = self.start()
+        self.assert_child_exits_after_launcher_kill(process, info['pid'])
+
+    def test_http_child_exits_when_launcher_is_killed_during_boot(self):
+        self.require_pidfd()
+        launcher = '''
+import os, subprocess, sys
+sys.path.insert(0, os.path.dirname(sys.argv.pop(1)))
+import verify_server
+
+before_ready = """
+import json, os, sys, threading
+sys.path.insert(0, os.path.dirname(sys.argv.pop(1)))
+import verify_server
+
+check_root = verify_server.check_root
+def held_root(*args):
+    check_root(*args)
+    print(json.dumps({'pid': os.getpid(), 'stage': 'check_root'}), flush=True)
+    threading.Event().wait()
+
+verify_server.check_root = held_root
+sys.exit(verify_server.main())
+"""
+popen = subprocess.Popen
+def held(args, **kwargs):
+    if '--serve' in args:
+        return popen([*args[:2], '-c', before_ready, *args[2:]], **kwargs)
+    return popen(args, **kwargs)
+
+subprocess.Popen = held
+sys.exit(verify_server.main())
+'''
+        process, info = self.start(('-c', launcher, SCRIPT))
+        self.assertEqual(info['stage'], 'check_root')
+        self.assert_child_exits_after_launcher_kill(process, info['pid'])
 
     def request(self, info, path, method='GET', body=None, cookie=True):
         origin = f'http://127.0.0.1:{info["port"]}'

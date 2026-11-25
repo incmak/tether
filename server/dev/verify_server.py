@@ -642,7 +642,7 @@ def serve(root, dist):
         auth.token()
         print(json.dumps({'port': http.server_port, 'url': f'http://127.0.0.1:{http.server_port}/chat/', 'root': str(root),
                           'cookie': {'name': auth.COOKIE, 'value': auth.session_value()}, 'pane': pane, 'session': session,
-                          'thread': SESSION}), flush=True)
+                          'thread': SESSION, 'pid': os.getpid()}), flush=True)
         http.serve_forever()
 
 
@@ -691,6 +691,15 @@ def check_dist(dist):
     return dist
 
 
+def exit_on_launcher_eof():
+    try:
+        while os.read(0, 4096):
+            pass
+    except OSError:
+        pass
+    os._exit(128 + signal.SIGTERM)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--dist', help='the built UI to serve at /chat/ (npm run build -- --outDir DIR)')
@@ -700,6 +709,8 @@ def main():
     args = parser.parse_args()
     dist = Path(args.dist or SERVER.parent / 'ui/dist')
     if args.serve:
+        # B468: the detached HTTP child must exit when a killed launcher closes its pipe.
+        threading.Thread(target=exit_on_launcher_eof, daemon=True).start()
         dist = dist.resolve()
         root = check_root(args.serve, os.environ.pop('TETHER_VERIFY_MARKER', ''))
         if os.environ.get('TMUX_CHAT_DIST') != str(dist):
@@ -752,7 +763,7 @@ def main():
             return 0
         child = subprocess.Popen([sys.executable, '-u', str(Path(__file__).resolve()), '--serve', str(root),
                                   '--dist', str(dist)], env={**env, 'TETHER_VERIFY_MARKER': marker}, cwd=SERVER,
-                                 stdin=subprocess.DEVNULL, start_new_session=True)
+                                 stdin=subprocess.PIPE, start_new_session=True)
         while child.poll() is None and not cancelled:
             if args.until_stdin_closes:
                 if select.select([sys.stdin], [], [], 0.2)[0] and not os.read(sys.stdin.fileno(), 4096):
@@ -773,8 +784,11 @@ def main():
                 except subprocess.TimeoutExpired:
                     child.kill()
                     child.wait(timeout=2)
-            if child is not None and child.poll() is None:
-                errors.append('server child did not exit')
+            if child is not None:
+                if child.poll() is None:
+                    errors.append('server child did not exit')
+                else:
+                    child.stdin.close()
         except (OSError, subprocess.SubprocessError) as exc:
             errors.append(f'could not stop server child: {exc}')
         if tmux_started:
