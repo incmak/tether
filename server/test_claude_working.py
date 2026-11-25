@@ -69,12 +69,18 @@ class ClaudeWorkingTests(unittest.TestCase):
                 self.assertEqual(terminal._live_status(self.entry, self.run, '\n'.join(frame))['state'], 'Idle')
         bottom = max(index for index, row in enumerate(idle) if row.startswith('─'))
         for status in ('  Opus 5.5 | esc to interrupt is the hint', '  esc to interrupt is the hint · main',
-                       '  Opus 5.5 · esc to interrupt · main', '  esc to interrupt · main'):
+                       '  Opus 5.5 · esc to interrupt · main', '  esc to interrupt · main', '  esc to interrupt',
+                       '  ⏵ Notes · esc to interrupt'):
             with self.subTest(status=status):
                 frame = idle[:bottom + 1] + [status] + idle[bottom + 1:]
                 self.assertIs(terminal.claude_screen_working('\n'.join(frame)), False)
-        frame = idle[:bottom + 1] + ['  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt'] + idle[bottom + 2:]
+        mode = next(index for index in range(bottom + 1, len(idle)) if idle[index].strip().startswith('⏵'))
+        frame = list(idle)
+        frame[mode] += ' · esc to interrupt'
         self.assertIs(terminal.claude_screen_working('\n'.join(frame)), True)
+        # The same hint on a row above Claude's mode row is a custom status line.
+        frame = idle[:mode] + [idle[mode] + ' · esc to interrupt'] + idle[mode:]
+        self.assertIs(terminal.claude_screen_working('\n'.join(frame)), False)
 
     def test_side_question_without_registry_uses_its_answering_state(self):
         for answering, state in ((True, 'Working'), (False, 'Idle')):
@@ -86,7 +92,7 @@ class ClaudeWorkingTests(unittest.TestCase):
             self.assertEqual(terminal._live_status(self.entry, self.run, '')['state'], 'Idle')
 
     def test_footer_hint_is_case_insensitive(self):
-        screen = '──────────\n❯\n──────────\n  Esc To Interrupt'
+        screen = '──────────\n❯\n──────────\n  ⏵⏵ auto mode on · Esc To Interrupt'
         self.assertIs(terminal.claude_screen_working(screen), True)
 
     def test_spinners_with_missing_mode_row(self):

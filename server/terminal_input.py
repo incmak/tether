@@ -1228,13 +1228,17 @@ def claude_screen_working(plain_screen):
                    and not lines[index].rstrip().strip('─') and _terminal_columns(lines[index].rstrip()) == width), None)
     if bottom is None:
         return None
-    # Claude's interrupt hint is a whole " · " item of its mode row ("⏵⏵ auto mode on · esc to interrupt"), or a row
-    # that holds only the hint. A custom status line that quotes it is not the hint.
+    # Claude's interrupt hint is a whole " · " item of its mode row ("⏵⏵ auto mode on · esc to interrupt"). Claude
+    # draws that row last in the footer block, under any custom status line, so only the last ⏵/⏸ row counts.
+    # Without a mode row the spinner check below decides.
+    block = []
     for line in lines[bottom + 1:]:
-        items = [item.strip() for item in line.split(' · ')]
-        if CLAUDE_INTERRUPT.match(items[0]) and len(items) == 1 or \
-                items[0].startswith(('⏵', '⏸')) and any(CLAUDE_INTERRUPT.match(item) for item in items[1:]):
-            return True
+        if not line.strip():
+            break
+        block.append(line.strip())
+    modes = [line for line in block if line.startswith(('⏵', '⏸'))]
+    if modes and modes[-1] == block[-1] and any(CLAUDE_INTERRUPT.match(item.strip()) for item in modes[-1].split(' · ')[1:]):
+        return True
     top = anchor - 1
     for line in reversed(lines[max(0, top - 40):top]):
         if line.startswith(('● ', '❯ ')):
