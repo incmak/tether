@@ -673,21 +673,32 @@ class AutomaticAccessTests(unittest.TestCase):
         self.assertFalse(self.server.pending)
         self.assertEqual(self.phone(), {'ok': False, 'reason': 'denied'})
 
-    def test_auto_does_not_reuse_a_tab_that_is_gone_or_controlled(self):
-        for remove in (False, True):
-            with self.subTest(remove=remove):
+    def test_auto_does_not_reuse_a_tab_that_is_gone_controlled_or_used_by_mak(self):
+        identity = self.identity
+
+        def watched(tab): tab.viewers = 1
+        def typed(tab): tab.last_input = self.real.clock() + 1
+        def moved(tab): tab.url = 'https://bank.example/transfer'
+        def other_process(tab): self.identity = ('claude', 999, 'later', 'thread')
+        changes = {'removed': lambda tab: self.real.tabs.pop(tab.target), 'controlled': lambda tab: setattr(tab, 'agent_client', object()),
+                   'watched': watched, 'typed': typed, 'moved': moved, 'other_process': other_process}
+        for name, change in changes.items():
+            with self.subTest(name):
+                self.identity = identity
                 original = self.ask(verified=True)
                 grant, = self.routed.state()['grants']
                 self.server.end(grant['id'], 'expired')
                 tab = self.real.tab(original['tab'])
-                if remove:
-                    self.real.tabs.pop(tab.target)
-                else:
-                    tab.agent_client = object()
+                change(tab)
                 result = self.ask(verified=True)
                 self.assertTrue(result['ok'])
                 self.assertNotEqual(result['tab'], original['tab'])
+                if name in ('watched', 'typed', 'moved'):
+                    self.assertEqual(tab.mode, 'saved')
+                    self.assertIsNone(tab.grant)
                 self.server.end(self.routed.state()['grants'][0]['id'], 'expired')
+                for target in [row for row in list(self.real.tabs) if row != result['tab']]:
+                    self.real.tabs.pop(target)
 
     def test_auto_failure_removes_slot_and_hides_capability_urls_and_paths(self):
         for message, error in [

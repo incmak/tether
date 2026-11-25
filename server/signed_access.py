@@ -382,8 +382,8 @@ class Access:
             try:
                 self._listen()
                 pane, url = slot['row']['pane'], slot['row']['url']
-                tab = self.browser.tabs.get(self.last_tab.get(pane)) if slot['auto'] else None
-                if tab and tab.mode == 'saved' and tab.grant is None and tab.agent_client is None:
+                tab = self._reusable_tab(slot) if slot['auto'] else None
+                if tab:
                     if url is not None:
                         self.browser.navigate(tab.target, url)
                 else:
@@ -404,6 +404,18 @@ class Access:
                 with self.lock:
                     self.reserved.discard(ident)
         return self.state()
+
+    def _reusable_tab(self, slot):
+        # Only the tab this agent process had, untouched since its grant ended: nobody watches it,
+        # nobody typed in it, and it still shows the same page. Else Mak may be using it.
+        last = self.last_tab.get(slot['row']['pane'])
+        if not last or last['key'] is None or last['key'] != process_key(slot['row']['pane'], slot['identity']):
+            return None
+        tab = self.browser.tabs.get(last['tab'])
+        if (not tab or tab.mode != 'saved' or tab.grant is not None or tab.agent_client is not None
+                or tab.viewers > 0 or tab.last_input > last['at'] or tab.url != last['url']):
+            return None
+        return tab
 
     def _check_hold(self, slot):
         # Recheck under the history lock at grant creation: End can run while the browser opens a tab.
@@ -447,7 +459,10 @@ class Access:
             client.revoke()
         with self.browser.lock:
             if grant:
-                self.last_tab[grant.row['pane']] = grant.row['tab']
+                tab = self.browser.tabs.get(grant.row['tab'])
+                self.last_tab[grant.row['pane']] = {
+                    'tab': grant.row['tab'], 'key': process_key(grant.row['pane'], grant.identity),
+                    'at': self.browser.clock(), 'url': tab.url if tab else None}
                 for target in list(grant.targets):
                     tab = self.browser.tabs.get(target)
                     if tab:
