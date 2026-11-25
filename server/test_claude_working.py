@@ -74,18 +74,13 @@ class ClaudeWorkingTests(unittest.TestCase):
             with self.subTest(status=status):
                 frame = idle[:bottom + 1] + [status] + idle[bottom + 1:]
                 self.assertIs(terminal.claude_screen_working('\n'.join(frame)), False)
+        # Review r5: even Claude's exact mode row with the hint is not trusted; a status command can print it.
         mode = next(index for index in range(bottom + 1, len(idle)) if idle[index].strip().startswith('⏵'))
-        frame = list(idle)
-        frame[mode] += ' · esc to interrupt'
-        self.assertIs(terminal.claude_screen_working('\n'.join(frame)), True)
-        # A custom status row shaped like a mode row, with no real mode row under it.
-        frame = idle[:mode] + ['  ⏵ Notes · esc to interrupt'] + idle[mode + 1:]
-        self.assertIs(terminal.claude_screen_working('\n'.join(frame)), False)
-        frame = idle[:mode] + ['  ⏵⏵ Notes on · esc to interrupt'] + idle[mode + 1:]
-        self.assertIs(terminal.claude_screen_working('\n'.join(frame)), False)
-        # The same hint on a row above Claude's mode row is a custom status line.
-        frame = idle[:mode] + [idle[mode] + ' · esc to interrupt'] + idle[mode:]
-        self.assertIs(terminal.claude_screen_working('\n'.join(frame)), False)
+        for row in (idle[mode] + ' · esc to interrupt', '  ⏵⏵ auto mode on staging · esc to interrupt'):
+            with self.subTest(row=row):
+                frame = idle[:mode] + [row] + idle[mode + 1:]
+                self.assertIs(terminal.claude_screen_working('\n'.join(frame)), False)
+                self.assertEqual(terminal._live_status(self.entry, self.run, '\n'.join(frame))['state'], 'Idle')
 
     def test_side_question_without_registry_uses_its_answering_state(self):
         for answering, state in ((True, 'Working'), (False, 'Idle')):
@@ -95,10 +90,6 @@ class ClaudeWorkingTests(unittest.TestCase):
         self.registry.write_text('{"status": "idle"}')
         with patch.object(side_question, 'observe', return_value={'reason': 'side', 'pending': True, 'answering': True}):
             self.assertEqual(terminal._live_status(self.entry, self.run, '')['state'], 'Idle')
-
-    def test_footer_hint_is_case_insensitive(self):
-        screen = '──────────\n❯\n──────────\n  ⏵⏵ auto mode on · Esc To Interrupt'
-        self.assertIs(terminal.claude_screen_working(screen), True)
 
     def test_spinners_with_missing_mode_row(self):
         for name, spinner in (
@@ -114,6 +105,12 @@ class ClaudeWorkingTests(unittest.TestCase):
                 self.assertIs(terminal.claude_screen_working('\n'.join(rows[:bottom + 1])), True)
         screen = fixture('working.txt')
         self.assertIs(terminal.claude_screen_working(screen.split('  ⏵⏵')[0]), True)
+        # Every captured working screen reads Working from its spinner alone.
+        for group, name in (('claude_2.1.331_working', 'working.txt'), ('claude_2.1.330_agent_bar', 'narrow_pill_focus.txt'),
+                            ('claude_2.1.330_agent_bar', 'prompt_waiting_shell_monitor.txt')):
+            with self.subTest(name=name):
+                rows = [row for row in fixture(name, group).splitlines() if 'esc to interrupt' not in row]
+                self.assertIs(terminal.claude_screen_working('\n'.join(rows)), True)
 
     def test_spinner_scan_stops_at_message_boundary(self):
         for start in ('● Reply', '❯ Prompt'):

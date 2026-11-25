@@ -1210,8 +1210,6 @@ def live_status(entry, run=subprocess.run):
 
 WORKING = detection_rules.pattern('common', 'WORKING')
 CLAUDE_SPINNER = detection_rules.pattern('claude', 'SPINNER')
-CLAUDE_MODE = re.compile(r"^(?:⏵⏵|⏸) (?:auto mode|accept edits|bypass permissions|don't ask|plan mode) on\b")
-CLAUDE_INTERRUPT = re.compile(r'^esc to interrupt(?:\s*…)?$', re.I)
 
 
 def claude_screen_working(plain_screen):
@@ -1229,18 +1227,8 @@ def claude_screen_working(plain_screen):
                    and not lines[index].rstrip().strip('─') and _terminal_columns(lines[index].rstrip()) == width), None)
     if bottom is None:
         return None
-    # Claude's interrupt hint is a whole " · " item of its mode row ("⏵⏵ auto mode on · esc to interrupt"). Claude
-    # draws that row last in the footer block, under any custom status line, so only the last row counts, and only
-    # when it starts with one of Claude's own modes. An unknown mode text refuses.
-    # Without a mode row the spinner check below decides.
-    block = []
-    for line in lines[bottom + 1:]:
-        if not line.strip():
-            break
-        block.append(line.strip())
-    items = [item.strip() for item in block[-1].split(' · ')] if block else []
-    if items and CLAUDE_MODE.match(items[0]) and any(CLAUDE_INTERRUPT.match(item) for item in items[1:]):
-        return True
+    # Only the spinner row above the box counts. The footer's "esc to interrupt" does not: a custom status line
+    # can print the same text, and every captured working screen also shows the spinner (B490 review 5).
     top = anchor - 1
     for line in reversed(lines[max(0, top - 40):top]):
         if line.startswith(('● ', '❯ ')):
