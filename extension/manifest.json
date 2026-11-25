@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Tether browser",
   "description": "Use one approved Chrome tab from Tether. Click the extension to stop control.",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "minimum_chrome_version": "118",
   "permissions": ["debugger", "tabs", "storage", "alarms"],
   "optional_host_permissions": ["https://*/*"],

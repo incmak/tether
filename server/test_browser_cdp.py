@@ -218,6 +218,59 @@ class TransportTests(unittest.TestCase):
             self.assertFalse(self.transport.closed)
             self.receive(cdp.frame(1, payload))
 
+    def test_large_devanagari_reply_and_event_stay_connected(self):
+        block = 'अ' * 1_000_000
+        prefix = b'{"id": 1, "result": {"value": "'
+        suffix = b'"}}'
+        event = {'method': 'Runtime.consoleAPICalled', 'params': {}}
+        self.transport.message({'id': 1, 'result': {'value': block * 12}})
+        self.transport.message(event)
+        self.assertFalse(self.transport.closed)
+        encoded = block.encode()
+        length = len(prefix) + 12 * len(encoded) + len(suffix)
+        with self.peer.makefile('rb') as stream:
+            self.assertEqual(stream.read(10), struct.pack('!BBQ', 0x81, 127, length))
+            self.assertEqual(stream.read(len(prefix)), prefix)
+            for _ in range(12):
+                self.assertEqual(stream.read(len(encoded)), encoded)
+            self.assertEqual(stream.read(len(suffix)), suffix)
+            expected = cdp.frame(1, json.dumps(event).encode())
+            self.assertEqual(stream.read(len(expected)), expected)
+
+    def test_64_mib_reply_with_32_mib_of_queued_events_stays_connected(self):
+        block = b'A' * (1024 * 1024)
+        prefix = b'{"id": 1, "result": {"data": "'
+        suffix = b'"}}'
+        length = 64 * len(block) - 10
+        self.transport.message({'id': 1, 'result': {'data': 'A' * (length - len(prefix) - len(suffix))}})
+        event_prefix = b'{"method": "Runtime.consoleAPICalled", "params": {"value": "'
+        event_length = len(block) - 10 - len(event_prefix) - len(suffix)
+        event = {'method': 'Runtime.consoleAPICalled', 'params': {'value': 'A' * event_length}}
+        for _ in range(32):
+            self.transport.message(event)
+        self.assertFalse(self.transport.closed)
+        with self.peer.makefile('rb') as stream:
+            self.assertEqual(stream.read(10), struct.pack('!BBQ', 0x81, 127, length))
+            self.assertEqual(stream.read(len(prefix)), prefix)
+            for _ in range(63):
+                self.assertEqual(stream.read(len(block)), block)
+            remaining = length - 63 * len(block) - len(prefix) - len(suffix)
+            self.assertEqual(stream.read(remaining), block[:remaining])
+            self.assertEqual(stream.read(len(suffix)), suffix)
+            expected = cdp.frame(1, event_prefix + block[:event_length] + suffix)
+            for _ in range(32):
+                self.assertEqual(stream.read(len(expected)), expected)
+
+    def test_message_with_lone_surrogate_is_valid_json_text(self):
+        reply = {'id': 1, 'result': {'value': 'अ\ud800'}}
+        self.transport.message(reply)
+        with self.peer.makefile('rb') as stream:
+            opcode, size = stream.read(2)
+            self.assertEqual(opcode, 0x81)
+            payload = stream.read(size).decode('utf-8')
+        self.assertIn(r'\ud800', payload)
+        self.assertEqual(json.loads(payload), reply)
+
 
 class ConfigTests(unittest.TestCase):
     def test_new_config_port_is_in_range(self):

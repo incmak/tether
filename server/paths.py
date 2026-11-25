@@ -44,6 +44,7 @@ def _find_tmux():
 
 HOME = Path(os.environ.get('MOBILE_TMUX_HOME') or Path.home())
 CACHE = Path(os.environ.get('MOBILE_TMUX_CACHE') or HOME / '.cache/mobile-tmux')
+PARSERS = Path(os.environ.get('TETHER_PARSERS') or CACHE / 'parsers')
 TETHER = Path(os.environ.get('TETHER_HOME') or HOME / '.tether')  # session projects (projects.py)
 SHARE = Path(os.environ.get('TETHER_SHARE') or TETHER / 'share')
 CONFIG = Path(os.environ.get('MOBILE_TMUX_CONFIG') or HOME / '.config/mobile-tmux')

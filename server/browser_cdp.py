@@ -30,7 +30,8 @@ LOG = logging.getLogger(__name__)
 # 29000-29999 is below Linux (32768+) and macOS (49152+) ephemeral ranges, so outgoing connections never take it.
 PORT_BASE = 29000
 MAX_MESSAGE = 32 * 1024 * 1024
-MAX_QUEUED_BYTES = 2 * MAX_MESSAGE
+# One 64 MiB reply frame plus 32 MiB of events behind it.
+MAX_QUEUED_BYTES = 96 * 1024 * 1024
 MAX_CLIENTS = 8
 TAB_LIMIT = 3
 ENV_NAMES = ('PLAYWRIGHT_MCP_CDP_ENDPOINT', 'TETHER_CDP_URL')
@@ -285,7 +286,12 @@ class Transport:
         self.abort()
 
     def message(self, message):
-        self.send(1, json.dumps(message).encode())
+        try:
+            data = json.dumps(message, ensure_ascii=False).encode('utf-8')
+        except UnicodeEncodeError:
+            # JSON can carry a lone surrogate only as an escape.
+            data = json.dumps(message).encode()
+        self.send(1, data)
 
     def close(self, code=1000, reason=''):
         text = reason.encode('utf-8')[:123].decode('utf-8', errors='ignore').encode('utf-8')

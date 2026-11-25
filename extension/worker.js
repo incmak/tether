@@ -1,8 +1,12 @@
 import {command, request, refuse, object} from './policy.mjs';
 import {searchTarget} from './search.mjs';
 
+// These limits apply to the UTF-8 bytes of the reply text.
+const CHUNK = 1_000_000;
+const MAX_REPLY = 64 * 1024 * 1024;
 let socket = null, epoch = null, pending = null, grant = null;
-let connected = false, lastPong = 0, reconnect = null, retry = 1000;
+let connected = false, chunks = false, lastProgress = 0, lastBufferedAmount = 0;
+let reconnect = null, retry = 1000;
 let serial = 0, approvalWindow = null, lastEnd = 'Not connected';
 const seenRequests = new Set();
 const send = data => {
@@ -11,6 +15,64 @@ const send = data => {
 function error(id, e) {
   send({type: 'error', id: typeof id === 'string' ? id : null, epoch,
     code: e.code || 'DEBUGGER_ERROR', message: String(e.message).slice(0, 200)});
+}
+async function reply(id, result) {
+  const ws = socket, g = grant, replyEpoch = epoch;
+  const active = () => socket === ws && ws?.readyState === WebSocket.OPEN &&
+    connected && epoch === replyEpoch && grant === g && Date.now() < g.expires;
+  if (!active()) return;
+  const text = JSON.stringify({type: 'result', id, epoch: replyEpoch, result});
+  if (!chunks) {
+    ws.send(text);
+    return;
+  }
+
+  const boundaries = [0];
+  let bytes = text.length;
+  if (!/[^\x00-\x7f]/.test(text)) {
+    for (let end = CHUNK; end < text.length; end += CHUNK) boundaries.push(end);
+  } else {
+    bytes = 0;
+    let chunkBytes = 0;
+    for (let i = 0; i < text.length;) {
+      const code = text.charCodeAt(i);
+      let width = 1, units = 1;
+      if (code >= 0x800) {
+        width = 3;
+        if (code >= 0xd800 && code <= 0xdbff) {
+          const next = text.charCodeAt(i + 1);
+          if (next >= 0xdc00 && next <= 0xdfff) { width = 4; units = 2; }
+        }
+      } else if (code >= 0x80) {
+        width = 2;
+      }
+      if (chunkBytes + width > CHUNK) {
+        boundaries.push(i);
+        chunkBytes = 0;
+      }
+      chunkBytes += width;
+      bytes += width;
+      i += units;
+    }
+  }
+  if (bytes <= CHUNK) {
+    ws.send(text);
+    return;
+  }
+  if (bytes > MAX_REPLY) {
+    const size = Math.ceil(bytes / (1024 * 1024));
+    error(id, {code: 'TOO_LARGE', message: `Reply is ${size} MB; the limit is 64 MB. Capture a smaller area (clip) or use JPEG.`});
+    return;
+  }
+
+  boundaries.push(text.length);
+  const total = boundaries.length - 1;
+  for (let seq = 0; seq < total; seq++) {
+    while (active() && ws.bufferedAmount >= CHUNK)
+      await new Promise(resolve => setTimeout(resolve, 25));
+    if (!active()) return;
+    send({type: 'chunk', id, epoch: replyEpoch, seq, total, data: text.slice(boundaries[seq], boundaries[seq + 1])});
+  }
 }
 function badge() {
   void chrome.action.setBadgeText({text: grant ? 'STOP' : pending ? '?' : ''});
@@ -62,10 +124,11 @@ async function handle(data) {
     if (!object(m)) refuse('BAD_MESSAGE', 'Expected an object');
     if (m.type === 'ready') {
       if (typeof m.epoch !== 'string' || connected) refuse('BAD_AUTH', 'Unexpected connection response');
-      epoch = m.epoch; connected = true; lastPong = Date.now(); retry = 1000; return;
+      epoch = m.epoch; chunks = m.chunks === true; connected = true;
+      lastProgress = Date.now(); lastBufferedAmount = socket.bufferedAmount; retry = 1000; return;
     }
     if (!connected || m.epoch !== epoch) refuse('OLD_EPOCH', 'Connection changed');
-    if (m.type === 'pong') { lastPong = Date.now(); return; }
+    if (m.type === 'pong') { lastProgress = Date.now(); return; }
     if (m.type === 'end') {
       if (grant?.id === m.id || pending?.id === m.id) end('tether_end');
       return;
@@ -95,7 +158,7 @@ async function handle(data) {
     if (m.method === 'Page.screencastFrameAck') {
       const count = g.frames.get(params.sessionId);
       if (count === undefined) {
-        send({type: 'result', id: m.id, epoch, result: {}});
+        await reply(m.id, {});
         return;
       }
       if (count === 1) g.frames.delete(params.sessionId);
@@ -109,7 +172,7 @@ async function handle(data) {
     try {
       if (grant !== g || !connected || Date.now() >= g.expires) refuse('EXPIRED', 'Grant ended before dispatch');
       const result = await chrome.debugger.sendCommand({tabId: g.tab}, m.method, params);
-      if (grant === g && connected && Date.now() < g.expires) send({type: 'result', id: m.id, epoch, result});
+      if (grant === g) await reply(m.id, result);
     } finally { g.commands--; }
   } catch (e) { error(m?.id, e); }
 }
@@ -233,8 +296,14 @@ chrome.runtime.onStartup.addListener(() => { void ready.then(connect); });
 void chrome.alarms.create('reconnect', {periodInMinutes: 1});
 chrome.alarms.onAlarm.addListener(() => { if (!socket) void ready.then(connect); });
 setInterval(() => {
-  if (pending && Date.now() >= pending.deadline) end('approval_expired');
-  if (grant && Date.now() >= grant.expires) end('expired');
-  if (connected && Date.now() - lastPong > 25000) { end('heartbeat_lost'); socket?.close(); }
+  const now = Date.now();
+  if (pending && now >= pending.deadline) end('approval_expired');
+  if (grant && now >= grant.expires) end('expired');
+  if (connected) {
+    const amount = socket.bufferedAmount;
+    if (amount < lastBufferedAmount) lastProgress = now;
+    lastBufferedAmount = amount;
+    if (now - lastProgress > 25000) { end('heartbeat_lost'); socket.close(); }
+  }
 }, 200);
 setInterval(() => { if (connected) send({type: 'ping', epoch}); }, 10000);
