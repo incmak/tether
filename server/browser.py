@@ -335,6 +335,7 @@ class Tab:
         self.url, self.title = 'about:blank', ''
         self.preset = 'desktop'
         self.size = DESKTOP
+        self.fullscreen_viewport = None  # CDP override for a live window larger than its output
         self.frame = None  # (seq, metadata, base64 jpeg)
         self.seq = 0
         self.acked = 0
@@ -567,7 +568,7 @@ class Browser:
                 if not enabled:
                     self.conn.call('Target.activateTarget', {'targetId': tab.target})
                 self._set_window_bounds(tab, enabled)
-                if tab.preset != 'desktop':
+                if tab.preset != 'desktop' or tab.fullscreen_viewport is not None:
                     self._apply_preset(tab, tab.preset, window_view=enabled)
             except BrowserError:
                 try:
@@ -701,6 +702,36 @@ class Browser:
         if info.get('targetId') == tab.target and tab.target in self.tabs and (tab.url, tab.title) != (info.get('url') or tab.url, info.get('title') or ''):
             tab.url, tab.title = info.get('url') or tab.url, info.get('title') or ''
             self._bump()
+        if self.container is not None:
+            self._fit_live_desktop(tab)
+
+    def _fit_live_desktop(self, tab):
+        """Native Wayland Chromium can keep its minimum window size even in fullscreen."""
+        with self.lock:
+            if (self.tabs.get(tab.target) is not tab or self.window_view
+                    or tab.controller != 'user' or tab.preset != 'desktop'):
+                return
+            try:
+                outputs = self.conn.call('Emulation.getScreenInfos', session=tab.session, timeout=5).get('screenInfos', [])
+                screen = next((output for output in outputs if output.get('isPrimary')), None)
+                if not screen or not screen.get('width') or not screen.get('height'):
+                    return
+                bounds = self.conn.call('Browser.getWindowForTarget', {'targetId': tab.target}, timeout=5).get('bounds', {})
+                if bounds.get('windowState') != 'fullscreen':
+                    return
+                width, height = screen['width'], screen['height']
+                viewport = (width, height) if bounds.get('width', 0) > width or bounds.get('height', 0) > height else None
+                if viewport == tab.fullscreen_viewport:
+                    return
+                if viewport:
+                    self.conn.call('Emulation.setDeviceMetricsOverride',
+                                   {'width': width, 'height': height, 'deviceScaleFactor': 0, 'mobile': False},
+                                   tab.session, timeout=5)  # keep the Wayland output's DPR
+                else:
+                    self.conn.call('Emulation.clearDeviceMetricsOverride', session=tab.session, timeout=5)
+                tab.fullscreen_viewport = viewport
+            except BrowserError:
+                pass  # the window can close while the live view refreshes
 
     def nav_state(self, target):
         tab = self.tab(target)
@@ -772,6 +803,7 @@ class Browser:
             agent = mobile_android_ua(self.user_agent) if spec['ua'] == 'android' else spec['ua']
             self.conn.call('Emulation.setUserAgentOverride', {'userAgent': agent}, session)
         tab.preset = preset
+        tab.fullscreen_viewport = None
 
     # input -----------------------------------------------------------------------------------------------------
     def input(self, target, events):

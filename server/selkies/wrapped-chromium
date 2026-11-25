@@ -1,6 +1,7 @@
 #!/bin/bash
 # Tether's replacement for the image's wrapper: sandbox on (no --no-sandbox; Tether's seccomp profile allows the
 # namespaces), no toolbar (--kiosk; Tether shows its own tab and address bar), DevTools over a pipe only.
+# Use native Wayland so Chromium draws at the session compositor's scale instead of rasterizing at 1x under Xwayland.
 if ! pgrep -x chromium > /dev/null; then rm -f "$HOME"/.config/chromium/Singleton*; fi
-exec /lsiopy/bin/python3 -u /tether/cdp_pipe.py /usr/bin/chromium --password-store=basic --kiosk --no-first-run \
+exec /lsiopy/bin/python3 -u /tether/cdp_pipe.py /usr/bin/chromium --ozone-platform=wayland --password-store=basic --kiosk --no-first-run \
   --no-default-browser-check --disable-sync --simulate-outdated-no-au='Tue, 31 Dec 2099 23:59:59 GMT' about:blank

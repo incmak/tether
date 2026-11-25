@@ -6,6 +6,17 @@ const { resolve } = require('node:path')
 const { chromium } = require('playwright-core')
 const ts = require('typescript')
 
+// Shared with the isolated pinned-container proof, which can read the real stream and remote CDP page.
+function assertRetinaDesktop({ hostDpr, viewport, stream, remoteDpr, remoteViewport }) {
+  assert.equal(hostDpr, 2, 'the panel runs at DPR 2')
+  for (const [index, cssPixels] of viewport.entries()) {
+    // Selkies can round an odd CSS dimension down before it applies display scale.
+    assert(Math.abs(stream[index] - cssPixels * hostDpr) <= hostDpr, 'stream fills the device-pixel viewport')
+    assert(Math.abs(remoteViewport[index] - cssPixels) <= 1, 'the remote page fills the CSS viewport')
+  }
+  assert.equal(remoteDpr, hostDpr, 'Chromium must rasterize the Desktop page at the stream density')
+}
+
 // While watching, Tab never reaches the live view and typing changes nothing in it.
 async function keysStayOut(page, frame) {
   await page.getByRole('button', { name: 'Take over', exact: true }).focus()
@@ -98,7 +109,8 @@ async function main() {
       [1280, 900, false], [320, 700, true], [768, 1024, true, true], [1280, 900, false, false, true], [320, 700, true, false, true],
       [1280, 900, false, false, false, true], [1280, 900, false, false, false, false, true], [320, 700, true, false, false, false, true],
     ]) {
-      const context = await browser.newContext({ viewport: { width, height }, hasTouch: touch, serviceWorkers: 'block' })
+      const dpr = width === 320 ? 2 : 1
+      const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: dpr, hasTouch: touch, serviceWorkers: 'block' })
       const page = await context.newPage()
       page.setDefaultTimeout(15000)
       const errors = []
@@ -181,6 +193,7 @@ async function main() {
       assert(!(await page.locator('.browser-screen').isVisible()), 'canvas hidden')
       const box = await frame.boundingBox(), stage = await page.locator('.browser-stage').boundingBox()
       assert(Math.abs(box.width - stage.width) < 1 && Math.abs(box.height - stage.height) < 1, 'live view fills the stage')
+      assert.equal(await page.frameLocator('iframe.browser-live').locator('body').evaluate(() => devicePixelRatio), dpr)
       await page.waitForFunction(() => window.calls.some(call => call.path === 'browser/show' && call.body.tab === 'fixture'))
       // No stream brings tab titles and history, so the panel polls for them, named by its tab.
       await page.waitForFunction(() => window.calls.filter(call => call.path.startsWith('browser/tabs?tab=fixture')).length >= 2, null, { timeout: 6000 })
@@ -344,7 +357,7 @@ async function main() {
       await frame.waitFor({ state: 'visible' })
       await wheelOver(page, phone, 1)
       const [turn] = (await wheelCalls(page)).slice(-1)
-      assert(Math.abs(turn.x - 103) <= 1 && Math.abs(turn.y - 458) <= 1 && turn.dy === 3, JSON.stringify(turn))
+      assert(Math.abs(turn.x - 103) <= 1 && Math.abs(turn.y - 458) <= 1 && turn.dy === 3 / dpr, JSON.stringify(turn))
       await page.evaluate(() => { window.holdShow = 'tablet' })
       const previousShows = await page.evaluate(() => window.calls.filter(call => call.path === 'browser/show' && call.body.tab === 'fixture').length)
       await page.getByRole('tab', { name: /Tablet tab/ }).click()
@@ -358,6 +371,10 @@ async function main() {
       await page.getByRole('button', { name: 'Device: Phone', exact: true }).click()
       await page.getByRole('menuitemradio', { name: /Desktop/ }).click()
       await page.waitForFunction(() => !document.querySelector('iframe.browser-live').classList.contains('browser-live-preset'))
+      const liveFrame = await (await frame.elementHandle()).contentFrame()
+      await liveFrame.waitForFunction(() => ![...document.querySelectorAll('style')].some(style =>
+        style.textContent.includes('image-rendering: auto')))
+      assert.equal(await frame.evaluate(el => getComputedStyle(el).transform), 'none')
       assert.equal(await page.locator('.browser-screen').isVisible(), false)
       assert.equal(await page.evaluate(() => window.sockets.length), 0)
       assert.equal(liveLoads, loads + 1, 'preset and tab changes keep the existing iframe')
@@ -371,4 +388,5 @@ async function main() {
     liveServer?.close()
   }
 }
-main().catch(error => { console.error(error); process.exitCode = 1 })
+module.exports = { assertRetinaDesktop }
+if (require.main === module) main().catch(error => { console.error(error); process.exitCode = 1 })

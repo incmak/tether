@@ -249,10 +249,18 @@ class ContainerTests(unittest.TestCase):
 
 class WindowChrome(FakeChrome):
     window_state = 'normal'
+    screen_size = None
+    window_size = None
 
     def answer(self, message):
         if message['method'] == 'Browser.getWindowForTarget':
-            return {'windowId': 7, 'bounds': {'windowState': self.window_state}}
+            bounds = {'windowState': self.window_state}
+            if self.window_size:
+                bounds.update(zip(('width', 'height'), self.window_size))
+            return {'windowId': 7, 'bounds': bounds}
+        if message['method'] == 'Emulation.getScreenInfos' and self.screen_size:
+            width, height = self.screen_size
+            return {'screenInfos': [{'isPrimary': True, 'width': width, 'height': height, 'devicePixelRatio': 2}]}
         if message['method'] == 'Browser.setWindowBounds':
             self.window_state = message['params']['bounds']['windowState']
         if message['method'] == 'Page.captureScreenshot':
@@ -322,6 +330,24 @@ class BrowserInContainerTests(unittest.TestCase):
         scrollbar = self.fake.sent('Emulation.setScrollbarsHidden')[-1]
         self.assertEqual(scrollbar['params'], {'hidden': False})
         self.assertLess(scrollbar['id'], clears[-1]['id'])
+
+    def test_desktop_fit_tracks_the_real_screen_when_chromium_clamps_the_window(self):
+        self.browser.list_tabs()
+        tab = self.browser.tab(self.browser.order[-1])
+        self.fake.screen_size = (470, 1260)
+        self.fake.window_size = (500, 1260)
+        self.browser.refresh(tab)
+        self.browser.refresh(tab)
+        self.fake.screen_size = (320, 560)
+        self.fake.window_size = (500, 560)
+        self.browser.refresh(tab)
+        self.assertEqual([call['params'] for call in self.fake.sent('Emulation.setDeviceMetricsOverride')], [
+            {'width': 470, 'height': 1260, 'deviceScaleFactor': 0, 'mobile': False},
+            {'width': 320, 'height': 560, 'deviceScaleFactor': 0, 'mobile': False},
+        ])
+        self.fake.screen_size = self.fake.window_size = (640, 560)
+        self.browser.refresh(tab)
+        self.assertEqual(len(self.fake.sent('Emulation.clearDeviceMetricsOverride')), 2)
 
     def test_signed_container_reports_its_port_and_uses_saved_tabs(self):
         fake = WindowChrome()
