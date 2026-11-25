@@ -29,6 +29,7 @@ import helper_tabs
 import history
 import injected_prompts
 import needs
+import parser_store
 import paths
 import push
 
@@ -37,6 +38,7 @@ ROLE_PATH = '/mobile/api/coordinator-role'
 OPTION = '@tether_role'
 MODES = ('all', 'needs', 'off')
 AGENTS = ('claude', 'codex')
+PARSER_VERSION = 1  # Bump when the Feed parser state or transcript interpretation changes.
 PANE = re.compile(r'%[0-9]+')
 MARK = '[Tether status]'
 MAX_REPLY = 20000
@@ -560,7 +562,11 @@ class Feed:
         self.seen = {}      # peer pane -> state and report identities
         self.queues = {}    # coordinator pane -> chat, report mode, and delivery state
         self.outcomes = {}  # peer pane -> transcript signature and last outcome
-        self.parsers = {}   # peer pane -> parser key and incremental history record
+        self.parser_store = parser_store.ParserStore('coordinator', PARSER_VERSION, clock=clock)
+
+    @property
+    def parsers(self):
+        return self.parser_store.records  # peer pane -> parser key and incremental history record
 
     def latest_outcome(self, entry):
         """The latest turn's outcome, with no transcript read when its file is unchanged."""
@@ -570,11 +576,12 @@ class Feed:
             return empty
         path = str(path)
         try:
-            with history._lock_for(path):
+            with self.parser_store.lock, history._lock_for(path):
                 info = os.stat(path)
                 key = (agent, path, info.st_dev, info.st_ino)
                 signature = (info.st_size, info.st_mtime_ns)
-                revision = 0
+                previous_key, _ = self.parsers.get(pane, ((), None))
+                revision = previous_key[-1] if previous_key[:-1] == key else 0
                 cached = self.outcomes.get(pane)
                 if cached and cached[0] == key:
                     _, previous, revision, outcome = cached
@@ -583,19 +590,14 @@ class Feed:
                     if previous[0] >= signature[0]:
                         revision = info.st_mtime_ns  # a same-size rewrite or truncation needs a new parser state
                 parser_key = (*key, revision)
-                previous_key, parser = self.parsers.get(pane, (None, None))
-                if previous_key != parser_key:
-                    parser = None
                 consume = _claude_turn if agent == 'claude' else _codex_turn
-                parser = history.advance(path, parser, empty.copy, consume, trim=False, info=info)
-                state = parser['state']
+                state = self.parser_store.advance(pane, parser_key, info, empty.copy, consume)
                 kind, text = state['kind'], state['text']
                 if kind == 'done' and attention.reply_ask(text)[0] == 'yes':
                     kind = 'asks'
                 # open: a reply of a turn arrived and the turn has not ended, so `identity` may be the running turn.
                 outcome = {'kind': kind, 'text': push.reply_summary(text, SUMMARY), 'identity': state['identity'],
                            'open': bool(state.get('active'))}
-                self.parsers[pane] = (parser_key, parser)
                 self.outcomes[pane] = (key, signature, revision, outcome)
                 return outcome
         except OSError:
@@ -678,8 +680,7 @@ class Feed:
             del self.seen[pane]
         for pane in [pane for pane in self.outcomes if pane not in by_pane]:
             del self.outcomes[pane]
-        for pane in [pane for pane in self.parsers if pane not in by_pane]:
-            del self.parsers[pane]
+        self.parser_store.prune(by_pane.keys())
         for pane, queue in list(self.queues.items()):
             entry = by_pane.get(pane)
             away = queue['away_since']

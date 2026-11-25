@@ -31,6 +31,7 @@ import continuations
 import coordinator
 import injected_prompts
 import pane_icons
+import parser_store
 import antigravity
 from antigravity import snapshot as antigravity_snapshot, transcript_message as antigravity_message, window_active
 from terminal_input import NAME_HELP, valid_name, fork_chat, new_window_after, DraftError, card_key, menu_choose, picker_choose, unqueue, clear_draft as terminal_clear_draft, type_text, live_status, capture, capture_screen, submit as terminal_submit, respond_approval, plan_menu, start_agent, create_session, shell_snapshot, shell_submit, verify
@@ -626,6 +627,7 @@ def monitor_notices():
             time.sleep(2)
             continue
         _observe_push(entries)
+        REVIEW_PARSERS.prune({entry['id'] for entry in entries})
         review_links.observe(entries, shared_status, partial(review_send, receipt=True), last_reply,
                              alert=review_alert, work_mark=review_work_mark, review_reply=review_reply,
                              turn_source=review_turn_source, level=review_level,
@@ -654,6 +656,8 @@ def monitor_notices():
                                      lock=SEND_LOCK, fresh=fresh_sessions)
         except Exception as exc:  # the coordinator feed must never stop the monitor
             print(f'coordinator feed failed: {exc!r}', file=sys.stderr)
+        coordinator.FEED.parser_store.save()
+        REVIEW_PARSERS.save()
         try:
             tab_brief.BRIEFER.observe(entries, shared_status, lambda entry: timeline(entry['id'])['finished'],
                                       brief_messages, apply_brief_name, brief_enabled)
@@ -1730,15 +1734,22 @@ def _review_record(state, index, record, agent, *, request_key=None, clean=displ
             state['draft'] = text
 
 
+REVIEW_PARSER_VERSION = 1  # Bump when the review parser state or transcript interpretation changes.
+REVIEW_PARSERS = parser_store.ParserStore('review', REVIEW_PARSER_VERSION, pending=review_links.REPLY_PENDING)
+
+
 def review_reply(entry, request_id):
     """Return this request's completed verdict, or distinguish a pending turn from missing or empty history."""
     try:
         agent = entry.get('agent')
         if agent in ('claude', 'codex') and not entry.get('ambiguous'):
-            state = history.read(entry['transcript'], lambda: {'replies': {}, 'draft': ''},
-                                 lambda state, index, record: _review_record(state, index, record, agent),
-                                 trim=False, namespace=('review', agent))
-            return state['replies'].get(request_id)
+            pane, path = entry['id'], str(entry['transcript'])
+            with REVIEW_PARSERS.lock, history._lock_for(path):
+                info = os.stat(path)
+                key = (agent, path, info.st_dev, info.st_ino)
+                state = REVIEW_PARSERS.advance(pane, key, info, lambda: {'replies': {}, 'draft': ''},
+                                               partial(_review_record, agent=agent))
+                return state['replies'].get(request_id)
     except Exception:
         pass
     return None
@@ -4166,6 +4177,8 @@ if __name__ == '__main__':
         if container is not None:
             panel_browser.use_container(container)
     atexit.register(browser.stop_all)
+    atexit.register(coordinator.FEED.parser_store.save, force=True)
+    atexit.register(REVIEW_PARSERS.save, force=True)
     pane_view.zoom_repair_all()
     paths.SCOPE_TMUX = bool(os.environ.get('INVOCATION_ID'))
     # A tmux server that this service starts takes its default-shell from $SHELL. systemd gives /bin/bash, so new panes
