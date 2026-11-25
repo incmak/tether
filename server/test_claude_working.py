@@ -78,6 +78,11 @@ class ClaudeWorkingTests(unittest.TestCase):
         frame = list(idle)
         frame[mode] += ' · esc to interrupt'
         self.assertIs(terminal.claude_screen_working('\n'.join(frame)), True)
+        # A custom status row shaped like a mode row, with no real mode row under it.
+        frame = idle[:mode] + ['  ⏵ Notes · esc to interrupt'] + idle[mode + 1:]
+        self.assertIs(terminal.claude_screen_working('\n'.join(frame)), False)
+        frame = idle[:mode] + ['  ⏵⏵ Notes on · esc to interrupt'] + idle[mode + 1:]
+        self.assertIs(terminal.claude_screen_working('\n'.join(frame)), False)
         # The same hint on a row above Claude's mode row is a custom status line.
         frame = idle[:mode] + [idle[mode] + ' · esc to interrupt'] + idle[mode:]
         self.assertIs(terminal.claude_screen_working('\n'.join(frame)), False)
