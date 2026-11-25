@@ -624,6 +624,8 @@ def _rollout_cwd(home, session_id):
                 settings = payload.get('thread_settings')
                 if isinstance(settings, dict) and isinstance(settings.get('cwd'), str):
                     cwd = settings['cwd']
+            elif kind == 'session_meta' and str(payload.get('id', '')).lower() != session_id:
+                continue  # A forked rollout embeds its source's session_meta; extract.rs skips other ids.
             elif kind == 'session_meta' or (kind == 'turn_context' and not cwd):
                 value = payload.get('cwd')
                 if isinstance(value, str) and value:
@@ -700,10 +702,9 @@ def _instruction_config(options, cwd, args):
             # core/src/config/mod.rs uses an absolute fallback_cwd without canonicalizing it.
             folder = _join(start, saved_cwd) if saved_cwd else None
             if folder and Path(folder) != start:
-                session = Path(folder)
-                if not session.is_dir():
-                    return base
-                resolved = _project_instruction_config(base, session, home, markers, trust)
+                # A deleted folder still loads its ancestors' trusted layers (config/src/loader/mod.rs walks
+                # cwd.ancestors() without an existence check).
+                resolved = _project_instruction_config(base, Path(folder), home, markers, trust)
                 if resolved is not None and isinstance(resolved.get('developer_instructions', ''), str):
                     return resolved
     except Exception:

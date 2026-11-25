@@ -511,14 +511,14 @@ class UnitTests(unittest.TestCase):
     def test_codex_resume_and_fork_use_session_instructions(self):
         launch, session, trust = self.resume_repos()
         self.config('[tui]\nresume_cwd = "session"\n' + trust)
-        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'cwd': str(session)}})
+        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'id': SESSION_ID, 'cwd': str(session)}})
         for cwd, command in ((launch, 'resume'), (session, 'resume'), (launch, 'fork')):
             with self.subTest(cwd=cwd, command=command):
                 self.assert_codex_text(cwd, 'session', [command, SESSION_ID])
 
     def test_codex_resume_without_session_mode_uses_launch_folder(self):
         launch, session, trust = self.resume_repos()
-        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'cwd': str(session)}})
+        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'id': SESSION_ID, 'cwd': str(session)}})
         args = ['resume', SESSION_ID]
         for settings in ('', '[tui]\nresume_cwd = "current"\n', '[tui]\nresume_cwd = "other"\n', 'tui = false\n'):
             with self.subTest(settings=settings):
@@ -534,11 +534,14 @@ class UnitTests(unittest.TestCase):
         home = 'developer_instructions = "home"\n[tui]\nresume_cwd = "session"\n'
         args = ['resume', SESSION_ID]
         self.config(home + self.project_trust(launch) + self.project_trust(session, 'untrusted'))
-        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'cwd': str(session)}})
+        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'id': SESSION_ID, 'cwd': str(session)}})
         self.assert_codex_text(launch, 'home', args)
         self.config(home + trust)
         missing = session / 'deleted'
-        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'cwd': str(missing)}})
+        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'id': SESSION_ID, 'cwd': str(missing)}})
+        self.assert_codex_text(launch, 'session', args)  # Codex still loads the deleted folder's trusted ancestors.
+        gone = self.temp / 'gone' / 'repo'
+        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'id': SESSION_ID, 'cwd': str(gone)}})
         self.assert_codex_text(launch, 'home', args)
 
     def test_codex_resume_rollout_metadata_order_and_archived_lookup(self):
@@ -546,14 +549,17 @@ class UnitTests(unittest.TestCase):
         later = self.instruction_repo('later')
         self.instruction_layer(later, 'developer_instructions = "later"')
         self.config('[tui]\nresume_cwd = "session"\n' + trust + self.project_trust(later))
-        meta = {'type': 'session_meta', 'payload': {'cwd': str(session)}}
+        meta = {'type': 'session_meta', 'payload': {'id': SESSION_ID, 'cwd': str(session)}}
         context = {'type': 'turn_context', 'payload': {'cwd': str(later)}}
         settings = {'type': 'event_msg', 'payload': {'type': 'thread_settings_applied',
                                                       'thread_settings': {'cwd': str(later)}}}
+        # A fork's rollout embeds its source's session_meta (another id) after its own.
+        parent = {'type': 'session_meta', 'payload': {'id': '019ab123-4567-7abc-9def-000000000000', 'cwd': str(later)}}
         args = ['resume', SESSION_ID]
         for records, expected in (((context,), 'later'), ((context, meta, context), 'session'),
                                   ((meta, settings, context, 'invalid thread_settings_applied'), 'later'),
-                                  ((meta, settings, meta), 'session')):
+                                  ((meta, settings, meta), 'session'), ((meta, parent), 'session'),
+                                  ((parent,), 'launch')):
             with self.subTest(records=records):
                 self.rollout(SESSION_ID.upper(), *records, archive=True)
                 self.assert_codex_text(launch, expected, args)
@@ -567,7 +573,7 @@ class UnitTests(unittest.TestCase):
         home = self.temp / 'custom-home'
         home.mkdir()
         (home / 'config.toml').write_text('[tui]\nresume_cwd = "session"\n' + trust)
-        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'cwd': '../alias/./child/..'}}, home=home)
+        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'id': SESSION_ID, 'cwd': '../alias/./child/..'}}, home=home)
         with mock.patch.dict(os.environ, CODEX_HOME=str(home)):
             self.assert_codex_text(launch, None, ['resume', SESSION_ID.upper()])
 
@@ -576,9 +582,9 @@ class UnitTests(unittest.TestCase):
         self.config('[tui]\nresume_cwd = "session"\n' + trust)
         args = ['resume', SESSION_ID]
         self.assert_codex_text(launch, 'launch', args)
-        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'cwd': ''}})
+        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'id': SESSION_ID, 'cwd': ''}})
         self.assert_codex_text(launch, 'launch', args)
-        meta = {'type': 'session_meta', 'payload': {'cwd': str(session)}}
+        meta = {'type': 'session_meta', 'payload': {'id': SESSION_ID, 'cwd': str(session)}}
         path = self.rollout(SESSION_ID, meta)
         path.with_name(f'rollout-{SESSION_ID}.jsonl').write_text(json.dumps(meta) + '\n')
         self.assert_codex_text(launch, 'session', args)
@@ -599,7 +605,7 @@ class UnitTests(unittest.TestCase):
 
     def test_codex_resume_mode_uses_startup_layer_precedence(self):
         launch, session, trust = self.resume_repos()
-        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'cwd': str(session)}})
+        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'id': SESSION_ID, 'cwd': str(session)}})
         resume = ['resume', SESSION_ID]
         self.config(trust)
         self.assert_codex_text(launch, 'session', ['-c', 'tui.resume_cwd="session"', *resume])
@@ -621,7 +627,7 @@ class UnitTests(unittest.TestCase):
     def test_codex_resume_only_switches_for_explicit_local_session_commands(self):
         launch, session, trust = self.resume_repos()
         self.config('[tui]\nresume_cwd = "session"\n' + trust)
-        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'cwd': str(session)}})
+        self.rollout(SESSION_ID, {'type': 'session_meta', 'payload': {'id': SESSION_ID, 'cwd': str(session)}})
         for args in ([], ['resume'], ['resume', '--last'], ['resume', '--last', SESSION_ID],
                      ['resume', 'thread-name', SESSION_ID], ['resume', '-m', SESSION_ID],
                      ['-m', 'resume', SESSION_ID], ['--remote=unix://', 'resume', SESSION_ID]):
