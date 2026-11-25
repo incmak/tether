@@ -3,8 +3,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import select
+import signal
 import stat
+import subprocess
+import sys
 import tempfile
+import textwrap
 import threading
 import unittest
 from unittest.mock import patch
@@ -224,6 +229,46 @@ class ParserCheckpoints(unittest.TestCase):
                 self.path.write_bytes(original.replace(b'Old reply', b'New reply') + lines(CLAUDE_END))
                 self.assertEqual(restart.latest_outcome(entry)['text'], 'New reply')
 
+    def test_rewrite_between_anchor_check_and_parse_restarts_feed_and_review(self):
+        transcripts = {
+            'claude': lines(claude('user', REQUEST), claude('assistant', 'Old reply', stop_reason='end_turn'),
+                            CLAUDE_END),
+            'codex': lines(event('task_started'), codex('user', REQUEST),
+                           codex('assistant', 'Old reply', phase='final_answer'), event('task_complete')),
+        }
+        extra = lines({'type': 'unrelated'})
+        advance = history.advance
+        for agent, original in transcripts.items():
+            for reader in ('feed', 'review'):
+                with self.subTest(agent=agent, reader=reader):
+                    feed = coordinator.Feed()
+                    review = parser_store.ParserStore('review', 1, pending=review_links.REPLY_PENDING)
+                    entry = {'id': '%1', 'agent': agent, 'transcript': self.path}
+
+                    def reply():
+                        if reader == 'feed':
+                            return feed.latest_outcome(entry)['text']
+                        return server.review_reply(entry, REQUEST_ID)
+
+                    self.path.write_bytes(original)
+                    inode = self.path.stat().st_ino
+                    with patch.object(server, 'REVIEW_PARSERS', review):
+                        self.assertEqual(reply(), 'Old reply')
+                        with self.path.open('ab') as stream:
+                            stream.write(extra)
+                        offsets = []
+
+                        def rewrite_then_advance(path, cached, *args, **kwargs):
+                            offsets.append(cached['offset'] if cached is not None else 0)
+                            if len(offsets) == 1:
+                                self.path.write_bytes(original.replace(b'Old reply', b'New reply') + extra * 2)
+                            return advance(path, cached, *args, **kwargs)
+
+                        with patch.object(history, 'advance', side_effect=rewrite_then_advance):
+                            self.assertEqual(reply(), 'New reply')
+                    self.assertEqual(self.path.stat().st_ino, inode)
+                    self.assertEqual(offsets, [len(original), 0])
+
     def test_feed_checks_a_same_size_rewrite_with_unchanged_mtime(self):
         original = lines(claude('assistant', 'Old reply'))
         self.path.write_bytes(original)
@@ -234,6 +279,27 @@ class ParserCheckpoints(unittest.TestCase):
         self.path.write_bytes(original.replace(b'Old reply', b'New reply'))
         os.utime(self.path, ns=(0, 0))
         self.assertEqual(feed.latest_outcome(entry)['text'], 'New reply')
+
+    def test_replacement_during_resume_reparses_with_the_new_inode(self):
+        original = lines(claude('assistant', 'Old reply'))
+        replacement = self.path.with_suffix('.new')
+        replacement.write_bytes(lines(claude('assistant', 'New reply'), CLAUDE_END))
+        self.path.write_bytes(original)
+        store = parser_store.ParserStore('replacement', 1)
+        self.assertEqual(self.advance(store)['state']['text'], 'Old reply')
+        advance = history.advance
+
+        def replace_then_advance(path, cached, *args, **kwargs):
+            if cached is not None:
+                replacement.replace(self.path)
+            return advance(path, cached, *args, **kwargs)
+
+        with patch.object(history, 'advance', side_effect=replace_then_advance) as parse:
+            record = self.advance(store)
+        self.assertEqual(record['state']['text'], 'New reply')
+        self.assertEqual(record['inode'], self.path.stat().st_ino)
+        self.assertEqual(record['offset'], self.path.stat().st_size)
+        self.assertEqual(parse.call_count, 2)
 
     def test_feed_reparses_invalid_saved_state(self):
         self.path.write_bytes(lines(claude('assistant', 'Done.')))
@@ -254,7 +320,7 @@ class ParserCheckpoints(unittest.TestCase):
                 path.write_text(json.dumps(malformed))
                 self.assertEqual(coordinator.Feed().latest_outcome(entry), expected)
 
-    def test_review_reparses_saved_state_without_a_reply_map(self):
+    def test_review_reparses_malformed_saved_state(self):
         self.path.write_bytes(lines(claude('user', REQUEST), claude('assistant', 'APPROVED', stop_reason='end_turn'),
                                     CLAUDE_END))
         entry = {'id': '%1', 'agent': 'claude', 'transcript': self.path}
@@ -262,12 +328,70 @@ class ParserCheckpoints(unittest.TestCase):
         with patch.object(server, 'REVIEW_PARSERS', store):
             self.assertEqual(server.review_reply(entry, REQUEST_ID), 'APPROVED')
         store.save()
-        saved = json.loads(store.path.read_text())
-        saved['records']['%1']['record']['state']['replies'] = []
-        store.path.write_text(json.dumps(saved))
-        restart = parser_store.ParserStore(store.name, 1, pending=review_links.REPLY_PENDING)
-        with patch.object(server, 'REVIEW_PARSERS', restart):
-            self.assertEqual(server.review_reply(entry, REQUEST_ID), 'APPROVED')
+        saved = store.path.read_text()
+        for bad_values in (dict(replies=[]), dict(replies={REQUEST_ID: {'bad': 1}}),
+                           dict(draft=None), dict(current=1)):
+            with self.subTest(bad_values=bad_values):
+                malformed = json.loads(saved)
+                malformed['records']['%1']['record']['state'].update(bad_values)
+                store.path.write_text(json.dumps(malformed))
+                restart = parser_store.ParserStore(store.name, 1, pending=review_links.REPLY_PENDING)
+                with patch.object(server, 'REVIEW_PARSERS', restart), \
+                        patch.object(server, '_review_record', wraps=server._review_record) as consume:
+                    self.assertEqual(server.review_reply(entry, REQUEST_ID), 'APPROVED')
+                    self.assertTrue(consume.called, 'Expected a cold parse of the transcript')
+                    self.assertEqual(consume.call_args_list[0].args[1], 0)
+
+    def test_sigterm_flushes_dirty_stores_and_preserves_signal_exit(self):
+        self.path.write_bytes(lines(claude('assistant', 'Done.')))
+        script = textwrap.dedent("""\
+            import atexit
+            import os
+            from pathlib import Path
+            import signal
+            import sys
+
+            import parser_store
+
+            path = sys.argv[1]
+            info = os.stat(path)
+            key = ('claude', path, info.st_dev, info.st_ino)
+            stores = [parser_store.ParserStore(name, 1) for name in ('feed', 'review')]
+            for store in stores:
+                with store.lock:
+                    store.advance('%1', key, info, dict, lambda *_: None)
+            with stores[0].lock:
+                stores[0].save(force=True, timeout=0)
+                assert not stores[0].path.exists()
+            atexit.register(Path(sys.argv[2]).touch)
+            parser_store.install_sigterm_flush(stores)
+            print('ready', flush=True)
+            signal.pause()
+        """)
+        marker = self.folder / 'atexit'
+        with subprocess.Popen(
+            [sys.executable, '-c', script, str(self.path), str(marker)],
+            cwd=Path(parser_store.__file__).parent, text=True,
+            env=dict(os.environ, TETHER_PARSERS=str(paths.PARSERS)),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ) as child:
+            try:
+                self.assertTrue(select.select([child.stdout], [], [], 5)[0], 'Child did not signal readiness')
+                ready = child.stdout.readline()
+                if ready != 'ready\n':
+                    _, stderr = child.communicate(timeout=5)
+                    self.fail(f'Child did not signal readiness: {stderr}')
+                child.send_signal(signal.SIGTERM)
+                _, stderr = child.communicate(timeout=5)
+                self.assertEqual(child.returncode, -signal.SIGTERM, stderr)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.communicate(timeout=5)
+        self.assertFalse(marker.exists())
+        for name in ('feed', 'review'):
+            saved = json.loads((paths.PARSERS / f'{name}.json').read_text())
+            self.assertEqual(saved['records']['%1']['record']['offset'], self.path.stat().st_size)
 
     def test_consume_error_on_resume_replays_from_zero(self):
         first = lines(claude('assistant', 'Done.', stop_reason='tool_use'))

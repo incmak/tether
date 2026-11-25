@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import signal
 import stat
 import tempfile
 import threading
@@ -44,6 +45,27 @@ def _valid_state(state, fresh):
         if key not in state or type(state[key]) not in types:
             return False
     return True
+
+
+def _valid_review_state(state):
+    replies = state.get('replies')
+    text_or_null = (str, type(None))
+    return (isinstance(replies, dict)
+            and all(isinstance(reply, text_or_null) for reply in replies.values())
+            and isinstance(state.get('current'), text_or_null))
+
+
+def install_sigterm_flush(stores):
+    def flush(signum, _frame):
+        try:
+            for store in stores:
+                store.save(force=True, timeout=2)
+        finally:
+            # Preserve signal termination without running the browser cleanup at exit.
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+
+    signal.signal(signal.SIGTERM, flush)
 
 
 class ParserStore:
@@ -133,7 +155,7 @@ class ParserStore:
             if cached is not None and old_signature is None:
                 state = cached['state']
                 if (not _valid_state(state, fresh())
-                        or self.pending is not None and not isinstance(state.get('replies'), dict)):
+                        or self.pending is not None and not _valid_review_state(state)):
                     cached = None
                 else:
                     cached = dict(cached, state=self._state(state, None, self.pending))
@@ -144,12 +166,24 @@ class ParserStore:
             record = history.advance(key[1], cached, fresh, consume, trim=False, info=info,
                                      strict_consume=cached is not None)
         except history.ConsumeError:
-            self._discard(pane)
-            record = history.advance(key[1], None, fresh, consume, trim=False, info=info)
+            record = None
         except OSError:
             if cached is not None:
                 self._discard(pane)
             raise
+        if record is not None and progress and progress[0] > 0:
+            # advance mutates the cached offset. Check the bytes that belonged to the old state.
+            checked = _digest(key, progress[0])
+            if checked is None or checked != digest:
+                record = None
+        if record is None:
+            self._discard(pane)
+            info = os.stat(key[1])
+            if not stat.S_ISREG(info.st_mode):
+                raise OSError('The transcript is not a regular file.')
+            key = (key[0], key[1], info.st_dev, info.st_ino, *key[4:])
+            signature = _signature(info)
+            record = history.advance(key[1], None, fresh, consume, trim=False, info=info)
         if record is not cached or progress != (record['offset'], record.get('unterminated')):
             digest = _digest(key, record['offset'], signature)
             self._changed.add(pane)
@@ -171,39 +205,42 @@ class ParserStore:
         for pane in self._records.keys() - panes:
             self._discard(pane)
 
-    def save(self, *, force=False):
-        with self.lock:
-            try:
-                if not self._dirty and self._prune_to is None:
-                    return
-                current = self.records  # apply any prune deferred until the checkpoint opened
-                now = self.clock()
-                if not self._dirty or not force and now - self._last_save < SAVE_INTERVAL:
-                    return
-                self._last_save = now
-                records = {pane: entry for pane, entry in self._saved.items()
-                           if pane in current and current[pane][0] == entry['key']}
-                missing = set()
-                for pane in self._changed:
-                    key, record = current[pane]
-                    signature, digest = self._anchors[pane]
-                    if digest is None:
-                        # Retry only against the file version this state describes.
-                        digest = _digest(key, record['offset'], signature)
-                    if digest is None:
-                        missing.add(pane)
-                        continue
-                    self._anchors[pane] = signature, digest
-                    state = self._state(record['state'], self.pending, None)
-                    records[pane] = dict(key=key, record=dict(record, state=state), sha256=digest)
-                if records != self._saved:
-                    self._write(dict(version=self.version, records=records))
-                self._saved = records
-                self._changed = missing
-                self._dirty = bool(missing)
-            except Exception:
-                # Checkpoint failures must never interrupt the monitor or stop an exit.
-                pass
+    def save(self, *, force=False, timeout=-1):
+        if not self.lock.acquire(timeout=timeout):
+            return
+        try:
+            if not self._dirty and self._prune_to is None:
+                return
+            current = self.records  # apply any prune deferred until the checkpoint opened
+            now = self.clock()
+            if not self._dirty or not force and now - self._last_save < SAVE_INTERVAL:
+                return
+            self._last_save = now
+            records = {pane: entry for pane, entry in self._saved.items()
+                       if pane in current and current[pane][0] == entry['key']}
+            missing = set()
+            for pane in self._changed:
+                key, record = current[pane]
+                signature, digest = self._anchors[pane]
+                if digest is None:
+                    # Retry only against the file version this state describes.
+                    digest = _digest(key, record['offset'], signature)
+                if digest is None:
+                    missing.add(pane)
+                    continue
+                self._anchors[pane] = signature, digest
+                state = self._state(record['state'], self.pending, None)
+                records[pane] = dict(key=key, record=dict(record, state=state), sha256=digest)
+            if records != self._saved:
+                self._write(dict(version=self.version, records=records))
+            self._saved = records
+            self._changed = missing
+            self._dirty = bool(missing)
+        except Exception:
+            # Checkpoint failures must never interrupt the monitor or stop an exit.
+            pass
+        finally:
+            self.lock.release()
 
     def _write(self, saved):
         path = self.path
