@@ -1,7 +1,12 @@
 {
   "version": 1,
-  "comment": "Claude dialogs, model picker details, and startup banner.",
+  "comment": "Claude status area, dialogs, model picker details, and startup banner.",
   "patterns": {
+    "SPINNER": {
+      "regex": "^[✻✶✽✢·*]\\s+[A-Z][\\w']*…",
+      "flags": [],
+      "comment": "Find an active Claude spinner at the start of a status row."
+    },
     "INPUT_NAMED_RULE": {
       "regex": "^─* \\S(?:.*\\S)? ─$",
       "flags": [],

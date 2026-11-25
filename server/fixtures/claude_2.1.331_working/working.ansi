@@ -1,0 +1,40 @@
+
+[38;5;231m●[39m Status: reading the Working detection rule in [38;5;153mserver/detection/common.json[39m and [38;5;153m_live_status[39m. Next: look at the real
+  screens to scope the match to Claude's status line.
+
+  [38;5;246mSearched for [1m1[0m[38;5;246m pattern, read [1m1[0m[38;5;246m file, listed [1m1[0m[38;5;246m directory, ran [1m3[0m[38;5;246m shell commands [39m
+
+[38;5;231m●[39m B490's [38;5;153mWORKING[39m check scans the whole screen at [38;5;153mserver/terminal_input.py:1244[39m, which is the cause. I'm narrowing it to
+  the status area around each agent's input box, then handing the implementation to Codex.[38;5;246m · summary[39m
+
+  [38;5;246mSearched for [1m1[0m[38;5;246m pattern, ran [1m2[0m[38;5;246m shell commands [39m
+
+[38;5;114m●[39m [1mAdvising[0m[38;5;246m using Fable 5.2[39m
+[38;5;246m  ⎿  ✔ Advisor has reviewed the conversation and will apply the feedback[39m
+
+  [38;5;246mRan [1m5[0m[38;5;246m shell commands [39m
+
+[38;5;231m●[39m The [38;5;153mB400 helper tab filter[39m tab is closed, so a live capture is not possible. Next: check if Claude's registry [38;5;153mstatus[39m
+  is reliable, using the open Claude tabs.
+
+  [38;5;246mRan [1m2[0m[38;5;246m shell commands [39m
+
+[38;5;231m●[39m Registry is reliable here ([38;5;153mbusy[39m mid-turn), but I keep the screen as a second signal and scope it. Next: make a real
+  idle capture with a throwaway Claude tab whose reply quotes the bad strings.
+
+  [38;5;246mRan [1m2[0m[38;5;246m shell commands [39m
+
+[38;5;231m●[39m Reproduced live: the idle probe tab reads as [38;5;153mWorking[39m. Saving its screen and my own mid-turn screen as fixtures.
+
+[38;5;246m [39m Saving idle and working fixtures, checking registry
+[38;5;246m  ⎿  $ d=server/fixtures/claude_2.1.331_working && mkdir -p $d && tmux capture-pane -p -t %970 > [39m
+     [38;5;246m$d/idle_reply_quotes_status.txt && tmux capture-pane -p -e -t %970 > $d/idle_reply_quotes_status.ansi && tmux [39m
+     [38;5;246mcapture-pane -p -t "$TMUX_PANE" > $d/working.txt && tmux capture-pane -p -e -t "$TMUX_PANE" > $d/…[39m
+
+[38;5;174m✻[39m [38;5;174mBeboppin'… [38;5;246m(8m 43s · ↓[39m [38;5;246m9.6k tokens · thought for 1s)[39m
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[38;5;246m❯ [39m
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;246mOpus 5.5 | ctx 10% (101k/1000k) | 7d 56% | tether | main[39m
+  [38;5;220m⏵⏵ auto mode on[38;5;246m (shift+tab to cycle) · esc to interrupt[39m

@@ -214,7 +214,8 @@ def observe(entry, screen, styled=None, now=None, copy=copy_answer, save=None, s
         run(lambda: _fetch(entry, state, copy, save))
     body = answer or found['text']
     card = {'id': hashlib.sha256(('side' + question).encode()).hexdigest(), 'reason': 'side', 'requiresResponse': False,
-            'question': question, 'text': '' if coming else body, 'pending': not found['done'] or coming, 'markdown': bool(answer),
+            'question': question, 'text': '' if coming else body, 'pending': not found['done'] or coming,
+            'answering': not found['done'], 'markdown': bool(answer),
             'fork': found['done'] and found['fork']}
     return card
 
