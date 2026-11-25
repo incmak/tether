@@ -1,0 +1,45 @@
+[2m│ [0;4m[38;5;75m]8;;https://github.com/openai/codex/releases/latest\https://github.com/openai/codex/releases/latest[0;2m]8;;\ │[0m
+[2m╰─────────────────────────────────────────────────╯[0m
+
+
+  [38;5;75m>_ [1m[39mOpenAI Codex[0;2m (v0.170.0)[0m
+     [2m~/.cache/b559p[0m
+
+[38;5;255m[48;5;238m [39m
+[1;2m› [0m[38;5;255m[48;5;238mFirst[39m [38;5;255msend[39m [38;5;255ma[39m [38;5;255mshort[39m [38;5;255mprogress[39m [38;5;255mmessage[39m [38;5;255mwhose[39m [38;5;255monly[39m [38;5;255mtext[39m [38;5;255mis:[39m [38;5;255mWorking[39m [38;5;255m(12s[39m [38;5;255m•[39m [38;5;255mesc[39m [38;5;255mto[39m [38;5;255minterrupt).[39m [38;5;255mThen[39m [38;5;255mrun[39m [38;5;255mthe[39m [38;5;255mshell[39m [38;5;255mcommand[39m [38;2;166;227;161mtouch a.txt[39m [38;5;255m(it[39m
+  [38;5;255mneeds approval), then run [38;2;166;227;161msleep 20[38;5;255m, then reply: ok[39m
+[38;5;255m [39m
+[49m
+[2m• [0mWorking (12s • esc to interrupt).
+
+[1m[38;5;2m•[0m [1mRan[0m [38;2;137;180;250mtouch[38;2;205;214;244m a.txt[39m
+[2m  └ (no output)[0m
+
+[1m[38;5;2m•[0m [1mRan[0m [38;2;137;180;250msleep[38;2;205;214;244m 20[39m
+[2m  └ (no output)[0m
+
+[2m• [0mok
+
+[2m  Worked for 37s • 16:16
+[0m
+[2m• [0mPermission selection requested: Read Only
+
+[38;5;255m[48;5;238m [39m
+[1;2m› [0m[38;5;255m[48;5;238mFirst[39m [38;5;255msend[39m [38;5;255ma[39m [38;5;255mshort[39m [38;5;255mprogress[39m [38;5;255mmessage[39m [38;5;255mwhose[39m [38;5;255monly[39m [38;5;255mtext[39m [38;5;255mis:[39m [38;5;255mWorking[39m [38;5;255m(12s[39m [38;5;255m•[39m [38;5;255mesc[39m [38;5;255mto[39m [38;5;255minterrupt).[39m [38;5;255mThen[39m [38;5;255mrun[39m [38;5;255mthe[39m [38;5;255mshell[39m [38;5;255mcommand[39m [38;2;166;227;161mtouch b.txt[38;5;255m,[39m [38;5;255mthen[39m
+  [38;2;166;227;161msleep 20[38;5;255m, then reply: ok[39m
+[38;5;255m [39m
+[49m
+[2m• [0mWorking (12s • esc to interrupt).
+
+[38;5;2m✔ [39mYou [1mapproved[0m codex to run [2mtouch b.txt[0;1m this time[0m
+
+[1m[38;5;2m•[0m [1mRan[0m [38;2;137;180;250mtouch[38;2;205;214;244m b.txt[39m
+[2m  └ (no output)[0m
+
+• [2mWorking[0m [2m(6s • [0;1mesc[0;2m to interrupt) · 1 background terminal running · /ps to view · /stop to close[0m
+
+
+[1m[38;5;215m›[0m [2mAsk Codex to do anything[0m
+
+  [38;5;223mGPT-6.2-Sol max fast[39m · [38;5;151m~/.cache/b559p[39m · [38;5;183mAsk for approval[39m · [38;5;216mContext 4% used[39m · [38;5;175mweekly 33% left[39m
+  [1m←[0m for agents · [1m?[0m for shortcuts                                                                                  ⚠ [38;5;179m4 warnings[39m · [1mf2[0m to view

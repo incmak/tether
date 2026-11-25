@@ -2,13 +2,6 @@
   "version": 1,
   "comment": "Shared terminal prompts, menus, and model picker rows.",
   "patterns": {
-    "WORKING": {
-      "regex": "Working \\(|esc to interrupt|(?m:^\\s*[✻✶✽✢·*●]\\s+[A-Z][a-z]+(?:ing|ed)?…)",
-      "flags": [
-        "IGNORECASE"
-      ],
-      "comment": "Find the working indicator or interrupt hint."
-    },
     "APPROVAL_QUESTION": {
       "regex": "^(?:Claude has written up a plan.*Would you like to proceed|Ready to code\\?|Quick safety check|Run this command\\?|Would you like to \\w+|Do you want to (?:proceed|allow|approve|make this edit|create)|Do you trust|Trust this (?:folder|directory|project)|Allow access to|Allow this|trust.{0,100}(?:folder|directory|project)|(?:folder|directory|project).{0,100}trust)",
       "flags": [

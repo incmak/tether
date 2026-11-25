@@ -15,6 +15,21 @@ import procinfo
 ROOT = paths.ANTIGRAVITY
 CACHE = paths.CACHE / 'antigravity'
 NOTICES_LOCK = threading.Lock()
+BUSY_STATES = ('thinking', 'working', 'tool_use', 'running')
+
+
+def current_report(entry, *, metrics=None):
+    """Return the status report only if it belongs to this conversation and process."""
+    try:
+        thread = entry['thread']
+        if metrics is None:
+            metrics = json.loads((CACHE / (thread + '.json')).read_text())
+        if not isinstance(metrics, dict) or metrics.get('conversation_id') != thread:
+            return {}
+        began = procinfo.start_ms(entry['process_start']) / 1000
+        return metrics if metrics['reported_at'] >= began else {}
+    except (OSError, ValueError, TypeError, KeyError, OverflowError):
+        return {}
 
 
 def saved_notices(thread):
@@ -289,6 +304,9 @@ def snapshot(entry, clean, read_records, normalize_usage):
         metrics = json.loads((CACHE / (entry['thread'] + '.json')).read_text())
     except (OSError, ValueError):
         pass
+    if not isinstance(metrics, dict):
+        metrics = {}
+    busy = current_report(entry, metrics=metrics).get('agent_state') in BUSY_STATES
     if not metrics.get('quota'):  # an agy started without the status hook: the account quota still shows from its newest report
         metrics = dict(metrics, **account_quota())
     context = metrics.get('context_window', {})
@@ -314,7 +332,7 @@ def snapshot(entry, clean, read_records, normalize_usage):
         timeline.append((position if position is not None else max(positions.values(), default=0) + 1, notice))
     timeline.extend(extras)
     timeline.sort(key=lambda item: item[0])
-    return {'messages': group_actions(merge_activity([message for _, message in timeline])), 'busy': metrics.get('agent_state') in ('thinking', 'working', 'tool_use'),
+    return {'messages': group_actions(merge_activity([message for _, message in timeline])), 'busy': busy,
             'usage': dict(normalize_usage({'percent': context.get('used_percentage'), 'tokens': context.get('total_input_tokens'),
                                            'limit': context.get('context_window_size')}, windows, metrics.get('reported_at')),
                           model=model.get('display_name') or model.get('id') or ''),

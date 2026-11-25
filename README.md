@@ -358,6 +358,7 @@ For Claude Code, a standalone recorder in `~/.claude/settings.json` looks like t
 ```
 
 Antigravity uses `~/.gemini/antigravity-cli/settings.json`, `server/antigravity_status.py`, and `"enabled": true` in that block.
+Without the Antigravity status hook, Tether cannot show Working or Stop for Antigravity tabs.
 Restart the agent after a hook change. Codex needs no hook.
 Without hooks, chat still works, but some usage reports are unavailable.
 
