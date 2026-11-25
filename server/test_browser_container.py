@@ -372,6 +372,80 @@ class BrowserInContainerTests(unittest.TestCase):
         self.browser.refresh(tab, live_size=(940, 2520))
         self.assertEqual(tab.fullscreen_viewport, (470, 1260))
 
+    def test_resize_observation_supersedes_an_older_poll_even_without_a_metrics_write(self):
+        tab = self.browser.tab(self.browser.list_tabs()['tabs'][0]['id'])
+        for screen, window, viewport in (
+            ((1190, 614), (1190, 614), None),
+            ((320, 560), (500, 560), (320, 560)),
+        ):
+            with self.subTest(screen=screen):
+                self.fake.screen_size, self.fake.window_size = screen, window
+                self.browser.refresh(tab)
+                self.assertEqual(tab.fullscreen_viewport, viewport)
+
+                self.fake.screen_size = (470, 572)
+                self.fake.window_size = (500, 572)
+                read = threading.Event()
+                resume = threading.Event()
+                call = self.browser.conn.call
+
+                def pause_poll(method, *args, **kwargs):
+                    result = call(method, *args, **kwargs)
+                    if method == 'Browser.getWindowForTarget' and not read.is_set():
+                        read.set()
+                        if not resume.wait(3):
+                            raise AssertionError('The resize waited for the poll geometry read.')
+                    return result
+
+                with mock.patch.object(self.browser.conn, 'call', side_effect=pause_poll):
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        poll = executor.submit(self.browser.refresh, tab)
+                        try:
+                            self.assertTrue(read.wait(3))
+                            self.fake.screen_size, self.fake.window_size = screen, window
+                            self.browser.refresh(tab, live_size=(screen[0] * 2, screen[1] * 2))
+                        finally:
+                            resume.set()
+                        poll.result(timeout=3)
+                self.assertEqual(tab.fullscreen_viewport, viewport)
+
+    def test_fit_rechecks_geometry_when_requests_read_it_out_of_start_order(self):
+        tab = self.browser.tab(self.browser.list_tabs()['tabs'][0]['id'])
+        self.fake.screen_size = (470, 572)
+        self.fake.window_size = (500, 572)
+        resize_started, poll_read = threading.Event(), threading.Event()
+        read_resize, finish_poll = threading.Event(), threading.Event()
+        call = self.browser.conn.call
+
+        def pause_reads(method, *args, **kwargs):
+            if method == 'Emulation.getScreenInfos' and not resize_started.is_set():
+                resize_started.set()
+                if not read_resize.wait(3):
+                    raise AssertionError('The poll waited for the resize geometry read.')
+            result = call(method, *args, **kwargs)
+            if method == 'Browser.getWindowForTarget' and not poll_read.is_set():
+                poll_read.set()
+                if not finish_poll.wait(3):
+                    raise AssertionError('The resize waited for the poll geometry read.')
+            return result
+
+        with mock.patch.object(self.browser.conn, 'call', side_effect=pause_reads):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                resize = executor.submit(self.browser.refresh, tab, live_size=(2380, 1228))
+                try:
+                    self.assertTrue(resize_started.wait(3))
+                    poll = executor.submit(self.browser.refresh, tab)
+                    self.assertTrue(poll_read.wait(3))
+                    self.fake.screen_size = self.fake.window_size = (1190, 614)
+                    read_resize.set()
+                    resize.result(timeout=3)
+                finally:
+                    read_resize.set()
+                    finish_poll.set()
+                poll.result(timeout=3)
+        self.assertIsNone(tab.fullscreen_viewport)
+        self.assertFalse(self.fake.sent('Emulation.setDeviceMetricsOverride'))
+
     def test_signed_container_reports_its_port_and_uses_saved_tabs(self):
         fake = WindowChrome()
         self.addCleanup(fake.close)

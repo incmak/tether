@@ -346,6 +346,7 @@ class Tab:
         self.preset = 'desktop'
         self.size = DESKTOP
         self.fullscreen_viewport = None  # CDP override for a live window larger than its output
+        self.live_fit_epoch = 0
         self.frame = None  # (seq, metadata, base64 jpeg)
         self.seq = 0
         self.acked = 0
@@ -713,20 +714,20 @@ class Browser:
             tab.url, tab.title = info.get('url') or tab.url, info.get('title') or ''
             self._bump()
         if self.container is not None:
-            # Selkies can publish its capture size before Chromium's display sees the mode change.
+            # Wait for Chromium's display to catch up, or reread after a concurrent fit.
             deadline = time.monotonic() + 1
             while self._fit_live_desktop(tab, live_size) is False:
                 if time.monotonic() >= deadline:
                     break
-                time.sleep(0.05)  # wait for the announced display size without holding the browser lock
+                time.sleep(0.05)
 
     def _fit_live_desktop(self, tab, live_size=None):
-        """Fit Chromium's minimum fullscreen window. Return False while an announced resize is pending."""
+        """Fit Chromium's minimum fullscreen window. Return False if geometry needs another read."""
         with self.lock:
-            if (self.tabs.get(tab.target) is not tab or self.window_view
+            if (self.conn is None or self.tabs.get(tab.target) is not tab or self.window_view
                     or tab.controller != 'user' or tab.preset != 'desktop'):
                 return
-            conn, version, previous = self.conn, self.version, tab.fullscreen_viewport
+            conn, version, fit_epoch = self.conn, self.version, tab.live_fit_epoch
         try:
             outputs = conn.call('Emulation.getScreenInfos', session=tab.session, timeout=5).get('screenInfos', [])
             screen = next((output for output in outputs if output.get('isPrimary')), None)
@@ -735,20 +736,26 @@ class Browser:
             width, height = screen['width'], screen['height']
             scale = screen.get('devicePixelRatio') or 1
             # CDP reports CSS pixels, with rounding at fractional output scales.
-            if live_size and any(abs(css * scale - pixels) > max(2, scale) for css, pixels in zip((width, height), live_size)):
+            if live_size and any(abs(css * scale - pixels) > max(2, scale)
+                                 for css, pixels in zip((width, height), live_size)):
                 return False
             bounds = conn.call('Browser.getWindowForTarget', {'targetId': tab.target}, timeout=5).get('bounds', {})
             if bounds.get('windowState') != 'fullscreen':
                 return
             viewport = (width, height) if bounds.get('width', 0) > width or bounds.get('height', 0) > height else None
-            if viewport == previous:
-                return
             # The poll reads geometry without blocking control changes. Serialize the occasional write with
             # preset, window mode and control changes, and discard results from before any such change.
             with self.lock:
-                if (self.conn is not conn or self.version != version or tab.fullscreen_viewport != previous
+                if (self.conn is not conn or self.version != version
                         or self.tabs.get(tab.target) is not tab or self.window_view
                         or tab.controller != 'user' or tab.preset != 'desktop'):
+                    return
+                # A concurrent fit can have newer geometry even if it did not need to write metrics.
+                # Request order can differ from CDP read order, so take a fresh sample on overlap.
+                if tab.live_fit_epoch != fit_epoch:
+                    return False
+                tab.live_fit_epoch += 1
+                if viewport == tab.fullscreen_viewport:
                     return
                 if viewport:
                     scale = LIVE_AGENT_METRICS[1]['deviceScaleFactor'] if self._uses_live_agent_metrics(tab) else 0
