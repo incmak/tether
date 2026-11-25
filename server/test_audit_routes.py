@@ -74,17 +74,31 @@ class AuditRouteTests(unittest.TestCase):
         backlog.observe()
         (backlog.folder() / 'BACKLOG.md').write_text('- [ ] Added by hand #B1\n')
         replies = []
-        with open(audit.folder() / '.lock', 'rb') as held:
+        with (open(audit.folder() / '.lock', 'rb') as held,
+              patch.object(audit, '_LEGACY_LOCK_TIMEOUT', 0),
+              patch.object(audit, '_LEGACY_TIMED_OUT', False),
+              patch.object(audit, '_LEGACY_WARNED', False), patch.object(audit, '_warn')):
             fcntl.flock(held, fcntl.LOCK_EX)
             reader = threading.Thread(target=lambda: replies.append(self.get('?kind=backlog')), daemon=True)
             reader.start()
             reader.join(10)  # fails the test, rather than hanging it, if the GET waits on the held lock
             self.assertFalse(reader.is_alive())
-        status, body = replies[0]
-        self.assertEqual(status, 200)
-        self.assertEqual([entry['summary'] for entry in body['entries']], ['Seed'])
-        backlog.observe()  # the watcher records the change once the lock is free
-        self.assertEqual(audit.query(kinds=['backlog'])['entries'][0]['detail'], {'observed': True})
+            status, body = replies[0]
+            self.assertEqual(status, 200)
+            self.assertEqual([entry['summary'] for entry in body['entries']], ['Seed'])
+            def observe_and_get():
+                backlog.observe()
+                replies.append(self.get('?kind=backlog'))
+
+            observer = threading.Thread(target=observe_and_get, daemon=True)
+            observer.start()
+            observer.join(10)
+            self.assertFalse(observer.is_alive())
+            observed, = audit._entries(audit.folder() / '.pending.jsonl')
+            self.assertEqual(observed['detail'], {'observed': True})
+            status, body = replies[1]
+            self.assertEqual(status, 200)
+            self.assertIn(observed, body['entries'])
 
     def test_permission_decisions_use_verified_option_and_store_no_prompt_data(self):
         config = {'id': '%12', 'thread': 'chat', 'agent': 'codex', 'pane_name': 'Audit Log', 'writable': True}

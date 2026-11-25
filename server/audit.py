@@ -3,6 +3,7 @@ import contextlib
 import contextvars
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
+import errno
 from itertools import chain, groupby
 import json
 import math
@@ -50,6 +51,10 @@ _ID = re.compile(r'[0-9]{16}-[0-9a-f]{6}')
 _DAY = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}\.jsonl')
 _ACTOR = contextvars.ContextVar('audit_actor', default=None)
 _LOCK = threading.Lock()
+_LEGACY_LOCK_TIMEOUT = 0.25
+_LEGACY_TIMED_OUT = False
+_LEGACY_WARNED = False
+_PENDING = '.pending.jsonl'
 _TAB_LOCK = threading.Lock()
 _TABS = {}
 _PRUNED = set()
@@ -168,17 +173,67 @@ def folder():
 _folder = folder
 
 
+def _take_legacy_lock(fd):
+    global _LEGACY_TIMED_OUT, _LEGACY_WARNED
+    wait = 0 if _LEGACY_TIMED_OUT else _LEGACY_LOCK_TIMEOUT
+    deadline = None
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK):
+                raise
+        else:
+            _LEGACY_TIMED_OUT = False
+            return True
+        if not wait:
+            break
+        now = time.monotonic()
+        if deadline is None:
+            deadline = now + wait
+        if now >= deadline:
+            break
+        time.sleep(min(0.01, deadline - now))
+        if time.monotonic() >= deadline:
+            break
+    _LEGACY_TIMED_OUT = True
+    if not _LEGACY_WARNED:
+        _LEGACY_WARNED = True
+        _warn('legacy lock is busy. New records are queued for replay.')
+    return False
+
+
 @contextlib.contextmanager
 def _locked(folder):
     with _LOCK:
         folder.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd = os.open(folder / '.lock', os.O_CREAT | os.O_RDWR | os.O_APPEND | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+        if fcntl is None:
+            with _legacy_fd(folder) as fd:
+                yield fd
+            return
+
+        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        writer = os.open(folder / '.writer.lock', flags, 0o200)
         try:
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_EX)
-            yield fd
+            info = os.fstat(writer)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+                raise OSError('Invalid audit writer lock.')
+            if stat.S_IMODE(info.st_mode) != 0o200:
+                os.fchmod(writer, 0o200)
+            fcntl.flock(writer, fcntl.LOCK_EX)
+            with _legacy_fd(folder) as fd:
+                yield fd if _take_legacy_lock(fd) else None
         finally:
-            os.close(fd)
+            os.close(writer)
+
+
+@contextlib.contextmanager
+def _legacy_fd(folder):
+    fd = os.open(folder / '.lock', os.O_CREAT | os.O_RDWR | os.O_APPEND | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    try:
+        yield fd
+    finally:
+        os.close(fd)
 
 
 def _day_files(folder):
@@ -219,8 +274,11 @@ def prune():
     try:
         folder = _folder()
         if folder.exists():
-            with _locked(folder):
-                _prune(folder, datetime.fromtimestamp(time.time(), timezone.utc).date())
+            with _locked(folder) as lock:
+                if lock is not None:
+                    today = _utc_day(time.time())
+                    _replay(folder, lock, today)
+                    _prune(folder, today)
     except Exception as exc:
         _warn(f'could not prune ({type(exc).__name__}).')
 
@@ -261,6 +319,66 @@ def _mark_clock_reversal(lock, path, entry):
             raise OSError('Short audit ordering write.')
 
 
+def _utc_day(at):
+    return datetime.fromtimestamp(at, timezone.utc).date()
+
+
+def _append(path, line):
+    fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    try:
+        written = os.write(fd, line)
+        if written != len(line):
+            # Remove the failed fragment so the next append starts on a new line.
+            os.ftruncate(fd, os.fstat(fd).st_size - written)
+            raise OSError('Short audit write.')
+    finally:
+        os.close(fd)
+
+
+def _file_stamp(path):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if stat.S_ISREG(info.st_mode):
+        return info.st_size, info.st_mtime_ns
+    return None
+
+
+def _pending_stamp(folder):
+    if fcntl is not None:
+        stamp = _file_stamp(folder / _PENDING)
+        if stamp and stamp[0]:
+            return stamp
+    return None
+
+
+def _replay(folder, lock, today):
+    if not _pending_stamp(folder):
+        return
+    pending = folder / _PENDING
+    cutoff = today - timedelta(days=RETENTION_DAYS)
+    ids_by_day = {}
+    for entry in sorted(_entries(pending), key=lambda entry: entry['id']):
+        day = _utc_day(entry['at'])
+        if day < cutoff:
+            continue
+        path = folder / f'{day}.jsonl'
+        if day not in ids_by_day:
+            ids_by_day[day] = {existing['id'] for existing in _entries(path)}
+        ids = ids_by_day[day]
+        if entry['id'] not in ids:
+            line = (json.dumps(entry) + '\n').encode('utf-8')
+            _mark_clock_reversal(lock, path, entry)
+            _append(path, line)
+            ids.add(entry['id'])
+    fd = os.open(pending, os.O_WRONLY | os.O_NOFOLLOW)
+    try:
+        os.ftruncate(fd, 0)
+    finally:
+        os.close(fd)
+
+
 def record(kind, summary, *, old=MISSING, new=MISSING, project=None, actor=None, undo=False, **detail):
     """Write one action. An audit failure must never fail the action itself."""
     try:
@@ -291,22 +409,18 @@ def record(kind, summary, *, old=MISSING, new=MISSING, project=None, actor=None,
         folder = _folder()
         with _locked(folder) as lock:
             at = float(time.time())
-            day = datetime.fromtimestamp(at, timezone.utc).date()
-            _prune(folder, day)
+            if lock is not None:
+                day = _utc_day(at)
+                _replay(folder, lock, day)
+                _prune(folder, day)
             entry.update(id=f'{int(at * 1000):016d}-{secrets.token_hex(3)}', at=at)
             line = (json.dumps(entry, allow_nan=False) + '\n').encode('utf-8')
-            path = folder / f'{day}.jsonl'
-            _mark_clock_reversal(lock, path, entry)
-            fd = os.open(path,
-                         os.O_APPEND | os.O_CREAT | os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0), 0o600)
-            try:
-                written = os.write(fd, line)
-                if written != len(line):
-                    # Remove the failed fragment so the next append starts on a new line.
-                    os.ftruncate(fd, os.fstat(fd).st_size - written)
-                    raise OSError('Short audit write.')
-            finally:
-                os.close(fd)
+            if lock is None:
+                _append(folder / _PENDING, line)
+            else:
+                path = folder / f'{day}.jsonl'
+                _mark_clock_reversal(lock, path, entry)
+                _append(path, line)
         return entry
     except Exception as exc:
         _warn(f'could not record ({type(exc).__name__}).')
@@ -363,7 +477,11 @@ def _entries(path, *, newest_first=False):
                 continue
 
 
-def _newest_entries(path):
+def _newest_entries(path, pending=()):
+    if pending:
+        entries = chain(_entries(path), pending)
+        yield from sorted(entries, key=lambda entry: entry['id'], reverse=True)
+        return
     with contextlib.closing(_entries(path, newest_first=True)) as stream:
         first = next(stream, None)  # Snapshot the file end before reading the ordering marker.
         if first is None:
@@ -389,11 +507,19 @@ def query(text=None, kinds=None, project=None, actor=None, since=None, until=Non
     kinds = set(kinds or ())
     project = project.casefold() if project else None
     actor = actor.casefold() if actor else None
+    folder = _folder()
+    pending = {}
+    if _pending_stamp(folder):
+        # Replay publishes day files before it truncates the spool. Read the spool first.
+        for entry in _entries(folder / _PENDING):
+            pending.setdefault(_utc_day(entry['at']), []).append(entry)
+    days = {day for day, _ in _day_files(folder)} | pending.keys()
     matches = []
-    for _, path in _day_files(_folder()):
-        for entry in _newest_entries(path):
+    seen = set()
+    for day in sorted(days, reverse=True):
+        for entry in _newest_entries(folder / f'{day}.jsonl', pending.get(day)):
             kind = entry['kind']
-            if before and entry['id'] >= before:
+            if entry['id'] in seen or (before and entry['id'] >= before):
                 continue
             if (since is not None and entry['at'] < since) or (until is not None and entry['at'] >= until):
                 continue
@@ -412,32 +538,37 @@ def query(text=None, kinds=None, project=None, actor=None, since=None, until=Non
             if len(matches) == limit:
                 return {'entries': matches, 'next': matches[-1]['id']}
             matches.append(entry)
+            seen.add(entry['id'])
     return {'entries': matches, 'next': None}
 
 
 def facets():
     global _FACETS
     folder = _folder()
+    pending_stamp = _pending_stamp(folder)
     files = []
     for _, path in _day_files(folder):
-        try:
-            info = path.lstat()
-        except FileNotFoundError:
-            continue
-        if stat.S_ISREG(info.st_mode):
-            files.append((path.name, info.st_size, info.st_mtime_ns))
-    key = (folder, files)
+        stamp = _file_stamp(path)
+        if stamp:
+            files.append((path.name, stamp))
+    key = (folder, pending_stamp, files)
     cached = _FACETS
     if cached is not None and cached[0] == key:
         return cached[1]
     kinds = Counter()
     projects, actors = set(), set()
-    for name, _, _ in files:
-        for entry in _entries(folder / name):
-            kinds[entry['kind']] += 1
-            if entry.get('project'):
-                projects.add(entry['project'])
-            actors.add(actor_name(entry['actor']))
+    pending = list(_entries(folder / _PENDING)) if pending_stamp else []
+    # Replay may have created new day files since the cache key was collected.
+    day_paths = (path for _, path in _day_files(folder)) if pending_stamp else (folder / name for name, _ in files)
+    seen = set()
+    for entry in chain(chain.from_iterable(_entries(path) for path in day_paths), pending):
+        if entry['id'] in seen:
+            continue
+        seen.add(entry['id'])
+        kinds[entry['kind']] += 1
+        if entry.get('project'):
+            projects.add(entry['project'])
+        actors.add(actor_name(entry['actor']))
     result = {'kinds': [{'id': kind, 'group': KINDS[kind], 'count': kinds[kind]} for kind in KINDS if kinds[kind]],
               'projects': sorted(projects, key=str.casefold), 'actors': sorted(actors, key=str.casefold)}
     _FACETS = key, result

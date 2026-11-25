@@ -1,7 +1,8 @@
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import redirect_stderr
+from contextlib import contextmanager, redirect_stderr
 from datetime import date, datetime, timedelta, timezone
+import importlib.util
 from io import StringIO
 import json
 import os
@@ -33,8 +34,38 @@ class AuditTests(unittest.TestCase):
         self.clock = self.enterContext(mock.patch.object(audit.time, 'time', return_value=AT))
         self.enterContext(mock.patch.object(audit, '_PRUNED', set()))
         self.enterContext(mock.patch.object(audit, '_FACETS', None))
+        self.enterContext(mock.patch.object(audit, '_LEGACY_TIMED_OUT', False))
+        self.enterContext(mock.patch.object(audit, '_LEGACY_WARNED', False))
         self.enterContext(mock.patch.object(audit, '_TABS', {}))
         self.folder = paths.CONFIG / 'audit'
+        self.pending = self.folder / '.pending.jsonl'
+        self.today = self.folder / f'{TODAY}.jsonl'
+
+    @contextmanager
+    def hold_legacy_lock(self):
+        self.folder.mkdir(exist_ok=True)
+        legacy = self.folder / '.lock'
+        legacy.touch(mode=0o600, exist_ok=True)
+        with legacy.open('rb') as held:
+            audit.fcntl.flock(held, audit.fcntl.LOCK_EX)
+            yield
+
+    def in_thread(self, operation):
+        result = []
+        thread = threading.Thread(target=lambda: result.append(operation()), daemon=True)
+        thread.start()
+        thread.join(10)
+        self.assertFalse(thread.is_alive())
+        value, = result
+        return value
+
+    def old_audit(self):
+        fixture = Path(__file__).with_name('fixtures') / 'audit_v0_1_16.py'
+        spec = importlib.util.spec_from_file_location('audit_v0_1_16', fixture)
+        old = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(old)
+        self.assertIs(old.paths.CONFIG, paths.CONFIG)
+        return old
 
     def test_append_uses_utc_day_and_owner_permissions(self):
         self.clock.return_value = AT + 0.123
@@ -75,6 +106,204 @@ class AuditTests(unittest.TestCase):
         self.clock.return_value += 2 * DAY
         audit.record('tab.close', 'Closed tab Two')
         self.assertFalse(stale.exists())
+
+    @unittest.skipIf(audit.fcntl is None, 'requires flock')
+    def test_contended_legacy_lock_spools_and_restores_wait_after_replay(self):
+        self.folder.mkdir()
+        stale = self.folder / f'{TODAY - timedelta(days=91)}.jsonl'
+        stale.touch()
+        clock = 0.0
+
+        def advance(delay):
+            nonlocal clock
+            clock += delay
+
+        warnings = StringIO()
+        with (redirect_stderr(warnings), mock.patch.object(audit.time, 'monotonic', side_effect=lambda: clock),
+              mock.patch.object(audit.time, 'sleep', side_effect=advance) as sleep):
+            with self.hold_legacy_lock():
+                before = self.in_thread(lambda: audit.record('lesson.add', 'Queued'))
+                self.assertIsNotNone(before)
+                self.assertEqual(clock, audit._LEGACY_LOCK_TIMEOUT)
+                self.assertEqual(stat.S_IMODE(self.pending.stat().st_mode), 0o600)
+                self.assertFalse(self.today.exists())
+                sleep.reset_mock()
+                with mock.patch.object(audit.fcntl, 'flock', wraps=audit.fcntl.flock) as flock:
+                    self.in_thread(audit.prune)
+                    self.assertEqual([call.args[1] for call in flock.call_args_list],
+                                     [audit.fcntl.LOCK_EX, audit.fcntl.LOCK_EX | audit.fcntl.LOCK_NB])
+                sleep.assert_not_called()
+                self.assertTrue(stale.exists())
+                self.assertEqual(self.in_thread(audit.query)['entries'], [before])
+
+            self.clock.return_value += 1
+            after = audit.record('lesson.add', 'Recorded after replay')
+            self.assertFalse(stale.exists())
+            self.assertEqual(list(audit._entries(self.today)), [before, after])
+            self.assertEqual(self.pending.read_bytes(), b'')
+            self.assertEqual(audit.query()['entries'], [after, before])
+
+            with self.hold_legacy_lock():
+                self.in_thread(audit.prune)
+                self.assertAlmostEqual(clock, 2 * audit._LEGACY_LOCK_TIMEOUT)
+            self.assertEqual(warnings.getvalue().splitlines(),
+                             ['Audit log: legacy lock is busy. New records are queued for replay.'])
+
+    @unittest.skipIf(audit.fcntl is None, 'requires flock')
+    def test_writer_lock_mode_is_write_only_on_creation_and_upgrade(self):
+        writer = self.folder / '.writer.lock'
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                if existing:
+                    writer.chmod(0o600)
+                self.assertIsNotNone(audit.record('lesson.add', 'Recorded'))
+                self.assertEqual(stat.S_IMODE(writer.stat().st_mode), 0o200)
+                self.assertEqual(stat.S_IMODE((self.folder / '.lock').stat().st_mode), 0o600)
+                if os.geteuid() != 0:
+                    with self.assertRaises(PermissionError), writer.open('rb'):
+                        pass
+
+    @unittest.skipIf(audit.fcntl is None, 'requires flock')
+    def test_writer_lock_refuses_symlinks_and_fifos(self):
+        self.folder.mkdir()
+        writer = self.folder / '.writer.lock'
+        target = self.folder / 'target'
+        target.touch(mode=0o600)
+        for setup in (lambda: writer.symlink_to(target), lambda: os.mkfifo(writer, 0o600)):
+            setup()
+            warnings = StringIO()
+            with redirect_stderr(warnings):
+                self.assertIsNone(self.in_thread(lambda: audit.record('lesson.add', 'Refused')))
+            self.assertEqual(warnings.getvalue().splitlines(), ['Audit log: could not record (OSError).'])
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+            writer.unlink()
+        self.assertFalse(self.today.exists())
+        self.assertFalse(self.pending.exists())
+
+    @unittest.skipIf(audit.fcntl is None, 'requires flock')
+    def test_replay_skips_ids_already_appended_and_drops_expired_and_invalid_entries(self):
+        expired = audit.record('lesson.add', 'Expired')
+        self.clock.return_value += 91 * DAY
+        first = audit.record('lesson.add', 'Already replayed')
+        day = self.folder / f'{TODAY + timedelta(days=91)}.jsonl'
+        with (mock.patch.object(audit, '_LEGACY_LOCK_TIMEOUT', 0), mock.patch.object(audit, '_warn'),
+              self.hold_legacy_lock()):
+            self.clock.return_value += 2
+            last = self.in_thread(lambda: audit.record('lesson.remove', 'Queued last by ID'))
+            self.clock.return_value -= 1
+            second = self.in_thread(lambda: audit.record('lesson.add', 'Queued second by ID'))
+        with self.pending.open('a') as pending:
+            pending.write(json.dumps(first) + '\n' + json.dumps(expired) + '\n{}\ninvalid json\n')
+
+        first_page = audit.query(limit=2)
+        self.assertEqual(first_page, {'entries': [last, second], 'next': second['id']})
+        self.assertEqual(audit.query(before=first_page['next'])['entries'], [first, expired])
+        self.assertEqual([kind['count'] for kind in audit.facets()['kinds']], [3, 1])
+
+        audit.prune()
+        self.assertEqual(list(audit._entries(day)), [first, second, last])
+        self.assertFalse(self.today.exists())
+        self.assertEqual(self.pending.read_bytes(), b'')
+        self.assertEqual(audit.query()['entries'], [last, second, first])
+        self.assertEqual([kind['count'] for kind in audit.facets()['kinds']], [2, 1])
+
+    @unittest.skipIf(audit.fcntl is None, 'requires flock')
+    def test_readers_find_spool_only_days_when_replay_moves_them_during_the_read(self):
+        entries = audit._entries
+
+        def read_after_replay(path, **kwargs):
+            if path == self.pending:
+                with mock.patch.object(audit, '_entries', entries):
+                    audit.prune()
+            return entries(path, **kwargs)
+
+        with mock.patch.object(audit, '_LEGACY_LOCK_TIMEOUT', 0), mock.patch.object(audit, '_warn'):
+            with self.hold_legacy_lock():
+                first = self.in_thread(lambda: audit.record('lesson.add', 'Queued for query', project='Query'))
+            self.assertFalse(self.today.exists())
+            with mock.patch.object(audit, '_entries', side_effect=read_after_replay):
+                self.assertEqual(self.in_thread(audit.query)['entries'], [first])
+
+            self.clock.return_value += DAY
+            with self.hold_legacy_lock():
+                self.in_thread(lambda: audit.record('lesson.add', 'Queued for facets', project='Facets'))
+            self.assertFalse((self.folder / f'{TODAY + timedelta(days=1)}.jsonl').exists())
+            with mock.patch.object(audit, '_entries', side_effect=read_after_replay):
+                self.assertEqual(self.in_thread(audit.facets)['projects'], ['Facets', 'Query'])
+
+    @unittest.skipIf(audit.fcntl is None, 'requires flock')
+    def test_old_writer_and_new_writer_do_not_interleave_appends(self):
+        old = self.old_audit()
+        entered, release = threading.Event(), threading.Event()
+        mark = old._mark_clock_reversal
+
+        def pause(*args):
+            entered.set()
+            if not release.wait(10):
+                raise TimeoutError('Test did not release the old writer.')
+            mark(*args)
+
+        written = []
+        with mock.patch.object(old, '_mark_clock_reversal', side_effect=pause):
+            writer = threading.Thread(target=lambda: written.append(old.record('lesson.add', 'Old writer')),
+                                      daemon=True)
+            writer.start()
+            try:
+                self.assertTrue(entered.wait(10))
+                self.clock.return_value += 1
+                with mock.patch.object(audit, '_LEGACY_LOCK_TIMEOUT', 0), mock.patch.object(audit, '_warn'):
+                    queued = self.in_thread(lambda: audit.record('lesson.add', 'New writer'))
+                self.assertIsNotNone(queued)
+                self.assertFalse(self.today.exists())
+                self.assertEqual(list(audit._entries(self.pending)), [queued])
+            finally:
+                release.set()
+                writer.join(10)
+        self.assertFalse(writer.is_alive())
+        self.assertEqual(list(audit._entries(self.today)), written)
+        self.clock.return_value += 1
+        after = audit.record('lesson.add', 'Replayed')
+        old_entry, = written
+        self.assertEqual(list(audit._entries(self.today)), [old_entry, queued, after])
+        self.assertEqual(self.pending.read_bytes(), b'')
+
+    @unittest.skipIf(audit.fcntl is None, 'requires flock')
+    def test_rollback_reads_replayed_entries_and_writes_with_new_markers(self):
+        old = self.old_audit()
+        self.clock.return_value = AT + 5
+        seed = audit.record('lesson.add', 'New seed')
+        with (mock.patch.object(audit, '_LEGACY_LOCK_TIMEOUT', 0), mock.patch.object(audit, '_warn'),
+              self.hold_legacy_lock()):
+            self.clock.return_value = AT + 1
+            queued = self.in_thread(lambda: audit.record('lesson.add', 'New queued'))
+        self.clock.return_value = AT + 8
+        later = audit.record('lesson.add', 'New later')
+        self.assertEqual((self.folder / '.lock').read_text(), f'{TODAY}\n')
+        self.assertTrue(old._unordered(self.today))
+        self.clock.return_value = AT + 3
+        rollback = old.record('lesson.add', 'Old writer after rollback')
+        self.assertEqual(old.query()['entries'], [later, seed, rollback, queued])
+        self.assertEqual((self.folder / '.lock').read_text(), f'{TODAY}\n')
+
+    @unittest.skipIf(audit.fcntl is None, 'requires flock')
+    def test_new_reader_honors_clock_reversal_marker_from_old_writer(self):
+        old = self.old_audit()
+        self.clock.return_value = AT + 5
+        later = old.record('lesson.add', 'Old later')
+        self.clock.return_value = AT + 1
+        earlier = old.record('lesson.add', 'Old earlier')
+        self.assertEqual((self.folder / '.lock').read_text(), f'{TODAY}\n')
+        self.assertEqual(audit.query(limit=1), {'entries': [later], 'next': later['id']})
+        self.assertEqual(audit.query(before=later['id'])['entries'], [earlier])
+
+    def test_without_fcntl_records_and_reads_day_files(self):
+        with mock.patch.object(audit, 'fcntl', None):
+            entry = audit.record('lesson.add', 'No flock')
+            audit.prune()
+            self.assertEqual(audit.query()['entries'], [entry])
+            self.assertEqual(list(audit._entries(self.today)), [entry])
+            self.assertFalse((self.folder / '.writer.lock').exists())
+            self.assertFalse(self.pending.exists())
 
     def test_filter_text_by_all_words_and_other_fields(self):
         with (audit.acting('ui', tab='Audit Log', device='Chrome on Mac', pane='%12'),
