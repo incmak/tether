@@ -128,7 +128,7 @@ class TmuxNameHookTests(unittest.TestCase):
         self.assertTrue(self.wait_for(lambda: self.tmux('show-options', '-gv', '@user_session').stdout.strip() == 'yes'))
 
     def test_install_without_a_tmux_server(self):
-        self.tmux('kill-server')
+        self.private.kill_server().check_returncode()
         self.assertFalse(tmux_names.install(run=self.run_tmux))
 
 

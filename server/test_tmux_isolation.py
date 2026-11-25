@@ -1,6 +1,7 @@
 """Private tmux servers and checks for their test lifecycle."""
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import ast
+from collections import defaultdict
 from io import StringIO
 import json
 import os
@@ -50,6 +51,12 @@ class PrivateTmux:
     def tmux(self, *args):
         return self.run([paths.TMUX, *args], capture_output=True, text=True, timeout=5, stdin=subprocess.DEVNULL)
 
+    def kill_server(self):
+        processes = _snapshot_descendants(self.pid)
+        result = self.tmux('kill-server')
+        _wait_for_processes(processes)
+        return result
+
 
 def private_tmux(case, prefix, env=None):
     # Short paths fit in a Unix socket address.
@@ -71,6 +78,7 @@ DETACH = ("import subprocess, sys\n"
           "subprocess.Popen(sys.argv[1:], start_new_session=True)\n")
 START_TIMEOUT = 10
 TERM_TIMEOUT = 5
+PROCESS_EXIT_TIMEOUT = 5
 
 
 def _close_watch_in_child():
@@ -136,10 +144,46 @@ def _stop_tmux_child(child):
         child.wait()
 
 
+def _snapshot_descendants(parent_pid):
+    children = defaultdict(list)
+    for pid, (ppid, _) in procinfo.table(fresh=True).items():
+        children[ppid].append(pid)
+    pending = children[parent_pid]
+    processes = []
+    while pending:
+        pid = pending.pop()
+        pending.extend(children.get(pid, ()))
+        try:
+            processes.append((pid, procinfo.start_ticks(pid)))
+        except (FileNotFoundError, ProcessLookupError):
+            pass
+    return processes
+
+
+def _process_is_alive(pid, ticks):
+    try:
+        return (procinfo.stat_exists(pid) and procinfo.stat_fields(pid)[0] != 'Z'
+                and procinfo.start_ticks(pid) == ticks)
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+
+
+def _wait_for_processes(processes):
+    deadline = time.monotonic() + PROCESS_EXIT_TIMEOUT
+    while alive := [(pid, ticks) for pid, ticks in processes if _process_is_alive(pid, ticks)]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            pids = ', '.join(str(pid) for pid, _ in sorted(alive))
+            raise RuntimeError(f'tmux descendants still alive after server exit: {pids}')
+        processes = alive
+        time.sleep(min(.02, remaining))
+
+
 def watch(requests, replies):
     folders = {}
     children = {}
-    errors = (OSError, RuntimeError, ValueError, TypeError, KeyError)
+    descendants = {}
+    errors = (OSError, RuntimeError, ValueError, TypeError, KeyError, subprocess.SubprocessError)
 
     def reap(folder):
         if folder in children:
@@ -156,6 +200,7 @@ def watch(requests, replies):
                 raise RuntimeError(f'folder was replaced: {folder}')
             shutil.rmtree(folder)
         del folders[folder]
+        descendants.pop(folder, None)
 
     try:
         for line in requests:
@@ -165,7 +210,10 @@ def watch(requests, replies):
                 if op == 'stop':
                     if folder not in folders:
                         raise RuntimeError('folder is not owned')
+                    if folder in children:
+                        descendants[folder] = _snapshot_descendants(children[folder].pid)
                     reap(folder)
+                    _wait_for_processes(descendants.get(folder, ()))
                     remove(folder)
                     reply = {'ok': True}
                 elif op in ('own', 'start'):
@@ -333,6 +381,97 @@ class IsolationTests(unittest.TestCase):
         self.assertTrue(case.doCleanups())
         self.assert_stopped([(target.folder, target.pid)])
 
+    def start_test_pane(self, private, ignore_shutdown=False):
+        home = Path(private.env['HOME'])
+        code = """\
+import signal, sys, time
+from pathlib import Path
+
+def finish(*_):
+    time.sleep(.5)
+    Path('late').write_text('done')
+    sys.exit(0)
+
+handler = signal.SIG_IGN if sys.argv[1] == 'ignore' else finish
+signal.signal(signal.SIGHUP, handler)
+signal.signal(signal.SIGTERM, handler)
+Path('ready').touch()
+while True:
+    signal.pause()
+"""
+        private.tmux('new-session', '-d', '-s', 'cleanup', '-c', str(home), sys.executable, '-c',
+                     code, 'ignore' if ignore_shutdown else 'finish').check_returncode()
+        result = private.tmux('display-message', '-p', '-t', 'cleanup', '#{pane_pid}')
+        result.check_returncode()
+        pid = int(result.stdout)
+        ticks = procinfo.start_ticks(pid)
+        self.addCleanup(self.kill_test_pane, pid, ticks)
+        deadline = time.monotonic() + 5
+        while not (home / 'ready').is_file():
+            self.assertLess(time.monotonic(), deadline, 'The pane did not install its signal handlers.')
+            time.sleep(.02)
+        return pid, ticks
+
+    def kill_test_pane(self, pid, ticks):
+        try:
+            if procinfo.start_ticks(pid) == ticks:
+                os.kill(pid, signal.SIGKILL)
+        except (FileNotFoundError, ProcessLookupError):
+            pass
+
+    def assert_pane_exited(self, pid, ticks):
+        try:
+            fields = procinfo.stat_fields(pid)
+        except (FileNotFoundError, ProcessLookupError):
+            return
+        self.assertFalse(fields[0] != 'Z' and fields[19] == ticks, f'Pane {pid} is still alive.')
+
+    @unittest.skipUnless(shutil.which(paths.TMUX), 'tmux is not installed')
+    def test_stop_waits_for_delayed_pane_exit(self):
+        home = self.folder()
+        case = unittest.TestCase()
+        private = private_tmux(case, 'ttz', {'HOME': str(home)})
+        self.addCleanup(self.stop_if_left, private)
+        pid, ticks = self.start_test_pane(private)
+        self.assertTrue(case.doCleanups())
+        self.assert_pane_exited(pid, ticks)
+        self.assertEqual((home / 'late').read_text(), 'done')
+
+    @unittest.skipUnless(shutil.which(paths.TMUX), 'tmux is not installed')
+    def test_stop_reports_a_pane_that_refuses_to_exit(self):
+        home = self.folder()
+        # The normal watcher is detached, so start a separate watcher with a short deadline.
+        self.enterContext(mock.patch(f'{__name__}._watch', None))
+        self.enterContext(mock.patch(f'{__name__}.WATCH', IMPORT_WATCH +
+                                     'w.PROCESS_EXIT_TIMEOUT = .3\nw.watch(sys.stdin, sys.stdout)\n'))
+        case = unittest.TestCase()
+        private = private_tmux(case, 'ttz', {'HOME': str(home)})
+        self.addCleanup(_close_watch_in_child)
+        self.addCleanup(self.stop_if_left, private)
+        pid, _ = self.start_test_pane(private, ignore_shutdown=True)
+        for _ in range(2):
+            with self.assertRaisesRegex(RuntimeError, rf'\b{pid}\b'):
+                watch_request('stop', private.folder)
+            self.assertTrue(Path(private.folder).is_dir())
+
+    @unittest.skipUnless(shutil.which(paths.TMUX), 'tmux is not installed')
+    def test_kill_server_waits_for_delayed_pane_exit(self):
+        home = self.folder()
+        private = private_tmux(self, 'ttz', {'HOME': str(home)})
+        pid, ticks = self.start_test_pane(private)
+        private.kill_server().check_returncode()
+        self.assert_pane_exited(pid, ticks)
+        self.assertEqual((home / 'late').read_text(), 'done')
+
+    def test_wait_treats_a_reused_pid_or_zombie_as_gone(self):
+        for state, ticks in (('S', '200'), ('Z', '100')):
+            with self.subTest(state=state, ticks=ticks), \
+                    mock.patch.object(procinfo, 'stat_exists', return_value=True), \
+                    mock.patch.object(procinfo, 'stat_fields', return_value=[state] + ['0'] * 18 + [ticks]), \
+                    mock.patch.object(procinfo, 'start_ticks', return_value=ticks), \
+                    mock.patch.object(time, 'sleep', side_effect=AssertionError('Process is gone.')):
+                _wait_for_processes([(123, '100')])
+
     def test_stop_escalates_when_sigterm_is_ignored(self):
         child = subprocess.Popen([sys.executable, '-c',
                                   'import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); '
@@ -347,7 +486,8 @@ class IsolationTests(unittest.TestCase):
                                     for op in ('start', 'stop')))
         replies = StringIO()
         with mock.patch(f'{__name__}.subprocess.Popen', return_value=child), \
-                mock.patch(f'{__name__}._wait_for_server'), mock.patch(f'{__name__}.TERM_TIMEOUT', .05):
+                mock.patch(f'{__name__}._wait_for_server'), mock.patch(f'{__name__}.TERM_TIMEOUT', .05), \
+                mock.patch.object(procinfo, 'table', return_value={}):
             watch(requests, replies)
         self.assertEqual(child.returncode, -signal.SIGKILL)
         self.assertEqual([json.loads(line) for line in replies.getvalue().splitlines()],
