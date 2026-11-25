@@ -114,6 +114,8 @@ async function main() {
     await startBrowser()
     const shot = async name => { const options = { path: path.join(SHOTS, `${name}.png`) }; try { await page.screenshot(options) } catch { await page.waitForTimeout(100); await page.screenshot(options) } }
     
+    // Measure menus after their entry animations end; a fixed sleep fails under CPU load (B458).
+    const settle = selector => page.locator(selector).first().evaluate(el => Promise.all(el.getAnimations({ subtree: true }).filter(a => a.effect?.getComputedTiming().endTime !== Infinity).map(a => a.finished.catch(() => {}))))
     const audit = async (name, selector, { scroll = true, bounds = true } = {}) => {
       check(`${name}: rendered`, await page.locator(selector).count() > 0)
       const bad = await page.locator(selector).evaluateAll((roots, opts) => roots.flatMap(root => {
@@ -244,7 +246,8 @@ async function main() {
       await shot(`${w}-chat`)
       const keys = page.locator('.keys-container > button').first()
       await keys.click()
-      await page.waitForTimeout(220)
+      await page.locator('.keys-menu').waitFor()
+      await settle('.keys-menu')
       await audit(`${w}: keys menu fits`, '.keys-menu')
       await shot(`${w}-keys`)
       await page.keyboard.press('Escape')
@@ -260,6 +263,8 @@ async function main() {
       await page.locator('.composer textarea').first().focus()
       const mode = page.getByRole('button', { name: /^Mode:/ }).first()
       await mode.click()
+      await page.locator('.mode-menu').waitFor()
+      await settle('.mode-menu')
       await audit(`${w}: mode menu fits`, '.mode-menu')
       await shot(`${w}-mode`)
       check(`${w}: last mode option is reachable`, await page.locator('.mode-menu button').last().evaluate(el => { const r = el.getBoundingClientRect(); return el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)) }))
@@ -283,7 +288,8 @@ async function main() {
       await shot(`${w}-attachment`)
       await page.getByRole('button', { name: 'Remove ' + LONG + '.txt', exact: true }).click()
       await page.locator('.composer .attach').first().click()
-      await page.waitForTimeout(220)
+      await page.locator('.attach-menu').waitFor()
+      await settle('.attach-menu')
       await audit(`${w}: attach menu fits`, '.attach-menu')
       await shot(`${w}-attach`)
       await page.locator('.attach-menu button:visible').first().focus()
