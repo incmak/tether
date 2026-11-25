@@ -1,6 +1,6 @@
 // UI usage (Settings › Usage tracking › UI usage, src/uiUsage.ts, server/ui_usage.py) against an existing build: the
-// page logs clicks, opened dialogs and seen controls without tab names or paths, the report renders at 320 px and
-// 1280 px, the switch saves the pref, and Clear asks first. Every API request stays in this page's fixtures.
+// page logs clicks, opened dialogs and seen controls without names or paths, the report renders at 320 px and 1280 px,
+// the switch saves the pref, and Clear asks first. Every API request stays in this page's fixtures.
 // Run: cd ui && npm run test:ui (or node test_ui_usage_ui.cjs against an existing build).
 const http = require('node:http')
 const fs = require('node:fs/promises')
@@ -10,8 +10,9 @@ const { getBrowser, shotsDir } = require('./browser_test_helper.cjs')
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = shotsDir('ui-usage')
 const sizes = [[320, 720], [1280, 900]]
-const paneA = { id: '%1', tmux_session: '$1', label: 'project:0.0', pane_name: 'Fix login', agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: 't1', approval: null }
-const paneB = { id: '%2', tmux_session: '$1', label: 'project:0.1', pane_name: 'Docs pass', agent: 'codex', dir: '/srv/docs', state: 'Idle', writable: true, thread: 't2', approval: null }
+const paneA = { id: '%1', tmux_session: '$1', label: 'acme-site:0.0', pane_name: 'Fix login', agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: 't1', approval: null }
+const paneB = { id: '%2', tmux_session: '$1', label: 'acme-site:0.1', pane_name: 'Docs pass', agent: 'codex', dir: '/srv/docs', state: 'Idle', writable: true, thread: 't2', approval: null }
+const nameLeaks = events => events.filter(event => /Fix login|Docs pass|acme-site|\/srv\//.test(JSON.stringify(event)))
 const fixture = {
   sessions: { sessions: [paneA, paneB], default_thread: 't1' },
   chat: { messages: [], busy: false, thread: 't1', agent: 'claude', writable: true, session: '%1', earlier: 0, limit: 100, state: 'Idle', approval: null },
@@ -114,16 +115,18 @@ async function main() {
         && match(request.postDataJSON())
     })
     const flush = () => page.evaluate(() => window.dispatchEvent(new Event('pagehide')))
-    const scanVisible = async (control, label) => {
-      const matches = event => event.k === 'seen' && event.r === 'Settings' && event.l === label
-      await control.scrollIntoViewIfNeeded()
-      if (usage().some(matches)) return
-      const sent = waitForPost('ui-usage', body => body.events.some(matches))
-      // Start an input scan at this scroll position with a key that has no Settings action.
+    const scan = async matches => {
+      // An automatic scan may have sent these controls already. The log sends each one only once per visit.
+      const sent = usage().some(matches) ? null : waitForPost('ui-usage', body => body.events.some(matches))
       await page.keyboard.press('Shift')
       await page.clock.runFor(1800) // 800 ms input debounce and the 1000 ms idle deadline, in virtual time.
       await flush()
       await sent
+    }
+    const scanVisible = async (control, label) => {
+      const matches = event => event.k === 'seen' && event.r === 'Settings' && event.l === label
+      await control.scrollIntoViewIfNeeded()
+      if (!usage().some(matches)) await scan(matches)
     }
     for (const [width, height] of sizes) {
       const at = `${width}px`
@@ -135,8 +138,31 @@ async function main() {
       await generation
       const chat = page.locator('.chat-panel[data-pane="%1"]').first()
       await chat.waitFor()
+      const mainSeen = event => event.k === 'seen' && event.d === 0
+      await scan(mainSeen)
+      const strip = chat.locator('.pane-tabs')
+      const stripVisible = await strip.isVisible()
+      const mainEvents = usage().filter(mainSeen)
+      if (stripVisible) check(`${at} logs Session tabs on the main screen`, mainEvents.some(event => event.c === 'tab' && event.r === 'Session tabs'))
+      if (await strip.locator('.tab-close.current').isVisible()) {
+        check(`${at} logs Close tab on the main screen`, mainEvents.some(event => event.l === 'Close tab'))
+      } else {
+        check(`${at} tab strip has no visible close button`, !stripVisible || (await strip.locator('.tab-close').count()) === 0)
+      }
       // Open Settings by clicks, then UI usage.
-      if (width < 800) await page.getByRole('button', { name: /menu|sessions|open the list/i }).first().click().catch(() => {})
+      if (width === 320) {
+        await chat.getByRole('button', { name: /^Open sessions/ }).click()
+        const drawer = page.getByRole('dialog', { name: 'Sessions', exact: true })
+        // The drawer opens on Catch up; the tab rows are in the Sessions view.
+        await drawer.getByRole('group', { name: 'Sidebar view' }).getByRole('button', { name: 'Sessions', exact: true }).click()
+        await drawer.locator('.row-close').first().waitFor()
+        const drawerSeen = event => event.k === 'seen' && event.d === 1 && event.r === 'Sessions'
+        await scan(drawerSeen)
+        const seen = usage().filter(drawerSeen)
+        check(`${at} logs redacted sidebar close and tab rows`, seen.some(event => event.l === 'Close …') && seen.some(event => event.l === '…, Task, idle'))
+        const leaks = nameLeaks(seen)
+        check(`${at} sidebar scan has no tab or session names or paths`, !leaks.length, JSON.stringify(leaks))
+      }
       await page.getByRole('button', { name: 'Settings' }).first().click()
       await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: /^Usage tracking/ }).click()
       const toggle = page.getByRole('switch', { name: /Log UI usage/ })
@@ -162,8 +188,8 @@ async function main() {
       const seen = events.filter(event => event.k === 'seen' && event.r === 'Settings').map(event => event.l)
       check(`${at} logs seen controls`, seen.includes('Log UI usage') && seen.includes('Clear the log'), JSON.stringify(seen))
       check(`${at} device`, events.every(event => event.w === (width < 800 ? 'phone' : 'wide')), JSON.stringify([...new Set(events.map(event => event.w))]))
-      const text = JSON.stringify(events)
-      check(`${at} no tab names or paths`, !/Fix login|Docs pass|\/srv\//.test(text), text.match(/.{40}(Fix login|Docs pass|\/srv\/).{40}/)?.[0])
+      const leaks = nameLeaks(events)
+      check(`${at} no tab or session names or paths`, !leaks.length, JSON.stringify(leaks))
       // Clear asks first.
       await clear.click()
       await page.getByRole('button', { name: 'Remove' }).click()

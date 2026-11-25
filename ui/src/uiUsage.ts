@@ -41,7 +41,7 @@ function regionOf(element: Element) {
   if (layer) return layerName(layer)
   const region = element.closest(REGION)
   if (!region) return 'Page'
-  return clean(region.getAttribute('aria-label') || labelledBy(region)) || (region.tagName === 'HEADER' ? 'Header' : region.tagName === 'FOOTER' ? 'Footer' : 'Page')
+  return clean(region.getAttribute('data-ui') || region.getAttribute('aria-label') || labelledBy(region)) || (region.tagName === 'HEADER' ? 'Header' : region.tagName === 'FOOTER' ? 'Footer' : 'Page')
 }
 
 function kindOf(element: Element) {

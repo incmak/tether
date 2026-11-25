@@ -390,7 +390,7 @@ export const PaneTabs = forwardRef<HTMLDivElement, Props>(function PaneTabs({ se
   const byId = new Map(tasks.map(item => [item.id, item]))
   const shown = preview ? preview.flatMap(id => { const item = byId.get(id); return item ? [item] : [] }) : tasks
   // While tabs are reordered, each tab draws its own highlight again.
-  return <div className={[preview ? 'pane-tabs' : 'pane-tabs has-pill', pick ? 'closable' : ''].filter(Boolean).join(' ')} ref={strip} role="tablist" aria-label={`Tasks in ${session.name}`} data-select-scope="">
+  return <div className={[preview ? 'pane-tabs' : 'pane-tabs has-pill', pick ? 'closable' : ''].filter(Boolean).join(' ')} ref={strip} role="tablist" aria-label={`Tasks in ${session.name}`} data-ui="Session tabs" data-select-scope="">
     <span className="pane-tab-pill" aria-hidden="true" />
     {shown.map(item => {
       const picked = !!pick?.picked.has(item.id)
@@ -428,7 +428,7 @@ export const PaneTabs = forwardRef<HTMLDivElement, Props>(function PaneTabs({ se
     </button>
     {/* A sibling, not inside the tab: a tab holds no other control. It sits over the tab's right edge (App.css). Not a
         Tab stop: the focused tab's Delete key does the same. Hidden while tabs are dragged, so it never lags behind. */}
-    {pick && !preview && <button type="button" className={item.id === pane.id ? 'tab-close current' : 'tab-close'} data-close-for={item.id} tabIndex={-1} aria-label={`Close ${paneTitle(item)}`} title={`Close ${words.pane} (Delete)`}
+    {pick && !preview && <button type="button" className={item.id === pane.id ? 'tab-close current' : 'tab-close'} data-close-for={item.id} data-ui="Close tab" tabIndex={-1} aria-label={`Close ${paneTitle(item)}`} title={`Close ${words.pane} (Delete)`}
       onClick={event => pick.onCloseTab(item.id, anchorOf(event))}><X size={14} aria-hidden="true" /></button>}
     </Fragment> })}
     <button className="tab-add" aria-label={`${words.newRight} with a task`} title={`${words.newRight} with a task`} aria-haspopup="dialog" aria-expanded={!!taskAt}

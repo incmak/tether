@@ -1066,7 +1066,7 @@ function App() {
       renderSlot={(target, index, shown) => chatFor(target, shown > 1 || zoomed ? { index, zoomed, onZoom: toggleZoom, onClose: zoomed ? undefined : () => closeSlot(index), onPick: () => setPicking(index), onSwapTo: to => swap(index, to), onDragStart: event => { event.dataTransfer.setData(DRAG_SLOT, String(index)); event.dataTransfer.effectAllowed = 'move' } } : undefined)}
       onDropPane={dropPane} onDropSession={dropSession} onDropChat={dropChat} onSwap={swap}
       tools={<>
-        {owner && owner.panes.length > 1 && <button type="button" className="icon-button" aria-label={`Show all panes of ${owner.name}`} title={`Show all panes of ${owner.name}`} onClick={() => showSession(owner)}><LayoutDashboard size={17} /></button>}
+        {owner && owner.panes.length > 1 && <button type="button" className="icon-button" data-ui="Show session panes" aria-label={`Show all panes of ${owner.name}`} title={`Show all panes of ${owner.name}`} onClick={() => showSession(owner)}><LayoutDashboard size={17} /></button>}
         <button type="button" className="icon-button" aria-label={words.newRight} title={words.tmux ? 'New pane right (tmux split, opens in a new slot)' : 'New tab, opens in a new slot'} onClick={() => void split('right')}><SquareSplitHorizontal size={17} /></button>
         <button type="button" className="icon-button" aria-label={words.newBelow} title={words.tmux ? 'New pane below (tmux split, opens in a new slot)' : 'New tab below, opens in a new slot'} onClick={() => void split('down')}><SquareSplitVertical size={17} /></button>
         <OldestButton items={waiting} sessions={sessions} selected={openId} onOpen={openPane} onDeck={() => setDeck(true)} />
