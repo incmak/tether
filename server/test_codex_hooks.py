@@ -184,10 +184,10 @@ class CodexHooksTests(unittest.TestCase):
                 patch.object(hooks, 'codex_live', side_effect=AssertionError('screen options win')):
             self.assertEqual(self.status('approval screen')['approval'], pending)
 
-    def test_no_hooks_preserves_screen_and_transcript_fallback(self):
+    def test_no_hooks_uses_transcript_fallback(self):
         screen = (WORKING_FIXTURES / 'working_tool.ansi').read_text()
         idle = (WORKING_FIXTURES / 'idle_reply_is_status_line.ansi').read_text()
-        self.assertEqual(self.status(screen)['state'], 'Working')
+        self.assertEqual(self.status(screen)['state'], 'Idle')
         self.assertEqual(self.status(idle)['state'], 'Idle')
         self.transcript.write_text(self.rollout('task_started'))
         self.assertEqual(self.status(idle)['state'], 'Working')

@@ -1128,25 +1128,44 @@ _busy = {}  # transcript path -> ((size, mtime), result)
 
 def transcript_busy(path, window=262144):
     """True when the last lifecycle event in a Codex rollout file is a started turn."""
+    last = None
     try:
         info = os.stat(path)
-        if path in _busy and _busy[path][0] == (info.st_size, info.st_mtime_ns):
-            return _busy[path][1]
+        signature = (info.st_size, info.st_mtime_ns)
+        cached = _busy.get(path)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        window = max(1, window)
         with open(path, 'rb') as stream:
-            stream.seek(0, 2)
-            stream.seek(max(0, stream.tell() - window))
-            tail = stream.read().decode(errors='ignore')
+            while True:
+                start = max(0, info.st_size - window)
+                # Read the preceding byte so a record on the window boundary is kept whole.
+                offset = max(0, start - 1)
+                stream.seek(offset)
+                tail = stream.read(info.st_size - offset)
+                if start:
+                    tail = tail.partition(b'\n')[2]
+                for line in reversed(tail.split(b'\n')):
+                    try:
+                        record = json.loads(line)
+                    except (ValueError, RecursionError):
+                        continue
+                    if not isinstance(record, dict) or record.get('type') != 'event_msg':
+                        continue
+                    payload = record.get('payload')
+                    if isinstance(payload, dict) and payload.get('type') in ('task_started', 'task_complete', 'turn_aborted'):
+                        last = payload['type']
+                        break
+                if last is not None or start == 0:
+                    break
+                window *= 2
     except (OSError, TypeError):
         return False
-    last = None
-    for line in tail.splitlines():
-        for kind in ('task_started', 'task_complete', 'turn_aborted'):
-            if '"type":"' + kind + '"' in line.replace(' ', ''):
-                last = kind
     if len(_busy) > 64:
         _busy.clear()
-    _busy[path] = ((info.st_size, info.st_mtime_ns), last == 'task_started')
-    return last == 'task_started'
+    busy = last == 'task_started'
+    _busy[path] = (signature, busy)
+    return busy
 
 
 def reflow_prompt(text):
@@ -1237,67 +1256,24 @@ def claude_screen_working(plain_screen):
     return False
 
 
-# Codex 0.170.0 status row (tui/src/status_indicator_widget.rs): "<bullet> <header> (<elapsed> • esc to interrupt)",
-# then optional " · <message>", cut with "…" to the pane width. Detail rows ("  └ ", wrapped with four spaces) hang
-# directly under it. The interrupt hint shows for every running task (bottom_pane/mod.rs set_task_running).
-CODEX_STATUS_ROW = re.compile(r'^[•◦] \S')
-CODEX_ELAPSED = re.compile(r' \((?:\d+h \d{2}m \d{2}s|\d+m \d{2}s|\d+s)')
-CODEX_INTERRUPT = ' • esc to interrupt)'
 # The hint row while a draft is typed mid-turn, and the Plan mode label Codex adds to any hint row (footer.rs).
 CODEX_QUEUE_HINT = re.compile(r'^  tab to queue message(?=\s{2,}⚠|$)')
 CODEX_PLAN_MODE = re.compile(r'^  Plan mode(?: \([^)]*to cycle\))?(?=\s{2,}⚠|$)| · Plan mode(?: \([^)]*to cycle\))?(?=\s{2,}⚠|$)')
 
 
-def codex_status_row(row):
-    """True only for Codex's own live status row: the elapsed counter, then the interrupt hint, whole or cut by …."""
-    if not CODEX_STATUS_ROW.match(row):
-        return False
-    row = row.rstrip()
-    for match in CODEX_ELAPSED.finditer(row):
-        rest = row[match.end():]
-        if rest == CODEX_INTERRUPT or rest.startswith(CODEX_INTERRUPT + ' · '):
-            return True
-        if rest.endswith('…') and (CODEX_INTERRUPT.startswith(rest[:-1]) or rest.startswith(CODEX_INTERRUPT + ' · ')):
-            return True
-    return False
-
-
-def codex_screen_working(plain_screen):
-    """Read the area above Codex's composer. Return None if the composer cannot be verified."""
+def codex_composer_ready(plain_screen):
+    """Verify Codex's composer by its prompt marker and footer."""
     lines = plain_screen.splitlines()
     start = next((i for i in range(len(lines) - 1, -1, -1) if lines[i].startswith('›')), None)
-    if start is None:
-        return None
+    if start is None:  # a menu ("› 1. Yes") has its own footer, so codex_input_box refuses it
+        return False
     end = next((i for i in range(start + 1, len(lines)) if not lines[i].strip()), len(lines))
     last = next((i for i in range(len(lines) - 1, end, -1) if lines[i].strip()), None)
     if last is not None:
         # Map the queue hint and the Plan mode label to the usual hint, then check the footer as usual.
-        # A menu ("› 1. Yes") has its own footer, so it still refuses here.
         hint = CODEX_PLAN_MODE.sub(lambda m: '  ← for agents' if m.group().startswith('  ') else '', lines[last])
         lines[last] = CODEX_QUEUE_HINT.sub('  ← for agents', hint)
-    if not codex_input_box(lines, end):
-        return None
-
-    def above_blanks(i):
-        while i >= 0 and not lines[i].strip():
-            i -= 1
-        return i
-
-    i = above_blanks(start - 1)
-    queued_row = re.compile(r'^(?:  ↳ |    \S)')
-    if i >= 0 and queued_row.match(lines[i]):
-        while i >= 0 and queued_row.match(lines[i]):
-            i -= 1
-        if i < 0 or lines[i].rstrip() != '• Queued follow-up inputs':
-            return False
-        i = above_blanks(i - 1)
-    top = i
-    while top >= 0 and re.match(r'^(?:  └ |    \S)', lines[top]):
-        top -= 1
-    if top != i and not lines[top + 1].startswith('  └ '):
-        return False
-    # Detail rows count only when they hang directly under the status row; a blank between ends the walk.
-    return top >= 0 and codex_status_row(lines[top])
+    return codex_input_box(lines, end)
 
 
 def claude_registry(entry):
@@ -1336,9 +1312,9 @@ def _live_status(entry, run, screen, login_screen=None, styled_screen=None):
             pending['text'] = reflow_prompt(pending['text'])
         return {'state': 'Approval', 'approval': {k: v for k, v in pending.items() if not k.startswith('_')}}
     live = claude_hooks.codex_live(entry) if entry['agent'] == 'codex' else None
-    # No hook reports an answered approval. Require the live status row to override "waiting":
-    # a reply can quote the status line (B559).
-    if live is not None and live['waiting'] and codex_screen_working(screen) is True:
+    # No hook or rollout record reports an answered approval. The composer replaces the approval card,
+    # so a verified composer means the approval is answered. This check never reads reply text (B559).
+    if live is not None and live['waiting'] and codex_composer_ready(screen):
         live = dict(live, waiting=False, busy=True)
     if live is not None and live['waiting']:
         prompt_actions.ledger.forget(entry['id'])
@@ -1353,7 +1329,7 @@ def _live_status(entry, run, screen, login_screen=None, styled_screen=None):
     elif live is not None:
         working = live['busy'] and not live['waiting']
     elif entry['agent'] == 'codex':
-        working = codex_screen_working(screen) is True or transcript_busy(entry.get('transcript'))
+        working = transcript_busy(entry.get('transcript'))
     elif entry['agent'] == 'antigravity':
         report = current_report(entry)
         working = report.get('agent_state') in BUSY_STATES
