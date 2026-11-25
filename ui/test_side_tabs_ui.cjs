@@ -223,10 +223,23 @@ async function fridayGrabWhileOpening(page, label) {
   await page.getByRole('button', { name: 'Shrink Friday to a bubble' }).click()
   await rest(page, '.live-bubble')
   await page.mouse.move(1, 1)
-  await page.locator(FRIDAY).click()
   // Hold the bloom at 200 of 300 ms, so the press lands while it runs, whatever the machine speed.
-  await page.waitForFunction(() => document.querySelector('.live-window')?.getAnimations().length > 0)
-  await page.evaluate(() => { for (const motion of document.querySelector('.live-window').getAnimations()) { motion.pause(); motion.currentTime = 200 } })
+  // Pause it in the same task that starts it: a poll can miss a 300 ms animation on a loaded machine.
+  await page.evaluate(() => {
+    const animate = Element.prototype.animate
+    Element.prototype.animate = function (...args) {
+      const motion = animate.apply(this, args)
+      if (this.matches('.live-window')) {
+        Element.prototype.animate = animate
+        motion.pause()
+        motion.currentTime = 200
+        window.__bloomHeld = true
+      }
+      return motion
+    }
+  })
+  await page.locator(FRIDAY).click()
+  await page.waitForFunction(() => window.__bloomHeld === true)
   const grip = await page.locator('.live-grip').boundingBox()
   const x = grip.x + grip.width / 2, y = grip.y + grip.height / 2
   await page.mouse.move(x, y)
