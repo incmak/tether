@@ -37,7 +37,8 @@ RESTORE_SECS = 30  # tmux-continuum restores its windows within this time of the
 PROMPT_SECS = 5  # a new shell draws its prompt within this time; later output means a person typed or ran something
 _RESTORED = '\t'.join('#{' + field + '}' for field in
                       ('pane_id', 'window_index', 'pane_index', 'pane_current_command', 'pane_current_path',
-                       '@chat_name', '@tether_role', 'window_activity', 'start_time', 'pane_pid', 'pid', 'pane_in_mode'))
+                       '@chat_name', '@tether_role', 'window_activity', 'start_time', 'pane_pid', 'pid', 'pane_in_mode',
+                       'pane_synchronized', 'pane_input_off'))
 
 _lock = threading.Lock()
 _wake = threading.Event()
@@ -230,7 +231,8 @@ def _restoring(run, now):
     """True while tmux-continuum may still restore windows into a new tmux server."""
     result = _tmux(run, 'display-message', '-p', '#{start_time}\t#{@continuum-restore}')
     start, _, restore = result.stdout.strip().partition('\t')
-    return result.returncode == 0 and restore == 'on' and start.isdigit() and now - int(start) < RESTORE_SECS
+    # A clock stepped back before the server start does not hold resumes back.
+    return result.returncode == 0 and restore == 'on' and start.isdigit() and 0 <= now - int(start) < RESTORE_SECS
 
 
 def _restored_shell(tab, *, run):
@@ -238,15 +240,18 @@ def _restored_shell(tab, *, run):
 
     A restore brings back the windows but not the agents in them. Resuming into a new window would leave that
     shell as an empty duplicate tab. A match needs tmux-continuum restore on, the same session, window.pane
-    position and folder, a shell in the foreground outside copy mode, and no @chat_name or @tether_role. The shell must have started
+    position and folder, a shell in the foreground that takes keys (not in copy mode, not synchronized with
+    other panes, input not disabled), and no @chat_name or @tether_role. The shell must have started
     within RESTORE_SECS of the tmux server, so a shell a person opens later does not match. Its window must have
     had no output after the prompt: a typed draft or a command updates window_activity.
     Returns (pane, (shell pid, window_activity)). The caller claims the pane with _claim. Right before the keys,
-    _ours checks that the shell, the activity and copy mode did not change, so a later draft gets no Enter.
+    _ours checks that the shell, the activity and the key state did not change.
 
     Known limits: a shell a person opens at that same position within RESTORE_SECS of the server start, or a
     draft typed within PROMPT_SECS of the shell start, looks like a restored shell. A restore slower than
-    RESTORE_SECS, or a host without /proc (macOS), falls back to a new window and keeps the duplicate.
+    RESTORE_SECS, or a host without /proc (macOS), falls back to a new window and keeps the duplicate. A draft
+    typed in the instant between the last check and the keys still gets Enter. When _ours refuses after the
+    option writes, the tab ends as failed and Retry opens a new window.
     B614 and B615 track two older launch races that also apply here."""
     result = _tmux(run, 'list-panes', '-s', '-t', '=' + tab['session'] + ':', '-F', _RESTORED)
     restore = _tmux(run, 'show-options', '-gqv', '@continuum-restore')
@@ -255,11 +260,11 @@ def _restored_shell(tab, *, run):
     folder = os.path.realpath(tab['folder'])
     for line in result.stdout.splitlines():
         fields = line.split('\t')
-        if len(fields) != 12:
+        if len(fields) != 14:
             continue
-        pane, window, index, command, cwd, name, role, activity, start, pid, server, mode = fields
+        pane, window, index, command, cwd, name, role, activity, start, pid, server, *keys = fields
         if not ([window, index] == [str(part) for part in tab['order']]
-                and command in SHELLS and cwd and os.path.realpath(cwd) == folder and not name and not role and mode == '0'
+                and command in SHELLS and cwd and os.path.realpath(cwd) == folder and not name and not role and keys == ['0', '0', '0']
                 and activity.isdigit() and start.isdigit() and pid.isdigit() and server.isdigit()):
             continue
         shell, began = _started(pid), _started(server)
@@ -281,10 +286,11 @@ def _ours(thread, pane, seen, *, run, now):
     if not claimed:
         return False
     result = _tmux(run, 'display-message', '-p', '-t', pane,
-                   '#{pane_pid}\t#{pane_current_command}\t#{window_activity}\t#{pane_in_mode}')
+                   '#{pane_pid}\t#{pane_current_command}\t#{window_activity}'
+                   '\t#{pane_in_mode}\t#{pane_synchronized}\t#{pane_input_off}')
     fields = result.stdout.strip().split('\t')
-    return (result.returncode == 0 and len(fields) == 4 and fields[1] in SHELLS
-            and (fields[0], fields[2]) == seen and fields[3] == '0')
+    return (result.returncode == 0 and len(fields) == 6 and fields[1] in SHELLS
+            and (fields[0], fields[2]) == seen and fields[3:] == ['0', '0', '0'])
 
 
 def _claim(thread, pane, *, now):

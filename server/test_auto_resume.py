@@ -455,7 +455,7 @@ class AutoResumeTests(unittest.TestCase):
         self.tmux.globals['@continuum-restore'] = restore
         self.shell_start = options.pop('shell_start', 5012.0)
         options = {'start_time': '5000', 'window_activity': '5013', 'pane_pid': '4242', 'pid': '100',
-                   'pane_in_mode': '0', **options}
+                   'pane_in_mode': '0', 'pane_synchronized': '0', 'pane_input_off': '0', **options}
         self.tmux.add(dict(self.entry, id='%7', thread=None, **(changes or {})), **options)
         self.tick()
         return self.saved()['tabs'].get(THREAD)
@@ -474,6 +474,8 @@ class AutoResumeTests(unittest.TestCase):
                  'other folder': ({'cwd': '/srv/other'}, {'pane_current_command': 'zsh'}),
                  'output after the prompt (a draft)': ({}, {'pane_current_command': 'zsh', 'window_activity': '5022'}),
                  'copy mode': ({}, {'pane_current_command': 'zsh', 'pane_in_mode': '1'}),
+                 'synchronized panes': ({}, {'pane_current_command': 'zsh', 'pane_synchronized': '1'}),
+                 'input disabled': ({}, {'pane_current_command': 'zsh', 'pane_input_off': '1'}),
                  'continuum restore off': ({}, {'pane_current_command': 'zsh', 'restore': ''}),
                  'shell opened after the restore': ({}, {'pane_current_command': 'zsh', 'shell_start': 5100.0,
                                                          'window_activity': '5101'}),
@@ -512,6 +514,11 @@ class AutoResumeTests(unittest.TestCase):
         self.clock += 1
         self.tick()
         self.assertEqual(self.saved()['tabs'][THREAD]['state'], 'resuming')
+
+    def test_a_clock_stepped_back_before_the_server_start_does_not_hold_resumes(self):
+        self.tmux.globals.update({'@continuum-restore': 'on', 'start_time': '5000'})
+        self.assertTrue(auto_resume._restoring(self.tmux, 5000))
+        self.assertFalse(auto_resume._restoring(self.tmux, 5000 - 3600))
 
     def test_retry_of_a_reused_tab_keeps_the_old_pane_safe_until_a_new_pane_is_saved(self):
         self._resume_beside_restored_pane(pane_current_command='zsh')
