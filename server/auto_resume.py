@@ -241,7 +241,12 @@ def _restored_shell(tab, *, run):
     position and folder, a shell in the foreground, and no Tether pane options. The shell must have started
     within RESTORE_SECS of the tmux server, so a shell a person opens later does not match. Its window must have
     had no output after the prompt: a typed draft or a command updates window_activity.
-    Returns (pane, shell pid). The caller claims the pane with _claim and checks it with _ours before the keys."""
+    Returns (pane, shell pid). The caller claims the pane with _claim and checks it with _ours before the keys.
+
+    Known limits: a shell a person opens at that same position within RESTORE_SECS of the server start, or a
+    draft typed within PROMPT_SECS of the shell start, looks like a restored shell. A restore slower than
+    RESTORE_SECS, or a host without /proc (macOS), falls back to a new window and keeps the duplicate.
+    B614 and B615 track two older launch races that also apply here."""
     result = _tmux(run, 'list-panes', '-s', '-t', '=' + tab['session'] + ':', '-F', _RESTORED)
     restore = _tmux(run, 'show-options', '-gqv', '@continuum-restore')
     if result.returncode or restore.stdout.strip() != 'on':
