@@ -435,6 +435,38 @@ class AutoResumeTests(unittest.TestCase):
         self.assertLess(project, send)
         self.assertEqual([call[1] for call in calls].count('new-window'), 1)
 
+    def _resume_beside_restored_pane(self, changes=None, **options):
+        """Lose the server; a restore then puts a pane in the tab's session before Tether resumes the tab."""
+        self.tick()
+        self.tmux.lose('30:300')
+        self.entries = []
+        self.tmux.add(dict(self.entry, id='%7', thread=None, **(changes or {})), **options)
+        self.tick()
+        return self.saved()['tabs'][THREAD]
+
+    def test_restored_idle_shell_at_the_tab_position_is_reused_not_duplicated(self):
+        tab = self._resume_beside_restored_pane(pane_current_command='zsh')
+        self.assertEqual((tab['pane'], tab['state']), ('%7', 'resuming'))
+        self.assertFalse(any(call[1] in ('new-window', 'new-session', 'kill-pane') for call in self.tmux.calls))
+        self.assertEqual(self.sends(), [[paths.TMUX, 'send-keys', '-t', '%7', '-l', 'claude --resume ' + THREAD],
+                                        [paths.TMUX, 'send-keys', '-t', '%7', 'Enter']])
+        self.assertEqual(self.tmux.panes['%7']['@chat_name'], 'Task')
+
+    def test_pane_that_is_not_a_restored_idle_shell_gets_a_new_window_beside_it(self):
+        cases = {'program in foreground': ({}, {'pane_current_command': 'node'}),
+                 'other folder': ({'cwd': '/Users/other'}, {'pane_current_command': 'zsh'}),
+                 'other position': ({'position': '3.0'}, {'pane_current_command': 'zsh'}),
+                 'named tab': ({}, {'pane_current_command': 'zsh', '@chat_name': 'Notes'}),
+                 'helper tab': ({}, {'pane_current_command': 'zsh', '@tether_role': 'advisor'})}
+        for case, (changes, options) in cases.items():
+            with self.subTest(case):
+                self.setUp()
+                tab = self._resume_beside_restored_pane(changes, **options)
+                self.assertNotEqual(tab['pane'], '%7')
+                self.assertEqual([call[1] for call in self.tmux.calls].count('new-window'), 1)
+                self.assertTrue(all(call[3] != '%7' for call in self.sends()))
+                self.assertIn('%7', self.tmux.panes)
+
     def test_same_server_after_tether_reload_does_not_resume(self):
         self.tick()
         importlib.reload(auto_resume)

@@ -32,6 +32,10 @@ SESSION_OPTIONS = ('@project', '@groups')  # @groups: the session's groups (grou
 _STATES = ('open', 'pending', 'resuming', 'failed', 'deferred')
 _FORMAT = '\t'.join('#{' + field + '}' for field in
                     ('pane_id', *OPTIONS, *SESSION_OPTIONS))
+SHELLS = frozenset(('bash', 'dash', 'fish', 'ksh', 'sh', 'zsh'))
+_RESTORED = '\t'.join('#{' + field + '}' for field in
+                      ('pane_id', 'window_index', 'pane_index', 'pane_current_command', 'pane_current_path',
+                       '@chat_name', '@tether_role'))
 _lock = threading.Lock()
 _wake = threading.Event()
 _tombstones = {}
@@ -201,6 +205,29 @@ def _pane_rows(*, run):
             pane, *values = fields
             rows[pane] = dict(zip((*OPTIONS, *SESSION_OPTIONS), values))
     return rows
+
+
+def _restored_shell(tab, *, run):
+    """The idle shell that a tmux restore (tmux-resurrect or tmux-continuum) put where this tab's agent ran, or None.
+
+    A restore brings back the windows but not the agents in them. Resuming into a new window would leave that
+    shell as an empty duplicate tab. A match needs the same session, window.pane position and folder, a shell in
+    the foreground, no Tether pane options, and no saved tab that owns the pane."""
+    result = _tmux(run, 'list-panes', '-s', '-t', '=' + tab['session'] + ':', '-F', _RESTORED)
+    if result.returncode:
+        return None
+    with _lock:
+        owned = {saved['pane'] for saved in _read()['tabs'].values() if saved['pane']}
+    folder = os.path.realpath(tab['folder'])
+    for line in result.stdout.splitlines():
+        fields = line.split('\t')
+        if len(fields) != 7:
+            continue
+        pane, window, index, command, cwd, name, role = fields
+        if (pane not in owned and [window, index] == [str(part) for part in tab['order']]
+                and command in SHELLS and cwd and os.path.realpath(cwd) == folder and not name and not role):
+            return pane
+    return None
 
 
 def _order(position):
@@ -403,7 +430,11 @@ def launch(*, entries, run=subprocess.run, now=time.time, sleep=time.sleep):
                 continue
             existing = _tmux(run, 'list-panes', '-s', '-t', '=' + tab['session'] + ':', '-F', '#{pane_id}')
             panes = existing.stdout.splitlines() if existing.returncode == 0 else []
-            if panes:
+            restored = _restored_shell(tab, run=run) if panes else None
+            if restored:
+                pane = restored  # Not ours to remove on failure: it was there before this launch.
+                _update(thread, pane=pane)
+            elif panes:
                 pane = new_window_after(panes[-1], run, cwd=tab['folder'], group=tab['options'].get('@group', ''))
                 cleanup = True
             else:
@@ -417,7 +448,8 @@ def launch(*, entries, run=subprocess.run, now=time.time, sleep=time.sleep):
             if panes:
                 # The project launcher needs the options before these shell keys.
                 if _tab(thread) is None:
-                    _tmux(run, 'kill-pane', '-t', pane)
+                    if cleanup:
+                        _tmux(run, 'kill-pane', '-t', pane)
                     continue
                 _tmux(run, 'send-keys', '-t', pane, '-l', command, check=True)
                 _tmux(run, 'send-keys', '-t', pane, 'Enter', check=True)
