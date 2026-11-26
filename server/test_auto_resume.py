@@ -440,6 +440,7 @@ class AutoResumeTests(unittest.TestCase):
         self.tick()
         self.tmux.lose('30:300')
         self.entries = []
+        options = {'start_time': '5000', 'window_activity': '5013', **options}  # drawn 13 s after the server start
         self.tmux.add(dict(self.entry, id='%7', thread=None, **(changes or {})), **options)
         self.tick()
         return self.saved()['tabs'][THREAD]
@@ -454,7 +455,8 @@ class AutoResumeTests(unittest.TestCase):
 
     def test_pane_that_is_not_a_restored_idle_shell_gets_a_new_window_beside_it(self):
         cases = {'program in foreground': ({}, {'pane_current_command': 'node'}),
-                 'other folder': ({'cwd': '/Users/other'}, {'pane_current_command': 'zsh'}),
+                 'other folder': ({'cwd': '/srv/other'}, {'pane_current_command': 'zsh'}),
+                 'output after the restore': ({}, {'pane_current_command': 'zsh', 'window_activity': '5500'}),
                  'other position': ({'position': '3.0'}, {'pane_current_command': 'zsh'}),
                  'named tab': ({}, {'pane_current_command': 'zsh', '@chat_name': 'Notes'}),
                  'helper tab': ({}, {'pane_current_command': 'zsh', '@tether_role': 'advisor'})}
@@ -466,6 +468,24 @@ class AutoResumeTests(unittest.TestCase):
                 self.assertEqual([call[1] for call in self.tmux.calls].count('new-window'), 1)
                 self.assertTrue(all(call[3] != '%7' for call in self.sends()))
                 self.assertIn('%7', self.tmux.panes)
+
+    def test_reused_shell_stays_when_the_resume_command_exits(self):
+        self._resume_beside_restored_pane(pane_current_command='zsh')
+        self.entries = [dict(self.entry, id='%7', agent='shell', writable=False, thread=None)]
+        self.clock += auto_resume.VERIFY_SECS
+        self.tick()
+        self.assertEqual(self.saved()['tabs'][THREAD]['state'], 'failed')
+        self.assertIn('%7', self.tmux.panes)
+        self.assertNotIn('kill-pane', [call[1] for call in self.tmux.calls])
+
+    def test_restored_shell_closed_during_lookup_is_not_used(self):
+        def close(argv):
+            if argv[1] == 'list-panes' and '-s' in argv:
+                auto_resume.forget_pane('%7', run=self.tmux, now=lambda: self.clock)
+        self.tmux.before = close
+        tab = self._resume_beside_restored_pane(pane_current_command='zsh')
+        self.assertNotEqual(tab['pane'], '%7')
+        self.assertTrue(all(call[3] != '%7' for call in self.sends()))
 
     def test_same_server_after_tether_reload_does_not_resume(self):
         self.tick()

@@ -33,9 +33,10 @@ _STATES = ('open', 'pending', 'resuming', 'failed', 'deferred')
 _FORMAT = '\t'.join('#{' + field + '}' for field in
                     ('pane_id', *OPTIONS, *SESSION_OPTIONS))
 SHELLS = frozenset(('bash', 'dash', 'fish', 'ksh', 'sh', 'zsh'))
+RESTORE_SECS = 120  # a tmux restore draws its windows within this time of the server start
 _RESTORED = '\t'.join('#{' + field + '}' for field in
                       ('pane_id', 'window_index', 'pane_index', 'pane_current_command', 'pane_current_path',
-                       '@chat_name', '@tether_role'))
+                       '@chat_name', '@tether_role', 'window_activity', 'start_time'))
 _lock = threading.Lock()
 _wake = threading.Event()
 _tombstones = {}
@@ -68,6 +69,7 @@ def _valid_tab(thread, tab):
             and _number(tab.get('started'))
             and (tab.get('missing_since') is None or _number(tab['missing_since']))
             and type(tab.get('offset')) is int and tab['offset'] >= 0
+            and type(tab.get('reused', False)) is bool
             and all(isinstance(tab.get(key), dict) and all(
                 opt in allowed and isinstance(value, str) and value
                 for opt, value in tab[key].items())
@@ -212,22 +214,37 @@ def _restored_shell(tab, *, run):
 
     A restore brings back the windows but not the agents in them. Resuming into a new window would leave that
     shell as an empty duplicate tab. A match needs the same session, window.pane position and folder, a shell in
-    the foreground, no Tether pane options, and no saved tab that owns the pane."""
+    the foreground, and no Tether pane options. Its window must have had no output since the restore: a typed
+    draft or a command updates window_activity, and a shell that a person opens later starts after the restore.
+    The caller claims the pane with _claim."""
     result = _tmux(run, 'list-panes', '-s', '-t', '=' + tab['session'] + ':', '-F', _RESTORED)
     if result.returncode:
         return None
-    with _lock:
-        owned = {saved['pane'] for saved in _read()['tabs'].values() if saved['pane']}
     folder = os.path.realpath(tab['folder'])
     for line in result.stdout.splitlines():
         fields = line.split('\t')
-        if len(fields) != 7:
+        if len(fields) != 9:
             continue
-        pane, window, index, command, cwd, name, role = fields
-        if (pane not in owned and [window, index] == [str(part) for part in tab['order']]
+        pane, window, index, command, cwd, name, role, activity, start = fields
+        if not (activity.isdigit() and start.isdigit()) or not 0 <= int(activity) - int(start) <= RESTORE_SECS:
+            continue
+        if ([window, index] == [str(part) for part in tab['order']]
                 and command in SHELLS and cwd and os.path.realpath(cwd) == folder and not name and not role):
             return pane
     return None
+
+
+def _claim(thread, pane, *, now):
+    """Give a restored shell to a resuming tab. Refuse when another tab owns it or a close named it."""
+    def change(saved):
+        _prune(now)
+        tab = saved['tabs'].get(thread)
+        if (tab is None or tab['state'] != 'resuming' or pane in _tombstones
+                or any(other['pane'] == pane for other in saved['tabs'].values())):
+            return False
+        tab.update(pane=pane, reused=True)
+        return True
+    return _edit(change)
 
 
 def _order(position):
@@ -320,7 +337,8 @@ def tick(*, entries, folder_of, status_of, display_dir, run=subprocess.run,
                     screen = _tmux(run, 'capture-pane', '-p', '-t', pane).stdout
                     lines = [line.strip() for line in screen.splitlines() if line.strip()]
                     failed[tab['thread']] = lines[-1][:160] if lines else 'The resume command exited.'
-                    _tmux(run, 'kill-pane', '-t', pane)
+                    if not tab.get('reused'):  # A restored shell was there before the resume; leave it.
+                        _tmux(run, 'kill-pane', '-t', pane)
                 elif age >= 5 * VERIFY_SECS or not entry or not entry.get('pending_conversation'):
                     failed[tab['thread']] = 'Could not verify the resumed conversation.'
 
@@ -426,14 +444,13 @@ def launch(*, entries, run=subprocess.run, now=time.time, sleep=time.sleep):
             if chat is None and not os.path.isfile(tab['transcript']):
                 raise ValueError('Conversation not found.')
             command = resume_command(thread, agent=tab['agent'], profile=tab['profile'])
-            if not _update(thread, state='resuming', started=now(), error=''):
+            if not _update(thread, state='resuming', started=now(), error='', reused=False):
                 continue
             existing = _tmux(run, 'list-panes', '-s', '-t', '=' + tab['session'] + ':', '-F', '#{pane_id}')
             panes = existing.stdout.splitlines() if existing.returncode == 0 else []
             restored = _restored_shell(tab, run=run) if panes else None
-            if restored:
+            if restored and _claim(thread, restored, now=now()):
                 pane = restored  # Not ours to remove on failure: it was there before this launch.
-                _update(thread, pane=pane)
             elif panes:
                 pane = new_window_after(panes[-1], run, cwd=tab['folder'], group=tab['options'].get('@group', ''))
                 cleanup = True
