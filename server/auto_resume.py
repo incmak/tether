@@ -37,7 +37,7 @@ RESTORE_SECS = 30  # tmux-continuum restores its windows within this time of the
 PROMPT_SECS = 5  # a new shell draws its prompt within this time; later output means a person typed or ran something
 _RESTORED = '\t'.join('#{' + field + '}' for field in
                       ('pane_id', 'window_index', 'pane_index', 'pane_current_command', 'pane_current_path',
-                       '@chat_name', '@tether_role', 'window_activity', 'start_time', 'pane_pid', 'pid'))
+                       '@chat_name', '@tether_role', 'window_activity', 'start_time', 'pane_pid', 'pid', 'pane_in_mode'))
 
 _lock = threading.Lock()
 _wake = threading.Event()
@@ -238,10 +238,11 @@ def _restored_shell(tab, *, run):
 
     A restore brings back the windows but not the agents in them. Resuming into a new window would leave that
     shell as an empty duplicate tab. A match needs tmux-continuum restore on, the same session, window.pane
-    position and folder, a shell in the foreground, and no Tether pane options. The shell must have started
+    position and folder, a shell in the foreground outside copy mode, and no @chat_name or @tether_role. The shell must have started
     within RESTORE_SECS of the tmux server, so a shell a person opens later does not match. Its window must have
     had no output after the prompt: a typed draft or a command updates window_activity.
-    Returns (pane, shell pid). The caller claims the pane with _claim and checks it with _ours before the keys.
+    Returns (pane, (shell pid, window_activity)). The caller claims the pane with _claim. Right before the keys,
+    _ours checks that the shell, the activity and copy mode did not change, so a later draft gets no Enter.
 
     Known limits: a shell a person opens at that same position within RESTORE_SECS of the server start, or a
     draft typed within PROMPT_SECS of the shell start, looks like a restored shell. A restore slower than
@@ -254,11 +255,11 @@ def _restored_shell(tab, *, run):
     folder = os.path.realpath(tab['folder'])
     for line in result.stdout.splitlines():
         fields = line.split('\t')
-        if len(fields) != 11:
+        if len(fields) != 12:
             continue
-        pane, window, index, command, cwd, name, role, activity, start, pid, server = fields
+        pane, window, index, command, cwd, name, role, activity, start, pid, server, mode = fields
         if not ([window, index] == [str(part) for part in tab['order']]
-                and command in SHELLS and cwd and os.path.realpath(cwd) == folder and not name and not role
+                and command in SHELLS and cwd and os.path.realpath(cwd) == folder and not name and not role and mode == '0'
                 and activity.isdigit() and start.isdigit() and pid.isdigit() and server.isdigit()):
             continue
         shell, began = _started(pid), _started(server)
@@ -266,21 +267,24 @@ def _restored_shell(tab, *, run):
             continue
         after = shell - began  # seconds from the tmux server start to the shell start
         if 0 <= after <= RESTORE_SECS and -1 <= int(activity) - int(start) - after <= PROMPT_SECS:
-            return pane, pid
+            return pane, (pid, activity)
     return None
 
 
-def _ours(thread, pane, pid, *, run, now):
-    """True when the tab still claims the reused pane and tmux still shows the same shell in it."""
+def _ours(thread, pane, seen, *, run, now):
+    """True when the tab still claims the reused pane and tmux still shows the same idle shell in it.
+    seen is (shell pid, window_activity) from _restored_shell: new output since then means a person typed."""
     with _lock:
         _prune(now)
         tab = _read()['tabs'].get(thread)
         claimed = tab is not None and tab['pane'] == pane and tab.get('reused') and pane not in _tombstones
     if not claimed:
         return False
-    result = _tmux(run, 'display-message', '-p', '-t', pane, '#{pane_pid}\t#{pane_current_command}')
-    shell, _, command = result.stdout.strip().partition('\t')
-    return result.returncode == 0 and shell == pid and command in SHELLS
+    result = _tmux(run, 'display-message', '-p', '-t', pane,
+                   '#{pane_pid}\t#{pane_current_command}\t#{window_activity}\t#{pane_in_mode}')
+    fields = result.stdout.strip().split('\t')
+    return (result.returncode == 0 and len(fields) == 4 and fields[1] in SHELLS
+            and (fields[0], fields[2]) == seen and fields[3] == '0')
 
 
 def _claim(thread, pane, *, now):

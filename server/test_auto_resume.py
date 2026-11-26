@@ -454,7 +454,8 @@ class AutoResumeTests(unittest.TestCase):
         restore = options.pop('restore', 'on')
         self.tmux.globals['@continuum-restore'] = restore
         self.shell_start = options.pop('shell_start', 5012.0)
-        options = {'start_time': '5000', 'window_activity': '5013', 'pane_pid': '4242', 'pid': '100', **options}
+        options = {'start_time': '5000', 'window_activity': '5013', 'pane_pid': '4242', 'pid': '100',
+                   'pane_in_mode': '0', **options}
         self.tmux.add(dict(self.entry, id='%7', thread=None, **(changes or {})), **options)
         self.tick()
         return self.saved()['tabs'].get(THREAD)
@@ -472,6 +473,7 @@ class AutoResumeTests(unittest.TestCase):
         cases = {'program in foreground': ({}, {'pane_current_command': 'node'}),
                  'other folder': ({'cwd': '/srv/other'}, {'pane_current_command': 'zsh'}),
                  'output after the prompt (a draft)': ({}, {'pane_current_command': 'zsh', 'window_activity': '5022'}),
+                 'copy mode': ({}, {'pane_current_command': 'zsh', 'pane_in_mode': '1'}),
                  'continuum restore off': ({}, {'pane_current_command': 'zsh', 'restore': ''}),
                  'shell opened after the restore': ({}, {'pane_current_command': 'zsh', 'shell_start': 5100.0,
                                                          'window_activity': '5101'}),
@@ -533,7 +535,9 @@ class AutoResumeTests(unittest.TestCase):
 
     def test_close_or_new_shell_after_the_claim_gets_no_keys(self):
         cases = {'tab closed': lambda: auto_resume.forget_pane('%7', run=self.tmux, now=lambda: self.clock),
-                 'shell replaced': lambda: self.tmux.panes['%7'].update(pane_pid='5151')}
+                 'shell replaced': lambda: self.tmux.panes['%7'].update(pane_pid='5151'),
+                 'draft typed after the claim': lambda: self.tmux.panes['%7'].update(window_activity='5020'),
+                 'copy mode after the claim': lambda: self.tmux.panes['%7'].update(pane_in_mode='1')}
         for case, change in cases.items():
             with self.subTest(case):
                 self.setUp()
