@@ -28,6 +28,7 @@ class FakeTmux:
         self.next_id = 10
         self.before = lambda argv: None
         self.screen = 'resume error'
+        self.globals = {}  # global options and server formats, such as @continuum-restore and start_time
 
     def add(self, entry, **options):
         self.panes[entry['id']] = dict(pane_id=entry['id'], session_id=entry['tmux_session'],
@@ -53,6 +54,8 @@ class FakeTmux:
                 output = self.server
             elif argv[-1] == '#{window-size}\t#{window_width}\t#{window_height}':
                 output = 'latest\t120\t40'
+            elif '-t' not in argv:
+                output = re.sub(r'#\{([^}]+)\}', lambda match: self.globals.get(match[1], ''), argv[-1])
             else:
                 target = argv[argv.index('-t') + 1]
                 row = (next((row for row in self.panes.values() if row['session_id'] == target[:-1]), None)
@@ -87,6 +90,8 @@ class FakeTmux:
             output = pane
         elif command == 'set-option' and '-p' in argv:
             self.panes[argv[argv.index('-t') + 1]][argv[-2]] = argv[-1]
+        elif command == 'show-options' and '-g' in argv[2]:
+            output = self.globals.get(argv[-1], '')
         elif command == 'capture-pane':
             output = self.screen
         elif command == 'kill-pane':
@@ -440,23 +445,37 @@ class AutoResumeTests(unittest.TestCase):
         self.tick()
         self.tmux.lose('30:300')
         self.entries = []
-        options = {'start_time': '5000', 'window_activity': '5013', **options}  # drawn 13 s after the server start
+        # A continuum restore started the shell 12 s after the server; it drew its prompt 1 s later.
+        self.tmux.globals.update({'@continuum-restore': 'on', 'start_time': '5000'})
+        self.clock = 5000 + auto_resume.RESTORE_SECS
+        self.shell_start = 5012.0
+        self.started = self.enterContext(patch.object(
+            auto_resume, '_started', side_effect=lambda pid: 5000.0 if pid == '100' else self.shell_start))
+        restore = options.pop('restore', 'on')
+        self.tmux.globals['@continuum-restore'] = restore
+        self.shell_start = options.pop('shell_start', 5012.0)
+        options = {'start_time': '5000', 'window_activity': '5013', 'pane_pid': '4242', 'pid': '100', **options}
         self.tmux.add(dict(self.entry, id='%7', thread=None, **(changes or {})), **options)
         self.tick()
-        return self.saved()['tabs'][THREAD]
+        return self.saved()['tabs'].get(THREAD)
 
     def test_restored_idle_shell_at_the_tab_position_is_reused_not_duplicated(self):
         tab = self._resume_beside_restored_pane(pane_current_command='zsh')
         self.assertEqual((tab['pane'], tab['state']), ('%7', 'resuming'))
         self.assertFalse(any(call[1] in ('new-window', 'new-session', 'kill-pane') for call in self.tmux.calls))
-        self.assertEqual(self.sends(), [[paths.TMUX, 'send-keys', '-t', '%7', '-l', 'claude --resume ' + THREAD],
-                                        [paths.TMUX, 'send-keys', '-t', '%7', 'Enter']])
+        self.assertEqual(self.sends(), [[paths.TMUX, 'send-keys', '-t', '%7', '-l', 'claude --resume ' + THREAD,
+                                         ';', 'send-keys', '-t', '%7', 'Enter']])
         self.assertEqual(self.tmux.panes['%7']['@chat_name'], 'Task')
+        self.assertTrue(self.saved()['tabs'][THREAD]['reused'])
 
     def test_pane_that_is_not_a_restored_idle_shell_gets_a_new_window_beside_it(self):
         cases = {'program in foreground': ({}, {'pane_current_command': 'node'}),
                  'other folder': ({'cwd': '/srv/other'}, {'pane_current_command': 'zsh'}),
-                 'output after the restore': ({}, {'pane_current_command': 'zsh', 'window_activity': '5500'}),
+                 'output after the prompt (a draft)': ({}, {'pane_current_command': 'zsh', 'window_activity': '5022'}),
+                 'continuum restore off': ({}, {'pane_current_command': 'zsh', 'restore': ''}),
+                 'shell opened after the restore': ({}, {'pane_current_command': 'zsh', 'shell_start': 5100.0,
+                                                         'window_activity': '5101'}),
+                 'shell start unknown': ({}, {'pane_current_command': 'zsh', 'shell_start': None}),
                  'other position': ({'position': '3.0'}, {'pane_current_command': 'zsh'}),
                  'named tab': ({}, {'pane_current_command': 'zsh', '@chat_name': 'Notes'}),
                  'helper tab': ({}, {'pane_current_command': 'zsh', '@tether_role': 'advisor'})}
@@ -477,6 +496,54 @@ class AutoResumeTests(unittest.TestCase):
         self.assertEqual(self.saved()['tabs'][THREAD]['state'], 'failed')
         self.assertIn('%7', self.tmux.panes)
         self.assertNotIn('kill-pane', [call[1] for call in self.tmux.calls])
+
+    def test_launch_waits_while_continuum_may_still_restore(self):
+        self.tick()
+        self.tmux.lose('30:300')
+        self.entries = []
+        self.tmux.globals.update({'@continuum-restore': 'on', 'start_time': '5000'})
+        self.tmux.add(dict(self.entry, id='%7', thread=None, position='3.0'))
+        self.clock = 5000 + auto_resume.RESTORE_SECS - 1
+        self.tick()
+        self.assertEqual(self.sends(), [])
+        self.assertEqual(self.saved()['tabs'][THREAD]['state'], 'pending')
+        self.clock += 1
+        self.tick()
+        self.assertEqual(self.saved()['tabs'][THREAD]['state'], 'resuming')
+
+    def test_retry_of_a_reused_tab_keeps_the_old_pane_safe_until_a_new_pane_is_saved(self):
+        self._resume_beside_restored_pane(pane_current_command='zsh')
+        saved = self.saved()
+        saved['tabs'][THREAD].update(state='failed')
+        self.store(saved)
+        self.assertEqual(auto_resume.retry(), 1)
+        def interrupt(argv):
+            if argv[1] == 'new-window':
+                raise KeyboardInterrupt
+        self.tmux.before = interrupt
+        self.tmux.panes['%7']['window_activity'] = '9000'  # no longer a fresh restore: a new window is due
+        self.entries = [dict(self.entry, id='%7', agent='shell', writable=False, thread=None)]
+        with self.assertRaises(KeyboardInterrupt):
+            self.tick()
+        self.assertTrue(self.saved()['tabs'][THREAD]['reused'])
+        self.tmux.before = lambda argv: None
+        self.clock += auto_resume.VERIFY_SECS
+        self.tick()
+        self.assertIn('%7', self.tmux.panes)
+
+    def test_close_or_new_shell_after_the_claim_gets_no_keys(self):
+        cases = {'tab closed': lambda: auto_resume.forget_pane('%7', run=self.tmux, now=lambda: self.clock),
+                 'shell replaced': lambda: self.tmux.panes['%7'].update(pane_pid='5151')}
+        for case, change in cases.items():
+            with self.subTest(case):
+                self.setUp()
+                def act(argv, change=change):
+                    if argv[1] == 'set-option' and '@chat_name' in argv:
+                        change()
+                self.tmux.before = act
+                self._resume_beside_restored_pane(pane_current_command='zsh')
+                self.assertEqual(self.sends(), [])
+                self.assertIn('%7', self.tmux.panes)
 
     def test_restored_shell_closed_during_lookup_is_not_used(self):
         def close(argv):

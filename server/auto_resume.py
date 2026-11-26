@@ -33,10 +33,12 @@ _STATES = ('open', 'pending', 'resuming', 'failed', 'deferred')
 _FORMAT = '\t'.join('#{' + field + '}' for field in
                     ('pane_id', *OPTIONS, *SESSION_OPTIONS))
 SHELLS = frozenset(('bash', 'dash', 'fish', 'ksh', 'sh', 'zsh'))
-RESTORE_SECS = 120  # a tmux restore draws its windows within this time of the server start
+RESTORE_SECS = 30  # tmux-continuum restores its windows within this time of the server start
+PROMPT_SECS = 5  # a new shell draws its prompt within this time; later output means a person typed or ran something
 _RESTORED = '\t'.join('#{' + field + '}' for field in
                       ('pane_id', 'window_index', 'pane_index', 'pane_current_command', 'pane_current_path',
-                       '@chat_name', '@tether_role', 'window_activity', 'start_time'))
+                       '@chat_name', '@tether_role', 'window_activity', 'start_time', 'pane_pid', 'pid'))
+
 _lock = threading.Lock()
 _wake = threading.Event()
 _tombstones = {}
@@ -209,29 +211,71 @@ def _pane_rows(*, run):
     return rows
 
 
+def _started(pid):
+    """The start time of a process in seconds since the epoch, or None where /proc cannot tell.
+
+    The boot time it builds on drifts from the wall clock by a few seconds, so compare two of these values
+    with each other, not with a tmux time."""
+    try:
+        with open('/proc/%d/stat' % int(pid), encoding='ascii') as stream:
+            ticks = int(stream.read().rsplit(')', 1)[1].split()[19])
+        with open('/proc/stat', encoding='ascii') as stream:
+            boot = next(int(line.split()[1]) for line in stream if line.startswith('btime '))
+        return boot + ticks / os.sysconf('SC_CLK_TCK')
+    except (OSError, ValueError, IndexError, StopIteration):
+        return None
+
+
+def _restoring(run, now):
+    """True while tmux-continuum may still restore windows into a new tmux server."""
+    result = _tmux(run, 'display-message', '-p', '#{start_time}\t#{@continuum-restore}')
+    start, _, restore = result.stdout.strip().partition('\t')
+    return result.returncode == 0 and restore == 'on' and start.isdigit() and now - int(start) < RESTORE_SECS
+
+
 def _restored_shell(tab, *, run):
     """The idle shell that a tmux restore (tmux-resurrect or tmux-continuum) put where this tab's agent ran, or None.
 
     A restore brings back the windows but not the agents in them. Resuming into a new window would leave that
-    shell as an empty duplicate tab. A match needs the same session, window.pane position and folder, a shell in
-    the foreground, and no Tether pane options. Its window must have had no output since the restore: a typed
-    draft or a command updates window_activity, and a shell that a person opens later starts after the restore.
-    The caller claims the pane with _claim."""
+    shell as an empty duplicate tab. A match needs tmux-continuum restore on, the same session, window.pane
+    position and folder, a shell in the foreground, and no Tether pane options. The shell must have started
+    within RESTORE_SECS of the tmux server, so a shell a person opens later does not match. Its window must have
+    had no output after the prompt: a typed draft or a command updates window_activity.
+    Returns (pane, shell pid). The caller claims the pane with _claim and checks it with _ours before the keys."""
     result = _tmux(run, 'list-panes', '-s', '-t', '=' + tab['session'] + ':', '-F', _RESTORED)
-    if result.returncode:
+    restore = _tmux(run, 'show-options', '-gqv', '@continuum-restore')
+    if result.returncode or restore.stdout.strip() != 'on':
         return None
     folder = os.path.realpath(tab['folder'])
     for line in result.stdout.splitlines():
         fields = line.split('\t')
-        if len(fields) != 9:
+        if len(fields) != 11:
             continue
-        pane, window, index, command, cwd, name, role, activity, start = fields
-        if not (activity.isdigit() and start.isdigit()) or not 0 <= int(activity) - int(start) <= RESTORE_SECS:
+        pane, window, index, command, cwd, name, role, activity, start, pid, server = fields
+        if not ([window, index] == [str(part) for part in tab['order']]
+                and command in SHELLS and cwd and os.path.realpath(cwd) == folder and not name and not role
+                and activity.isdigit() and start.isdigit() and pid.isdigit() and server.isdigit()):
             continue
-        if ([window, index] == [str(part) for part in tab['order']]
-                and command in SHELLS and cwd and os.path.realpath(cwd) == folder and not name and not role):
-            return pane
+        shell, began = _started(pid), _started(server)
+        if shell is None or began is None:
+            continue
+        after = shell - began  # seconds from the tmux server start to the shell start
+        if 0 <= after <= RESTORE_SECS and -1 <= int(activity) - int(start) - after <= PROMPT_SECS:
+            return pane, pid
     return None
+
+
+def _ours(thread, pane, pid, *, run, now):
+    """True when the tab still claims the reused pane and tmux still shows the same shell in it."""
+    with _lock:
+        _prune(now)
+        tab = _read()['tabs'].get(thread)
+        claimed = tab is not None and tab['pane'] == pane and tab.get('reused') and pane not in _tombstones
+    if not claimed:
+        return False
+    result = _tmux(run, 'display-message', '-p', '-t', pane, '#{pane_pid}\t#{pane_current_command}')
+    shell, _, command = result.stdout.strip().partition('\t')
+    return result.returncode == 0 and shell == pid and command in SHELLS
 
 
 def _claim(thread, pane, *, now):
@@ -411,6 +455,8 @@ def launch(*, entries, run=subprocess.run, now=time.time, sleep=time.sleep):
                          key=lambda tab: (tab['session'], tab['order']))
         return [tab['thread'] for tab in pending[:MAX_PASS]]
     try:
+        if _restoring(run, now()):
+            return False  # The restore may still bring back the shells these tabs would reuse.
         selected = _edit(select)
     except Exception:
         return False  # Without a durable claim, no conversation may start.
@@ -444,38 +490,47 @@ def launch(*, entries, run=subprocess.run, now=time.time, sleep=time.sleep):
             if chat is None and not os.path.isfile(tab['transcript']):
                 raise ValueError('Conversation not found.')
             command = resume_command(thread, agent=tab['agent'], profile=tab['profile'])
-            if not _update(thread, state='resuming', started=now(), error='', reused=False):
+            if not _update(thread, state='resuming', started=now(), error=''):
                 continue
             existing = _tmux(run, 'list-panes', '-s', '-t', '=' + tab['session'] + ':', '-F', '#{pane_id}')
             panes = existing.stdout.splitlines() if existing.returncode == 0 else []
             restored = _restored_shell(tab, run=run) if panes else None
-            if restored and _claim(thread, restored, now=now()):
-                pane = restored  # Not ours to remove on failure: it was there before this launch.
+            shell_pid = None
+            if restored and _claim(thread, restored[0], now=now()):
+                pane, shell_pid = restored  # Not ours to remove on failure: it was there before this launch.
             elif panes:
                 pane = new_window_after(panes[-1], run, cwd=tab['folder'], group=tab['options'].get('@group', ''))
                 cleanup = True
             else:
                 pane = resume_session(tab['session'], tab['folder'], thread, run=run,
                                       agent=tab['agent'], profile=tab['profile'])
-                _update(thread, pane=pane)
+                _update(thread, pane=pane, reused=False)
             session_id = _tmux(run, 'display-message', '-p', '-t', pane, '#{session_id}', check=True).stdout.strip()
             # For a new session resume_session already sent the keys. The shell
             # buffers them during startup; the launcher reads @project afterwards.
             _options(tab, pane, session_id, run=run)
             if panes:
                 # The project launcher needs the options before these shell keys.
-                if _tab(thread) is None:
+                if shell_pid is not None:
+                    if not _ours(thread, pane, shell_pid, run=run, now=now()):
+                        continue  # Closed or replaced since the claim: leave the pane alone.
+                    # One tmux command list, so no other client command runs between the text and Enter.
+                    _tmux(run, 'send-keys', '-t', pane, '-l', command, ';', 'send-keys', '-t', pane, 'Enter',
+                          check=True)
+                elif _tab(thread) is None:
                     if cleanup:
                         _tmux(run, 'kill-pane', '-t', pane)
                     continue
-                _tmux(run, 'send-keys', '-t', pane, '-l', command, check=True)
-                _tmux(run, 'send-keys', '-t', pane, 'Enter', check=True)
+                else:
+                    _tmux(run, 'send-keys', '-t', pane, '-l', command, check=True)
+                    _tmux(run, 'send-keys', '-t', pane, 'Enter', check=True)
             transcript = tab['transcript'] or (chat or {}).get('transcript') or ''
             try:
                 offset = os.path.getsize(transcript)
             except OSError:
                 offset = 0
-            _update(thread, pane=pane, session_id=session_id, transcript=transcript, offset=offset)
+            _update(thread, pane=pane, session_id=session_id, transcript=transcript, offset=offset,
+                    reused=shell_pid is not None)
             launched = True
         except Exception as exc:
             try:
