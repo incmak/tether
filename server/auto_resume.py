@@ -251,7 +251,9 @@ def _restored_shell(tab, *, run):
     draft typed within PROMPT_SECS of the shell start, looks like a restored shell. A restore slower than
     RESTORE_SECS, or a host without /proc (macOS), falls back to a new window and keeps the duplicate. A draft
     typed in the instant between the last check and the keys still gets Enter. When _ours refuses after the
-    option writes, the tab ends as failed and Retry opens a new window.
+    option writes, the tab ends as failed and Retry opens a new window. Output paused with Ctrl+S does not
+    update window_activity, so a draft typed then also gets Enter. A close of the shell right after _claim
+    reads as a close of the agent tab and drops its resume record.
     B614 and B615 track two older launch races that also apply here."""
     result = _tmux(run, 'list-panes', '-s', '-t', '=' + tab['session'] + ':', '-F', _RESTORED)
     restore = _tmux(run, 'show-options', '-gqv', '@continuum-restore')
