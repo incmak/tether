@@ -50,6 +50,14 @@ def _has_tagged_parent(pid, table, tagged):
     return False
 
 
+def _thread_tree(db, thread):
+    """The tab's thread and every subagent below it, at any depth and status: a daemon runs their terminals too."""
+    rows = db.execute("""WITH RECURSIVE tree(id) AS (SELECT ? UNION
+                             SELECT e.child_thread_id FROM thread_spawn_edges e JOIN tree ON e.parent_thread_id=tree.id)
+                         SELECT id FROM tree""", (thread,))
+    return {row[0].encode() for row in rows}
+
+
 def background_terminals(entry, *, table=None):
     """Return one process per tagged terminal subtree. Call only when the tab is idle."""
     owner, thread = entry['owner_pid'], entry['thread']
@@ -60,9 +68,10 @@ def background_terminals(entry, *, table=None):
         root_env = {owner: _environment(owner)}
         with closing(agents.codex_database()) as db:
             rollout = agents.open_rollout(db, owner, strict=True)
-        roots = {owner: None}
-        if not rollout or rollout[0] != thread:
-            roots.update((pid, thread.encode()) for pid in _daemon_pids(table, owner))
+            roots = {owner: None}
+            if not rollout or rollout[0] != thread:
+                threads = _thread_tree(db, thread)
+                roots.update((pid, threads) for pid in _daemon_pids(table, owner))
 
         scopes = {}
         for root, thread_id in roots.items():
@@ -77,7 +86,7 @@ def background_terminals(entry, *, table=None):
         for pid, thread_id in scopes.items():
             try:
                 env = root_env[pid] if pid in root_env else _environment(pid)
-                if env.get(b'CODEX_TOOL_CALL_ID') and (thread_id is None or env.get(b'CODEX_THREAD_ID') == thread_id):
+                if env.get(b'CODEX_TOOL_CALL_ID') and (thread_id is None or env.get(b'CODEX_THREAD_ID') in thread_id):
                     tagged[pid] = procinfo.comm(pid)
             except _GONE:
                 continue

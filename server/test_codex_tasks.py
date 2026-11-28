@@ -27,6 +27,10 @@ class CodexTasksTests(unittest.TestCase):
         self.addCleanup(db.close)
         db.execute('INSERT INTO threads (id, rollout_path, archived, source) VALUES (?, ?, 0, ?)',
                    (THREAD, self.rollout, 'cli'))
+        db.execute('CREATE TABLE IF NOT EXISTS thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT PRIMARY KEY, status TEXT)')
+        db.executemany('INSERT INTO thread_spawn_edges VALUES (?, ?, ?)',
+                       [(THREAD, 'child', 'closed'), ('child', 'grandchild', 'open'), ('other', 'unrelated', 'open')])
+        self.db = db
         self.enterContext(patch.object(agents, 'codex_database', return_value=db))
 
     def environ(self, pid):
@@ -95,11 +99,22 @@ class CodexTasksTests(unittest.TestCase):
                               tags={'CODEX_TOOL_CALL_ID': 'exec-2', 'CODEX_THREAD_ID': 'other'})
         self.rows[104] = dict(ppid=owner, state='S', comm='sleep',
                               tags={'CODEX_TOOL_CALL_ID': 'exec-3', 'CODEX_THREAD_ID': 'other'})
+        self.rows[105] = dict(ppid=101, state='S', comm='tail',
+                              tags={'CODEX_TOOL_CALL_ID': 'exec-4', 'CODEX_THREAD_ID': 'grandchild'})
+        self.rows[106] = dict(ppid=101, state='S', comm='tail',
+                              tags={'CODEX_TOOL_CALL_ID': 'exec-5', 'CODEX_THREAD_ID': 'unrelated'})
 
-    def test_daemon_client_checks_its_thread_and_its_own_descendants(self):
+    def test_daemon_client_checks_its_thread_tree_and_its_own_descendants(self):
         self.fds.return_value = []
         self.assertEqual(self.check('after_stop', edits=self.daemon_rows),
-                         [{'pid': 102, 'command': 'sleep'}, {'pid': 104, 'command': 'sleep'}])
+                         [{'pid': 102, 'command': 'sleep'}, {'pid': 104, 'command': 'sleep'},
+                          {'pid': 105, 'command': 'tail'}])
+
+    def test_daemon_client_without_spawn_edges_is_unchecked(self):
+        self.fds.return_value = []
+        self.db.execute('DROP TABLE thread_spawn_edges')
+        with self.assertRaises(codex_tasks.Unchecked):
+            self.check('after_stop', edits=self.daemon_rows)
 
     def test_daemon_root_read_error_is_unchecked(self):
         def edits(owner):

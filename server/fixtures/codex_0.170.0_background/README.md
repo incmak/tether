@@ -13,6 +13,8 @@ unified-exec tags. The tag values are shortened.
 
 The process check cannot detect embedded subagents that are thinking with no
 process, yielded Code Mode cells, or async hooks. These cases have no outside
-channel for this check. Injected process tables cover the daemon-client branch.
+channel for this check. For a daemon client, the check counts terminals of the
+tab's thread and of every subagent below it in `thread_spawn_edges`. Injected
+process tables cover the daemon-client branch.
 The host daemon runs Codex 0.172.0, so the 0.170.0 daemon-client branch was not
 verified live.
