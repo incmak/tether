@@ -182,12 +182,21 @@ def _agy_tool_parts(call):
     args = call.get('args') if isinstance(call, dict) and isinstance(call.get('args'), dict) else {}
 
     def value(key):
-        return str(args.get(key, '')).strip().strip('"')
+        raw = args.get(key, '')
+        if isinstance(raw, str) and raw.startswith('"') and raw.endswith('"'):
+            try:
+                decoded = json.loads(raw, strict=False)
+            except json.JSONDecodeError:
+                pass
+            else:
+                if isinstance(decoded, str):
+                    return decoded
+        return str(raw).strip().strip('"')
 
     name = call.get('name', 'tool') if isinstance(call, dict) else 'tool'
     command = value('CommandLine')
     first_line = command.split('\n', 1)[0] if command else None
-    return name, first_line, value('toolAction') or value('toolSummary'), value('AbsolutePath')
+    return name, first_line, value('toolAction') or value('toolSummary'), value('AbsolutePath') or value('Path')
 
 
 def agy_tool_line(call):

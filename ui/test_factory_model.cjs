@@ -186,6 +186,49 @@ test('the same Done stamp and deployment clock follow Kolkata and New York indep
   assert.equal(at([tool('run_command', 'python3 -m unittest -q')], { agent: 'antigravity' }).phase, 'verify')
 }
 
+// Tool order from server/fixtures/antigravity_1.5.19/transcript.jsonl.
+const agyTools = [
+  tool('read_file', '.'),
+  tool('read_file', 'calc.py'),
+  tool('update_steps', ''),
+  tool('run_command', 'ls -la /workspace/agyrun'),
+  tool('run_command', 'grep -rn "beta" /workspace/agyrun'),
+  tool('read_file', '/workspace/agyrun/calc.py'),
+  tool('update_steps', ''),
+  tool('edit_file', '/workspace/agyrun/calc.py'),
+  tool('write_file', '/workspace/agyrun/hello.txt'),
+  tool('update_steps', ''),
+  tool('run_command', "cd /workspace/agyrun && python3 -c 'import calc; print(calc.add(2,3))'"),
+  tool('update_steps', ''),
+]
+
+test('Antigravity fixture through step 6 is Spec', () => {
+  assert.equal(m.phaseOfTools(agyTools.slice(0, 6)).phase, 'spec')
+})
+
+test('Antigravity fixture edits put the task in Build through step 11', () => {
+  const afterEdits = m.phaseOfTools(agyTools.slice(0, 9))
+  assert.equal(afterEdits.phase, 'build')
+  assert.equal(afterEdits.why, 'edits files: write_file /workspace/agyrun/hello.txt')
+  assert.equal(m.phaseOfTools(agyTools.slice(0, 8)).why, 'edits files: edit_file /workspace/agyrun/calc.py')
+})
+
+test('Antigravity fixture remains in Build after the Python smoke check', () => {
+  const result = m.phaseOfTools(agyTools)
+  assert.equal(result.phase, 'build')
+  assert.equal(result.why, 'edits files: write_file /workspace/agyrun/hello.txt')
+})
+
+test('Antigravity write alone is Build with file edit evidence', () => {
+  assert.deepEqual(m.phaseOfTools([tool('write_file', 'hello.txt')]), {
+    phase: 'build', why: 'edits files: write_file hello.txt',
+  })
+})
+
+test('Antigravity viewer and search calls are Spec', () => {
+  assert.equal(m.phaseOfTools([tool('view_file', 'calc.py'), tool('grep_search', 'beta')]).phase, 'spec')
+})
+
 // A working reviewer puts the task in Review; a DEPLOYED.md line puts an open item in Deploy.
 {
   const result = floor([pane('%6', { pane_name: 'B20 work', reviewers: ['%7'] }), pane('%7', { agent: 'codex', state: 'Working' })], { '%6': [tool('Edit', 'x')] })

@@ -30,7 +30,7 @@ def tool_use(name, data, stamp='2026-11-17T08:00:00Z'):
 
 
 def agy_step(position, **fields):
-    # Synthetic Antigravity rows from the shape antigravity.py parses. No live agy capture.
+    # Synthetic Antigravity rows. See server/fixtures/antigravity_1.5.19/ for a live capture.
     return {'type': 'PLANNER_RESPONSE', 'step_index': position, 'content': '', **fields}
 
 
@@ -175,7 +175,7 @@ class ToolTests(unittest.TestCase):
                 {'type': 'USER_INPUT', 'step_index': 1, 'content': 'Run the tests'},
                 agy_step(2, created_at=stamp, tool_calls=[
                     {'name': 'run_command', 'args': {'CommandLine': '"python3 -m unittest -q"'}},
-                    {'name': 'view_file', 'args': {'AbsolutePath': '"/repo/test_factory.py"'}},
+                    {'name': 'view_file', 'args': {'AbsolutePath': '"/repo/test_factory.py"', 'Path': '"test_factory.py"'}},
                 ]),
             ])
             entry = {'id': '%1', 'agent': 'antigravity', 'transcript': str(path)}
@@ -183,6 +183,25 @@ class ToolTests(unittest.TestCase):
                 {'name': 'run_command', 'title': 'python3 -m unittest -q', 'at': stamp, 'error': False, 'done': False},
                 {'name': 'view_file', 'title': '/repo/test_factory.py', 'at': stamp, 'error': False, 'done': False},
             ])
+
+    def test_recent_tools_reads_antigravity_1_5_19_transcript(self):
+        path = Path(__file__).parent / 'fixtures/antigravity_1.5.19/transcript.jsonl'
+        entry = {'id': '%1', 'agent': 'antigravity', 'transcript': str(path)}
+        tools = factory.recent_tools(entry, server.FACTORY_READERS)
+        self.assertEqual([(tool['name'], tool['title'], tool['at']) for tool in tools], [
+            ('read_file', '.', '2026-11-28T13:11:50Z'),
+            ('read_file', 'calc.py', '2026-11-28T13:11:50Z'),
+            ('update_steps', '', '2026-11-28T13:17:57Z'),
+            ('run_command', 'ls -la /workspace/agyrun', '2026-11-28T13:17:57Z'),
+            ('run_command', 'grep -rn "beta" /workspace/agyrun', '2026-11-28T13:17:57Z'),
+            ('read_file', '/workspace/agyrun/calc.py', '2026-11-28T13:17:57Z'),
+            ('update_steps', '', '2026-11-28T13:21:28Z'),
+            ('edit_file', '/workspace/agyrun/calc.py', '2026-11-28T13:21:28Z'),
+            ('write_file', '/workspace/agyrun/hello.txt', '2026-11-28T13:21:28Z'),
+            ('update_steps', '', '2026-11-28T13:21:37Z'),
+            ('run_command', "cd /workspace/agyrun && python3 -c 'import calc; print(calc.add(2,3))'", '2026-11-28T13:21:37Z'),
+            ('update_steps', '', '2026-11-28T13:21:54Z'),
+        ])
 
     def test_recent_tools_orders_and_replaces_antigravity_steps(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -228,6 +247,10 @@ class ToolTests(unittest.TestCase):
         ]:
             with self.subTest(args=args):
                 self.assertEqual(antigravity.agy_tool_line({'name': 'view_file', 'args': args}), expected)
+
+    def test_agy_tool_line_decodes_json_escaped_command(self):
+        call = {'name': 'run_command', 'args': {'CommandLine': r'"grep -rn \"beta\" x"'}}
+        self.assertEqual(antigravity.agy_tool_line(call), 'Ran grep -rn "beta" x')
 
     def test_no_tools_for_unread_agents_missing_files_or_odd_records(self):
         self.assertEqual(factory.recent_tools({'id': '%1', 'agent': 'shell', 'transcript': '/x'}, claude_readers()), [])

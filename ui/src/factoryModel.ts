@@ -59,8 +59,8 @@ export const STUCK_MS = 30 * 60 * 1000       // no tab of a task in progress has
 const RECENT = 4                            // the latest steps that decide Verify, Review and Deploy
 const SPEC_WINDOW = 12                      // Spec: none of the latest 12 steps edits a file
 
-const EDITS = /^(Edit|MultiEdit|Write|NotebookEdit|apply_patch|edit|write)$/i
-const READS = /^(Read|Grep|Glob|LS|WebSearch|WebFetch|ToolSearch|TodoWrite|TaskList|Skill|AskUserQuestion|read_file|list_dir|grep|view_image|web_search|update_plan)$/i
+const EDITS = /^(Edit|MultiEdit|Write|NotebookEdit|apply_patch|edit|write|edit_file|write_file|notebook_edit)$/i
+const READS = /^(Read|Grep|Glob|LS|WebSearch|WebFetch|ToolSearch|TodoWrite|TaskList|Skill|AskUserQuestion|read_file|list_dir|grep|view_image|web_search|update_plan|update_steps|view_file|grep_search|find_by_name|search_in_file|view_content_chunk|code_search|search_web|command_status|read_terminal|ask_question)$/i
 const READ_COMMANDS = /^\s*(cd [^&;]+(&&|;)\s*)*(cat|head|tail|sed -n|grep|rg|ls|find|wc|git (log|show|diff|status|blame)|jq|tree|stat|file)\b/
 const TESTS = /(unittest|pytest|run_ui_tests|test_[\w-]+\.(cjs|py|js|ts)|\bnpm (run )?test|vitest|jest|playwright|tsc -b|\beslint\b|screenshot|SHOTS=|\bcheck\b.*--)/i
 const REVIEWS = /(codex-lane|codex exec|agent_tab_cli\.py (wait|start --reviews-me|send)|agent_advisor_cli)/
@@ -106,7 +106,7 @@ export function phaseOfTools(tools: FactoryTool[]): { phase: Phase; why: string 
   if (test) return { phase: 'verify', why: `latest steps check the work: ${short(test)}` }
   const window = tools.slice(-SPEC_WINDOW)
   const edits = window.some(tool => EDITS.test(tool.name))
-  const reads = window.every(tool => READS.test(tool.name) || (/^(Bash|exec_command|shell)$/i.test(tool.name) && READ_COMMANDS.test(tool.title)))
+  const reads = window.every(tool => READS.test(tool.name) || (/^(Bash|exec_command|shell|run_command)$/i.test(tool.name) && READ_COMMANDS.test(tool.title)))
   if (!edits && reads) return { phase: 'spec', why: `the latest ${window.length} steps only read and search, no edits yet` }
   const edit = [...window].reverse().find(tool => EDITS.test(tool.name))
   return { phase: 'build', why: edit ? `edits files: ${short(edit)}` : `latest step: ${short(tools[tools.length - 1])}` }
