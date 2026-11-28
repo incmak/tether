@@ -190,7 +190,7 @@ def _agy_tool_parts(call):
                 pass
             else:
                 if isinstance(decoded, str):
-                    return decoded
+                    return decoded.strip()
         return str(raw).strip().strip('"')
 
     name = call.get('name', 'tool') if isinstance(call, dict) else 'tool'
