@@ -127,6 +127,10 @@ export function useQuickCreate({ api, agent, sessions, onOpen }: Options): { cre
     show(id, old => ({ ...old, kind: 'busy', text: `Moving “${started.name}” to ${placeName(place)}…`, suggest: undefined }))
     try {
       const moved = await moveTab(api, started.pane, place)
+      if ('restart' in moved) {
+        setToast(old => old?.id === id ? null : old)
+        return
+      }
       show(id, old => ({ ...old, kind: 'done', text: `Moved “${started.name}” to ${placeName(moved.place)}.`, note: 'The agent keeps its folder.', tab: { ...started, place: moved.place } }))
     } catch (failure) {
       show(id, old => ({ ...old, kind: 'error', text: `The tab was not moved. ${message(failure)}` }))

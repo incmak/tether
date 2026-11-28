@@ -195,6 +195,7 @@ class RenderTests(Bundles):
     def test_marks_cover_the_group_revision(self):
         projects.set_instructions(PID, 'Use pnpm.', 0)
         projects.set_instructions(self.GPID, 'Group rule.', 0)
+        other = 'c1c2c3c4c5c6'
         raw = json.dumps([{'id': 'gaaaaaaaa', 'name': 'Docs', 'project': self.GPID}, {'id': 'gbbbbbbbb', 'name': 'New', 'project': ''}])
         lines = '\n'.join([f'$3\t{PID}\t%1\t{PID}:1+{self.GPID}:1\tgaaaaaaaa\t{raw}',
                            f'$3\t{PID}\t%2\t{PID}:1\tgaaaaaaaa\t{raw}',
@@ -202,9 +203,12 @@ class RenderTests(Bundles):
                            f'$3\t{PID}\t%4\t{PID}:1\tgbbbbbbbb\t{raw}',
                            f'$3\t{PID}\t%5\t{PID}:1\tgffffffff\t{raw}',
                            f'$3\t{PID}\t%6\t{PID}:1\t\t{raw}',
-                           f'$3\t{PID}\t%7\t{PID}:1+{self.GPID}:1\t\t{raw}'])
+                           f'$3\t{PID}\t%7\t{PID}:1+{self.GPID}:1\t\t{raw}',
+                           f'$3\t{PID}\t%8\t{other}:1+{self.GPID}:1\tgaaaaaaaa\t{raw}'])
         run = lambda args, **_: SimpleNamespace(returncode=0, stdout=lines, stderr='')
-        self.assertEqual(projects.marks(run, self.home)['$3']['stale'], ['%2', '%3', '%7'])
+        mark = projects.marks(run, self.home)['$3']
+        self.assertEqual(mark['stale'], ['%2', '%3', '%7', '%8'])
+        self.assertEqual(mark['moved'], ['%8'])
 
 
 class LaunchTests(Bundles):

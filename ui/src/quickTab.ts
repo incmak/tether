@@ -44,7 +44,7 @@ export const startTab = (api: Api, message: string, choice: Choice, request: str
 
 /** Put a tab that startTab made into another session or stack. Its agent keeps running in its folder. */
 export const moveTab = (api: Api, pane: string, place: Place) =>
-  api<{ pane: string; place: Place }>('quick-tab/move', { pane, session: place.session, group: place.group }, undefined, undefined, 15000)
+  api<{ pane: string; place: Place; restart?: unknown }>('quick-tab/move', { pane, session: place.session, group: place.group }, undefined, undefined, 15000)
 
 /** Same place: same session and same stack. */
 export const samePlace = (a: Place, b: Place) => a.session === b.session && a.group === b.group
