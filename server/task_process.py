@@ -170,44 +170,51 @@ def stop(process, *, sleep=time.sleep, kill=os.killpg):
     return exited(process)
 
 
-def _stop_time(record):
-    return record.get('ended') if isinstance(record, dict) else record
+def _confirmed_ledger():
+    return LEDGER.with_suffix('.confirmed.json')
 
 
-def _read():
+def _read(path):
     try:
-        data = json.loads(LEDGER.read_text())
+        data = json.loads(path.read_text())
         if isinstance(data, dict):
-            return {key: record for key, record in data.items()
-                    if type(stamp := _stop_time(record)) in (int, float) and math.isfinite(stamp)}
+            return {key: stamp for key, stamp in data.items()
+                    if type(stamp) in (int, float) and math.isfinite(stamp)}
     except (OSError, ValueError, OverflowError):
         pass
     return {}
 
 
 def record(key, *, confirmed=False):
-    """Record a bound exit. Older numeric entries only recorded a signal attempt."""
+    """Record a bound exit separately so older servers can still write their signal-attempt ledger."""
+    path = _confirmed_ledger() if confirmed else LEDGER
     with _lock:
-        data = _read()
-        now = time.time()
-        data[key] = {'ended': now} if confirmed else now
-        for old in sorted(data, key=lambda key: _stop_time(data[key]))[:-LEDGER_LIMIT]:
+        data = _read(path)
+        data[key] = time.time()
+        for old in sorted(data, key=data.get)[:-LEDGER_LIMIT]:
             del data[old]
-        LEDGER.parent.mkdir(parents=True, exist_ok=True)
-        temporary = LEDGER.with_suffix('.tmp')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix('.tmp')
         temporary.write_text(json.dumps(data))
-        os.replace(temporary, LEDGER)
+        os.replace(temporary, path)
+
+
+def _ledger_stamp(path):
+    try:
+        return str(path), path.stat().st_mtime_ns
+    except OSError:
+        return str(path), None
 
 
 def stopped():
     """Read the stop records once per ledger change for the listing poll."""
     with _lock:
-        try:
-            stamp = (str(LEDGER), LEDGER.stat().st_mtime_ns)
-        except OSError:
-            return {}
+        confirmed = _confirmed_ledger()
+        stamp = (_ledger_stamp(LEDGER), _ledger_stamp(confirmed))
         if _memo[0] != stamp:
-            _memo[:] = [stamp, _read()]
+            records = _read(LEDGER)
+            records.update({key: {'ended': ended} for key, ended in _read(confirmed).items()})
+            _memo[:] = [stamp, records]
         return _memo[1]
 
 

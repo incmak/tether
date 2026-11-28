@@ -54,6 +54,8 @@ class Replay:
         self.opened = []
         self.stopped = []
         self.closed = False
+        self.shell_processes = {}
+        self.exited_shells = set()
 
     @contextmanager
     def session(self):
@@ -74,6 +76,7 @@ class Replay:
         tasks.mkdir(parents=True)
         self.output = tasks / f'{IDS["shell"]}.output'
         self.output.touch()
+        self.shell_processes[self.output] = canary.task_process.Process(PID + 1, 'shell')
         registry = self.root / 'registry.json'
         registry.write_text(json.dumps({'pid': PID, 'sessionId': thread, 'version': VERSION}))
         for kind, tool, age in (('shell', 'Bash', 165), ('monitor', 'Monitor', 161)):
@@ -95,7 +98,12 @@ class Replay:
                     patch.object(canary.procinfo, 'comm', return_value='claude'), \
                     patch.object(canary.task_process, 'children', return_value=[PID + 1]), \
                     patch.object(canary.task_process, 'running', return_value=True), \
-                    patch.object(canary.stop, 'bind', side_effect=AssertionError('unexpected process fallback')):
+                    patch.object(canary.task_process, 'LEDGER', self.root / 'task-stops.json'), \
+                    patch.object(canary.task_process, 'find', side_effect=self.find_shell), \
+                    patch.object(canary.task_process, 'same', side_effect=lambda process: process not in self.exited_shells), \
+                    patch.object(canary.task_process, 'exited', side_effect=self.exited_shells.__contains__), \
+                    patch.object(canary.task_process, 'stop', side_effect=AssertionError('unexpected process signal')) as signal_stop:
+                self.signal_stop = signal_stop
                 yield self.entry
         finally:
             self.closed = True
@@ -103,6 +111,10 @@ class Replay:
     def append(self, record):
         with self.transcript.open('a') as stream:
             stream.write(json.dumps(record) + '\n')
+
+    def find_shell(self, owner_pid, task, output, started):
+        process = self.shell_processes.get(Path(output)) if owner_pid == PID else None
+        return process if process not in self.exited_shells else None
 
     listing = staticmethod(canary.subagents.listing)
 
@@ -165,7 +177,7 @@ class Replay:
             elif kind == 'agent':
                 self.meta.write_text(json.dumps({'description': AGENT, 'stoppedByUser': True}))
             elif kind == 'shell':
-                self.output.write_text('[killed]\n')
+                self.exited_shells.add(self.shell_processes[self.output])
             else:
                 event = f'<task-notification><task-id>{IDS[kind]}</task-id><status>killed</status></task-notification>'
                 self.append({'type': 'user', 'message': {'content': event}})
@@ -191,6 +203,7 @@ class WaitingReplay(Replay):
             child = 'bchild'
             self.child_output = self.output.with_name(f'{child}.output')
             self.child_output.touch()
+            self.shell_processes[self.child_output] = canary.task_process.Process(PID + 2, 'child')
             with self.agent_path.open('a') as stream:
                 for record in (
                     {'type': 'assistant', 'message': {'content': [
@@ -200,8 +213,7 @@ class WaitingReplay(Replay):
                      'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'child'}]}},
                 ):
                     stream.write(json.dumps(record) + '\n')
-            with patch.object(canary.task_process, 'find', return_value=canary.task_process.Process(PID + 1, 'child')):
-                yield entry
+            yield entry
 
     def listing(self, entry):
         listed = super().listing(entry)
@@ -245,7 +257,7 @@ class WaitingReplay(Replay):
                     self.stopped.append('agent')
                     if self.unconfirmed != 'agent':
                         self.meta.write_text(json.dumps(dict(json.loads(self.meta.read_text()), stoppedByUser=True)))
-                        self.child_output.write_text('[killed]\n')
+                        self.exited_shells.add(self.shell_processes[self.child_output])
                         self.row_order = ['monitor', 'shell']
                         self.selection = 0
                 return subprocess.CompletedProcess(args, 0)
@@ -453,6 +465,7 @@ class StopCanaryTests(unittest.TestCase):
                 report = json.loads(self.report.read_text())
                 self.assertIn('Found 2 shell rows in /tasks. Expected one.', report['tasks']['shell']['error'])
                 self.assertEqual(self.replay.stopped, ['agent', 'monitor'])
+                self.replay.signal_stop.assert_not_called()
                 self.assertEqual([kind for kind, _ in self.replay.opened].count('shell'), int(appears_at_stop))
 
     def test_changed_detail_refuses_only_that_task(self):

@@ -14,7 +14,7 @@ import tool_details
 from own_time import own_time
 
 
-CLAUDE_332_TASKS = Path(__file__).with_name('fixtures') / 'claude_2.1.332_tasks'
+CLAUDE_332_TASK_RECORDS = Path(__file__).with_name('fixtures') / 'claude_2.1.332_task_records'
 
 
 def shell_completion_record(output, tool_id, status, timestamp, *, summary='Background command ended', as_user=False):
@@ -825,7 +825,7 @@ class ProcessTasksTests(unittest.TestCase):
         parent, = subagents.listing(self.config)['agents']
         self.assertEqual(parent['waiting'], {'shell': 1, 'monitor': 0})
         with self.main.open('a') as stream:
-            stream.write((CLAUDE_332_TASKS / 'task-stop.jsonl').read_text())
+            stream.write((CLAUDE_332_TASK_RECORDS / 'task-stop.jsonl').read_text())
         listed = subagents.listing(self.config)
         self.assertEqual(listed['agents'][0]['state'], 'finished')
         tasks = {task['id']: task for task in listed['tasks']}
@@ -834,12 +834,12 @@ class ProcessTasksTests(unittest.TestCase):
         self.assertEqual(tasks['b00000003']['state'], 'running')
 
     def test_task_stop_requires_success_for_the_requested_shell(self):
-        for wrong_field in ('tool', 'request', 'tool use', 'result', 'error', 'command', 'start time'):
+        for wrong_field in ('tool', 'request', 'tool use', 'task type', 'extra result', 'result', 'error', 'command', 'start time'):
             with self.subTest(wrong_field=wrong_field):
                 self.setUp()
                 identifier = 'b00000002'
                 self.output(identifier)
-                call, result = map(json.loads, (CLAUDE_332_TASKS / 'task-stop.jsonl').read_text().splitlines())
+                call, result = map(json.loads, (CLAUDE_332_TASK_RECORDS / 'task-stop.jsonl').read_text().splitlines())
                 use = call['message']['content'][0]
                 tool_result = result['toolUseResult']
                 if wrong_field == 'tool':
@@ -848,6 +848,10 @@ class ProcessTasksTests(unittest.TestCase):
                     use['input']['task_id'] = 'b00000003'
                 elif wrong_field == 'tool use':
                     result['message']['content'][0]['tool_use_id'] = 'toolu_other'
+                elif wrong_field == 'task type':
+                    tool_result['task_type'] = 'local_agent'
+                elif wrong_field == 'extra result':
+                    result['message']['content'].append({'type': 'tool_result', 'tool_use_id': 'toolu_other'})
                 elif wrong_field == 'result':
                     tool_result['message'] = f'Task {identifier} may still be running.'
                 elif wrong_field == 'error':

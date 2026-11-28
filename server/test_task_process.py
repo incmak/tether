@@ -202,10 +202,17 @@ class LedgerTests(unittest.TestCase):
         records = task_process.stopped()
         self.assertIsInstance(records['a/b1'], float)
         self.assertIsInstance(records['a/b2']['ended'], float)
+        self.assertEqual(json.loads(task_process.LEDGER.read_text()), {'a/b1': records['a/b1']})
         with patch.object(task_process, 'LEDGER_LIMIT', 3):
             for index in range(5):
                 task_process.record(f'k{index}')
         self.assertEqual(len(json.loads(task_process.LEDGER.read_text())), 3)
+        self.assertEqual(task_process.stopped()['a/b2'], records['a/b2'])
+
+    def test_confirmed_exit_stands_alone_without_a_legacy_signal_attempt(self):
+        task_process.record('a/b1', confirmed=True)
+        self.assertFalse(task_process.LEDGER.exists())
+        self.assertIsInstance(task_process.stopped()['a/b1']['ended'], float)
 
     def test_corrupt_ledger_reads_empty_and_is_rewritten(self):
         task_process.LEDGER.parent.mkdir(parents=True)

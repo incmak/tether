@@ -16,7 +16,7 @@ import server
 import subagent_stop as stop
 import subagents
 import terminal_input as terminal
-from test_subagents import CLAUDE_332_TASKS, shell_completion_record
+from test_subagents import CLAUDE_332_TASK_RECORDS, shell_completion_record
 
 
 LIST_HINT = ('↑/↓ to select · Enter to view · f to foreground · x to stop · '
@@ -473,7 +473,7 @@ class ProcessStopTests(unittest.TestCase):
 
     def terminal_stop(self, *, child=None, exited=True):
         fixture = 'user-stop-child-shell.jsonl' if child else 'user-stop-shell.jsonl'
-        record = json.loads((CLAUDE_332_TASKS / fixture).read_text())
+        record = json.loads((CLAUDE_332_TASK_RECORDS / fixture).read_text())
         record['message']['content'] = record['message']['content'].replace('/redacted/tasks/shell02.output', str(self.output))
         with (child or Path(self.entry['transcript'])).open('a') as stream:
             stream.write(json.dumps(record) + '\n')
@@ -636,6 +636,22 @@ class ProcessStopTests(unittest.TestCase):
                              side_effect=lambda process: self.finish_shell('failed') or True):
             self.assertEqual(self.stop('shell02'), {'ok': True, 'state': 'stopped'})
         self.assertNotIn(('x',), self.pane.keys)
+
+    def test_disabled_signal_fallback_refuses_errors_even_with_a_bound_process(self):
+        for terminal_error in (False, True):
+            with self.subTest(terminal_error=terminal_error):
+                self.setUp()
+                self.make_tasks()
+                self.pane.draft = 'Keep draft'
+                if terminal_error:
+                    self.verify.side_effect = OSError('terminal unavailable')
+                expected = 'Could not stop the task' if terminal_error else 'unsent draft'
+                with patch.object(stop.task_process, 'stop', side_effect=AssertionError('Unexpected signal')) as signal_stop:
+                    with self.assertRaisesRegex(stop.StopError, expected):
+                        stop.stop(self.entry, 'shell02', run=self.pane, sleep=lambda _: None,
+                                  allow_process_fallback=False)
+                signal_stop.assert_not_called()
+                self.assertEqual(self.pane.keys, [])
 
     def test_failure_after_x_never_falls_back_to_signal(self):
         # After x, Claude may already have stopped the task; a signal could then reach a same-command twin.
