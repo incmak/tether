@@ -7,8 +7,10 @@ version draws /tasks.
 """
 from collections import namedtuple
 import json
+import math
 import os
 import signal
+import subprocess
 import threading
 import time
 
@@ -20,7 +22,7 @@ LEDGER_LIMIT = 500
 # The start record is written after the process starts; allow for a slow transcript write.
 START_BEFORE, START_AFTER = 15, 3
 _lock = threading.Lock()
-_memo = [None, frozenset()]  # (path, mtime_ns), keys
+_memo = [None, {}]  # (path, mtime_ns), stop records
 # A pid alone can name a new process after the task exits; start ticks pin the exact process.
 Process = namedtuple('Process', 'pid ticks')
 
@@ -124,15 +126,23 @@ def running(owner_pid, task, started, pids=None):
 
 def _alive(pid, ticks):
     try:
-        return procinfo.start_ticks(pid) == ticks and procinfo.stat_fields(pid)[0] not in ('Z', 'X')
-    except (OSError, ValueError, KeyError, IndexError):
+        fields = procinfo.stat_fields(pid)
+        return fields[19] == ticks and fields[0] not in ('Z', 'X')
+    except (FileNotFoundError, ProcessLookupError):
         return False
+    except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError):
+        return None
+
+
+def exited(process):
+    """Confirm exit of an earlier binding, even if a live process can close its output or change group."""
+    return _alive(process.pid, process.ticks) is False
 
 
 def same(process):
     """True while process is still the same live group leader that find named."""
     try:
-        return _alive(process.pid, process.ticks) and os.getpgid(process.pid) == process.pid
+        return _alive(process.pid, process.ticks) is True and os.getpgid(process.pid) == process.pid
     except (OSError, ValueError, KeyError):
         return False
 
@@ -143,10 +153,10 @@ def stop(process, *, sleep=time.sleep, kill=os.killpg):
     process comes from find. Each signal goes only while the pid still has the start ticks find
     read, so a pid that a new process reused is never signalled."""
     if not same(process):
-        return True
+        return exited(process)
     kill(process.pid, signal.SIGTERM)
     for attempt in range(31):
-        if not _alive(*process):
+        if exited(process):
             return True
         if attempt == 30:
             break
@@ -155,41 +165,56 @@ def stop(process, *, sleep=time.sleep, kill=os.killpg):
         kill(process.pid, signal.SIGKILL)
         for _ in range(10):
             sleep(0.1)
-            if not _alive(*process):
+            if exited(process):
                 return True
-    return not _alive(*process)
+    return exited(process)
 
 
-def _read():
+def _confirmed_ledger():
+    return LEDGER.with_suffix('.confirmed.json')
+
+
+def _read(path):
     try:
-        data = json.loads(LEDGER.read_text())
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        return {}
+        data = json.loads(path.read_text())
+        if isinstance(data, dict):
+            return {key: stamp for key, stamp in data.items()
+                    if type(stamp) in (int, float) and math.isfinite(stamp)}
+    except (OSError, ValueError, OverflowError):
+        pass
+    return {}
 
 
-def record(key):
-    """Remember that Tether stopped this task, so its listing says stopped, not failed."""
+def record(key, *, confirmed=False):
+    """Record a bound exit separately so older servers can still write their signal-attempt ledger."""
+    path = _confirmed_ledger() if confirmed else LEDGER
     with _lock:
-        data = _read()
+        data = _read(path)
         data[key] = time.time()
         for old in sorted(data, key=data.get)[:-LEDGER_LIMIT]:
             del data[old]
-        LEDGER.parent.mkdir(parents=True, exist_ok=True)
-        temporary = LEDGER.with_suffix('.tmp')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix('.tmp')
         temporary.write_text(json.dumps(data))
-        os.replace(temporary, LEDGER)
+        os.replace(temporary, path)
+
+
+def _ledger_stamp(path):
+    try:
+        return str(path), path.stat().st_mtime_ns
+    except OSError:
+        return str(path), None
 
 
 def stopped():
-    """Keys of tasks Tether stopped. Listing polls call this, so it reads the file only after a change."""
+    """Read the stop records once per ledger change for the listing poll."""
     with _lock:
-        try:
-            stamp = (str(LEDGER), LEDGER.stat().st_mtime_ns)
-        except OSError:
-            return frozenset()
+        confirmed = _confirmed_ledger()
+        stamp = (_ledger_stamp(LEDGER), _ledger_stamp(confirmed))
         if _memo[0] != stamp:
-            _memo[:] = [stamp, frozenset(_read())]
+            records = _read(LEDGER)
+            records.update({key: {'ended': ended} for key, ended in _read(confirmed).items()})
+            _memo[:] = [stamp, records]
         return _memo[1]
 
 

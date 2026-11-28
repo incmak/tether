@@ -479,6 +479,49 @@ def _entry(agent_id, files, now, notifications, since, members=None):
 
 
 _REF_LIMIT = 1024
+_TASK_STATES = {'completed': 'finished', 'failed': 'failed', 'killed': 'stopped'}
+_SHELL_NOTICE = re.compile(
+    r'<task-notification>\n<task-id>([a-z0-9]{6,32})</task-id>\n'
+    r'<tool-use-id>([^<>\n]+)</tool-use-id>\n<output-file>([^\n]+)</output-file>\n'
+    r'<status>(completed|failed|killed)</status>\n<summary>([^<]*)</summary>\n'
+)
+
+
+def _shell_completion(record):
+    # Claude Code 2.1.332 stamps its shell completion at delivery. A prompt or
+    # raw queue entry can carry the same text without the producer metadata.
+    if record['type'] == 'attachment':
+        attachment = record.get('attachment')
+        if (not isinstance(attachment, dict) or attachment.get('type') != 'queued_command'
+                or attachment.get('commandMode') != 'task-notification'):
+            return None
+        origin, text = attachment.get('origin'), attachment.get('prompt')
+    elif record['type'] == 'user':
+        origin, text = record.get('origin'), record['message'].get('content')
+    else:
+        return None
+    if (not isinstance(origin, dict) or origin.get('kind') != 'task-notification'
+            or origin.get('producer') != 'session-task' or not isinstance(text, str)
+            or not text.endswith('\n</task-notification>')):
+        return None
+    match = _SHELL_NOTICE.match(text)
+    if match is None:
+        return None
+    identifier, tool_id, output, status, summary = match.groups()
+    return (identifier, tool_id, output), (_TASK_STATES[status], unescape(summary).strip()[:240],
+                                          _stamp(record.get('timestamp')))
+
+
+def _stopped_shell(result, parts, calls):
+    """Read a successful local TaskStop result. Claude also returns data for a remote stop it could not confirm."""
+    identifier, command, message = (result.get(key) for key in ('task_id', 'command', 'message'))
+    if not all(isinstance(value, str) for value in (identifier, command, message)):
+        return None
+    if (len(parts) == 1 and not parts[0].get('is_error')
+            and calls.get(parts[0]['tool_use_id']) == identifier
+            and message.startswith(f'Successfully stopped task: {identifier} (')):
+        return identifier, command
+    return None
 
 
 def _task_refs(text, refs, root):
@@ -499,14 +542,17 @@ def _task_refs(text, refs, root):
 def _task_scan(path, previous=None, *, root):
     """Index task starts, notifications and tasks-folder mentions once, then scan only appended lines.
     The index does not depend on the tab that asks, so all tabs of one project share one scan per file."""
-    data = {'starts': {}, 'calls': {}, 'notifications': {}, 'refs': set(), '_offset': 0}
+    data = {'starts': {}, 'calls': {}, 'stop_calls': {}, 'shell_stops': {},
+            'notifications': {}, 'completion_notices': {}, 'refs': set(), '_offset': 0}
     root_bytes = root.encode()
     with path.open('rb') as stream:
         size = stream.seek(0, 2)
         if previous is not None and size > previous[0][1]:
             old = previous[1]
             data = dict(old, starts=dict(old['starts']), calls=dict(old['calls']),
-                        notifications=dict(old['notifications']), refs=set(old['refs']))
+                        stop_calls=dict(old['stop_calls']), shell_stops=dict(old['shell_stops']),
+                        notifications=dict(old['notifications']), completion_notices=dict(old['completion_notices']),
+                        refs=set(old['refs']))
         stream.seek(data['_offset'])
         while True:
             data['_offset'] = stream.tell()
@@ -516,6 +562,9 @@ def _task_scan(path, previous=None, *, root):
             if root_bytes in line:
                 _task_refs(line.decode('utf-8', errors='replace'), data['refs'], root)
             for record in _records([line]):
+                if b'<task-notification>' in line and (completion := _shell_completion(record)) is not None:
+                    key, state = completion
+                    data['completion_notices'][key] = state
                 message = record.get('message')
                 content = message.get('content') if isinstance(message, dict) else None
                 text = _text(content)
@@ -524,9 +573,12 @@ def _task_scan(path, previous=None, *, root):
                 if record['type'] == 'assistant' and isinstance(content, list):
                     for part in content:
                         if (isinstance(part, dict) and part.get('type') == 'tool_use'
-                                and part.get('name') in ('Bash', 'Monitor') and isinstance(part.get('id'), str)):
+                                and part.get('name') in ('Bash', 'Monitor', 'TaskStop') and isinstance(part.get('id'), str)):
                             inputs = part.get('input')
                             inputs = inputs if isinstance(inputs, dict) else {}
+                            if part['name'] == 'TaskStop':
+                                data['stop_calls'][part['id']] = inputs.get('task_id')
+                                continue
                             command, description = inputs.get('command'), inputs.get('description')
                             data['calls'][part['id']] = {
                                 'kind': 'monitor' if part['name'] == 'Monitor' else 'shell',
@@ -534,14 +586,24 @@ def _task_scan(path, previous=None, *, root):
                                 'description': description if isinstance(description, str) else None}
                 if record['type'] != 'user':
                     continue
-                _notifications(_text(content), data['notifications'])
+                _notifications(text, data['notifications'])
                 result = record.get('toolUseResult')
                 if not isinstance(result, dict):
+                    continue
+                parts = [
+                    part for part in content if isinstance(part, dict)
+                    and part.get('type') == 'tool_result' and isinstance(part.get('tool_use_id'), str)
+                ] if isinstance(content, list) else []
+                if result.get('task_type') == 'local_bash':
+                    key = _stopped_shell(result, parts, data['stop_calls'])
+                    ended = _stamp(record.get('timestamp'))
+                    if key is not None and ended is not None:
+                        data['shell_stops'][key] = ended
                     continue
                 identifier = result.get('backgroundTaskId') or result.get('taskId')
                 if not isinstance(identifier, str) or not re.fullmatch(r'[a-z0-9]{6,32}', identifier):
                     continue
-                ids = [part.get('tool_use_id') for part in content if isinstance(part, dict)] if isinstance(content, list) else []
+                ids = [part['tool_use_id'] for part in parts]
                 call = next((data['calls'][key] for key in ids if key in data['calls']), {})
                 data['starts'][identifier] = dict(call, started=record.get('timestamp'), _call_ids=ids)
             if not line.endswith(b'\n'):
@@ -559,7 +621,7 @@ def _task_path(tasks_dir, identifier):
     return path
 
 
-def _footer(path):
+def _monitor_footer(path):
     with path.open('rb') as stream:
         stream.seek(max(0, path.stat().st_size - 200))
         tail = stream.read(200).decode('utf-8', errors='replace').rstrip()
@@ -589,7 +651,7 @@ def _tasks(config, tasks_dir, files, now, since, *, include_finished=False):
             sources[path] = (identifier, False)
     # tasks_dir is always TASKS_TMP.resolve()/<slug>/<uuid>/tasks, so one scan per transcript and root
     # serves every tab of the project.
-    starts, notifications, calls, scans = {}, {}, {}, []
+    starts, notifications, completion_notices, shell_stops, calls, scans = {}, {}, {}, {}, {}, []
     marker, root = str(tasks_dir), str(tasks_dir.parent.parent.parent)
     first = main.parent / f'{tasks_dir.parent.name}.jsonl'
     for path, (parent, in_scope) in sources.items():
@@ -599,6 +661,8 @@ def _tasks(config, tasks_dir, files, now, since, *, include_finished=False):
             if parent is None and path not in (main, first) and marker not in scan['refs']:
                 continue
             notifications.update(scan['notifications'])
+            completion_notices.update(scan['completion_notices'])
+            shell_stops.update(scan['shell_stops'])
             calls.update(scan['calls'])
             scans.append((scan, parent, in_scope))
         except (OSError, ValueError, RuntimeError):
@@ -616,33 +680,47 @@ def _tasks(config, tasks_dir, files, now, since, *, include_finished=False):
     ledger = task_process.stopped()
     for candidate in tasks_dir.glob('*.output'):
         try:
-            seen.add(candidate.stem)
-            path = _task_path(tasks_dir, candidate.stem)
-            info = path.stat()
-            (state, footer), _ = _cached(path, _footer)
-            status, summary = notifications.get(candidate.stem, (None, None))
-            if state is None:
-                state = {'completed': 'finished', 'failed': 'failed', 'killed': 'stopped'}.get(status, 'running')
-            if state == 'failed' and task_process.key(tasks_dir, candidate.stem) in ledger:
-                # Tether stopped it with a signal; Claude records that as a non-zero exit.
-                state, footer, summary = 'stopped', None, STOPPED_BY_TETHER
-            start = starts.get(candidate.stem, {})
-            if not start:
+            identifier = candidate.stem
+            seen.add(identifier)
+            start = starts.get(identifier)
+            if start is None:
                 # Claude makes an output file for every Bash call, so a foreground command can move to
                 # the background. Only a start record (backgroundTaskId/taskId) makes it a background task.
                 continue
+            path = _task_path(tasks_dir, identifier)
+            info = path.stat()
+            kind = start.get('kind', 'shell')
             started = start.get('started')
             stamp = _stamp(started)
+            stop_record = ledger.get(task_process.key(tasks_dir, identifier))
+            if kind == 'monitor':
+                (state, footer), _ = _cached(path, _monitor_footer)
+                status, summary = notifications.get(identifier, (None, None))
+                state = state or _TASK_STATES.get(status, 'running')
+                ended = info.st_mtime if footer else None
+                summary = footer or summary
+            else:
+                output = str(path)
+                keys = ((identifier, tool_id, output) for tool_id in start['_call_ids'])
+                state, summary, ended = next((completion_notices[key] for key in keys if key in completion_notices),
+                                             ('running', None, None))
+                claude_stop = shell_stops.get((identifier, start.get('command')))
+                if state == 'running' and claude_stop is not None and stamp is not None and claude_stop >= stamp:
+                    state, summary, ended = 'stopped', 'Stopped by Claude.', claude_stop
+                if state == 'running' and isinstance(stop_record, dict):
+                    state, summary, ended = 'stopped', STOPPED_BY_TETHER, stop_record['ended']
+            if state == 'failed' and stop_record is not None:
+                # Claude can record a signal from Tether as a failed exit, even on an older stop entry.
+                state, summary = 'stopped', STOPPED_BY_TETHER
             if stamp is None:
                 stamp = getattr(info, 'st_birthtime', info.st_ctime)
                 started = datetime.fromtimestamp(stamp, timezone.utc).isoformat().replace('+00:00', 'Z')
-            ended = info.st_mtime if footer else None
-            result.append({'id': candidate.stem, 'kind': start.get('kind', 'shell'),
+            result.append({'id': identifier, 'kind': kind,
                            'description': start.get('description'), 'command': start.get('command'),
                            'state': state, 'started': started,
                            'ended': datetime.fromtimestamp(ended, timezone.utc).isoformat().replace('+00:00', 'Z') if ended is not None else None,
                            'seconds': int((ended if ended is not None else now) - stamp),
-                           'parent': start.get('parent'), 'summary': (footer or summary) if state in ('failed', 'stopped') else None,
+                           'parent': start.get('parent'), 'summary': summary if state in ('failed', 'stopped') else None,
                            '_scope': start['_scope'], '_output': path})
         except (OSError, ValueError, RuntimeError):
             continue
@@ -669,7 +747,7 @@ def _monitors(config, tasks_dir, starts, notifications, ledger, seen, now, since
         if stamp is None:
             continue
         status, summary = notifications.get(identifier, (None, None))
-        state = {'completed': 'finished', 'failed': 'failed', 'killed': 'stopped'}.get(status)
+        state = _TASK_STATES.get(status)
         if state is None:
             if since is None or stamp < since - 5:
                 state, summary = 'stopped', 'Claude exited before this task finished.'
