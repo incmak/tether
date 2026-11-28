@@ -38,15 +38,16 @@ EXTRA_ROUNDS = 2
 # Counts that pause a review at MAX_ROUNDS: failed reviews, reviews of turns that changed nothing, and approvals
 # that could not be verified for the current commit.
 COUNTS = ('rounds', 'empty_rounds', 'stale_rounds')
-CAP_DECISION = ('counts', 'limit', 'grant_rounds', 'paused', 'unreadable', 'parent_stage', 'parent_missing',
-                'escalate', 'cap_reset')
+CAP_DECISION = ('counts', 'limit', 'grant_rounds', 'mak_grants', 'grant_pending', 'paused', 'unreadable',
+                'parent_stage', 'parent_missing', 'escalate', 'cap_reset')
 # Parent evidence: the marker after delivery, the stamp before delivery, and the window renewed after an earlier turn.
 PARENT_FIELDS = ('agent_prompt', 'parent_send_at', 'parent_window_at')
 CAP_FIELDS = (*CAP_DECISION, 'restart', 'review_prompts', 'review_turn_at', *PARENT_FIELDS, 'feedback_turn')
 LEGACY_COUNTS = (*COUNTS, 'round_sources')
 UNOWNED = ''  # B268 saved records can predate reviewer identity.
 SAVED_CAP_TTL = 24 * 60 * 60
-CAP_ERROR = 'This worker reached the review round cap. Mak or the parent must decide before linking a reviewer.'
+CAP_ERROR = ('This worker reached the review round cap. Mak or the parent must decide before linking a reviewer. '
+             'Mak can allow 2 more rounds from the paused review in Tether.')
 UPGRADE_PAUSE = 'upgrade'
 UPGRADE_ERROR = 'The review state from the upgrade needs attention. Stop any existing review link, then link the tabs again in the browser.'
 DELIVERY_ERROR = 'Review feedback is being delivered. Try linking again.'
@@ -133,7 +134,7 @@ def _sanitize(row):
     row = dict(row)
     row.pop('follow_up_ticks', None)  # obsolete idle-poll counter
     for fields, check in (
-        ((*COUNTS, 'limit', 'grant_rounds', 'parent_missing', 'confirm_ticks', 'lost_ticks', 'idle_ticks',
+        ((*COUNTS, 'limit', 'grant_rounds', 'mak_grants', 'parent_missing', 'confirm_ticks', 'lost_ticks', 'idle_ticks',
           'pending_idle_ticks', 'scope_ticks', 'verify_ticks'),
          lambda value: type(value) is int and value >= 0),
         (('created', 'saved_at'), lambda value: type(value) in (int, float)),
@@ -141,13 +142,17 @@ def _sanitize(row):
         (('scope_since', 'scope_retry_at', 'follow_up_checked_at', 'follow_up_untimed_at'),
          lambda value: (type(value) is int or type(value) is float and math.isfinite(value)) and value >= 0),
         (('unreadable', 'pending_reset', 'pending_adoption', 'seen_working', 'upgrade_alerted',
-          'upgrade_alert_deferred', 'stale_unreadable'),
+          'upgrade_alert_deferred', 'stale_unreadable', 'grant_pending'),
          lambda value: type(value) is bool),
         (('name', 'escalate', 'cap_reset'), lambda value: isinstance(value, str)),
     ):
         for field in fields:
             if field in row and not check(row[field]):
                 row.pop(field)
+    if not {'limit', 'grant_rounds'} <= row.keys():
+        row.pop('mak_grants', None)
+    if 'mak_grants' not in row:
+        row.pop('grant_pending', None)
     paused = row.get('paused')
     if type(paused) is not bool and not (_is_cap(row) and paused == UPGRADE_PAUSE):
         row.pop('paused', None)
@@ -320,7 +325,8 @@ def _read():
     if migrate or _needs_migration(rows):
         rows = _migrate(rows, cutoff)
     return [row for row in rows if not _is_cap(row) or not _saved(row)
-            or row['saved_at'] > cutoff or _at_cap(row) or _cap_key(row) in _feedback_in_flight]
+            or row['saved_at'] > cutoff or _at_cap(row) or row.get('grant_pending')
+            or _cap_key(row) in _feedback_in_flight]
 
 
 def _backup_legacy_store():
@@ -395,6 +401,68 @@ def _check_cap(rows, worker, thread):
 def check_cap(worker, thread):
     with _lock:
         _check_cap(_read(), worker, thread)
+
+
+def _failed_rounds(cap):
+    return max((entry.get('rounds', 0) + entry.get('empty_rounds', 0)
+                for entry in cap.get('counts', {}).values()), default=0)
+
+
+def _grant_state(cap):
+    if cap.get('paused') == UPGRADE_PAUSE:
+        raise ValueError(UPGRADE_ERROR)
+    if cap.get('unreadable'):
+        raise ValueError("The review is paused because Tether could not read the tab's commit.")
+    if _stale_limit(cap):
+        raise ValueError('The review is paused because consecutive approvals could not be verified.')
+    if not _at_round_limit(cap):
+        raise ValueError('This review is not at the round cap.')
+    _check_delivery(*_cap_key(cap))
+    failed = _failed_rounds(cap)
+    token = f"{cap.get('cap_reset', '')}:{cap.get('mak_grants', 0)}:{failed}"
+    return dict(rounds=failed, limit=_round_limit(cap), token=token, thread=cap.get('worker_thread'))
+
+
+def grant(worker, worker_thread, expect):
+    """Let Mak resume one conversation from its current review round cap."""
+    if not isinstance(worker, str) or not re.fullmatch(r'%[0-9]+', worker):
+        raise ValueError('Select a worker tab.')
+    with _lock:
+        rows = _read()
+        cap = _cap_for(rows, (worker, worker_thread))
+        if cap is None:
+            raise ValueError('This conversation has no review cap.')
+        state = _grant_state(cap)
+        if expect != state['token']:
+            raise ValueError('The review cap changed. Reload and try again.')
+        failed = state['rounds']
+        limit = failed + EXTRA_ROUNDS
+        cap.update(limit=limit, grant_rounds=failed, mak_grants=cap.get('mak_grants', 0) + 1, grant_pending=True)
+        for field in ('paused', 'parent_stage', 'parent_missing', 'escalate'):
+            cap.pop(field, None)
+        if _saved(cap):
+            cap['saved_at'] = time.time()
+        _write(rows)
+        audit.record('review.grant', f'Mak allowed 2 more review rounds for {cap["name"]}', worker=worker,
+                     reviewer=', '.join(sorted(cap['counts'])), limit=limit)
+        return limit
+
+
+def grantable(threads=None):
+    """List grantable caps, optionally restricted to the panes' current conversations."""
+    with _lock:
+        result = {}
+        for cap in _read():
+            if not _is_cap(cap) or not re.fullmatch(r'%[0-9]+', cap['worker']):
+                continue
+            worker, thread = _cap_key(cap)
+            if threads is not None and (worker not in threads or threads[worker] != thread):
+                continue
+            try:
+                result[worker] = _grant_state(cap)
+            except ValueError:
+                continue
+        return result
 
 
 def _binding_decision(cap):
@@ -834,8 +902,7 @@ def agent_prompt(worker, sender=None, sender_thread=None, *, worker_thread=None)
             cap['agent_prompt'] = time.time()
             if grant:
                 cap['limit'] = MAX_ROUNDS + EXTRA_ROUNDS
-                cap['grant_rounds'] = max((entry.get('rounds', 0) + entry.get('empty_rounds', 0)
-                                           for entry in cap.get('counts', {}).values()), default=0)
+                cap['grant_rounds'] = _failed_rounds(cap)
                 for field in ('paused', 'parent_stage', 'parent_missing'):
                     cap.pop(field, None)
                 if _saved(cap):
@@ -935,11 +1002,16 @@ def _renew_parent_window(cap, started_at, finished_at, *, legacy_agent=False):
 
 
 def _round_limit(cap):
+    if 'mak_grants' in cap:
+        return cap['limit']
     return min(cap.get('limit', MAX_ROUNDS), MAX_ROUNDS + EXTRA_ROUNDS)
 
 
 def _counts_at_limit(cap, counts, next_round=None):
     failed = [counts.get(key, 0) + (key == next_round) for key in ('rounds', 'empty_rounds')]
+    if 'mak_grants' in cap:
+        return (max(failed) >= _round_limit(cap) or sum(failed) >= cap['grant_rounds'] + EXTRA_ROUNDS
+                or counts.get('stale_rounds', 0) >= MAX_ROUNDS)
     # Switching between changed and unchanged work cannot extend the grant, and a granted task never runs more
     # than MAX_ROUNDS + EXTRA_ROUNDS failed reviews for one reviewer.
     return max(failed) >= _round_limit(cap) or (
@@ -949,6 +1021,10 @@ def _counts_at_limit(cap, counts, next_round=None):
 
 def _at_round_limit(cap):
     return any(_counts_at_limit(cap, counts) for counts in cap.get('counts', {}).values())
+
+
+def _stale_limit(cap):
+    return any(counts.get('stale_rounds', 0) >= MAX_ROUNDS for counts in cap.get('counts', {}).values())
 
 
 def _at_cap(cap):
@@ -1254,7 +1330,7 @@ def _idle_source(link, cap, turn_read):
     feedback = cap.get('feedback_turn')
     observed = ('restart' in cap or link['seen_working'] or
                 feedback and feedback['phase'] == 'working'
-                and ['review-correction', feedback['sent_at']] in pending)
+                and any([kind, feedback['sent_at']] in pending for kind in ('review-correction', 'review-grant')))
     fresh = finished_at is None or finished_at > cap.get('review_turn_at', float('-inf'))
     clipped = source in ('unknown', 'unknown-background')
     unbound = source == injected_prompts.UNKNOWN_RECEIPT
@@ -1287,16 +1363,17 @@ def _idle_source(link, cap, turn_read):
         sent_at = feedback['sent_at']
         after_send = ((turn_at is None or turn_at >= sent_at) and
                       (finished_at is None or finished_at >= sent_at))
-        if after_send and source in ('review-feedback', 'review-summary', 'review-correction'):
+        if after_send and source in ('review-feedback', 'review-summary', 'review-correction', 'review-grant'):
             cap.pop('feedback_turn')
         elif feedback['phase'] == 'queued':
             # An idle tick can be the end of the turn that was already running when we queued feedback.
             cap['feedback_turn'] = {**feedback, 'phase': 'pending'}
         elif after_send and (feedback['phase'] == 'working' or source == 'user' and started_at is not None):
             cap.pop('feedback_turn')
-            # The correction's turn ended unmatched (Antigravity has no prompt time). Its marker must not outlive it.
-            if not unbound and (stuck := ['review-correction', sent_at]) in cap.get('review_prompts', ()):
-                cap['review_prompts'] = [marker for marker in cap['review_prompts'] if marker != stuck]
+            # A delivered turn ended unmatched (Antigravity has no prompt time). Retire its marker.
+            if not unbound and cap.get('review_prompts'):
+                cap['review_prompts'] = [marker for marker in cap['review_prompts']
+                                         if marker not in (['review-correction', sent_at], ['review-grant', sent_at])]
                 if not cap['review_prompts']:
                     cap.pop('review_prompts')
             if source == 'user' and started_at is not None:
@@ -1347,6 +1424,11 @@ CORRECTION_ACTION = 'Do not push, deploy or merge on that approval.'
 CORRECTION_PAUSED = 'The review is paused: Mak decides.'
 CORRECTION_REQUESTED = 'Tether asked the reviewer to review the current commit.'
 CORRECTION_WAIT = 'Wait for the next review.'
+GRANT_HEAD = '[Tether review] Mak allowed 2 more review rounds'
+GRANT_ACTION = 'Fix the open findings from the last review, then stop and wait.'
+GRANT_PROMPT = re.compile(
+    rf'{re.escape(GRANT_HEAD)} \(limit [1-9][0-9]*\)\. {re.escape(GRANT_ACTION)}'
+    r'(?: No reviewer tab is linked: start one with python3 [^\r\n]+/agent_tab_cli\.py start --reviews-me\.)?')
 
 
 def prompt_source(entry, record, text):
@@ -1366,6 +1448,8 @@ def _relay_source(text):
     text = injected_prompts.strip_delivery_id(shell_log.strip_folder_note(continuations.unwrap(text)))
     if text.startswith(PARENT_SUMMARY) and text.rstrip().endswith(PARENT_SUMMARY_END):
         return 'review-summary'
+    if GRANT_PROMPT.fullmatch(text.rstrip()):
+        return 'review-grant'
     notice = PARENT_NOTICE.match(text)
     if notice and text.rstrip().endswith(_parent_options(notice[1])):
         return 'review-notice'
@@ -1445,6 +1529,47 @@ def _send_parent_notice(cap, entries, status, send, clear):
                     parent['review_prompts'] = [*parent.get('review_prompts', ()), ['review-notice', sent_at]]
             _release(key, delivery, writing=True)
             _write(rows)
+    finally:
+        with _lock:
+            _release(key, delivery)
+
+
+def _send_grant(cap, entries, status, send, clear):
+    if not cap.get('grant_pending'):
+        return
+    key = _cap_key(cap)
+    worker = entries.get(key[0])
+    if worker is None or helper_tabs._thread(worker) != key[1]:
+        return
+    state = status(worker)['state']
+    if state != 'Idle' or not _can_send(worker, state, clear):
+        return
+    delivery = object()
+    with _lock:
+        rows = _read()
+        current = _cap_for(rows, key)
+        if (current is None or _decision(current) != _decision(cap) or key in _feedback_in_flight
+                or _binding_pending(rows, key, entries)):
+            return
+        linked = any(_is_link(row) and _cap_key(row) == key for row in rows)
+        _feedback_in_flight[key] = delivery
+    try:
+        text = f'{GRANT_HEAD} (limit {cap["limit"]}). {GRANT_ACTION}'
+        if not linked:
+            cli = Path(__file__).resolve().with_name('agent_tab_cli.py')
+            text += f' No reviewer tab is linked: start one with python3 {cli} start --reviews-me.'
+        sent_at = time.time()
+        if not _send_message(worker, text, state, send, clear):
+            return
+        with _lock:
+            rows = _read()
+            current = _cap_for(rows, key)
+            if current is not None:
+                current.pop('grant_pending', None)
+                current['review_prompts'] = [*current.get('review_prompts', ()), ['review-grant', sent_at]]
+                current['feedback_turn'] = {'sent_at': sent_at, 'phase': 'pending'}
+                _release(key, delivery, writing=True)
+                _write(rows)
     finally:
         with _lock:
             _release(key, delivery)
@@ -1621,7 +1746,8 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
         # A clipped turn can request a review, but it cannot authorize a cap reset.
         if not by_agent and source == 'user' and not clipped:
             cap.pop('agent_prompt', None)
-            for field in ('parent_stage', 'parent_missing', 'limit', 'grant_rounds', 'escalate'):
+            for field in ('parent_stage', 'parent_missing', 'limit', 'grant_rounds', 'mak_grants',
+                          'grant_pending', 'escalate'):
                 cap.pop(field, None)
             cap['counts'] = _reviewer_counts_since(cap.get('counts', {}), start.get('counts', {}))
             if start.get('paused') or not _at_round_limit(cap):
@@ -1657,6 +1783,10 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
         # Keep watching for a new Mak turn while all review requests and reply delivery are on hold.
         link['seen_working'] = state == 'Working'
         return link
+    if cap.get('grant_pending') or (state == 'Idle'
+            and (feedback := cap.get('feedback_turn')) is not None
+            and ['review-grant', feedback['sent_at']] in cap.get('review_prompts', ())):
+        return link  # The grant's turn must start before work can go back to a reviewer.
     if link.get('awaiting', False):
         if cap.get('unreadable'):
             link['awaiting'] = False
@@ -1888,7 +2018,9 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
     if state == 'Working':
         if link['worker'] not in awaiting and not correction_turn:
             link['seen_working'] = True
-    elif state == 'Idle' and (link['seen_working'] or link.get('approved_turn')):
+    elif state == 'Idle' and (link['seen_working'] or link.get('approved_turn') or source == 'review-grant'):
+        if source == 'review-grant':
+            link['seen_working'] = True  # This turn can start and end between polls.
         target = None
         if link.get('approved_turn'):
             approved = link.get('approved_state') or {}
@@ -2098,14 +2230,15 @@ def _cap_alert(cap, preview=None, limit=None, *, unreadable=False):
                    else 'Answer in that tab to restart reviews.')
         return ('Review needs you',
                 f'“{cap["name"]}”: the reviewer still found blocking problems after {limit or _round_limit(cap)} rounds. '
-                f'{restart} Open findings: “{preview}”')
-    if any(counts.get('stale_rounds', 0) >= MAX_ROUNDS for counts in cap.get('counts', {}).values()):
+                f'Tap Allow 2 more rounds in Tether. {restart} Open findings: “{preview}”')
+    if _stale_limit(cap):
         reason = "Tether could not read the tab's commit for the latest approval. " if unreadable else ''
         return ('Review needs you',
                 f'“{cap["name"]}”: {MAX_ROUNDS} approvals in a row could not be verified for the current commit. '
                 f'{reason}Answer in that tab to restart reviews.')
     if 'parent_stage' not in cap and 'escalate' not in cap:
-        return ('Review paused', f'“{cap["name"]}” reached the round limit. Answer in that tab to restart reviews.')
+        return ('Review paused', f'“{cap["name"]}” reached the round limit ({_round_limit(cap)} rounds). '
+                'Tap Allow 2 more rounds in Tether or answer in that tab to restart reviews.')
     return None
 
 
@@ -2304,6 +2437,7 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
             if _cap_key(cap) in unavailable:
                 continue
             try:
+                _send_grant(cap, by_pane, fresh if fresh is not None else status, send, clear)
                 notify(_cap_key(cap), _step_parent(cap, by_pane, status, send, clear))
             except Exception:
                 continue

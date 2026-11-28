@@ -60,7 +60,8 @@ class AgentTabsTests(unittest.TestCase):
         handler.rfile = io.BytesIO(encoded)
         handler.headers = {'Host': 'localhost', 'Origin': 'http://localhost', 'X-Codex-Mobile': '1',
                            'X-Tether-Hook': 'test-credential', 'Content-Length': str(len(encoded)), **(headers or {})}
-        handler.deny = Mock(return_value=denied)
+        if denied is not None:
+            handler.deny = Mock(return_value=denied)
         handler.respond = Mock()
         handler.do_POST()
         return handler.respond.call_args.args if handler.respond.called else None
@@ -517,6 +518,29 @@ class AgentTabsTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn('Mak or the parent', reply['error'])
         self.run.assert_not_called()
+
+    def test_review_grant_requires_browser_credentials_and_current_conversation(self):
+        self.stop_review_at(5, paused=True, limit=5, grant_rounds=3)
+        token = review_links.grantable()['%12']['token']
+        payload = {'worker': '%12', 'thread': THREAD, 'token': token}
+        path = '/mobile/api/review-grant'
+        cookie = {'Cookie': f'{auth.COOKIE}=test-credential'}
+        with patch.object(auth, 'MODE', 'token'):
+            for headers, status in (({}, 401), (dict(cookie, Origin='https://evil.test'), 403),
+                                    (dict(cookie, **{'X-Codex-Mobile': ''}), 403)):
+                with self.subTest(status=status, headers=headers):
+                    self.assertEqual(self.request(payload, headers, denied=None, path=path)[0], status)
+            self.fresh.assert_not_called()
+            self.assertEqual(self.request(dict(payload, action='grant'), path=agent_tabs.PATH)[0], 400)
+            self.assertEqual(self.request(dict(payload, thread=None), cookie, denied=None, path=path),
+                             (400, {'error': 'The worker conversation changed. Reload and try again.'}))
+            self.assertEqual(self.request(dict(payload, token='stale'), cookie, denied=None, path=path),
+                             (400, {'error': 'The review cap changed. Reload and try again.'}))
+            with patch.object(server, 'review_send') as send:
+                self.assertEqual(self.request(payload, cookie, denied=None, path=path), (200, {'limit': 7}))
+                send.assert_not_called()
+            self.assertEqual(self.request(payload, cookie, denied=None, path=path)[0], 400)
+        self.assertEqual(review_links.grantable(), {})
 
     def test_relink_below_the_cap_carries_rounds(self):
         self.stop_review_at(1, empty_rounds=2)

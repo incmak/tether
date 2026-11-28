@@ -100,6 +100,7 @@ export interface Pane {
   ask?: Ask | null  // Attention mode: the ask that waits on you until you answer it (server/attention.py)
   reviewers?: string[]
   reviewers_paused?: string[]  // the panes that review each finished turn of this one (server/review_links.py)
+  review_grant?: { rounds: number; limit: number; token: string; thread: string | null }
   parent?: string  // the tab that started this one, from @tether_helper (server/helper_tabs.py)
   opened_by?: { pane: string; name: string | null; live: boolean }  // the tab that ran `start` for this one (B400)
   owner?: string  // the live tab that owns this tab's work; the tab nests under it (B400)

@@ -95,6 +95,14 @@ assert.deepEqual([old.terms, old.commit, old.reply, old.transcript, old.last], [
 assert.deepEqual(plain(review.parseReview('[Tether review] Feedback from the reviewer tab (%9): Fix the test. Fix what it raises, then stop and wait.')), { kind: 'feedback', feedback: true, tab: '%9', reply: 'Fix the test.' })
 assert.equal(review.parseReview('Hello'), null)
 
+const grantAction = 'Fix the open findings from the last review, then stop and wait.'
+const withoutReviewer = ' No reviewer tab is linked: start one with python3 /work tree/server/agent_tab_cli.py start --reviews-me.'
+for (const [limit, reply] of [[7, grantAction], [10, grantAction + withoutReviewer]]) {
+  assert.deepEqual(plain(review.parseReview(`[Tether review] Mak allowed 2 more review rounds (limit ${limit}). ${reply}`)),
+    { kind: 'granted', feedback: true, rounds: limit, reply })
+}
+assert.equal(review.parseReview('[Tether review] Mak allowed 2 more review rounds (limit 7). An unrelated prompt.'), null)
+
 const samples = JSON.parse(readFileSync('../server/fixtures/injected_prompts/other.json', 'utf8'))
 const payload = (message, start, end) => message.slice(message.indexOf(start) + start.length, message.lastIndexOf(end))
 assert.deepEqual(plain(review.parseReview(samples.review_approved)), {

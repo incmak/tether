@@ -1398,6 +1398,143 @@ class ReviewLinksTests(unittest.TestCase):
         self.observe(**{'%12': 'Working'})
         self.observe(**{'%12': 'Idle'})
 
+    def capped_worker(self, rounds=5, **fields):
+        self.add(worker_thread=WORKER_THREAD)
+        rows = self.rows()
+        cap = next(row for row in rows if row.get('cap'))
+        if rounds:
+            self.set_counts(cap, '%12', rounds=rounds - 1, empty_rounds=1)
+        cap.update(fields)
+        self.file.write_text(json.dumps(rows))
+        return cap
+
+    def test_mak_grants_rounds_six_through_nine_in_two_steps(self):
+        self.capped_worker(limit=5, grant_rounds=3, paused=True)
+        self.add_parent()
+        with patch.object(audit, '_folder', return_value=self.file.parent / 'audit'):
+            for failed, limit in ((5, 7), (7, 9)):
+                self.alert.reset_mock()
+                state = review_links.grantable()['%13']
+                self.assertEqual((state['rounds'], state['limit']), (failed, failed))
+                self.assertEqual(review_links.grant('%13', WORKER_THREAD, state['token']), limit)
+                self.observe()
+                prompt = self.send.call_args.args[1]
+                self.assertEqual(prompt, f'[Tether review] Mak allowed 2 more review rounds (limit {limit}). '
+                                 'Fix the open findings from the last review, then stop and wait.')
+                sent = self.links()[0]['feedback_turn']['sent_at']
+                self.turn_source = Mock(return_value=('review-grant', sent + 1, sent + 2))
+                self.observe()  # The grant turn ended between polls.
+                self.assertTrue(self.links()[0]['awaiting'])
+                self.finish_review(FINDINGS)
+                self.assertNotIn('paused', self.links()[0])
+                self.assertIn('Fix what it raises', self.send.call_args.args[1])
+                self.turn_source.return_value = 'review-feedback'
+                self.request_review()
+                self.finish_review(FINDINGS)
+                self.assert_mak_stop(rounds=limit)
+                link = self.links()[0]
+                self.assertEqual(link['rounds'] + link['empty_rounds'], limit)
+                self.assertEqual(link['mak_grants'], (limit - 5) // 2)
+            records = [json.loads(line) for path in audit._folder().glob('*.jsonl')
+                       for line in path.read_text().splitlines()]
+            grants = [record['detail'] for record in records if record['kind'] == 'review.grant']
+            self.assertEqual(grants, [{'worker': '%13', 'reviewer': f'%12:{THREAD}', 'limit': limit}
+                                      for limit in (7, 9)])
+
+    def test_saved_cap_can_receive_prompt_and_relink_after_grant(self):
+        self.capped_worker(rounds=8, limit=5, grant_rounds=3, paused=True)
+        review_links.close('%12')
+        with self.assertRaisesRegex(ValueError, 'Mak can allow 2 more rounds'):
+            self.add(reviewer='%21', worker_thread=WORKER_THREAD, reset=False)
+        state = review_links.grantable()['%13']
+        self.assertEqual(state['rounds'], 8)
+        self.assertEqual(review_links.grant('%13', WORKER_THREAD, state['token']), 10)
+        self.send.assert_not_called()
+        self.worker['agent'] = 'claude'
+        self.observe(entries=[self.worker], **{'%13': 'Working'})
+        self.send.assert_not_called()
+        self.send.side_effect = DraftError('unsent draft')
+        self.observe(entries=[self.worker], **{'%13': 'Idle'})
+        self.assertTrue(self.links()[0]['grant_pending'])
+        self.send.side_effect = None
+        self.observe(entries=[dict(self.worker, thread=THREAD)])
+        self.assertEqual(self.send.call_count, 1)
+        self.observe(entries=[self.worker])
+        self.assertIn('No reviewer tab is linked:', self.send.call_args.args[1])
+        self.assertTrue(self.send.call_args.args[1].endswith('/agent_tab_cli.py start --reviews-me.'))
+        self.assertEqual(review_links._relay_source(self.send.call_args.args[1]), 'review-grant')
+        self.assertNotIn('grant_pending', self.links()[0])
+        self.observe(entries=[self.worker])
+        self.assertEqual(self.send.call_count, 2)
+        self.add(reviewer='%21', worker_thread=WORKER_THREAD, reset=False)
+        self.assertEqual(review_links.reviewed_by(), {'%13': ['%21']})
+        self.assertEqual((self.links()[0]['rounds'], self.links()[0]['limit']), (7, 10))
+
+    def test_mak_grant_refusals_leave_cap_unchanged(self):
+        stage = dict(pane='%11', thread=PARENT_THREAD, notice=FINDINGS, sent=True)
+        for rounds, fields, reason in (
+            (2, {}, 'not at the round cap'),
+            (5, {'paused': review_links.UPGRADE_PAUSE}, 'upgrade'),
+            (5, {'unreadable': True}, 'could not read'),
+            (5, {'counts': {f'%12:{THREAD}': {'rounds': 5, 'stale_rounds': 3}},
+                 'limit': 7, 'grant_rounds': 5, 'mak_grants': 1}, 'approvals could not be verified'),
+            (5, {'parent_stage': stage}, 'feedback is being delivered'),
+        ):
+            with self.subTest(reason=reason):
+                self.capped_worker(rounds, **fields)
+                before = self.file.read_bytes()
+                deliveries = {('%13', WORKER_THREAD): stage} if 'parent_stage' in fields else {}
+                with patch.object(review_links, '_feedback_in_flight', deliveries):
+                    self.assertEqual(review_links.grantable(), {})
+                    with self.assertRaisesRegex(ValueError, reason):
+                        review_links.grant('%13', WORKER_THREAD, 'bad token')
+                self.assertEqual(self.file.read_bytes(), before)
+        with self.assertRaisesRegex(ValueError, 'no review cap'):
+            review_links.grant('%13', THREAD, 'bad token')
+
+    def test_mak_grant_ends_parent_wait_and_refuses_replayed_token(self):
+        stage = dict(pane='%11', thread=PARENT_THREAD, notice=FINDINGS, sent=False)
+        self.capped_worker(4, paused=True, parent_stage=stage, parent_missing=1, escalate=FINDINGS)
+        state = review_links.grantable()['%13']
+        with self.assertRaisesRegex(ValueError, 'cap changed'):
+            review_links.grant('%13', WORKER_THREAD, 'old token')
+        self.assertEqual(review_links.grant('%13', WORKER_THREAD, state['token']), 6)
+        self.assertFalse({'paused', 'parent_stage', 'parent_missing', 'escalate'} & self.links()[0].keys())
+        before = self.file.read_bytes()
+        with self.assertRaises(ValueError):
+            review_links.grant('%13', WORKER_THREAD, state['token'])
+        self.assertEqual(self.file.read_bytes(), before)
+
+    def test_bound_grant_prompt_preserves_cap_and_mak_prompt_resets_it(self):
+        for agent in REVIEW_TRANSCRIPT_AGENTS:
+            with self.subTest(agent=agent):
+                self.capped_worker(rounds=4, paused=True)
+                self.send.reset_mock()
+                self.worker['agent'] = agent
+                self.worker['writable'] = True
+                self.worker['transcript'] = str(self.file.parent / f'grant-{agent}.jsonl')
+                if agent == 'claude':
+                    self.worker['registry'] = '/r'
+                self.turn_source = server.review_turn_source
+                token = review_links.grantable()['%13']['token']
+                review_links.grant('%13', WORKER_THREAD, token)
+                self.observe()
+                prompt = self.send.call_args.args[1]
+                with injected_prompts.track_send(self.worker, prompt, 'review') as delivery:
+                    self.write_worker_turn(delivery)
+                self.assertEqual(self.turn_source(self.worker)[0], 'review-grant')
+                self.request_review()
+                self.assertEqual(self.links()[0]['mak_grants'], 1)
+                self.assertTrue(self.links()[0]['awaiting'])
+                self.finish_review(FINDINGS)
+                with injected_prompts.track_send(self.worker, self.send.call_args.args[1], 'review') as delivery:
+                    self.write_worker_turn(delivery, mode='w' if agent == 'antigravity' else 'a')
+                self.request_review()
+                self.write_worker_turn('Please start over.', mode='w' if agent == 'antigravity' else 'a')
+                self.assertEqual(self.turn_source(self.worker)[0], 'user')
+                self.request_review()
+                self.assertFalse({'mak_grants', 'grant_rounds', 'limit', 'rounds'} & self.links()[0].keys())
+
     def test_reviewer_reply_returns_exact_feedback_once_and_next_turn_gets_reviewed(self):
         self.request_review()
         self.finish_review('  Needs a regression test.\n ')
@@ -1536,7 +1673,7 @@ class ReviewLinksTests(unittest.TestCase):
         self.alert.assert_called_once_with(
             'Review needs you',
             f'“Fix the bug”: the reviewer still found blocking problems after {rounds} rounds. '
-            f'Answer in that tab to restart reviews. Open findings: “{FINDINGS}”',
+            f'Tap Allow 2 more rounds in Tether. Answer in that tab to restart reviews. Open findings: “{FINDINGS}”',
             '%13',
         )
 
@@ -2269,7 +2406,8 @@ class ReviewLinksTests(unittest.TestCase):
                                 '“Fix the bug”: 3 approvals in a row could not be verified for the current commit. '
                                 'Answer in that tab to restart reviews.' if count == 'stale_rounds' else
                                 f'“Fix the bug”: the reviewer still found blocking problems after {limit} rounds. '
-                                f'Answer in that tab to restart reviews. Open findings: “{blocking_reply}”'
+                                f'Tap Allow 2 more rounds in Tether. Answer in that tab to restart reviews. '
+                                f'Open findings: “{blocking_reply}”'
                             )
                             before_second = []
 
@@ -2891,7 +3029,8 @@ class ReviewLinksTests(unittest.TestCase):
             'parent_send_at': (now - 12, now - 7), 'parent_window_at': (now - 9, now - 4),
             'feedback_turn': (dict(sent_at=now - 2, phase='pending'), dict(sent_at=now - 1, phase='queued')),
         }
-        fields = tuple(field for field in review_links.CAP_FIELDS if field != 'counts')
+        fields = tuple(field for field in review_links.CAP_FIELDS
+                       if field not in ('counts', 'mak_grants', 'grant_pending'))
         link = dict(worker='%13', worker_thread=WORKER_THREAD, name='Fix the bug')
 
         # Exercise all fields together, then omit each field in turn from each source.
@@ -5785,7 +5924,8 @@ class ReviewLinksTests(unittest.TestCase):
         self.file.write_text(json.dumps([link]))
         self.observe()
         self.alert.assert_called_once_with('Review paused',
-            '“Fix the bug” reached the round limit. Answer in that tab to restart reviews.', '%13')
+            '“Fix the bug” reached the round limit (3 rounds). '
+            'Tap Allow 2 more rounds in Tether or answer in that tab to restart reviews.', '%13')
         self.observe()
         self.assertTrue(review_links.remove('%13'))
         self.observe()

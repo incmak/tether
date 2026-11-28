@@ -33,7 +33,7 @@ KINDS = {
     'setting.learning': 'settings', 'setting.automation': 'settings',
     'passkey.add': 'settings', 'passkey.remove': 'settings',
     'tab.start': 'tabs', 'tab.close': 'tabs', 'tab.restart': 'tabs',
-    'review.link': 'reviews', 'review.stop': 'reviews', 'review.verdict': 'reviews',
+    'review.link': 'reviews', 'review.stop': 'reviews', 'review.verdict': 'reviews', 'review.grant': 'reviews',
     'backlog.add': 'backlog', 'backlog.start': 'backlog', 'backlog.done': 'backlog',
     'backlog.move': 'backlog', 'backlog.remove': 'backlog',
     'lesson.add': 'lessons', 'lesson.remove': 'lessons', 'lesson.dispute': 'lessons',

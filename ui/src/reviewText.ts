@@ -1,6 +1,6 @@
 // The review messages that Tether types into a tab (server/review_links.py), parsed for the review card in chat.
 export type Review = {
-  kind: 'request' | 'feedback' | 'approved' | 'stopped' | 'summary' | 'notice' | 'correction'
+  kind: 'request' | 'feedback' | 'approved' | 'stopped' | 'summary' | 'notice' | 'correction' | 'granted'
   feedback: boolean; tab?: string; agent?: string; name?: string; terms?: TermPart[]; commit?: string
   reply: string; transcript?: string; last?: boolean; uncommitted?: boolean; rounds?: number
 }
@@ -57,6 +57,7 @@ const STOPPED = new RegExp(String.raw`^\[Tether review\] Stopped after ([1-9][0-
   + literal(` still finds blocking problems. Do not fix them in this turn. Mak decides the next step.${FINDINGS}`)
   + String.raw`([\s\S]*)\n\n`
   + literal('Reply with a short list of the open findings and what you tried, then end with "Needs you: yes".') + '$')
+const GRANTED = /^\[Tether review\] Mak allowed 2 more review rounds \(limit ([1-9][0-9]*)\)\. (Fix the open findings from the last review, then stop and wait\.(?: No reviewer tab is linked: start one with python3 [^\r\n]+\/agent_tab_cli\.py start --reviews-me\.)?)$/
 // The parent summary and notice always use review_links.MAX_ROUNDS. The worker's STOPPED count varies.
 const PARENT_ROUNDS = 3
 const SUMMARY = new RegExp(String.raw`^\[Tether review\] ${PARENT_ROUNDS} review rounds still found blocking problems\. `
@@ -117,6 +118,10 @@ export function parseReview(text: string): Review | null {
   const stopped = STOPPED.exec(message)
   if (stopped && Number.isSafeInteger(Number(stopped[1]))) {
     return { kind: 'stopped', feedback: true, rounds: Number(stopped[1]), tab: stopped[2], reply: stopped[3] }
+  }
+  const granted = GRANTED.exec(message)
+  if (granted && Number.isSafeInteger(Number(granted[1]))) {
+    return { kind: 'granted', feedback: true, rounds: Number(granted[1]), reply: granted[2] }
   }
   const summary = SUMMARY.exec(message)
   if (summary) {

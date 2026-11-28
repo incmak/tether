@@ -6,6 +6,7 @@ import { COORDINATOR_RULES, INTERRUPTED } from './injectedPrompt'
 import { shellCommand } from './shellCommand'
 import { copyText } from './clipboard'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { Blocks, CalendarClock, RefreshCw, Clock3, Layers, Check, Copy, Share, ChevronRight, X, MessageSquare, MessageSquareReply, MessageCircleQuestion, Info, ShieldAlert, Square, Play, Eye, ClipboardPlus, Radio } from 'lucide-react'
 import { MessagePrimitive } from '@assistant-ui/react'
 import type { ThreadMessageLike } from '@assistant-ui/react'
@@ -115,7 +116,7 @@ function WatchGroup({ id, run, time, api, session }: { id: string; run: WatchRun
       : <div key={item.id} className="watch-reply" data-msg-id={item.id}>{item.text.split(/\n\s*\n/).map((part, at) => <p key={at}><Linked text={part.trim()} /></p>)}<MessageActions text={item.text} time={item.time} /></div>)}</div>
   </details>
 }
-export function Message({ id, role, kind, title, text, source, legacy, tabs, count, time, tools, api, session, actions = true, images, imageKey, live, runningShown, watch, advisor }: { watch?: WatchRun; live?: boolean; runningShown?: boolean; images?: number; imageKey?: string; actions?: boolean; id: string; role: string; kind?: unknown; title?: string; text: string; source?: ChatMessage['source']; legacy?: ChatMessage['legacy']; tabs?: ChatMessage['tabs']; count?: unknown; time?: string; tools?: ToolSummary[]; advisor?: AdvisorCall; api: Api; session: string }) {
+export function Message({ id, role, kind, title, text, source, legacy, tabs, count, time, tools, api, session, actions = true, images, imageKey, live, runningShown, watch, advisor, reviewAction }: { reviewAction?: ReactNode; watch?: WatchRun; live?: boolean; runningShown?: boolean; images?: number; imageKey?: string; actions?: boolean; id: string; role: string; kind?: unknown; title?: string; text: string; source?: ChatMessage['source']; legacy?: ChatMessage['legacy']; tabs?: ChatMessage['tabs']; count?: unknown; time?: string; tools?: ToolSummary[]; advisor?: AdvisorCall; api: Api; session: string }) {
   if (kind === 'watch' && watch) return <WatchGroup id={id} run={watch} time={time} api={api} session={session} />
   if (kind === 'advisor') return advisor
     ? <AdvisorRow id={id} advisor={advisor} time={time} live={live} />
@@ -161,7 +162,7 @@ export function Message({ id, role, kind, title, text, source, legacy, tabs, cou
   if (role === 'user' && !kind && (source === 'tether' || legacy)) {
     const review = parseReview(text)
     if (review && (source === 'tether' || review.kind === 'request' || review.kind === 'feedback')) {
-      return <ReviewCard id={id} review={review} />
+      return <ReviewCard id={id} review={review} action={review.kind === 'stopped' ? reviewAction : undefined} />
     }
   }
   if (role === 'user' && !kind && source === 'tether') {
@@ -197,6 +198,7 @@ function reviewHead(review: Review): { title: string; meta: React.ReactNode; ope
       meta: review.uncommitted ? 'The reviewer tab approved the uncommitted changes. Commit them; Tether asks the reviewer to confirm that commit.'
         : short ? <>The reviewer tab approved commit <code>{short}</code> only.</> : 'The reviewer tab approved this work.' }
     case 'stopped': return { title: `Review stopped after ${rounds}`, open: true, meta: 'The reviewer tab still finds blocking problems. Mak decides the next step.' }
+    case 'granted': return { title: 'Mak allowed 2 more rounds', open: true, meta: `The review limit is now ${rounds}.` }
     case 'summary': return { title: `Review blocked after ${rounds}`, open: true, meta: 'The reviewer still finds blocking problems. The parent tab decides the next step.' }
     case 'notice': return { title: `Review blocked · ${review.name}`, open: true, meta: `This helper tab still has blocking findings after ${rounds}. Send it the next step, or hand it to Mak.` }
     case 'correction': return { title: 'Review correction', open: true, meta: 'Do not act on the approval above.' }
@@ -206,7 +208,7 @@ function reviewHead(review: Review): { title: string; meta: React.ReactNode; ope
       : `The ${review.agent} tab ${review.tab} finished a turn. Reply APPROVED, or list what is wrong. Tether sends your reply to that tab.` }
   }
 }
-function ReviewCard({ id, review }: { id: string; review: Review }) {
+function ReviewCard({ id, review, action }: { id: string; review: Review; action?: ReactNode }) {
   const preview = review.reply.split('\n').find(line => line.trim())?.replace(/^#+\s*/, '')
   const { title, meta, open } = reviewHead(review)
   const Icon = review.kind === 'approved' ? Check : Eye
@@ -215,6 +217,7 @@ function ReviewCard({ id, review }: { id: string; review: Review }) {
     <p className="review-meta">{meta}</p>
     {review.terms && <p className="review-meta review-terms">{review.terms.map((part, index) => part.code ? <code key={index}>{part.text}</code> : part.text)}</p>}
     <div className="review-quote"><Linked text={review.reply} /></div>
+    {action}
     {review.transcript && <p className="review-meta review-path" title={review.transcript}>{review.transcript}</p>}
   </details>
 }

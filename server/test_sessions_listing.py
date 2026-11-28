@@ -58,6 +58,20 @@ class ListingParentsTests(unittest.TestCase):
             [paths.TMUX, 'list-panes', '-a', '-F', '#{pane_id}\t#{@group_by}\t#{@tether_role}\t#{@tether_helper}\t#{session_id}\t#{@tether_done}\t#{@tether_reopened}\t#{@tether_done_at}'],
             capture_output=True, text=True, timeout=5)
 
+    def test_saved_review_grant_is_listed_for_current_conversation_only(self):
+        self.tmux_rows([])
+        thread = self.entries[0]['thread']
+        caps = [dict(cap=True, worker='%1', worker_thread=value, saved_at=0, paused=True,
+                     counts={'%2:': {'rounds': rounds}})
+                for value, rounds in ((thread, 3), ('17b9c72a-a916-46a0-bc10-bc41a8c6249a', 4))]
+        self.review_file.write_text(json.dumps(caps))
+        rows = self.listing()
+        self.assertEqual(rows['%1']['review_grant'],
+                         {'rounds': 3, 'limit': 3, 'token': ':0:3', 'thread': thread})
+        self.assertNotIn('review_grant', rows['%2'])
+        with patch.object(server.review_links, 'grantable', side_effect=OSError('store unreadable')):
+            self.assertNotIn('review_grant', self.listing()['%1'])
+
     def test_invalid_parent_records_are_ignored(self):
         for raw in ('{', '[]', json.dumps(dict(self.record, sent_at=True)),
                     json.dumps(dict(self.record, owner_pane='2')), json.dumps(dict(self.record, owner_pane='%99')),

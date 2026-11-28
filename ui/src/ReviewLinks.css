@@ -32,3 +32,11 @@
 .review-picker .hint { margin: 0; }
 .review-picker-list { max-height: 40dvh; overflow-y: auto; }
 .review-picker-list small { flex-shrink: 0; max-width: 35%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
+
+/* A paused review that Mak can extend (B627): the text and button line up with the section heading. */
+.review-paused { display: grid; gap: 8px; padding: 0 8px 6px; }
+.sheet.popover.review-pop .review-paused h2 { padding-inline: 0; }
+.review-paused p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.4; }
+.review-grant { justify-self: start; min-height: 44px; }
+.review-message .review-grant { margin-top: 8px; }
+@media (pointer: fine) { .review-grant { min-height: 34px; } }

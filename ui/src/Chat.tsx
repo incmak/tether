@@ -69,7 +69,8 @@ import { LiveTerminal } from './Terminal'
 import { WORKSPACE_QUERY } from './workspace'
 import { useHost } from './host'
 import { OpenedBy } from './HelperFold'
-import { ReviewLinks } from './ReviewLinks'
+import { ReviewGrantButton, ReviewLinks } from './ReviewLinks'
+import { parseReview } from './reviewText'
 import { agentBrowserItems, useAgentBrowser } from './AgentBrowser'
 import { PreviewDrawer } from './PreviewDrawer'
 import { PreviewOpener, artifactsOf, devServersTarget } from './preview'
@@ -710,6 +711,17 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   // The name the tab shows: the pane's own name, else the session's (a bare number is not a name).
   const claudeName = pane.pane_name || (session && !/^\d+$/.test(session.name) ? session.name : '')
   const messages = useMemo(() => chatMessages(data), [data])
+  const canGrantReview = !!pane.review_grant
+  const stoppedReview = useMemo(() => {
+    if (!canGrantReview) return
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const message = messages[index]
+      if (message.role !== 'user' || message.kind || message.source !== 'tether') continue
+      const kind = parseReview(message.text)?.kind
+      if (kind === 'stopped') return message.id
+      if (kind === 'granted' || kind === 'summary') return
+    }
+  }, [canGrantReview, messages])
   // Up-arrow recall offers only what the person typed: not the status, review and rules prompts Tether typed in.
   const sentPrompts = useMemo(() => messages.filter(message => message.role === 'user' && !message.kind && message.source !== 'tether' && !INTERRUPTED.has(message.text.trim())).map(message => message.text), [messages])
   // Read a new reply aloud when its turn ends. Replies already there when the chat opens are not read.
@@ -1302,7 +1314,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
           <button type="button" onClick={() => startWith('/')}><Blocks size={16} />Commands & skills</button>
         </div>}</div>}
 
-      {activePane.agent === 'shell' ? <ShellOutput key={activePane.id} folder={activePane.dir} text={messages.map(message => message.text).join('\n')} /> : <ThreadPrimitive.Messages>{({ message }) => <Message api={api} session={activePane.id} live={message.id === liveWork} runningShown={!!footer.running} actions={turnEnds.has(message.id)} tools={message.metadata.custom.tools as ToolSummary[] | undefined} advisor={message.metadata.custom.advisor as AdvisorCall | undefined} id={message.id} role={message.role} kind={message.metadata.custom.kind} title={message.metadata.custom.title ? String(message.metadata.custom.title) : undefined} count={message.metadata.custom.count} text={String(message.metadata.custom.text ?? '')} source={message.metadata.custom.source as ChatMessage['source']} legacy={message.metadata.custom.legacy === true ? true : undefined} tabs={message.metadata.custom.tabs as ChatMessage['tabs']} time={String(message.metadata.custom.time ?? '')} images={message.metadata.custom.images as number | undefined} imageKey={message.metadata.custom.imageKey as string | undefined} watch={message.metadata.custom.watch as WatchRun | undefined} />}</ThreadPrimitive.Messages>}
+      {activePane.agent === 'shell' ? <ShellOutput key={activePane.id} folder={activePane.dir} text={messages.map(message => message.text).join('\n')} /> : <ThreadPrimitive.Messages>{({ message }) => <Message api={api} session={activePane.id} reviewAction={message.id === stoppedReview ? <ReviewGrantButton api={api} pane={pane} onChanged={onUpdate} onToast={setToast} /> : undefined} live={message.id === liveWork} runningShown={!!footer.running} actions={turnEnds.has(message.id)} tools={message.metadata.custom.tools as ToolSummary[] | undefined} advisor={message.metadata.custom.advisor as AdvisorCall | undefined} id={message.id} role={message.role} kind={message.metadata.custom.kind} title={message.metadata.custom.title ? String(message.metadata.custom.title) : undefined} count={message.metadata.custom.count} text={String(message.metadata.custom.text ?? '')} source={message.metadata.custom.source as ChatMessage['source']} legacy={message.metadata.custom.legacy === true ? true : undefined} tabs={message.metadata.custom.tabs as ChatMessage['tabs']} time={String(message.metadata.custom.time ?? '')} images={message.metadata.custom.images as number | undefined} imageKey={message.metadata.custom.imageKey as string | undefined} watch={message.metadata.custom.watch as WatchRun | undefined} />}</ThreadPrimitive.Messages>}
       {bang && <><div className="user-message"><span>{bangItem?.text ?? `!${bang.command}`}</span></div>
         <div className="assistant-message bang-run" role="status"><small><Terminal size={12} />Running{bang.seconds != null ? ` · ${bang.seconds}s` : ''}<button type="button" className="bang-stop" aria-label="Stop this command" disabled={!writable || acting} onClick={() => void sendKey('C-c')}><X size={13} />Stop</button></small><pre>{bang.output ? <Linked text={bang.output} /> : 'No output yet'}</pre></div></>}
       {state === 'Working' && preview && <div className="assistant-message reply-preview"><small>typing</small><div>{preview}</div></div>}

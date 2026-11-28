@@ -860,6 +860,10 @@ def build_listing():
         links = {}
         paused = {}
     try:
+        grants = review_links.grantable({entry['id']: helper_tabs._thread(entry) for entry in entries})
+    except Exception:  # a review-store read error must not hide the session list
+        grants = {}
+    try:
         escalations = review_links.escalated(entries)
     except Exception:  # a review-store read error must not hide the session list
         escalations = set()
@@ -873,6 +877,8 @@ def build_listing():
         if links.get(row['id']):
             row['reviewers'] = links[row['id']]
         row['reviewers_paused'] = paused.get(row['id'], [])
+        if row['id'] in grants:
+            row['review_grant'] = grants[row['id']]
         row.update(helper_fields.get(row['id'], {}))
         if row['id'] in escalations:
             row['escalated'] = True
@@ -3040,7 +3046,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.respond(403, {'error': 'Reload the page and try again.'})
             return
         if self.path not in task_tree_api.WRITES and not backgrounds.handles(self.path) and self.path not in (factory_history.PATH, '/mobile/api/update', '/mobile/api/history/hide', '/mobile/api/file-check', '/mobile/api/preview', '/mobile/api/dev-preview', '/mobile/api/dev-preview/release', '/mobile/api/dev-preview/stop', '/mobile/api/ask-hook', '/mobile/api/ask-answer', '/mobile/api/ask-engage', '/mobile/api/message', '/mobile/api/broadcast', '/mobile/api/approval', '/mobile/api/menu', '/mobile/api/pick', '/mobile/api/prompt-action', '/mobile/api/start', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/key', '/mobile/api/dialog', '/mobile/api/clear-draft', '/mobile/api/unqueue', '/mobile/api/mode', '/mobile/api/type',
-                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, *quick_tab.PATHS, suggest_names.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/restart-tab', '/mobile/api/auto-resume', '/mobile/api/pane-name', coordinator.ROLE_PATH, '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not commit_gate.handles(self.path) and not claude_advisor.handles(self.path) and not auto_merge.handles(self.path) and not app_identity.handles(self.path) and not codex_trust.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path) and not reminders.handles(self.path) and not friday_notes.handles(self.path) and not task_sources.handles(self.path) and not activity_time.handles(self.path) and not ui_usage.handles(self.path) and not feedback.handles(self.path) and not undo_api.handles(self.path) and not upkeep_api.handles(self.path) and not command_history.handles(self.path) and self.path != coordinator.PATH:
+                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, *quick_tab.PATHS, suggest_names.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/review-grant', '/mobile/api/resume', '/mobile/api/restart-tab', '/mobile/api/auto-resume', '/mobile/api/pane-name', coordinator.ROLE_PATH, '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not commit_gate.handles(self.path) and not claude_advisor.handles(self.path) and not auto_merge.handles(self.path) and not app_identity.handles(self.path) and not codex_trust.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path) and not reminders.handles(self.path) and not friday_notes.handles(self.path) and not task_sources.handles(self.path) and not activity_time.handles(self.path) and not ui_usage.handles(self.path) and not feedback.handles(self.path) and not undo_api.handles(self.path) and not upkeep_api.handles(self.path) and not command_history.handles(self.path) and self.path != coordinator.PATH:
             self.respond(404, {'error': 'Not found'})
             return
         # Reject unauthenticated and cross-origin submissions.
@@ -3548,6 +3554,13 @@ class Handler(BaseHTTPRequestHandler):
                     result = agent_tabs.link_pair(body, sessions(), last_reply, reset=True)
                 self.respond(200, result)
                 return
+            if self.path == '/mobile/api/review-grant':
+                worker, thread = body.get('worker'), body.get('thread')
+                entry = next((entry for entry in fresh_sessions() if entry['id'] == worker), None)
+                if entry is None or 'thread' not in body or helper_tabs._thread(entry) != thread:
+                    raise ValueError('The worker conversation changed. Reload and try again.')
+                self.respond(200, {'limit': review_links.grant(worker, thread, body.get('token'))})
+                return
             if self.path == '/mobile/api/review-stop':
                 worker, reviewer = agent_tabs.review_pair(body)
                 self.respond(200, {'stopped': review_links.remove(worker, reviewer)})
@@ -3917,7 +3930,7 @@ class Handler(BaseHTTPRequestHandler):
         except undo.CloseInterrupted as exc:
             task_tree_api.interrupted_response(self, exc)
         except (ValueError, UnicodeError) as exc:
-            self.respond(400, {'error': str(exc) if self.path in (*quick_tab.PATHS, coordinator.PATH, '/mobile/api/history/hide', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/broadcast', '/mobile/api/merge', '/mobile/api/model', '/mobile/api/shell', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/restart-tab', '/mobile/api/auto-resume', '/mobile/api/pane-name', coordinator.ROLE_PATH, '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/mode', '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/menu', '/mobile/api/pick', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') else 'Invalid message.'})
+            self.respond(400, {'error': str(exc) if self.path in (*quick_tab.PATHS, coordinator.PATH, '/mobile/api/history/hide', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/broadcast', '/mobile/api/merge', '/mobile/api/model', '/mobile/api/shell', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/review-grant', '/mobile/api/resume', '/mobile/api/restart-tab', '/mobile/api/auto-resume', '/mobile/api/pane-name', coordinator.ROLE_PATH, '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/mode', '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/menu', '/mobile/api/pick', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') else 'Invalid message.'})
         except (OSError, RuntimeError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
             # The journal keeps why a send was refused; the access log shows only "503".
             print(f'{self.path} refused: {type(exc).__name__}: {str(exc)[:200]}', file=sys.stderr, flush=True)
