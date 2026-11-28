@@ -1,0 +1,40 @@
+
+  [38;5;75m>_ [1m[39mOpenAI Codex[0;2m (v0.170.0)[0m
+     [2m/tmp/b479[0m
+
+[38;5;255m[48;5;238m [39m
+[1;2m› [0m[38;5;255m[48;5;238mRun the shell command [38;2;166;227;161msleep 240[38;5;255m (one call, wait for it), then reply: ok[39m
+[38;5;255m [39m
+[49m
+[2m• [0mI’ll run [38;2;166;227;161msleep 240[39m once and wait for it to finish.
+
+■ Conversation interrupted - use /feedback if something went wrong
+
+[2m  1 background terminal running · /ps to view · /stop to close[0m
+
+
+[1m[38;5;215m›[0m This is a long queued follow-up message that should wrap across more than one row in the preview [2m↑
+[0m  because the pane is only one hundred columns wide, and it keeps going so that it needs a third
+  row and then a fourth row to be sure the preview cuts it off with an ellipsis line at the end of
+  it all.
+  !ls -la
+  line one
+  line two
+  a
+
+  b
+  see ]8;;https://example.com/some/very/long/path/that/keeps/going/and/going/for/a/while/until/it/is/longer/than/the/row?x=1\https://example.com/some/very/long/path/that/keeps/going/and/going/for/a/while/until/it/is/]8;;\
+  ]8;;https://example.com/some/very/long/path/that/keeps/going/and/going/for/a/while/until/it/is/longer/than/the/row?x=1\longer/than/the/row?x=1]8;;\
+  extra 1
+  extra 2
+  extra 3
+  extra 4
+  extra 5
+  extra 6
+  extra 7
+  extra 8
+  extra 9
+  extra 10
+  extra 11
+  extra 12
+

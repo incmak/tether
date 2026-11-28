@@ -1,0 +1,40 @@
+[2m╭─────────────────────────────────────────────────╮[0m
+[2m│ [0;1m[38;5;75m✨ Update available![0m [1m0.170.0 -> 0.172.0[0;2m         │[0m
+[2m│ [0mRun [38;5;75mnpm install -g @openai/codex[39m to update.[2m     │[0m
+[2m│                                                 │[0m
+[2m│ [0mSee full release notes:[2m                         │[0m
+[2m│ [0;4m[38;5;75m]8;;https://github.com/openai/codex/releases/latest\https://github.com/openai/codex/releases/latest[0;2m]8;;\ │[0m
+[2m╰─────────────────────────────────────────────────╯[0m
+
+
+  [38;5;75m>_ [1m[39mOpenAI Codex[0;2m (v0.170.0)[0m
+     [2m/tmp/b479[0m
+
+[38;5;255m[48;5;238m [39m
+[1;2m› [0m[38;5;255m[48;5;238mRun the shell command [38;2;166;227;161msleep 240[38;5;255m (one call, wait for it), then reply: ok[39m
+[38;5;255m [39m
+[49m
+[2m• [0mI’ll run [38;2;166;227;161msleep 240[39m once and wait for it to finish.
+
+
+
+
+
+• [2mWorking[0m [2m(18s • [0;1mesc[0;2m to interrupt)[0m
+
+[2m• [0mQueued follow-up inputs
+[2m  ↳ [3msay hi[0m
+[2m  ↳ [3mThis is a long queued follow-up message that should wrap across more than one row in the preview
+[0m    [2;3mbecause the pane is only one hundred columns wide, and it keeps going so that it needs a third[0m
+    [2;3mrow and then a fourth row to be sure the preview cuts it off with an ellipsis line at the end of
+    …[0m
+[2m  ↳ [3m!ls -la[0m
+[2m  ↳ [3mline one[0m
+    [2;3mline two[0m
+    [1mshift+←[0;2m edit last queued message[0m
+
+
+[1m[38;5;215m›[0m [2mAsk Codex to do anything[0m
+
+  [38;5;223mGPT-6.2-Sol max fast[39m · [38;5;151m/tmp/b479[39m · [38;5;183mApprove for me[39m · [38;5;216mContext 0% used[39m · [38;5;175mweekly 89% left[39m
+  [1m←[0m for agents · [1m?[0m for shortcuts                                          ⚠ [38;5;179m4 warnings[39m · [1mf2[0m to view

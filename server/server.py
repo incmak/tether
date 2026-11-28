@@ -27,6 +27,7 @@ from agents import records
 import agents
 import audit
 import codex_messages
+import codex_queue
 import continuations
 import coordinator
 import injected_prompts
@@ -2024,8 +2025,14 @@ def chat_payload(config, shell_mode=False, limit=DEFAULT_WINDOW, preview=False):
     """One chat view: the latest `limit` messages plus how many older ones were left out."""
     before = change_signature(config) if preview else None
     shell = config['agent'] == 'shell' and shell_mode
+    read_codex_queue = config['agent'] == 'codex' and not shell_mode
     sampled = time.time() if config['agent'] == 'claude' else None
-    state = {'state': 'Shell', 'approval': None} if shell else auto_resume.overlay(config, live_status(config))
+    screens = []
+    if shell:
+        state = {'state': 'Shell', 'approval': None}
+    else:
+        status = live_status(config, on_screen=screens.append) if read_codex_queue else live_status(config)
+        state = auto_resume.overlay(config, status)
     data = shell_snapshot(config) if shell else marked_snapshot(config)
     if not shell and isinstance(data.get('messages'), list):
         data = dict(data, messages=shell_log.merge(config['id'], data['messages']))
@@ -2051,6 +2058,8 @@ def chat_payload(config, shell_mode=False, limit=DEFAULT_WINDOW, preview=False):
             stale = STALE_QUEUE.get(transcript, ()) if transcript else ()
             queued = [item for item in queued if item['id'] not in stale]
         data = dict(data, queued=queued[-50:])
+    elif read_codex_queue:
+        data = dict(data, queued=codex_queue.for_chat(config, screens[-1]) if screens else [])
     if not (config['agent'] == 'claude' and plan_menu(state.get('approval') or state.get('attention'))):
         data.pop('plan', None)
     ask = data.pop('ask', None) if isinstance(data, dict) else None

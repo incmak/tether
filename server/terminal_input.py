@@ -1330,19 +1330,24 @@ CODEX_QUEUE_HINT = re.compile(r'^  tab to queue message(?=\s{2,}⚠|$)')
 CODEX_PLAN_MODE = re.compile(r'^  Plan mode(?: \([^)]*to cycle\))?(?=\s{2,}⚠|$)| · Plan mode(?: \([^)]*to cycle\))?(?=\s{2,}⚠|$)')
 
 
-def codex_composer_ready(plain_screen):
-    """Verify Codex's composer by its prompt marker and footer."""
-    lines = plain_screen.splitlines()
+def codex_composer_row(lines):
+    """Return the row of Codex's last prompt marker if the footer verifies it."""
     start = next((i for i in range(len(lines) - 1, -1, -1) if lines[i].startswith('›')), None)
     if start is None:  # a menu ("› 1. Yes") has its own footer, so codex_input_box refuses it
-        return False
+        return None
     end = next((i for i in range(start + 1, len(lines)) if not lines[i].strip()), len(lines))
     last = next((i for i in range(len(lines) - 1, end, -1) if lines[i].strip()), None)
     if last is not None:
         # Map the queue hint and the Plan mode label to the usual hint, then check the footer as usual.
         hint = CODEX_PLAN_MODE.sub(lambda m: '  ← for agents' if m.group().startswith('  ') else '', lines[last])
+        lines = lines.copy()
         lines[last] = CODEX_QUEUE_HINT.sub('  ← for agents', hint)
-    return codex_input_box(lines, end)
+    return start if codex_input_box(lines, end) else None
+
+
+def codex_composer_ready(plain_screen):
+    """Verify Codex's composer by its prompt marker and footer."""
+    return codex_composer_row(plain_screen.splitlines()) is not None
 
 
 def claude_registry(entry):

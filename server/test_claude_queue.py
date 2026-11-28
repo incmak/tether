@@ -307,12 +307,12 @@ class ClaudeQueueTests(unittest.TestCase):
         self.assertIn('transcript-1', server.STALE_QUEUE)
         self.assertEqual(server.STALE_QUEUE[self.entry['transcript']], {0})
 
-    def test_payload_leaves_other_agents_and_shell_mode_alone(self):
+    def test_payload_leaves_antigravity_and_shell_mode_alone(self):
         with patch.object(server, 'live_status', return_value={'state': 'Idle', 'approval': None}), \
              patch.object(server, 'snapshot', side_effect=lambda _: {'messages': []}), \
              patch.object(server.shell_log, 'merge', side_effect=lambda _, messages: messages), \
              patch.object(server, 'shell_snapshot', return_value={'messages': []}) as shell:
-            for agent in ('codex', 'antigravity', 'shell'):
+            for agent in ('antigravity', 'shell'):
                 with self.subTest(agent=agent):
                     payload = server.chat_payload(dict(self.entry, agent=agent), shell_mode=agent == 'shell')
                     self.assertNotIn('queued', payload)

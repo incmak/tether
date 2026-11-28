@@ -1,0 +1,40 @@
+[2m╭─────────────────────────────────────────────────╮[0m
+[2m│ [0;1m[38;5;75m✨ Update available![0m [1m0.170.0 -> 0.172.0[0;2m         │[0m
+[2m│ [0mRun [38;5;75mnpm install -g @openai/codex[39m to update.[2m     │[0m
+[2m│                                                 │[0m
+[2m│ [0mSee full release notes:[2m                         │[0m
+[2m│ [0;4m[38;5;75m]8;;https://github.com/openai/codex/releases/latest\https://github.com/openai/codex/releases/latest[0;2m]8;;\ │[0m
+[2m╰─────────────────────────────────────────────────╯[0m
+
+
+  [38;5;75m>_ [1m[39mOpenAI Codex[0;2m (v0.170.0)[0m
+     [2m/tmp/b479[0m
+
+[38;5;255m[48;5;238m [39m
+[1;2m[38;5;255m› [0m[38;5;255m[48;5;238mReply with exactly the contents of block.txt inside a plain text code block and nothing else. Do[39m
+[38;5;255m  not run any other command.[39m
+[38;5;255m [39m
+[49m
+[2m• [0mI’ll read [38;2;166;227;161mblock.txt[39m directly.
+
+[2m•[0m [1mExplored[0m
+[2m  └ [0m[38;5;75mRead[39m block.txt
+[2m    + Show details
+[0m
+[2m• [0m• Queued follow-up inputs
+    ↳ say hi
+      shift+← edit last queued message
+
+[2m  Worked for 11s • 20:55
+[0m
+
+
+
+
+
+
+
+[1m[38;5;215m›[0m [2mAsk Codex to do anything[0m
+
+  [38;5;223mGPT-6.2-Sol max fast[39m · [38;5;151m/tmp/b479[39m · [38;5;183mApprove for me[39m · [38;5;216mContext 3% used[39m · [38;5;175mweekly 88% left[39m
+  [1m←[0m for agents · [1m?[0m for shortcuts                                          ⚠ [38;5;179m4 warnings[39m · [1mf2[0m to view

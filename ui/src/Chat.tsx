@@ -933,7 +933,8 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     }
   }
   // Claude: Up pulls every queued message back into its input; Tether clears that input and returns the text to the message box.
-  // Codex has no queue to edit, so the × only hides the bubble there.
+  // Other agents: Tether does not pull back their queue, so the × only hides a bubble this box sent. An entry read from
+  // the Codex screen (B479) has no × at all.
   // id null: an entry another sender queued. Claude returns the whole queue, so it lands in the message box the same way.
   async function unqueue(id: number | null) {
     if (activePane.agent !== 'claude') { setPending(list => list.filter(other => other.id !== id)); return }
@@ -1340,7 +1341,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
         <button type="button" className="failed-action" onClick={() => editFailed(item)}><Pencil size={13} />Edit</button>
         <button type="button" aria-label="Delete this unsent message" onClick={() => setPending(list => list.filter(other => other.id !== item.id))}><X size={12} /></button></small></div>
       : <div key={item.id} className="user-message pending-message"><SentContent {...sentContent(item.text, activePane.id)} /><small><Clock3 size={12} />{/^\/btw\s/.test(item.text.trim()) ? 'Asking…' : state === 'Working' ? 'Queued' : 'Sending…'}<button type="button" aria-label={cancelLabel} title={cancelLabel} onClick={() => void unqueue(item.id)}><X size={12} /></button></small></div>)}
-        {otherQueued.map((entry, index) => <div key={`queued-${entry.id ?? index}`} className="user-message pending-message"><SentContent {...sentContent(entry.text, activePane.id)} /><small><Clock3 size={12} />Queued<button type="button" aria-label={cancelLabel} title={cancelLabel} onClick={() => void unqueue(null)}><X size={12} /></button></small></div>)}</> },
+        {otherQueued.map((entry, index) => <div key={`queued-${entry.id ?? index}`} className="user-message pending-message"><SentContent {...sentContent(entry.text, activePane.id)} /><small><Clock3 size={12} />Queued{activePane.agent === 'claude' && <button type="button" aria-label={cancelLabel} title={cancelLabel} onClick={() => void unqueue(null)}><X size={12} /></button>}</small></div>)}</> },
       { id: 'terminal-run', label: notes.length === 1 ? `${commandOf(notes[0].text)} ran in the terminal` : `${notes.length} commands ran in the terminal`, active: notes.length > 0, content: notes.map(item => {
         const command = commandOf(item.text)
         const dismiss = () => setPending(list => list.filter(other => other.id !== item.id))
