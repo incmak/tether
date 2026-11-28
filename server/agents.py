@@ -217,6 +217,10 @@ def has_names(connection):
     return any(column[1] == 'name' for column in connection.execute('PRAGMA table_info(threads)'))
 
 
+def is_codex_daemon_command(arguments):
+    return b'app-server' in arguments and b'--listen' in arguments
+
+
 def daemon_threads(connection, processes, strict=False):
     """The threads that a Codex app-server holds loaded (their rollouts open), or None when no app-server runs.
     Plain `codex` 0.169 is a client of the shared daemon (`codex app-server --listen`): the daemon, not the client,
@@ -231,7 +235,7 @@ def daemon_threads(connection, processes, strict=False):
                 if strict:
                     raise
                 continue
-            if b'app-server' in arguments and b'--listen' in arguments:
+            if is_codex_daemon_command(arguments):
                 servers.append(pid)
     if not servers:
         return None
@@ -251,7 +255,7 @@ def daemon_threads(connection, processes, strict=False):
     return loaded
 
 
-def open_rollout(connection, pid):
+def open_rollout(connection, pid, *, strict=False):
     """The interactive thread whose rollout this process holds open. In-process Codex holds it; a client of the shared
     app-server daemon holds none, and several open rollouts say nothing."""
     try:
@@ -267,7 +271,8 @@ def open_rollout(connection, pid):
         if len(candidates) == 1:
             return candidates.pop()
     except OSError:
-        pass
+        if strict:
+            raise
     return None
 
 

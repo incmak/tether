@@ -7,6 +7,7 @@ from time import monotonic
 import audit
 import auto_resume
 import codex_provider
+import codex_tasks
 import delegate
 import paths
 import procinfo
@@ -87,6 +88,16 @@ def restart(body, *, sessions, forget_sessions, run=subprocess.run, sleep=time.s
         raise Refused(409, 'Stop its background tasks first: a restart ends them.')
     if status.get('crons'):
         raise Refused(409, 'This tab has scheduled jobs. A restart ends them.')
+    if agent == 'codex':
+        try:
+            terminals = codex_tasks.background_terminals(entry)
+        except codex_tasks.Unchecked as exc:
+            version = terminal_input._agent_version(entry) or 'unknown'
+            raise Refused(409, f'Tether could not check this tab for Codex {version} background terminals, '
+                               'so it did not restart it.') from exc
+        if terminals:
+            raise Refused(409, 'Stop its background terminals first: a restart ends them. '
+                               'Type /stop in the tab, or /ps to see them.')
     try:
         terminal_input.empty_prompt(entry, run, read_only=True)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:

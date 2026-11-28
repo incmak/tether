@@ -1,0 +1,56 @@
+{
+ "codex_version": "0.170.0",
+ "pane_shell_pid": 3442171,
+ "owner_pid": 3442290,
+ "processes": [
+  {
+   "pid": 3442171,
+   "ppid": 4063,
+   "state": "S",
+   "comm": "zsh",
+   "tags": {}
+  },
+  {
+   "pid": 3442290,
+   "ppid": 3442171,
+   "state": "S",
+   "comm": "codex",
+   "tags": {}
+  },
+  {
+   "pid": 3443996,
+   "ppid": 3442290,
+   "state": "S",
+   "comm": "npm exec shadcn",
+   "tags": {}
+  },
+  {
+   "pid": 3444287,
+   "ppid": 3443996,
+   "state": "S",
+   "comm": "sh",
+   "tags": {}
+  },
+  {
+   "pid": 3444289,
+   "ppid": 3444287,
+   "state": "S",
+   "comm": "MainThread",
+   "tags": {}
+  },
+  {
+   "pid": 3444002,
+   "ppid": 3442290,
+   "state": "S",
+   "comm": "MainThread",
+   "tags": {}
+  },
+  {
+   "pid": 3472256,
+   "ppid": 3442290,
+   "state": "S",
+   "comm": "codex-code-mode",
+   "tags": {}
+  }
+ ]
+}

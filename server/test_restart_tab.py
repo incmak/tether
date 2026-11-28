@@ -43,6 +43,7 @@ class RestartTests(unittest.TestCase):
         self.events.cwd.return_value = str(self.folder)
         self.events.saved_tab.return_value = None
         self.events.launch_profile.return_value = None
+        self.terminals = self.enterContext(patch.object(restart_tab.codex_tasks, 'background_terminals', return_value=[]))
         self.enterContext(patch.object(restart_tab.procinfo, 'cwd', self.events.cwd))
         self.enterContext(patch.object(restart_tab.audit, 'record', self.events.audit))
         self.enterContext(patch.object(restart_tab.auto_resume, 'saved_tab', self.events.saved_tab))
@@ -152,6 +153,30 @@ class RestartTests(unittest.TestCase):
                                 ({'crons': [{'id': 'job'}]}, 'This tab has scheduled jobs. A restart ends them.')]:
             with self.subTest(fields=fields), patch.dict(self.status, fields):
                 self.assert_refused(message)
+        self.prompt.assert_not_called()
+
+    def test_busy_codex_tab_is_refused_before_checking_for_terminals(self):
+        self.entry['agent'] = 'codex'
+        self.status['state'] = 'Working'
+        self.assert_refused('Wait until the agent finishes its turn.')
+        self.terminals.assert_not_called()
+
+    def test_codex_background_terminals_refuse_restart(self):
+        self.entry['agent'] = 'codex'
+        self.terminals.return_value = [{'pid': 3472384, 'command': 'codex-linux-san'}]
+        self.assert_refused('Stop its background terminals first: a restart ends them. '
+                            'Type /stop in the tab, or /ps to see them.')
+        self.terminals.assert_called_once_with(self.entry)
+        self.prompt.assert_not_called()
+
+    def test_unchecked_codex_terminals_refuse_restart_with_the_chat_version(self):
+        self.entry['agent'] = 'codex'
+        self.terminals.side_effect = restart_tab.codex_tasks.Unchecked
+        for meta, version in (('{"type":"session_meta","payload":{"cli_version":"0.170.0"}}\n', '0.170.0'), ('', 'unknown')):
+            with self.subTest(version=version):
+                Path(self.entry['transcript']).write_text(meta)
+                self.assert_refused(f'Tether could not check this tab for Codex {version} background terminals, '
+                                    'so it did not restart it.')
         self.prompt.assert_not_called()
 
     def test_draft_is_preserved(self):
@@ -296,6 +321,7 @@ class RestartTests(unittest.TestCase):
     def test_claude_restarts_in_process_folder_then_confirms_start(self):
         self.probes = ['cat', 'sh', 'claude']
         self.assertEqual(self.restart(), dict(REPLY, agent='claude', started=True))
+        self.terminals.assert_not_called()
         self.assertEqual(self.writes(), [[paths.TMUX, 'respawn-pane', '-k', '-t', '%7', '-c', str(self.folder), '/bin/sh', '-l'],
                                         [paths.TMUX, 'send-keys', '-t', '%7', '-l', 'claude --resume ' + THREAD],
                                         [paths.TMUX, 'send-keys', '-t', '%7', 'Enter']])
