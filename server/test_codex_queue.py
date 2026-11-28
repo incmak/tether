@@ -117,6 +117,21 @@ class QueueScreenTests(unittest.TestCase):
         self.assertEqual(codex_queue.parse(screen.replace(block, body), 24),
                          entries(('0123456789 界界界界界', False), ('界' * 10 + '…', True)))
 
+    def test_full_width_wrapped_row_is_not_cut(self):
+        # LONG_ROWS[0] fills the 96 columns Codex has at width 100. Codex wraps at spaces, so the text is complete.
+        screen = frame('queued_four').replace(
+            '    ' + LONG_ROWS[2] + '\n    …\n', '').replace('    ' + LONG_ROWS[1], '    short tail')
+        self.assertEqual(len(LONG_ROWS[0]), 96)
+        self.assertEqual(codex_queue.parse(screen, 100), four(LONG_ROWS[0] + ' short tail')[:1]
+                         + entries((LONG_ROWS[0] + ' short tail', False), start=1)
+                         + four()[2:])
+
+    def test_steer_rows_above_the_composer_are_not_a_clipped_queue(self):
+        screen = frame('queued_four')
+        block = screen[screen.index('• Queued follow-up inputs'):screen.index(HINT) + len(HINT)]
+        steer = '• Messages to be submitted at end of turn\n  ↳ rejected steer'
+        self.assertEqual(codex_queue._parse(screen.replace(block, steer), 100), [])
+
     def test_keeps_the_last_50_entries_with_their_screen_indexes(self):
         screen = frame('queued_four')
         block = screen[screen.index('  ↳ say hi'):screen.index(HINT)]

@@ -31,7 +31,9 @@ def _restored_draft(lines):
 
 def _entry(index, rows, cut, width):
     available = width - len(INDENT) if width is not None else None
-    partial = cut or (available is not None and any(_terminal_columns(row) >= available for row in rows if row))
+    # Codex wraps at spaces, so a full row is normal. It clips only a token too long for one row (a URL).
+    partial = cut or (available is not None and any(
+        ' ' not in row and _terminal_columns(row) >= available for row in rows if row))
     parts = [rows[0]]
     for prev, row in pairwise(rows):
         words = row.split(maxsplit=1)
@@ -60,11 +62,13 @@ def _parse(plain_screen, width):
     if bottom < 0:
         return []
     if not HINT.fullmatch(lines[bottom]):
-        # A clipped preview can end on a continuation as well as on an entry start.
-        if lines[bottom].startswith(INDENT):
-            while bottom >= 0 and (not lines[bottom] or lines[bottom].startswith(INDENT)):
-                bottom -= 1
-        return 'clipped' if bottom >= 0 and lines[bottom].startswith(ENTRY) else []
+        # A clipped preview ends on an entry or continuation row, with the queued header above those rows.
+        # Rows under a steer header only are not a queue.
+        if not lines[bottom].startswith((ENTRY, INDENT)):
+            return []
+        while bottom >= 0 and (not lines[bottom] or lines[bottom].startswith((ENTRY, INDENT))):
+            bottom -= 1
+        return 'clipped' if bottom >= 0 and lines[bottom] == HEADER else []
 
     top = bottom - 1
     while top >= 0 and (not lines[top] or lines[top].startswith((ENTRY, INDENT))):
