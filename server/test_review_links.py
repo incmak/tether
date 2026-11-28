@@ -1441,6 +1441,21 @@ class ReviewLinksTests(unittest.TestCase):
             self.assertEqual(grants, [{'worker': '%13', 'reviewer': f'%12:{THREAD}', 'limit': limit}
                                       for limit in (7, 9)])
 
+    def test_saved_cap_with_pending_grant_expires_after_its_own_limit(self):
+        for age, kept in ((review_links.SAVED_CAP_TTL + 60, True), (review_links.GRANT_PENDING_TTL + 60, False)):
+            with self.subTest(age=age):
+                review_links.FILE.unlink(missing_ok=True)
+                self.capped_worker(rounds=8, limit=5, grant_rounds=3, paused=True)
+                review_links.close('%12')
+                state = review_links.grantable()['%13']
+                review_links.grant('%13', WORKER_THREAD, state['token'])
+                rows = json.loads(review_links.FILE.read_text())
+                for row in rows:
+                    if row.get('saved_at'):
+                        row['saved_at'] = time.time() - age
+                review_links.FILE.write_text(json.dumps(rows))
+                self.assertEqual(any(row.get('grant_pending') for row in review_links._read()), kept)
+
     def test_saved_cap_can_receive_prompt_and_relink_after_grant(self):
         self.capped_worker(rounds=8, limit=5, grant_rounds=3, paused=True)
         review_links.close('%12')
@@ -9122,3 +9137,25 @@ class ApprovalTurnTimingTests(ApprovalTurnTimingFixture):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CapAlertGrantTextTests(unittest.TestCase):
+    """B627: the alert offers Allow 2 more rounds only for a pause that grant() accepts."""
+
+    def cap(self, **extra):
+        return {'name': 'Worker', 'counts': {'%2': {'rounds': 3}}, **extra}
+
+    def test_round_cap_alert_offers_the_grant(self):
+        for preview in (None, 'A lock is missing.'):
+            with self.subTest(preview=preview):
+                title, body = review_links._cap_alert(self.cap(), preview, 3)
+                self.assertIn('Tap Allow 2 more rounds', body)
+
+    def test_unreadable_or_upgrade_pause_does_not_offer_the_grant(self):
+        for extra in ({'unreadable': True}, {'paused': review_links.UPGRADE_PAUSE}):
+            for preview in (None, 'A lock is missing.'):
+                with self.subTest(extra=extra, preview=preview):
+                    alert = review_links._cap_alert(self.cap(**extra), preview, 3)
+                    self.assertIsNotNone(alert)
+                    self.assertNotIn('Allow 2 more rounds', alert[1])
+                    self.assertIn('restart reviews', alert[1])

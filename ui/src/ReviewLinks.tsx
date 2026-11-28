@@ -33,7 +33,7 @@ export function ReviewGrantButton({ api, pane, onChanged, onToast, onGranted }: 
     }
   }
   return <button type="button" className="secondary review-grant" disabled={pending === grant.token}
-    aria-label={`Allow 2 more review rounds for ${paneTitle(pane)}`} onClick={() => void allow(grant)}>Allow 2 more rounds</button>
+    aria-label={`Allow 2 more rounds for ${paneTitle(pane)}`} onClick={() => void allow(grant)}>Allow 2 more rounds</button>
 }
 
 // The eye in the chat header shows linked tabs and paused reviews.

@@ -46,6 +46,8 @@ CAP_FIELDS = (*CAP_DECISION, 'restart', 'review_prompts', 'review_turn_at', *PAR
 LEGACY_COUNTS = (*COUNTS, 'round_sources')
 UNOWNED = ''  # B268 saved records can predate reviewer identity.
 SAVED_CAP_TTL = 24 * 60 * 60
+# A Mak grant keeps a saved cap until the worker's next turn takes it. Drop it if that turn never comes.
+GRANT_PENDING_TTL = 7 * 24 * 3600
 CAP_ERROR = ('This worker reached the review round cap. Mak or the parent must decide before linking a reviewer. '
              'Mak can allow 2 more rounds from the paused review in Tether.')
 UPGRADE_PAUSE = 'upgrade'
@@ -319,13 +321,15 @@ def _needs_migration(rows):
 
 def _read():
     rows = _load_rows()
-    cutoff = time.time() - SAVED_CAP_TTL
+    now = time.time()
+    cutoff = now - SAVED_CAP_TTL
     migrate = _needs_migration(rows)
     rows = [_sanitize(row) for row in rows]
     if migrate or _needs_migration(rows):
         rows = _migrate(rows, cutoff)
     return [row for row in rows if not _is_cap(row) or not _saved(row)
-            or row['saved_at'] > cutoff or _at_cap(row) or row.get('grant_pending')
+            or row['saved_at'] > cutoff or _at_cap(row)
+            or (row.get('grant_pending') and row['saved_at'] > now - GRANT_PENDING_TTL)
             or _cap_key(row) in _feedback_in_flight]
 
 
@@ -2225,12 +2229,14 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
 
 
 def _cap_alert(cap, preview=None, limit=None, *, unreadable=False):
+    # grant() refuses an unreadable or upgrade pause, so do not offer the button for one.
+    tap = not cap.get('unreadable') and cap.get('paused') != UPGRADE_PAUSE
     if preview is not None:
         restart = ('Link the tabs again from Tether to restart reviews.' if _saved(cap)
                    else 'Answer in that tab to restart reviews.')
         return ('Review needs you',
                 f'“{cap["name"]}”: the reviewer still found blocking problems after {limit or _round_limit(cap)} rounds. '
-                f'Tap Allow 2 more rounds in Tether. {restart} Open findings: “{preview}”')
+                f'{"Tap Allow 2 more rounds in Tether. " if tap else ""}{restart} Open findings: “{preview}”')
     if _stale_limit(cap):
         reason = "Tether could not read the tab's commit for the latest approval. " if unreadable else ''
         return ('Review needs you',
@@ -2238,7 +2244,8 @@ def _cap_alert(cap, preview=None, limit=None, *, unreadable=False):
                 f'{reason}Answer in that tab to restart reviews.')
     if 'parent_stage' not in cap and 'escalate' not in cap:
         return ('Review paused', f'“{cap["name"]}” reached the round limit ({_round_limit(cap)} rounds). '
-                'Tap Allow 2 more rounds in Tether or answer in that tab to restart reviews.')
+                + ('Tap Allow 2 more rounds in Tether or answer in that tab to restart reviews.' if tap
+                 else 'Answer in that tab to restart reviews.'))
     return None
 
 
