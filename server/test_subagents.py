@@ -14,6 +14,18 @@ import tool_details
 from own_time import own_time
 
 
+def shell_completion_record(output, tool_id, status, timestamp, *, summary='Background command ended', as_user=False):
+    notice = (f'<task-notification>\n<task-id>{output.stem}</task-id>\n'
+              f'<tool-use-id>{tool_id}</tool-use-id>\n<output-file>{output}</output-file>\n'
+              f'<status>{status}</status>\n<summary>{summary}</summary>\n</task-notification>')
+    origin = {'kind': 'task-notification', 'producer': 'session-task'}
+    if as_user:
+        return {'type': 'user', 'timestamp': timestamp, 'origin': origin, 'rowSource': 'recorded',
+                'message': {'role': 'user', 'content': notice}}
+    return {'type': 'attachment', 'timestamp': timestamp, 'attachment': {
+        'type': 'queued_command', 'commandMode': 'task-notification', 'origin': origin, 'prompt': notice}}
+
+
 class SubagentTests(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
@@ -570,6 +582,10 @@ class ProcessTasksTests(unittest.TestCase):
         os.utime(path, (self.now + seconds, self.now + seconds))
         return path
 
+    def shell_completion(self, identifier, status='completed', **fields):
+        return shell_completion_record(self.tasks / f'{identifier}.output', f'tool-{identifier}',
+                                       status, self.stamp(-10), **fields)
+
     def listed_tasks(self):
         return {item['id']: item for item in subagents.listing(self.config)['tasks']}
 
@@ -656,8 +672,8 @@ class ProcessTasksTests(unittest.TestCase):
         self.assertEqual(task['state'], 'stopped')
 
     def test_shell_killed_by_tether_reads_stopped_not_failed(self):
-        self.output('shell01', 'out\n[exited with code 143]')
-        self.write(self.main, self.task_start('shell01'))
+        self.output('shell01', 'out')
+        self.write(self.main, self.task_start('shell01') + [self.shell_completion('shell01', 'failed')])
         self.assertEqual(self.listed_tasks()['shell01']['state'], 'failed')
         subagents.task_process.record(subagents.task_process.key(self.tasks.resolve(), 'shell01'))
         task = self.listed_tasks()['shell01']
@@ -736,36 +752,57 @@ class ProcessTasksTests(unittest.TestCase):
         (self.tasks / 'escape.output').symlink_to(outside)
         self.assertEqual(subagents.listing(self.config)['agents'], [])
 
-    def test_task_footers_and_live_owner(self):
+    def test_shell_completion_records_and_live_owner(self):
         records = []
-        cases = [('shell00', '[exited with code 0]', 'finished'),
-                 ('shell02', '[exited with code 2]', 'failed'),
-                 ('shell03', '[killed]', 'stopped'), ('shell04', '', 'running')]
-        for identifier, footer, _ in cases:
+        cases = [('shell00', 'completed', 'finished'), ('shell02', 'failed', 'failed'),
+                 ('shell03', 'killed', 'stopped'), ('shell04', None, 'running')]
+        for identifier, status, _ in cases:
             records.extend(self.task_start(identifier))
-            self.output(identifier, 'output\n' + footer + '\n')
+            self.output(identifier, 'output\n')
+            if status is not None:
+                records.append(self.shell_completion(identifier, status, summary='Result &amp; details',
+                                                     as_user=status == 'failed'))
         self.write(self.main, records)
         tasks = self.listed_tasks()
-        for identifier, footer, state in cases:
+        for identifier, status, state in cases:
             self.assertEqual(tasks[identifier]['state'], state)
-            self.assertEqual(tasks[identifier]['seconds'], 80 if footer else 100)
-            self.assertEqual(tasks[identifier]['ended'], self.stamp(-20) if footer else None)
-            self.assertEqual(tasks[identifier]['summary'], footer if state in ('failed', 'stopped') else None)
+            self.assertEqual(tasks[identifier]['seconds'], 90 if status else 100)
+            self.assertEqual(tasks[identifier]['ended'], self.stamp(-10) if status else None)
+            self.assertEqual(tasks[identifier]['summary'], 'Result & details' if state in ('failed', 'stopped') else None)
         self.owner_start.return_value = 'dead'
         self.assertEqual(self.listed_tasks(), {})
         self.assertIsNone(subagents._tasks_dir(self.config))
 
-    def test_footer_precedes_notification_and_notification_is_secondary(self):
+    def test_shell_output_stays_running_until_its_own_completion_arrives(self):
         self.output('shell01', '[killed]')
-        self.output('shell02', '')
-        self.write(self.main, self.task_start('shell01') + self.task_start('shell02') + [
-            self.record('user', self.notification('shell01', 'completed')),
-            self.record('user', self.notification('shell02', 'failed', 'Notification failure'))])
+        self.output('shell02', '[exited with code 2]')
+        self.write(self.main, self.task_start('shell01') + self.task_start('shell02'))
         tasks = self.listed_tasks()
-        self.assertEqual(tasks['shell01']['state'], 'stopped')
-        self.assertEqual(tasks['shell01']['summary'], '[killed]')
-        self.assertEqual(tasks['shell02']['state'], 'failed')
-        self.assertEqual(tasks['shell02']['summary'], 'Notification failure')
+        self.assertEqual(set(tasks), {'shell01', 'shell02'})
+        for identifier, task in tasks.items():
+            with self.subTest(identifier=identifier):
+                self.assertEqual((task['state'], task['ended'], task['summary']), ('running', None, None))
+        with self.main.open('a') as stream:
+            stream.write(json.dumps(self.shell_completion('shell01')) + '\n')
+        tasks = self.listed_tasks()
+        self.assertEqual(tasks['shell01']['state'], 'finished')
+        self.assertEqual(tasks['shell02']['state'], 'running')
+        self.assertEqual(subagents.task(self.config, 'shell02')['output'], '[exited with code 2]')
+
+    def test_shell_completion_requires_native_origin_and_matching_tool_and_output(self):
+        output = self.output('shell01')
+        attachment = self.shell_completion('shell01')
+        attachment['attachment']['origin'].pop('producer')
+        notice = attachment['attachment']['prompt']
+        self.write(self.main, self.task_start('shell01') + [
+            self.record('user', notice),
+            {'type': 'queue-operation', 'operation': 'enqueue', 'content': notice},
+            attachment,
+            shell_completion_record(output, 'tool-other01', 'completed', self.stamp(-10)),
+            shell_completion_record(self.root / output.name, 'tool-shell01', 'completed', self.stamp(-10)),
+        ])
+        tasks = self.listed_tasks()
+        self.assertEqual(tasks['shell01']['state'], 'running')
 
     def test_finished_agent_waits_until_its_running_children_finish(self):
         self.enterContext(patch.object(subagents.task_process, 'running', return_value=True))
@@ -791,7 +828,8 @@ class ProcessTasksTests(unittest.TestCase):
         self.assertIsNone(subagents.detail(self.config, 'abc')['report'])
 
         for identifier in ('shell01', 'shell02'):
-            self.output(identifier, '[exited with code 0]')
+            with self.main.open('a') as stream:
+                stream.write(json.dumps(self.shell_completion(identifier)) + '\n')
         agent, = subagents.listing(self.config)['agents']
         self.assertEqual(agent['waiting'], {'shell': 0, 'monitor': 1})
         self.output('monitor1', '[exited with code 0]')
@@ -822,7 +860,8 @@ class ProcessTasksTests(unittest.TestCase):
         for index in range(42):
             identifier = f'task{index:03}'
             records.extend(self.task_start(identifier, seconds=-100 + index))
-            self.output(identifier, '[exited with code 0]')
+            self.output(identifier)
+            records.append(self.shell_completion(identifier))
         self.write(self.main, records)
         listed = subagents.listing(self.config)
         self.assertEqual(len(listed['tasks']), 40)
@@ -864,7 +903,10 @@ class ProcessTasksTests(unittest.TestCase):
                 self.assertEqual(agent['state'], 'running')
                 self.assertEqual(agent['waiting'][kind], 1)
                 self.assertEqual([(task['id'], task['parent']) for task in listed['tasks']], [(identifier, 'abc')])
-                self.output(identifier, '[exited with code 0]')
+                if kind == 'shell':
+                    self.write(self.main, [self.shell_completion(identifier)])
+                else:
+                    self.output(identifier, '[exited with code 0]')
                 self.assertEqual(subagents.listing(self.config)['agents'], [])
 
     def test_bar_candidates_keep_metadata_only_agents_across_clears(self):
@@ -943,8 +985,8 @@ class ProcessTasksTests(unittest.TestCase):
         self.assertEqual(task['parent'], 'abc')
 
     def test_earlier_chat_keeps_only_running_tasks_and_skips_foreground_files(self):
-        self.write(self.first, self.task_start('older01') + self.task_start('older02'))
-        self.output('older01', '[exited with code 0]')
+        self.write(self.first, self.task_start('older01') + self.task_start('older02') + [self.shell_completion('older01')])
+        self.output('older01')
         self.output('older02')
         # Output files with no start record are foreground Bash calls, not background tasks.
         self.output('unknown1')
