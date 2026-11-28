@@ -16,7 +16,7 @@ import server
 import subagent_stop as stop
 import subagents
 import terminal_input as terminal
-from test_subagents import shell_completion_record
+from test_subagents import CLAUDE_332_TASKS, shell_completion_record
 
 
 LIST_HINT = ('↑/↓ to select · Enter to view · f to foreground · x to stop · '
@@ -441,13 +441,16 @@ class ProcessStopTests(unittest.TestCase):
     def setUp(self):
         StopTests.setUp(self)
         self.enterContext(patch.object(stop.task_process, 'same', return_value=True))
+        self.exited = self.enterContext(patch.object(stop.task_process, 'exited', return_value=False))
+        self.enterContext(patch.object(stop.task_process, 'stop', side_effect=AssertionError('Unexpected process signal')))
 
     stop = StopTests.stop
-    def make_tasks(self):
+    def make_tasks(self, *, bind_shell=True):
         self.tasks = self.meta.parent.parent.parent / 'tmp' / 'cwd' / '11111111-1111-1111-1111-111111111111' / 'tasks'
         self.tasks.mkdir(parents=True)
         self.enterContext(patch.object(subagents, 'TASKS_TMP', self.tasks.parent.parent.parent))
         self.enterContext(patch.object(subagents, '_fd_links', return_value=[self.tasks]))
+        self.enterContext(patch.object(stop.task_process, 'find', return_value=PROCESS if bind_shell else None))
         self.output = self.tasks / 'shell02.output'
         self.output.write_text('output')
         records = [
@@ -461,12 +464,59 @@ class ProcessStopTests(unittest.TestCase):
         self.pane.names = ['sleep 600']
         self.pane.shells = ['sleep 300', 'sleep 600']
         self.pane.at = 2
-        self.pane.on_stop = self.finish_shell
+        self.pane.on_stop = self.terminal_stop
 
-    def finish_shell(self, status='killed', identifier='shell02', tool_id='bash-start'):
+    def finish_shell(self, status, identifier='shell02', tool_id='bash-start'):
         record = shell_completion_record(self.tasks / f'{identifier}.output', tool_id, status, '2027-01-15T08:05:00Z')
         with Path(self.entry['transcript']).open('a') as stream:
             stream.write(json.dumps(record) + '\n')
+
+    def terminal_stop(self, *, child=None, exited=True):
+        fixture = 'user-stop-child-shell.jsonl' if child else 'user-stop-shell.jsonl'
+        record = json.loads((CLAUDE_332_TASKS / fixture).read_text())
+        record['message']['content'] = record['message']['content'].replace('/redacted/tasks/shell02.output', str(self.output))
+        with (child or Path(self.entry['transcript'])).open('a') as stream:
+            stream.write(json.dumps(record) + '\n')
+        self.output.write_text('output\n[killed]\n')
+        self.exited.return_value = exited
+
+    def test_verified_terminal_stop_confirms_main_and_child_shells(self):
+        for owned_by_child in (False, True):
+            with self.subTest(owned_by_child=owned_by_child):
+                self.setUp()
+                self.make_tasks()
+                child = None
+                if owned_by_child:
+                    main = Path(self.entry['transcript'])
+                    child = self.meta.with_name('agent-alpha.jsonl')
+                    child.write_bytes(main.read_bytes())
+                    main.write_text('')
+                self.pane.on_stop = lambda: self.terminal_stop(child=child)
+
+                def find_before_keys(*args):
+                    self.assertEqual(self.pane.keys, [])
+                    return PROCESS
+
+                with patch.object(stop.task_process, 'find', side_effect=find_before_keys) as find:
+                    result = stop.stop(self.entry, 'shell02', run=self.pane, sleep=lambda _: None,
+                                       allow_process_fallback=False)
+                self.assertEqual(result, {'ok': True, 'state': 'stopped'})
+                find.assert_called_once()
+                self.exited.assert_called_with(PROCESS)
+                task, = subagents.listing(self.entry)['tasks']
+                self.assertEqual((task['state'], task['summary']), ('stopped', 'Stopped from Tether.'))
+
+    def test_user_stop_notice_with_no_bound_exit_leaves_task_unconfirmed(self):
+        for bind_shell in (True, False):
+            with self.subTest(bind_shell=bind_shell):
+                self.setUp()
+                self.make_tasks(bind_shell=bind_shell)
+                self.pane.on_stop = lambda: self.terminal_stop(exited=False)
+                with self.assertRaisesRegex(stop.StopError, 'The task did not stop'):
+                    self.stop('shell02')
+                task, = subagents.listing(self.entry)['tasks']
+                self.assertEqual((task['state'], task['ended']), ('running', None))
+                self.assertEqual(bool(self.exited.called), bind_shell)
 
     def test_stop_task_moves_up_from_agent_to_second_shell_only(self):
         self.make_tasks()
@@ -491,11 +541,11 @@ class ProcessStopTests(unittest.TestCase):
         for header, success in (('Shell › sleep 600', True), ('Second wait', True), ('Unrelated task', False)):
             with self.subTest(header=header):
                 self.setUp()
-                self.make_tasks()
+                self.make_tasks(bind_shell=success)
                 self.pane = FakeTasks(self.meta)
                 self.pane.detail = True
                 self.pane.detail_header = header
-                self.pane.on_stop = self.finish_shell
+                self.pane.on_stop = self.terminal_stop
                 if success:
                     self.assertTrue(self.stop('shell02')['ok'])
                 else:
@@ -505,7 +555,7 @@ class ProcessStopTests(unittest.TestCase):
                 self.assertEqual(self.pane.keys[-1], ('Escape',))
 
     def test_task_ambiguous_shells_refuse_with_task_error(self):
-        self.make_tasks()
+        self.make_tasks(bind_shell=False)
         self.pane.shells = ['sleep 600', 'Second wait']
         self.pane.shell_details = {0: (None, 'sleep 600'), 1: (None, 'sleep 600')}
         with self.assertRaisesRegex(stop.StopError, '2 tasks share this name'):
@@ -548,7 +598,6 @@ class ProcessStopTests(unittest.TestCase):
 
         def kill(pid, sig):
             signals.append((pid, sig))
-            self.finish_shell('failed')
 
         # /tasks refuses (an unsent draft), so the signal fallback stops the task.
         self.pane.draft = 'Keep draft'
@@ -646,15 +695,15 @@ class ProcessStopTests(unittest.TestCase):
         folder.mkdir()
         (folder / 'm1.output').write_text('')
         monitor = {'id': 'm1', 'kind': 'monitor', 'command': 'tail -f log', 'started': '2026-11-14T10:00:00Z'}
-        shell = {'id': 's1', 'kind': 'shell', 'command': 'sleep 600'}
-        (folder / 's1.output').write_text('')
+        shell = {'id': 'shell01', 'kind': 'shell', 'command': 'sleep 600'}
+        (folder / 'shell01.output').write_text('')
         with patch.object(stop.subagents, '_owner_since', return_value=1), \
                 patch.object(stop.subagents, '_tasks_dir', return_value=folder), \
                 patch.object(stop.task_process, 'find', return_value=PROCESS) as find:
             self.assertIsNone(stop.bind(self.entry, monitor))
             find.assert_not_called()
-            self.assertEqual(stop.bind(self.entry, shell), (PROCESS, f'{folder}/s1'))
-            self.assertEqual(find.call_args.args[2], os.path.realpath(folder / 's1.output'))
+            self.assertEqual(stop.bind(self.entry, shell), (PROCESS, f'{folder}/shell01'))
+            self.assertEqual(find.call_args.args[2], os.path.realpath(folder / 'shell01.output'))
 
     def test_unreadable_screen_error_names_a_newer_claude_version(self):
         sessions = Path(self.meta).parent / 'sessions'
@@ -679,7 +728,7 @@ class ProcessStopTests(unittest.TestCase):
                 self.assertEqual(self.stop('shell02'), {'ok': True, 'state': state})
 
     def test_task_draft_and_failed_confirmation_are_safe(self):
-        self.make_tasks()
+        self.make_tasks(bind_shell=False)
         self.pane.draft = 'Keep draft'
         with self.assertRaisesRegex(stop.StopError, 'unsent draft'):
             self.stop('shell02')

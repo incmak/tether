@@ -29,8 +29,14 @@ class FakeProcs:
             (str(index), target) for index, target in enumerate(self.procs[pid]['fds'])]))
         case.enterContext(patch.object(module, 'start_ticks', side_effect=lambda pid: str(self.procs[pid]['start'])))
         case.enterContext(patch.object(module, 'start_ms', side_effect=lambda ticks: float(ticks) * 1000))
-        case.enterContext(patch.object(module, 'stat_fields', side_effect=lambda pid: [self.procs[pid]['state']]))
+        case.enterContext(patch.object(module, 'stat_fields', side_effect=self.stat_fields))
         case.enterContext(patch.object(task_process.os, 'getpgid', side_effect=lambda pid: self.procs[pid]['group']))
+
+    def stat_fields(self, pid):
+        if pid not in self.procs:
+            raise ProcessLookupError(pid)
+        process = self.procs[pid]
+        return [process['state'], *(['0'] * 18), str(process['start'])]
 
 
 def wrapped(command):
@@ -151,8 +157,21 @@ class StopTests(unittest.TestCase):
 
     def test_pid_that_left_its_group_gets_no_signal(self):
         self.procs.procs[200]['group'] = 100
-        task_process.stop(self.process(), sleep=lambda _: None, kill=self.kill({signal.SIGTERM}))
+        self.assertFalse(task_process.stop(self.process(), sleep=lambda _: None, kill=self.kill({signal.SIGTERM})))
         self.assertEqual(self.sent, [])
+
+    def test_exit_proof_tracks_the_bound_instance_and_refuses_unreadable_state(self):
+        process = self.process()
+        self.procs.procs[200].update(group=100, fds=[])
+        self.assertFalse(task_process.exited(process))
+        with patch.object(task_process.procinfo, 'stat_fields', side_effect=PermissionError):
+            self.assertFalse(task_process.exited(process))
+        self.procs.procs[200]['state'] = 'Z'
+        self.assertTrue(task_process.exited(process))
+        self.procs.add(200, start=5000)
+        self.assertTrue(task_process.exited(process))
+        del self.procs.procs[200]
+        self.assertTrue(task_process.exited(process))
 
     def test_find_refuses_a_pid_reused_during_its_checks(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -177,9 +196,12 @@ class LedgerTests(unittest.TestCase):
         self.enterContext(patch.object(task_process, 'LEDGER', Path(folder.name) / 'cache' / 'task-stops.json'))
 
     def test_record_read_and_bound(self):
-        self.assertEqual(task_process.stopped(), frozenset())
+        self.assertEqual(task_process.stopped(), {})
         task_process.record('a/b1')
-        self.assertIn('a/b1', task_process.stopped())
+        task_process.record('a/b2', confirmed=True)
+        records = task_process.stopped()
+        self.assertIsInstance(records['a/b1'], float)
+        self.assertIsInstance(records['a/b2']['ended'], float)
         with patch.object(task_process, 'LEDGER_LIMIT', 3):
             for index in range(5):
                 task_process.record(f'k{index}')
@@ -188,7 +210,7 @@ class LedgerTests(unittest.TestCase):
     def test_corrupt_ledger_reads_empty_and_is_rewritten(self):
         task_process.LEDGER.parent.mkdir(parents=True)
         task_process.LEDGER.write_text('{not json')
-        self.assertEqual(task_process.stopped(), frozenset())
+        self.assertEqual(task_process.stopped(), {})
         task_process.record('x')
         self.assertEqual(set(task_process.stopped()), {'x'})
 

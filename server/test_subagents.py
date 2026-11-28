@@ -14,6 +14,9 @@ import tool_details
 from own_time import own_time
 
 
+CLAUDE_332_TASKS = Path(__file__).with_name('fixtures') / 'claude_2.1.332_tasks'
+
+
 def shell_completion_record(output, tool_id, status, timestamp, *, summary='Background command ended', as_user=False):
     notice = (f'<task-notification>\n<task-id>{output.stem}</task-id>\n'
               f'<tool-use-id>{tool_id}</tool-use-id>\n<output-file>{output}</output-file>\n'
@@ -679,6 +682,12 @@ class ProcessTasksTests(unittest.TestCase):
         task = self.listed_tasks()['shell01']
         self.assertEqual((task['state'], task['summary']), ('stopped', 'Stopped from Tether.'))
 
+    def test_legacy_signal_attempt_is_not_a_confirmed_exit(self):
+        self.output('shell01')
+        self.write(self.main, self.task_start('shell01'))
+        subagents.task_process.record(subagents.task_process.key(self.tasks.resolve(), 'shell01'))
+        self.assertEqual(self.listed_tasks()['shell01']['state'], 'running')
+
     def test_link_to_new_session_before_any_write_finds_middle_session_lines(self):
         # Seen live: /clear points the link at the new session at once; the agent's lines stay in the
         # session between the first and the current one.
@@ -793,16 +802,69 @@ class ProcessTasksTests(unittest.TestCase):
         output = self.output('shell01')
         attachment = self.shell_completion('shell01')
         attachment['attachment']['origin'].pop('producer')
+        wrong_origin = self.shell_completion('shell01')
+        wrong_origin['attachment']['origin']['kind'] = 'human'
+        wrong_mode = self.shell_completion('shell01')
+        wrong_mode['attachment']['commandMode'] = 'prompt'
         notice = attachment['attachment']['prompt']
         self.write(self.main, self.task_start('shell01') + [
             self.record('user', notice),
             {'type': 'queue-operation', 'operation': 'enqueue', 'content': notice},
-            attachment,
+            attachment, wrong_origin, wrong_mode,
             shell_completion_record(output, 'tool-other01', 'completed', self.stamp(-10)),
             shell_completion_record(self.root / output.name, 'tool-shell01', 'completed', self.stamp(-10)),
         ])
         tasks = self.listed_tasks()
         self.assertEqual(tasks['shell01']['state'], 'running')
+
+    def test_task_stop_result_releases_waiting_parent_and_leaves_other_shell_running(self):
+        self.agent(meta={'finished': True}, records=self.task_start('b00000002'))
+        self.output('b00000002', '[killed]')
+        self.output('b00000003', 'working')
+        self.write(self.main, self.task_start('b00000003'))
+        parent, = subagents.listing(self.config)['agents']
+        self.assertEqual(parent['waiting'], {'shell': 1, 'monitor': 0})
+        with self.main.open('a') as stream:
+            stream.write((CLAUDE_332_TASKS / 'task-stop.jsonl').read_text())
+        listed = subagents.listing(self.config)
+        self.assertEqual(listed['agents'][0]['state'], 'finished')
+        tasks = {task['id']: task for task in listed['tasks']}
+        self.assertEqual((tasks['b00000002']['state'], tasks['b00000002']['ended']),
+                         ('stopped', self.stamp(-10)))
+        self.assertEqual(tasks['b00000003']['state'], 'running')
+
+    def test_task_stop_requires_success_for_the_requested_shell(self):
+        for wrong_field in ('tool', 'request', 'tool use', 'result', 'error', 'command', 'start time'):
+            with self.subTest(wrong_field=wrong_field):
+                self.setUp()
+                identifier = 'b00000002'
+                self.output(identifier)
+                call, result = map(json.loads, (CLAUDE_332_TASKS / 'task-stop.jsonl').read_text().splitlines())
+                use = call['message']['content'][0]
+                tool_result = result['toolUseResult']
+                if wrong_field == 'tool':
+                    use['name'] = 'TaskOutput'
+                elif wrong_field == 'request':
+                    use['input']['task_id'] = 'b00000003'
+                elif wrong_field == 'tool use':
+                    result['message']['content'][0]['tool_use_id'] = 'toolu_other'
+                elif wrong_field == 'result':
+                    tool_result['message'] = f'Task {identifier} may still be running.'
+                elif wrong_field == 'error':
+                    result['message']['content'][0]['is_error'] = True
+                elif wrong_field == 'command':
+                    tool_result['command'] = 'sleep 601'
+                else:
+                    result['timestamp'] = self.stamp(-150)
+                self.write(self.main, self.task_start(identifier) + [call, result])
+                self.assertEqual(self.listed_tasks()[identifier]['state'], 'running')
+
+    def test_session_exit_without_a_completion_record_does_not_confirm_the_shell(self):
+        self.write(self.main, self.task_start('shell01'))
+        self.output('shell01', '[killed]')
+        self.assertEqual(self.listed_tasks()['shell01']['state'], 'running')
+        self.owner_start.return_value = 'exited'
+        self.assertEqual(self.listed_tasks(), {})
 
     def test_finished_agent_waits_until_its_running_children_finish(self):
         self.enterContext(patch.object(subagents.task_process, 'running', return_value=True))
@@ -882,7 +944,7 @@ class ProcessTasksTests(unittest.TestCase):
 
     def test_unfinished_child_output_from_before_restart_cannot_reopen_parent(self):
         self.agent(meta={'finished': True}, records=self.task_start('shell01', seconds=-400), age=400)
-        self.output('shell01')
+        self.output('shell01', '[killed]')
         agent, = subagents.listing(self.config)['agents']
         self.assertEqual(agent['state'], 'finished')
         self.assertNotIn('waiting', agent)

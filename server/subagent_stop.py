@@ -3,7 +3,6 @@
 Claude's /tasks dialog stops agents, shells and monitors. Waiting agents appear in the agent bar
 instead. Both paths require a verified screen identity. Shells have an exact process fallback."""
 import json
-import os
 import re
 import subprocess
 import time
@@ -618,15 +617,14 @@ def bind(entry, task):
     marker. Its command and start time can match a same-command twin that starts later, so a
     monitor stops through /tasks only. The signal fallback uses only this binding and never looks
     again, because by then the task may have ended."""
-    if subagents._owner_since(entry) is None:
+    if task.get('kind') == 'monitor' or subagents._owner_since(entry) is None:
         return None
     tasks_dir = subagents._tasks_dir(entry)
-    if tasks_dir is None:
+    try:
+        output = subagents._task_path(tasks_dir, task['id'])
+    except (OSError, ValueError, RuntimeError):
         return None
-    output = tasks_dir / f'{task["id"]}.output'
-    if task.get('kind') == 'monitor' or not output.exists():
-        return None
-    process = task_process.find(entry['owner_pid'], task, os.path.realpath(output), None)
+    process = task_process.find(entry['owner_pid'], task, str(output), None)
     return None if process is None else (process, task_process.key(tasks_dir, task['id']))
 
 
@@ -637,13 +635,13 @@ def stop_process(bound):
     process, key = bound
     if not task_process.same(process):
         return True  # It ended on its own; confirm reads the state Claude recorded.
-    task_process.record(key)
     if not task_process.stop(process):
         raise StopError('The task did not stop. Check the terminal view.')
+    task_process.record(key, confirmed=True)
     return True
 
 
-def confirm(entry, agent_id, is_task, sleep):
+def confirm(entry, agent_id, is_task, sleep, *, bound=None):
     noun, collection = ('task', 'tasks') if is_task else ('agent', 'agents')
     for attempt in range(21):
         agent = next((item for item in subagents.listing(entry)[collection] if item['id'] == agent_id), None)
@@ -653,6 +651,10 @@ def confirm(entry, agent_id, is_task, sleep):
             agent = next((item for item in confirmed[collection] if item['id'] == agent_id), None)
         if agent is not None and agent['state'] in (('stopped', 'finished', 'failed') if is_task else ('stopped',)):
             return {'ok': True, 'state': agent['state']}
+        # Claude's /tasks can stop a shell without a delivered completion record.
+        if bound is not None and task_process.exited(bound[0]):
+            task_process.record(bound[1], confirmed=True)
+            return {'ok': True, 'state': 'stopped'}
         if attempt < 20:
             sleep(0.25)
     raise StopError(f'The {noun} did not stop. Check the terminal view.')
@@ -698,7 +700,7 @@ def stop(entry, agent_id, run=subprocess.run, sleep=time.sleep, clock=time.time,
         waiting = not is_task and 'waiting' in agent
 
         pressed = {}
-        bound = bind(entry, agent) if is_task and allow_process_fallback else None
+        bound = bind(entry, agent) if is_task else None
 
         def by_terminal():
             terminal_input.verify(entry, run)
@@ -720,7 +722,7 @@ def stop(entry, agent_id, run=subprocess.run, sleep=time.sleep, clock=time.time,
             finally:
                 if not waiting:
                     close(entry, run, sleep)
-            return confirm(entry, agent_id, is_task, sleep)
+            return confirm(entry, agent_id, is_task, sleep, bound=bound)
 
         # Tasks: /tasks first, so Claude records the task as stopped by the user. A signal makes
         # Claude report a failed command, and its agent may then debug or rerun it. For a shell the
@@ -731,11 +733,11 @@ def stop(entry, agent_id, run=subprocess.run, sleep=time.sleep, clock=time.time,
         try:
             return by_terminal()
         except StopError as exc:
-            if is_task and not pressed and stop_process(bound):
+            if allow_process_fallback and not pressed and stop_process(bound):
                 return confirm(entry, agent_id, True, sleep)
             raise StopError(with_version(entry, str(exc))) from exc
         except (ValueError, RuntimeError, OSError, subprocess.SubprocessError):
-            if is_task and not pressed and stop_process(bound):
+            if allow_process_fallback and not pressed and stop_process(bound):
                 return confirm(entry, agent_id, True, sleep)
             raise
     except StopError:

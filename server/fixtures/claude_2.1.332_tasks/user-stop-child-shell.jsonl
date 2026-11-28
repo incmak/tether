@@ -1,0 +1,1 @@
+{"type":"user","version":"2.1.332","timestamp":"2027-01-15T08:05:00.000Z","rowSource":"harness","origin":{"kind":"task-notification"},"message":{"role":"user","content":"<task-notification>\n<task-id>shell02</task-id>\n<tool-use-id>bash-start</tool-use-id>\n<status>stopped</status>\n<summary>Task \"Second wait\" was stopped by the parent agent</summary>\n</task-notification>"}}
