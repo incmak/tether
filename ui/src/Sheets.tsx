@@ -7,6 +7,8 @@ import { FolderInput, Eye, Archive, ListChecks, ArchiveRestore, ArrowDown, BookM
 import { ColorRow, GroupPicker } from './Organize'
 import type { SessionGroup, TagColor } from './Organize'
 import { ReviewLinkPicker } from './ReviewLinks'
+import { ListSearch } from './ListSearch'
+import { useListSearch } from './listSearch'
 import { CoordinatorPicker, canCoordinate, coordinatorLabel } from './Coordinator'
 import { SelectMenu } from './SelectMenu'
 import { TabAdvisor } from './ClaudeAdvisor'
@@ -102,14 +104,35 @@ function PlaceItems({ place, pending, onClose }: { place: Place | undefined; pen
 
 /** The keyboard path for drag to merge: a list of the other sessions to choose from. */
 function SessionPicker({ label, targets, pending, extra, onPick, onCancel }: { label: string; targets: Session[]; pending: boolean; extra?: React.ReactNode; onPick: (target: Session) => void; onCancel: () => void }) {
-  return <div className="action-list" role="group" aria-label={label}>
+  const search = useListSearch(targets, target => [target.name, target.dir, ...target.panes.map(paneTitle)])
+  const { shown, query, setQuery, input, setList, listKeys, searchable } = search
+  return <div role="group" aria-label={label}>
     <p className="action-label">{label}</p>
-    {targets.map((target, at) => <button key={target.id} autoFocus={at === 0} disabled={pending} onClick={() => onPick(target)}>{target.name}<small>{target.panes.length === 1 ? '1 pane' : `${target.panes.length} panes`}</small></button>)}
+    <ListSearch search={search} label="Find a session" noun="sessions" pick />
     {!targets.length && !extra && <p className="hint">There is no other session.</p>}
-    {extra}
-    <hr />
-    <button disabled={pending} onClick={onCancel}>Cancel</button>
+    {!!targets.length && !shown.length && <p className="hint list-search-none">No session matches “{query.trim()}”. <button type="button" className="link-button" onClick={() => { setQuery(''); input?.focus() }}>Clear search</button></p>}
+    <div ref={setList} className="action-list" onKeyDown={listKeys}>
+      {shown.map((target, at) => <button key={target.id} autoFocus={!searchable && at === 0} disabled={pending} onClick={() => onPick(target)}>{target.name}<small>{target.panes.length === 1 ? '1 pane' : `${target.panes.length} panes`}</small></button>)}
+      {extra}
+      <hr />
+      <button data-search-skip disabled={pending} onClick={onCancel}>Cancel</button>
+    </div>
   </div>
+}
+
+function TaskMovePicker({ pane, targets, pending, onPick, onBack }: { pane: Pane; targets: Pane[]; pending: boolean; onPick: (target: Pane) => void; onBack: () => void }) {
+  const search = useListSearch(targets, target => [paneTitle(target), target.label, target.dir])
+  const { shown, query, setQuery, input, setList, listKeys } = search
+  return <>
+    <p className="hint">Move {paneTitle(pane)} into a task in this stack.</p>
+    <ListSearch search={search} label="Find a task" noun="tasks" pick />
+    {!targets.length ? <p className="hint">There are no other tasks in this stack.</p>
+      : !shown.length && <p className="hint list-search-none">No task matches “{query.trim()}”. <button type="button" className="link-button" onClick={() => { setQuery(''); input?.focus() }}>Clear search</button></p>}
+    <div ref={setList} className="action-list" onKeyDown={listKeys}>
+      {shown.map(target => <button key={target.id} type="button" disabled={pending} onClick={() => onPick(target)}><FolderInput size={18} aria-hidden="true" />{paneTitle(target)}</button>)}
+      <div className="sheet-buttons"><button type="button" className="secondary" data-search-skip disabled={pending} onClick={onBack}>Back</button></div>
+    </div>
+  </>
 }
 
 /** A sheet on the phone; a popover at `at` on the desktop. The popover closes on Esc or a click outside it. */
@@ -222,7 +245,6 @@ export function PaneActions({ api, session, tabCount, archived, pane, panes, at,
   const [initialPane] = useState(pane)
   const [hadChildren] = useState(() => taskChildren(pane, panes).length > 0)
   const closeTree = !initialPane.task && (hadChildren || taskChildren(pane, panes).length > 0)
-  const taskTargets = panes.filter(target => canMoveInto(pane, target, panes, session?.groups))
   const cancelClose = () => startClose ? onClose() : setMode('menu')
   const moveTask = (target: Pane | null) => void run(async () => { await moveIntoTask(api, initialPane, target); return undefined })
   const last = tabCount <= 1
@@ -245,15 +267,11 @@ export function PaneActions({ api, session, tabCount, archived, pane, panes, at,
       <p className="sheet-sub">{words.Pane} in {session?.name ?? pane.label} · {pane.dir}</p>
     </>}
     {mode === 'task-move'
-      ? <div className="action-list">
-          <p className="hint">Move {paneTitle(initialPane)} into a task in this stack.</p>
-          {taskTargets.length ? taskTargets.map(target => <button key={target.id} type="button" disabled={pending} onClick={() => moveTask(target)}><FolderInput size={18} aria-hidden="true" />{paneTitle(target)}</button>) : <p className="hint">There are no other tasks in this stack.</p>}
-          <div className="sheet-buttons"><button type="button" className="secondary" disabled={pending} onClick={() => setMode('menu')}>Back</button></div>
-        </div>
+      ? <TaskMovePicker pane={initialPane} targets={panes.filter(target => canMoveInto(pane, target, panes, session?.groups))} pending={pending} onPick={moveTask} onBack={() => setMode('menu')} />
       : mode === 'move'
       ? <SessionPicker label={`Move this ${words.pane} to`} targets={targets.filter(target => target.id !== pane.tmux_session)} pending={pending} onCancel={() => setMode('menu')}
           onPick={target => void run(async () => { await api('merge', { kind: 'pane', source: pane.id, target: target.id }); return undefined })}
-          extra={!last && <button disabled={pending} onClick={() => void run(async () => { await api('merge', { kind: 'break', source: pane.id }); return undefined })}><Plus size={18} />New session</button>} />
+          extra={!last && <button data-search-skip disabled={pending} onClick={() => void run(async () => { await api('merge', { kind: 'break', source: pane.id }); return undefined })}><Plus size={18} />New session</button>} />
       : mode === 'rename'
       ? <form className="rename-form" onSubmit={event => { event.preventDefault(); void rename() }}>
           <label htmlFor="pane-name-input">{words.Pane} name</label>
