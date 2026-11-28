@@ -14,6 +14,8 @@ except ImportError:  # Python < 3.11
 
 import claude_probe
 import paths
+from antigravity_catalog import build as antigravity_catalog
+from catalog_metadata import front_matter, short
 
 HOME = Path.home()
 CODEX_ADMIN = Path('/etc/codex')
@@ -90,29 +92,6 @@ CODEX_BUILTINS = [
     ('clear', 'clear the terminal and start a new chat', [], '[text]'),
     ('subagents', "switch between this session's subagents", [], ''),
 ]
-FRONT = re.compile(r'^---\s*\n(.*?)\n---', re.S)
-
-
-def front_matter(path):
-    """Metadata from a SKILL.md or command file; tolerant of missing or odd front matter."""
-    try:
-        text = path.read_text(errors='ignore')[:4000]
-    except OSError:
-        return {}
-    match = FRONT.match(text)
-    result = {}
-    for line in (match[1] if match else '').splitlines():
-        key, _, value = line.partition(':')
-        if key.strip() in ('name', 'description', 'argument-hint') and value.strip() and value.strip() not in ('>', '|', '>-', '|-'):
-            result[key.strip()] = value.strip().strip('"\'')
-    return result
-
-
-def short(text, limit=140):
-    text = ' '.join((text or '').split())
-    return text if len(text) <= limit else text[:limit - 1].rstrip() + '…'
-
-
 def skills_in(folder, prefix=''):
     items = []
     for skill in sorted(folder.glob('*/SKILL.md')) if folder.is_dir() else []:
@@ -304,6 +283,8 @@ def catalog(agent, cwd, transcript=None):
         return claude_catalog(cwd, transcript)
     if agent == 'codex':
         return codex_catalog(cwd)
+    if agent == 'antigravity':
+        return antigravity_catalog(cwd)
     return {'commands': [], 'plugins': [], 'mcp': [], 'note': ''}
 
 
