@@ -7,12 +7,15 @@ from textwrap import dedent
 FRONT = re.compile(r'^---[ \t]*\r?\n(.*?)\n---[ \t]*\r?(?:\n|$)', re.S)
 
 
-def metadata_text(path, limit):
-    """Read bounded metadata from regular files, including symlinked customizations."""
+def metadata_text(path, limit, *, whole=False):
+    """Read regular-file metadata. With whole=True, reject files past the byte limit."""
     try:
-        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK), 'rb') as handle:
+        flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY
+        with os.fdopen(os.open(path, flags), 'rb') as handle:
             if stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                return handle.read(limit).decode('utf-8', errors='ignore')
+                data = handle.read(limit + int(whole))
+                if len(data) <= limit:
+                    return data.decode('utf-8', errors='strict' if whole else 'ignore')
     except (OSError, ValueError):
         pass
     return ''

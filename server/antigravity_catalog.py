@@ -77,15 +77,11 @@ def object_value(value):
 
 
 def configuration(path):
-    text = metadata_text(path, MANIFEST_LIMIT + 1)
     try:
-        if len(text) <= MANIFEST_LIMIT:
-            value = json.loads(text)
-            if isinstance(value, dict):
-                return value
+        value = json.loads(metadata_text(path, MANIFEST_LIMIT, whole=True))
     except (ValueError, RecursionError):
-        pass
-    return None
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def string_set(value):
@@ -145,7 +141,7 @@ def customizations(folder, filenames, include=()):
 
 
 def declared_path(value, base, fallback):
-    if not isinstance(value, str) or not value or '\0' in value or value.startswith('~'):
+    if not isinstance(value, str) or not value or '\0' in value:
         return None
     local = base / value
     try:

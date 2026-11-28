@@ -41,6 +41,7 @@ class AntigravityCatalogTests(unittest.TestCase):
     def test_cli_commands_have_aliases_and_argument_hints(self):
         commands = self.commands()
         self.assertEqual(commands['add-dir']['hint'], '<path>')
+        self.assertEqual(commands['open']['hint'], '<path>')
         self.assertEqual(commands['codesearch']['aliases'], ['cs', 'search'])
         self.assertEqual(commands['resume']['aliases'], ['switch', 'conversation'])
         self.assertEqual(commands['projects']['kind'], 'builtin')
@@ -122,6 +123,33 @@ class AntigravityCatalogTests(unittest.TestCase):
         self.assertIn('local-exception', commands)
         self.assertFalse({'unused', 'archive', 'hidden'} & commands.keys())
 
+    def test_manifest_tilde_paths_are_relative_to_the_workspace(self):
+        self.skill(self.home / 'extra', 'from-home', 'Outside the workspace')
+        self.skill(self.cwd / '~' / 'extra', 'literal-tilde', 'In a folder named tilde')
+        self.config(self.cwd / '.agents' / 'skills.json', {'entries': [{'path': '~/extra'}]})
+
+        commands = self.commands()
+        self.assertIn('literal-tilde', commands)
+        self.assertNotIn('from-home', commands)
+
+    def test_manifest_filters_match_literal_names_and_paths(self):
+        self.skill(self.cwd / '.agents' / 'skills', 'outer-one', 'Top-level exclude is literal')
+        self.skill(self.cwd / 'extra', 'experimental-one', 'Entry exclude is literal')
+        self.skill(self.cwd / 'extra', 'excluded', 'Exact exclude removes this skill')
+        self.skill(self.cwd / 'selected', 'match-one', 'Pattern does not include this skill')
+        self.skill(self.cwd / 'selected', 'chosen', 'Exact include loads this skill')
+        self.config(self.cwd / '.agents' / 'skills.json', {
+            'entries': [
+                {'path': 'extra', 'exclude': ['experimental-.*', 'excluded']},
+                {'path': 'selected', 'include_only': ['match-.*', 'chosen']},
+            ],
+            'exclude': ['outer-.*'],
+        })
+
+        commands = self.commands()
+        self.assertTrue({'outer-one', 'experimental-one', 'chosen'} <= commands.keys())
+        self.assertFalse({'excluded', 'match-one'} & commands.keys())
+
     def test_plugins_and_mcp_read_public_metadata_only(self):
         local = self.cwd / '.agents' / 'plugins' / 'kit-folder'
         installed = self.gemini / 'config' / 'plugins' / 'global-kit'
@@ -157,6 +185,44 @@ class AntigravityCatalogTests(unittest.TestCase):
                          {'global': 'global', 'project': 'workspace', 'kit-folder_tasks': 'plugin kit-folder'})
         self.assertNotIn(secret, json.dumps(result))
         self.assertNotIn('fixture-program', json.dumps(result))
+
+    def test_builtin_plugin_contributes_its_metadata(self):
+        plugin = self.gemini / 'antigravity-cli' / 'builtin' / 'plugins' / 'swarm'
+        self.config(plugin / 'plugin.json', {})
+        self.skill(plugin / 'skills', 'guide', 'Read the swarm guide')
+        result = self.read()
+        self.assertEqual(result['plugins'], [{'name': 'swarm', 'source': 'built-in', 'enabled': True}])
+        self.assertIn('swarm:guide', {command['name'] for command in result['commands']})
+
+    def test_plugin_manifest_can_disable_a_plugin_without_a_preference(self):
+        plugin = self.cwd / '.agents' / 'plugins' / 'off-kit'
+        self.config(plugin / 'plugin.json', {'disabled': True})
+        self.skill(plugin / 'skills', 'check', 'Check the workspace')
+        self.config(plugin / 'mcp_config.json', {'mcpServers': {'tasks': {}}})
+        result = self.read()
+        self.assertEqual(result['plugins'], [{'name': 'off-kit', 'source': 'workspace', 'enabled': False}])
+        self.assertNotIn('off-kit:check', {command['name'] for command in result['commands']})
+        self.assertEqual(result['mcp'], [])
+
+    def test_plugin_manifest_excludes_default_workspace_and_global_plugins(self):
+        workspace = self.cwd / '.agents'
+        self.config(workspace / 'plugins' / 'workspace-kit' / 'plugin.json', {})
+        self.config(self.gemini / 'config' / 'plugins' / 'global-kit' / 'plugin.json', {})
+        self.config(workspace / 'plugins' / 'keep-kit' / 'plugin.json', {})
+        self.config(workspace / 'plugins.json', {'exclude': ['workspace-kit', 'global-kit']})
+        self.assertEqual(self.read()['plugins'], [{'name': 'keep-kit', 'source': 'workspace', 'enabled': True}])
+
+    def test_manifests_over_the_byte_limit_are_ignored(self):
+        self.skill(self.cwd / 'extra', 'listed', 'Load from the manifest')
+        manifest = self.cwd / '.agents' / 'skills.json'
+        for text in ('text', 'café'):
+            with self.subTest(text=text):
+                data = json.dumps({'entries': [{'path': 'extra'}], 'description': text}, ensure_ascii=False)
+                at_limit = data + ' ' * (1024 * 1024 - len(data.encode('utf-8')))
+                self.write(manifest, at_limit)
+                self.assertIn('listed', self.commands())
+                self.write(manifest, at_limit + ' ')
+                self.assertNotIn('listed', self.commands())
 
     def test_malformed_metadata_keeps_the_rest_of_the_catalog(self):
         agents = self.cwd / '.agents'

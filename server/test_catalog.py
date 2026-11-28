@@ -1,11 +1,13 @@
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import catalog
+import catalog_metadata
 
 
 def listing(names, content, initial=True):
@@ -124,6 +126,24 @@ class DocsParserTests(unittest.TestCase):
 
 
 class DiskHintTests(unittest.TestCase):
+    def test_metadata_refuses_a_symlink_to_a_character_device(self):
+        device = Path('/dev/zero')
+        if not device.is_char_device():
+            self.skipTest('/dev/zero is unavailable')
+        with tempfile.TemporaryDirectory() as folder:
+            skill = Path(folder) / 'SKILL.md'
+            skill.symlink_to(device)
+            self.assertEqual(catalog_metadata.metadata_text(skill, 16), '')
+
+    def test_front_matter_opens_without_taking_control_of_a_terminal(self):
+        with tempfile.TemporaryDirectory() as folder:
+            skill = Path(folder) / 'SKILL.md'
+            skill.write_text('---\nname: example\n---\n')
+            with mock.patch.object(catalog_metadata.os, 'open', wraps=os.open) as open_file:
+                self.assertEqual(catalog.front_matter(skill), {'name': 'example'})
+            open_file.assert_called_once()
+            self.assertTrue(open_file.call_args.args[1] & os.O_NOCTTY)
+
     def test_front_matter_and_disk_hints(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
