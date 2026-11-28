@@ -732,28 +732,40 @@ def settings():
     return {'thread': saved.get('thread'), 'transcript': saved.get('transcript')}
 
 
-STATUS_CACHE = {}  # entry id -> (when, status)
+STATUS_CACHE = {}  # entry id -> (when, status, codex_fresh)
 STATUS_LOCK = threading.Lock()
 STATUS_PANE_LOCKS = {}
 
 
-def shared_status(entry, *, fresh=False):
-    """live_status for the session list and the monitor, which would otherwise each re-read the pane every few seconds."""
+def cached_status(entry, *, fresh=False):
+    """Share one pane read and cache the Codex banner separately from the status fields."""
     with STATUS_LOCK:
         pane_lock = STATUS_PANE_LOCKS.setdefault(entry['id'], threading.Lock())
     with pane_lock:
-        when, status = STATUS_CACHE.get(entry['id'], (0.0, None))
-        if fresh or time.monotonic() - when > 1:
+        when, status, codex_fresh = STATUS_CACHE.get(entry['id'], (0.0, None, False))
+        if status is None or fresh or time.monotonic() - when > 1:
+            codex_fresh = False
+
+            def observe_banner(screen):
+                nonlocal codex_fresh
+                codex_fresh = fresh_codex_screen(screen)
+
             try:
-                status = auto_resume.overlay(entry, live_status(entry))
+                sampled = live_status(entry, on_screen=observe_banner) if entry.get('agent') == 'codex' else live_status(entry)
+                status = auto_resume.overlay(entry, sampled)
             except (OSError, ValueError, KeyError, subprocess.SubprocessError):  # a pane that just closed must not fail the whole tab list
                 status = {'state': 'Unavailable', 'approval': None}
             if (status.get('attention') or {}).get('askBridge'):
                 STATUS_CACHE.pop(entry['id'], None)  # Keep question payloads in the bounded bridge store only.
             else:
-                STATUS_CACHE[entry['id']] = (time.monotonic(), status)
+                STATUS_CACHE[entry['id']] = (time.monotonic(), status, codex_fresh)
             track(entry['id'], status['state'])
-        return status
+        return status, codex_fresh
+
+
+def shared_status(entry, *, fresh=False):
+    """Cached pane status for callers that only need the status fields."""
+    return cached_status(entry, fresh=fresh)[0]
 
 
 def fresh_status(entry):
@@ -953,8 +965,8 @@ def session_context_percent(entry):
 
 def session_row(entry):
     """One pane in the session list. `needs` is a one-line summary when the pane waits on the user (the desktop "Needs you" list)."""
-    status = dict(shared_status(entry))
-    context = None if status.pop('_codex_fresh', False) else session_context_percent(entry)
+    status, codex_fresh = cached_status(entry)
+    context = None if codex_fresh else session_context_percent(entry)
     return dict({key: entry.get(key) for key in ('id', 'tmux_session', 'label', 'agent', 'thread', 'writable', 'pane_name', 'tmux_pane_name', 'pane_icon', 'agent_name', 'codex_profile', 'worktree', 'group', 'role')},
                 **({'coordinator': entry['coordinator']} if entry.get('coordinator') in coordinator.MODES else {}),
                 dir=home_path(tab_folder(entry)), **status, **timeline(entry['id']), needs=needs.summary(status), context_percent=context,

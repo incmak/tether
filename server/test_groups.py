@@ -1079,7 +1079,7 @@ class CliAndServerTests(unittest.TestCase):
             self.assertEqual(handler.respond.call_args.args[0], 200)
 
     def test_session_row_copies_group(self):
-        with mock.patch.object(server, 'shared_status', return_value={}), \
+        with mock.patch.object(server, 'cached_status', return_value=({}, False)), \
                 mock.patch.object(server, 'tab_folder', return_value='/Users/test/project'), \
                 mock.patch.object(server, 'timeline', return_value={}), \
                 mock.patch.object(server.needs, 'summary', return_value=''):

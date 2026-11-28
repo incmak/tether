@@ -71,7 +71,7 @@ class SessionRowTests(unittest.TestCase):
     def test_row_carries_needs_without_another_status_read(self):
         entry = {'id': '%9', 'tmux_session': '$1', 'label': 'work:0.0', 'agent': 'claude', 'thread': 't', 'writable': True}
         status = {'state': 'Input needed', 'approval': None, 'attention': {'id': 'q', 'reason': 'menu', 'text': '', 'question': 'Ship it?'}}
-        with patch.object(server, 'shared_status', return_value=status) as read, \
+        with patch.object(server, 'cached_status', return_value=(status, False)) as read, \
                 patch.object(server, 'tab_folder', return_value='/w'), patch.object(server, 'home_path', return_value='~/w'):
             row = server.session_row(entry)
         read.assert_called_once()

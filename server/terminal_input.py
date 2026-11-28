@@ -1269,17 +1269,17 @@ def fresh_codex_screen(screen):
     return not any(line.startswith('•') for line in lines) and sum(line.startswith('›') for line in lines) <= 1
 
 
-def live_status(entry, run=subprocess.run):
+def live_status(entry, run=subprocess.run, *, on_screen=None):
     if not entry.get('owner_pid') or not entry.get('writable'):
         return {'state': 'Unavailable', 'approval': None}
     if not detection_rules.available(entry['agent']):
         return {'state': 'Unknown', 'approval': None}
     styled_screen = capture(entry, run, styled=True)
     screen = prompt_actions.plain(styled_screen)
+    if on_screen is not None:
+        on_screen(screen)
     login_screen = login_capture(entry, screen, run)
     status = _live_status(entry, run, screen, login_screen=login_screen, styled_screen=styled_screen)
-    if entry['agent'] == 'codex' and fresh_codex_screen(screen):
-        status['_codex_fresh'] = True
     if entry['agent'] == 'claude':
         import ask_bridge
         status = ask_bridge.overlay(entry, status)

@@ -182,7 +182,8 @@ class SessionContextTests(unittest.TestCase):
         self.enterContext(patch.object(server.agents, 'METRICS', self.folder))
         self.enterContext(patch.object(server.antigravity, 'CACHE', self.folder))
         self.enterContext(patch.object(server.antigravity.procinfo, 'start_ms', return_value=1000))
-        self.status = self.enterContext(patch.object(server, 'shared_status', return_value={'state': 'Idle'}))
+        self.enterContext(patch.object(server, 'STATUS_CACHE', {}))
+        self.enterContext(patch.object(server, 'track'))
         self.enterContext(patch.object(server, 'tab_folder', return_value=''))
         self.enterContext(patch.object(server.tab_brief.STORE, 'get', return_value=None))
         self.enterContext(patch.object(server.attention.STORE, 'ask', return_value=None))
@@ -258,10 +259,30 @@ class SessionContextTests(unittest.TestCase):
         for changes in ({'codex_binding': 'guess'}, {'pending_conversation': True}, {'ambiguous': True}):
             with self.subTest(changes=changes):
                 self.assertIsNone(self.context(dict(self.codex, **changes)))
-        self.status.return_value = {'state': 'Idle', '_codex_fresh': True}
-        row = server.session_row(self.codex)
-        self.assertIsNone(row['context_percent'])
-        self.assertNotIn('_codex_fresh', row)
+
+    def test_codex_banner_changes_sidebar_context_without_changing_status_payloads(self):
+        entry = dict(self.codex, writable=True, owner_pid=1)
+        self.append_context(9500)
+        captures = Path(__file__).parent / 'fixtures'
+        cases = (('codex_0.170.0_restart/idle.ansi', None),
+                 ('codex_0.170.0_restart/idle_narrow.ansi', None),
+                 ('codex_0.170.0_working/idle_reply_is_status_line.ansi', 95))
+        for name, expected in cases:
+            with self.subTest(screen=name), \
+                    patch.object(server, 'STATUS_CACHE', {}), own_time(server, monotonic=Mock(return_value=100)), \
+                    patch.object(terminal_input, 'capture', return_value=(captures / name).read_text()) as read, \
+                    patch.object(terminal_input, 'login_capture', return_value=''), \
+                    patch.object(terminal_input, '_live_status', return_value={'state': 'Idle', 'approval': None}), \
+                    patch.object(server, 'marked_snapshot', return_value={'messages': [], 'busy': False}):
+                payload = server.chat_payload(entry)
+                self.assertEqual(payload['state'], 'Idle')
+                self.assertNotIn('_codex_fresh', payload)
+                read.reset_mock()
+                self.assertEqual(server.shared_status(entry), {'state': 'Idle', 'approval': None})
+                row = server.session_row(entry)
+                self.assertEqual(row['context_percent'], expected)
+                self.assertNotIn('_codex_fresh', row)
+                read.assert_called_once()
 
 
 class SessionsListingTests(unittest.TestCase):

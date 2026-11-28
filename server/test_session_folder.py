@@ -300,7 +300,7 @@ class WorktreeDiscovery(unittest.TestCase):
                          [('%1', 'g1a2b3c4d', 'feature/foo', 'terminal'), ('%2', '', 'feature/bar', '')])
 
     def test_session_row_copies_worktree(self):
-        with patch.object(server, 'shared_status', return_value={}), \
+        with patch.object(server, 'cached_status', return_value=({}, False)), \
                 patch.object(server, 'tab_folder', return_value='/Users/test/project'), \
                 patch.object(server, 'timeline', return_value={}), \
                 patch.object(server.needs, 'summary', return_value=''):
