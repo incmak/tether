@@ -7,7 +7,7 @@ import type { ListSearchState } from './listSearch'
 /**
  * The search field above a list. Down moves to the first row. Enter picks the first row when pick is set and a query
  * is typed (a picker); without pick, Enter does nothing (a field in a form must not send it). Escape clears the text
- * first; a second Escape reaches the dialog and closes it. The status line tells a screen reader how many rows match.
+ * first, from anywhere in the dialog; a second Escape closes it. The status line tells a screen reader how many rows match.
  */
 export function ListSearch<T>({ search, label, noun, pick = false, autoFocus }: {
   search: ListSearchState<T>; label: string
@@ -22,6 +22,21 @@ export function ListSearch<T>({ search, label, noun, pick = false, autoFocus }: 
   const focus = autoFocus ?? (typeof matchMedia === 'function' && matchMedia('(pointer: fine)').matches)
   // After the dialog's own focus step, which takes the first button.
   useEffect(() => { if (!focus || !input) return; const frame = requestAnimationFrame(() => input.focus()); return () => cancelAnimationFrame(frame) }, [focus, input])
+  // Escape anywhere in the picker (the field, a result, Clear search) clears a query first; with no query it closes the
+  // dialog as before. Capture on the dialog runs before any row's own keys, and preventDefault stops its cancel event.
+  useEffect(() => {
+    const scope = input?.closest('dialog') ?? input?.closest('.list-search-box')
+    if (!input || !scope || !query) return
+    const clear = (event: Event) => {
+      const key = event as globalThis.KeyboardEvent
+      if (key.key !== 'Escape' || key.isComposing || key.keyCode === 229) return
+      // A dialog can hold another (Broadcast holds Send via): only the innermost dialog of the key clears its own search.
+      if ((key.target as Element | null)?.closest?.('dialog') !== input.closest('dialog')) return
+      key.preventDefault(); key.stopPropagation(); setQuery(''); input.focus()
+    }
+    scope.addEventListener('keydown', clear, true)
+    return () => scope.removeEventListener('keydown', clear, true)
+  }, [input, query, setQuery])
   // Announce the count a moment after typing stops, so a screen reader does not read a number for every letter.
   useEffect(() => { const timer = setTimeout(() => setSettled(query), 400); return () => clearTimeout(timer) }, [query])
   const count = !query.trim() || settled !== query ? ''
@@ -32,7 +47,9 @@ export function ListSearch<T>({ search, label, noun, pick = false, autoFocus }: 
       <input ref={setInput} type="search" value={query} aria-label={label} placeholder={label} autoComplete="off" enterKeyHint={pick ? 'go' : 'search'}
         onChange={event => setQuery(event.target.value)}
         onKeyDown={event => {
-          if (event.key === 'Escape' && query) { event.preventDefault(); event.stopPropagation(); setQuery(''); return }
+          // Keys that finish an IME composition (Chinese, Japanese, Korean input) belong to the IME, not the picker.
+          // Stop them here, or the dialog's arrow walk (usePopover) moves the focus away; keep their default for the IME.
+          if (event.nativeEvent.isComposing || event.keyCode === 229) { event.stopPropagation(); return }
           if (event.key === 'Enter') {
             event.preventDefault()
             if (pick && query.trim()) rowsOf(list)[0]?.click()

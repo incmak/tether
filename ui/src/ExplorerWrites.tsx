@@ -6,11 +6,13 @@ import type { Api } from './api'
 import { useModal } from './hooks'
 import type { Anchor } from './hooks'
 import { PopMenu } from './PanelColumn'
-import { baseName, crumbs, filesUrl, formatSize, parentOf } from './files'
+import { baseName, crumbs, filesUrl, formatSize, joinPath, parentOf } from './files'
 import type { FileList } from './files'
 import { clearUploads, useUploads, writes } from './fileWrites'
 import type { SizeInfo } from './fileWrites'
 import { sentence, useHost } from './host'
+import { ListSearch } from './ListSearch'
+import { useListSearch } from './listSearch'
 
 // The Files explorer's write actions (slice 3): the item menu, the trash and zip confirms, the folder picker and the upload panel.
 
@@ -97,6 +99,13 @@ export function FolderPicker({ api, move, names, start, sources, onCancel, onPic
     return () => controller.abort()
   }, [api, folder])
   const shown = listing?.path === folder ? listing : null
+  const folders = shown?.folders ?? []
+  const search = useListSearch(folders, name => [name])
+  const { shown: matches, query, setQuery, input, setList, listKeys } = search
+  const openFolder = (path: string) => {
+    setQuery('')
+    setFolder(path)
+  }
   // A folder cannot go into itself. Moving to the folder the items are in changes nothing.
   const blocked = sources.some(path => folder === path || folder.startsWith(`${path}/`))
   const same = move && sources.every(path => parentOf(path) === folder)
@@ -110,17 +119,19 @@ export function FolderPicker({ api, move, names, start, sources, onCancel, onPic
   return <dialog {...modal} className="sheet fx-dialog fx-picker" aria-labelledby="fx-pick-title">
     <div className="sheet-heading"><h2 id="fx-pick-title">{verb} {itemsText(names)} to…</h2><button type="button" className="icon-button" aria-label="Close" disabled={pending} onClick={onCancel}><X /></button></div>
     <div className="fx-pick-bar">
-      <button type="button" className="fx-ib" aria-label="Parent folder" disabled={!parentOf(folder)} onClick={() => { const up = parentOf(folder); if (up) setFolder(up) }}><ArrowUp size={16} /></button>
+      <button type="button" className="fx-ib" aria-label="Parent folder" disabled={!parentOf(folder)} onClick={() => { const up = parentOf(folder); if (up) openFolder(up) }}><ArrowUp size={16} /></button>
       <nav className="fx-pick-path" aria-label="Folder">{crumbs(folder).map((crumb, at, all) => <span key={crumb.path}>
         {at > 0 && <span className="fx-pick-sep" aria-hidden="true">/</span>}
-        {at === all.length - 1 ? <span aria-current="location">{crumb.label}</span> : <button type="button" onClick={() => setFolder(crumb.path)}>{crumb.label}</button>}
+        {at === all.length - 1 ? <span aria-current="location">{crumb.label}</span> : <button type="button" onClick={() => openFolder(crumb.path)}>{crumb.label}</button>}
       </span>)}</nav>
     </div>
-    <ul className="fx-pick-list" aria-label={`Folders in ${baseName(folder)}`} aria-busy={!shown || undefined}>
+    <ListSearch search={search} label="Find a folder" noun="folders" pick />
+    <ul ref={setList} className="fx-pick-list" aria-label={`Folders in ${baseName(folder)}`} aria-busy={!shown || undefined} onKeyDown={listKeys}>
       {shown?.error ? <li className="error" role="alert">{shown.error}</li>
         : !shown ? <Loading as="li" className="fx-pick-note" />
-        : !shown.folders?.length ? <li className="fx-pick-note">No folders here.</li>
-        : shown.folders.map(name => <li key={name}><button type="button" onClick={() => setFolder(folder === '/' ? `/${name}` : `${folder}/${name}`)}><FolderOpen size={15} aria-hidden="true" /><span className="fx-tb-text" title={name}>{name}</span></button></li>)}
+        : !folders.length ? <li className="fx-pick-note">No folders here.</li>
+        : !matches.length ? <li className="fx-pick-note list-search-none">No folder matches “{query.trim()}”. <button type="button" className="link-button" data-search-skip onClick={() => { setQuery(''); input?.focus() }}>Clear search</button></li>
+        : matches.map(name => <li key={name}><button type="button" onClick={() => openFolder(joinPath(folder, name))}><FolderOpen size={15} aria-hidden="true" /><span className="fx-tb-text" title={name}>{name}</span></button></li>)}
     </ul>
     {error && <p className="error" role="alert">{error}</p>}
     {blocked && <p className="fx-pick-note" role="status">A folder cannot go into itself. Choose another folder.</p>}

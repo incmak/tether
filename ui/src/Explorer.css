@@ -140,8 +140,9 @@ a.fx-tb:hover { background: var(--hover); }
 .fx-pick-path [aria-current] { padding: 2px 4px; font-weight: 600; }
 .fx-pick-sep { color: var(--muted); }
 .fx-pick-list { list-style: none; margin: 0 0 10px; padding: 4px; height: min(300px, 45vh); overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); }
-.fx-pick-list button { display: flex; align-items: center; gap: 8px; width: 100%; min-height: var(--control); padding: 0 8px; border-radius: var(--radius-sm); text-align: left; font-size: 13.5px; }
-.fx-pick-list button:hover { background: var(--hover); }
+.fx-picker .list-search-box { margin-bottom: 8px; }
+.fx-pick-list button:not(.link-button) { display: flex; align-items: center; gap: 8px; width: 100%; min-height: var(--control); padding: 0 8px; border-radius: var(--radius-sm); text-align: left; font-size: 13.5px; }
+.fx-pick-list button:not(.link-button):hover { background: var(--hover); }
 .fx-pick-list .fx-tb-text { flex: 1; white-space: nowrap; }
 .fx-picker .sheet-buttons .primary { flex-shrink: 1; min-width: 0; }
 .fx-pick-list svg { flex: none; color: var(--attention); }

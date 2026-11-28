@@ -17,6 +17,8 @@ import { TextViewer } from './TextViewer'
 import type { TextFile } from './TextViewer'
 import { wheelSideways } from './wheelSideways'
 import { useTetherZone } from './zone'
+import { ListSearch } from './ListSearch'
+import { useListSearch } from './listSearch'
 
 // The phone Files screen (slice 4). Layout from ExplorerPhone.dc.html: path chips, a sort cycle, search, Select mode with
 // an action bar, a + sheet, a ⋯ sheet per row and a full-screen preview. Writes use POST /mobile/api/files/* (API.md).
@@ -475,18 +477,25 @@ function ZipDialog({ api, paths, onClose, onStart }: { api: Api; paths: string[]
 /** Copy to / Move to: walk the folders, then copy or move here. */
 function FolderPicker({ api, mode, paths, start, hidden, onClose, onDone }: { api: Api; mode: 'copy' | 'move'; paths: string[]; start: string; hidden: boolean; onClose: () => void; onDone: (result: Result, to: string) => void }) {
   const [folder, setFolder] = useState(start)
-  const [list, setList] = useState<{ path: string; rows?: Row[]; error?: string } | null>(null)
+  const [listing, setListing] = useState<{ path: string; rows?: Row[]; error?: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const modal = useModal(true, () => { if (!busy) onClose() })
   useEffect(() => {
     const controller = new AbortController()
     api<FileList>(filesUrl.list(folder, hidden, 'name', true), undefined, controller.signal).then(
-      data => setList({ path: folder, rows: data.entries.filter(entry => entry.dir && !entry.secret).map(entry => ({ ...entry, full: joinPath(folder, entry.name) })) }),
-      failure => { if (!controller.signal.aborted) setList({ path: folder, error: errorText(failure) }) })
+      data => setListing({ path: folder, rows: data.entries.filter(entry => entry.dir && !entry.secret).map(entry => ({ ...entry, full: joinPath(folder, entry.name) })) }),
+      failure => { if (!controller.signal.aborted) setListing({ path: folder, error: errorText(failure) }) })
     return () => controller.abort()
   }, [api, folder, hidden])
-  const current = list?.path === folder ? list : null
+  const current = listing?.path === folder ? listing : null
+  const folders = current?.rows ?? []
+  const search = useListSearch(folders, row => [row.name])
+  const { shown, query, setQuery, input, setList, listKeys } = search
+  const openFolder = (path: string) => {
+    setQuery('')
+    setFolder(path)
+  }
   const inside = paths.some(path => folder === path || folder.startsWith(`${path}/`))
   const same = mode === 'move' && paths.every(path => parentOf(path) === folder)
   const blocked = inside ? `${mode === 'copy' ? 'Copy' : 'Move'} cannot go into a folder it is ${mode === 'copy' ? 'copying' : 'moving'}.` : same ? 'The items are already in this folder.' : inSecret(folder) ? 'Secret folders are read only.' : ''
@@ -497,20 +506,23 @@ function FolderPicker({ api, mode, paths, start, hidden, onClose, onDone }: { ap
   }
   return <dialog {...modal} className="xp-picker" aria-labelledby="xp-pick-title">
     <header className="xp-head">
-      <button type="button" className="icon-button" aria-label="Parent folder" disabled={!parentOf(folder) || busy} onClick={() => { const up = parentOf(folder); if (up) setFolder(up) }}><ChevronLeft size={24} /></button>
+      <button type="button" className="icon-button" aria-label="Parent folder" disabled={!parentOf(folder) || busy} onClick={() => { const up = parentOf(folder); if (up) openFolder(up) }}><ChevronLeft size={24} /></button>
       <div className="xp-pick-title"><h2 id="xp-pick-title">{verb} {paths.length === 1 ? baseName(paths[0]) : items(paths.length)}</h2><span>Choose a folder</span></div>
       <button type="button" className="icon-button" aria-label="Close" disabled={busy} onClick={onClose}><X /></button>
     </header>
     <nav ref={wheelSideways} className="xp-crumbs" aria-label="Folder path">
       {crumbs(folder).map((crumb, at, all) => at === all.length - 1 ? <span key={crumb.path} className="xp-chip" aria-current="page">{crumb.label}</span>
-        : <button key={crumb.path} type="button" className="xp-chip" disabled={busy} onClick={() => setFolder(crumb.path)}>{crumb.label}</button>)}
+        : <button key={crumb.path} type="button" className="xp-chip" disabled={busy} onClick={() => openFolder(crumb.path)}>{crumb.label}</button>)}
     </nav>
+    <ListSearch search={search} label="Find a folder" noun="folders" pick />
     <div className="xp-list">
       {current?.error ? <p className="xp-empty" role="alert">{current.error}</p>
         : !current ? <SkeletonRows count={8} label="Loading files" className="xp-skeleton" icon={24} />
-        : !current.rows?.length ? <p className="xp-empty">No folders in here.</p>
-        : <ul aria-label={`Folders in ${baseName(folder)}`}>{current.rows.map(row => <li key={row.full} className={`xp-row${row.hidden ? ' dim' : ''}`}>
-            <button type="button" className="xp-row-main" disabled={busy || paths.includes(row.full)} onClick={() => setFolder(row.full)}>
+        : !folders.length ? <p className="xp-empty">No folders in here.</p>
+        : <ul ref={setList} aria-label={`Folders in ${baseName(folder)}`} onKeyDown={listKeys}>
+          {!shown.length && <li className="xp-empty list-search-none">No folder matches “{query.trim()}”. <button type="button" className="link-button" data-search-skip onClick={() => { setQuery(''); input?.focus() }}>Clear search</button></li>}
+          {shown.map(row => <li key={row.full} className={`xp-row${row.hidden ? ' dim' : ''}`}>
+            <button type="button" className="xp-row-main" disabled={busy || paths.includes(row.full)} onClick={() => openFolder(row.full)}>
               <EntryIcon entry={row} /><span className="xp-row-text"><span className="xp-name"><span>{row.name}</span></span><span className="xp-meta">{formatModified(row.modified)}</span></span>
             </button>
           </li>)}</ul>}

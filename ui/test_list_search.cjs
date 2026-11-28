@@ -19,6 +19,8 @@ const tabs = Array.from({ length: 42 }, (_, index) => {
   const titles = { 1: 'Current work', 4: 'Review plans', 7: 'Review release', 13: 'Folding atlas', 26: 'Review docs' }
   return pane(id, Math.ceil(id / 7), titles[id] || `Task ${id}`, id % 2 ? 'claude' : 'codex')
 })
+const folders = ['Archive', 'Design', 'Docs', 'Images', 'Reports', 'Site', 'Tests', 'Work']
+const entry = (name, dir) => ({ name, dir, kind: dir ? 'folder' : 'text', modified: null, size: dir ? null : 12 })
 const fixtures = {
   chat: { messages: [], busy: false, thread: 'thread-1', agent: 'claude', writable: true, session: '%1', earlier: 0, limit: 100, state: 'Idle', approval: null },
   footer: { observed: false, notices: [] },
@@ -35,6 +37,7 @@ const fixtures = {
   'browser/agents': { enabled: false, available: false, agents: [], asks: [] },
   'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] },
   prefs: { prefs: {}, version: 1 },
+  'files/places': { pinned: [], sessions: [], disk: null },
 }
 
 async function installFixtures(context, sessions, posts) {
@@ -48,6 +51,15 @@ async function installFixtures(context, sessions, posts) {
       if (endpoint === 'review-link' && request.method() === 'POST') {
         posts.push(request.postDataJSON())
         return route.fulfill({ json: { ok: true } })
+      }
+      if (/^files\/(?:copy|move)$/.test(endpoint) && request.method() === 'POST') {
+        posts.push(request.postDataJSON())
+        return route.fulfill({ status: 500, json: { error: 'Unexpected file write' } })
+      }
+      if (endpoint === 'files/list') {
+        const folder = url.searchParams.get('path')
+        return route.fulfill({ json: { path: folder, truncated: false,
+          entries: [...folders.map(name => entry(name, true)), entry('notes.md', false)] } })
       }
       if (endpoint === 'sessions') return route.fulfill({ json: { sessions: sessions(), default_thread: 'thread-1' } })
       if (endpoint === 'stream') return route.fulfill({ status: 204 })
@@ -106,9 +118,13 @@ async function main() {
     await page.keyboard.press('ArrowUp')
     await focusIs('.review-picker input[type="search"]')
 
-    await findTab.press('Escape')
+    await findTab.press('ArrowDown')
+    await focusIs('.review-picker-list button:first-child')
+    await page.keyboard.press('Escape')
+    assert.equal(await page.evaluate(() => document.activeElement?.matches('.review-picker input[type="search"]')),
+      true, 'Escape from a row returns focus to the review search field')
+    assert.equal(await dialog.isVisible(), true, 'Escape from a row clears text before closing the picker')
     assert.equal(await findTab.inputValue(), '')
-    assert.equal(await dialog.isVisible(), true, 'Escape clears text before closing the picker')
     await findTab.press('Escape')
     await dialog.waitFor({ state: 'detached' })
 
@@ -121,13 +137,77 @@ async function main() {
     assert.deepEqual(await titles(), inOrder)
     assert.deepEqual(posts, [], 'an empty query never sends a review-link POST')
 
+    await findTab.fill('no such title')
+    await dialog.getByRole('button', { name: 'Clear search', exact: true }).focus()
+    await page.keyboard.press('Escape')
+    assert.equal(await page.evaluate(() => document.activeElement?.matches('.review-picker input[type="search"]')),
+      true, 'Escape from Clear search returns focus to the review search field')
+    assert.equal(await dialog.isVisible(), true, 'Escape from Clear search keeps the review picker open')
+    assert.equal(await findTab.inputValue(), '', 'Escape from Clear search clears the review query')
+    await findTab.press('Escape')
+    await dialog.waitFor({ state: 'detached' })
+
+    await openReview()
     await findTab.fill('review')
+    await dialog.getByRole('status').filter({ hasText: /^3 tabs found$/ }).waitFor()
+    const imePicks = await findTab.evaluate(input => {
+      let picks = 0
+      const row = input.closest('.review-picker').querySelector('.review-picker-list button')
+      const countPick = () => { picks += 1 }
+      row.addEventListener('click', countPick)
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true }))
+      row.removeEventListener('click', countPick)
+      return picks
+    })
+    assert.equal(imePicks, 0, 'IME Enter does not activate a review row')
+    assert.deepEqual(posts, [], 'IME Enter sends no review-link POST')
+    assert.equal(await dialog.isVisible(), true)
+
+    const imeArrowKeepsFocus = await findTab.evaluate(input => {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', isComposing: true, bubbles: true }))
+      return document.activeElement === input
+    })
+    assert.equal(imeArrowKeepsFocus, true, 'IME ArrowDown keeps focus in the review search field')
+
     const linked = page.waitForResponse(response => response.url() === `${ORIGIN}/mobile/api/review-link` && response.request().method() === 'POST')
     await findTab.press('Enter')
     assert.ok((await linked).ok())
     await dialog.waitFor({ state: 'detached' })
     assert.deepEqual(posts, [{ worker: '%7', reviewer: '%1' }], 'a nonempty query picks the first result once')
-    console.log('ok review picker focus, order, filtering, status, arrows, Enter, Escape, and Clear search')
+    console.log('ok review picker focus, order, filtering, status, arrows, Enter, IME keys, and Escape from a row and Clear search')
+
+    await page.getByRole('button', { name: 'Message all sessions', exact: true }).click()
+    const broadcast = page.getByRole('dialog', { name: 'Message sessions', exact: true })
+    const filterPanes = broadcast.getByRole('searchbox', { name: 'Filter panes' })
+    await filterPanes.fill('review')
+    await broadcast.getByRole('status').filter({ hasText: /^3 panes found$/ }).waitFor()
+    await broadcast.getByRole('button', { name: 'Direct', exact: true }).click()
+    const via = broadcast.getByRole('dialog', { name: 'Send via', exact: true })
+    const findClaude = via.getByRole('searchbox', { name: 'Find a Claude pane' })
+    await findClaude.fill('folding atlas')
+    await via.getByRole('button', { name: /^Folding atlas/ }).waitFor()
+    await findClaude.press('Escape')
+    assert.equal(await filterPanes.inputValue(), 'review', 'Escape in Send via preserves the Broadcast filter')
+    assert.equal(await via.isVisible(), true, 'first Escape keeps Send via open')
+    assert.equal(await findClaude.inputValue(), '', 'first Escape clears the Send via query')
+    await findClaude.press('Escape')
+    await via.waitFor({ state: 'detached' })
+    assert.equal(await broadcast.isVisible(), true, 'second Escape closes only Send via')
+    assert.equal(await filterPanes.inputValue(), 'review', 'closing Send via preserves the Broadcast filter')
+    await broadcast.getByRole('button', { name: 'Close', exact: true }).click()
+    await broadcast.waitFor({ state: 'detached' })
+    console.log('ok nested Escape clears and closes Send via while preserving the Broadcast filter')
+
+    await pickFromTabMenu('Move to session…')
+    const sessionRows = dialog.getByRole('button', { name: /^Session \d+ 7 panes$/ })
+    assert.equal(await sessionRows.count(), 5, 'the six-session fixture has five move destinations')
+    await sessionRows.last().focus()
+    await page.keyboard.press('ArrowDown')
+    assert.match(await dialog.evaluate(el => el.contains(document.activeElement) ? document.activeElement.textContent : ''),
+      /^(New session|Cancel)$/, 'ArrowDown from the last short-list session reaches New session or Cancel')
+    await page.keyboard.press('Escape')
+    await dialog.waitFor({ state: 'detached' })
+    console.log('ok short move picker arrows reach a command after the last session')
 
     // Six sessions cover the review picker. Add three so the move picker has eight destinations.
     sessions = [...tabs, ...[7, 8, 9].map(number => pane(40 + number, number, `Extra task ${number}`, 'codex'))]
@@ -143,8 +223,48 @@ async function main() {
     await dialog.getByRole('button', { name: 'New session', exact: true }).waitFor()
     await findSession.press('ArrowDown')
     assert.equal(await findSession.evaluate(input => input === document.activeElement), true, 'arrows skip commands when there are no destinations')
-    assert.deepEqual(errors, [])
     console.log('ok move picker filters by a tab title and skips commands when there are no results')
+
+    for (const width of [1280, 320]) {
+      const phone = width === 320
+      const filesPage = await context.newPage()
+      filesPage.on('pageerror', error => errors.push(error.message))
+      await filesPage.setViewportSize({ width, height: 860 })
+      await filesPage.goto(`${ORIGIN}/chat/?session=%251`)
+      await filesPage.locator(phone ? '.phone-tabbar' : '.app-rail').getByRole('button', { name: 'Files', exact: true }).click()
+      if (phone) {
+        await filesPage.getByRole('button', { name: 'Select', exact: true }).click()
+        await filesPage.locator('.xp-row-main').filter({ hasText: 'notes.md' }).click()
+      } else {
+        await filesPage.locator('.fx-row[data-path]').filter({ hasText: 'notes.md' }).click()
+      }
+      await filesPage.locator(phone ? '.xp-actionbar' : '.fx-toolbar').getByRole('button', { name: phone ? 'Move to' : 'Move to…', exact: true }).click()
+      const picker = filesPage.locator(phone ? '.xp-picker' : '.fx-picker')
+      const findFolder = picker.getByRole('searchbox', { name: 'Find a folder' })
+      const folderList = picker.getByRole('list', { name: /^Folders in / })
+      await findFolder.fill('no such folder')
+      await folderList.getByText(/^No folder matches “no such folder”\./).waitFor()
+      await findFolder.press('Enter')
+      assert.equal(await findFolder.inputValue(), 'no such folder', 'Enter skips Clear search')
+      await folderList.getByRole('button', { name: 'Clear search' }).click()
+      assert.equal(await findFolder.inputValue(), '')
+
+      await findFolder.fill('doc')
+      assert.equal(await folderList.getByRole('button').count(), 1)
+      await findFolder.press('Enter')
+      await picker.getByRole('list', { name: 'Folders in Docs', exact: true }).getByRole('button', { name: /^Archive/ }).waitFor()
+      assert.equal(await findFolder.inputValue(), '', 'Enter opens a result and clears the query in the new folder')
+
+      await findFolder.fill('report')
+      await picker.getByRole('button', { name: 'Parent folder' }).click()
+      await folderList.getByRole('button', { name: /^Archive/ }).waitFor()
+      assert.equal(await findFolder.inputValue(), '', 'going to the parent also clears the query')
+      assert.equal(await folderList.getByRole('button').count(), folders.length)
+      assert.deepEqual(posts, [{ worker: '%7', reviewer: '%1' }], 'folder navigation sends no file writes')
+      await filesPage.close()
+      console.log(`ok folder picker at ${width} px filters, clears, and opens a folder without a file write`)
+    }
+    assert.deepEqual(errors, [])
   } finally {
     await browser.close()
   }
