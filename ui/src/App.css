@@ -192,7 +192,10 @@ label.broadcast-row:hover { background: var(--hover); }
 .session-icon { display: flex; flex-shrink: 0; color: var(--muted); }
 .session-text { display: flex; flex-direction: column; min-width: 0; flex: 1; gap: 1px; }
 .session-title { display: flex; align-items: center; gap: 5px; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-title-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .session-title svg { flex-shrink: 0; color: var(--muted); }
+.context-mark { display: inline-flex; flex: none; align-items: center; gap: 3px; color: color-mix(in srgb, var(--error) 80%, var(--text)); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1; white-space: nowrap; }
+.context-mark svg { color: inherit; }
 .session-folder { display: block; direction: rtl; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
 .grip { display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; color: var(--muted); touch-action: none; cursor: grab; }
 .reordering .session-main { pointer-events: none; }

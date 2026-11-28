@@ -12,13 +12,13 @@ const ask = (pane, ago, extra = {}) => ({ pane, thread: null, since: NOW - ago, 
 const pane = (id, session, name, label, extra) => ({ id, tmux_session: session, label, pane_name: name, agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: `t${id.slice(1)}`, approval: null, ask: null, ...extra })
 const busy = {
   sessions: [
-    pane('%1', '$1', 'Release notes', 'tether:0.1', { group: 'g1', ask: ask('%1', 3 * 3600) }),
-    pane('%2', '$1', 'Deploy check', 'tether:0.2', { group: 'g1', ask: ask('%2', 1800, { urgent: true, opened: true }) }),
+    pane('%1', '$1', 'Release notes', 'tether:0.1', { group: 'g1', ask: ask('%1', 3 * 3600), context_percent: 79.99 }),
+    pane('%2', '$1', 'Deploy check', 'tether:0.2', { group: 'g1', ask: ask('%2', 1800, { urgent: true, opened: true }), context_percent: 80 }),
     pane('%3', '$1', 'Sidebar build', 'tether:0.3', { state: 'Working', since: NOW - 300 }),
     pane('%4', '$1', 'Old idea', 'tether:0.4', { group: 'g2' }),
     pane('%5', '$1', 'Older idea', 'tether:0.5', { group: 'g2' }),
     pane('%6', '$1', 'Voice fix', 'tether:0.6', { finished: NOW - 600 }),
-    pane('%10', '$2', 'BriskBot', 'briskbot', { state: 'Approval', since: NOW - 2 * 3600 }),
+    pane('%10', '$2', 'BriskBot', 'briskbot', { state: 'Approval', since: NOW - 2 * 3600, context_percent: 93 }),
     pane('%20', '$3', 'Notes one', 'notes:0.0', {}), pane('%21', '$3', 'Notes two', 'notes:0.1', {}),
     pane('%30', '$4', 'Scratch', 'scratch', {}),
   ],
@@ -168,6 +168,9 @@ async function main() {
       && await releaseHead.locator('.group-count').count() === 1 && await releaseHead.locator('.state-dot.approval').isVisible())
     const releaseNotes = tether.getByRole('button', { name: 'Release notes, Task, needs you', exact: true })
     check('a tab whose ask waits has the Needs you dot', await releaseNotes.locator('.task-dot.needs').isVisible())
+    check('79.99% stays below the warning threshold', await releaseNotes.locator('.context-mark').count() === 0)
+    check('80% warns on the tab row and in its accessible name', await tether.getByRole('button', { name: /Deploy check.*80% of context used/ }).locator('.context-mark').isVisible())
+    check('a tab with no context report has no warning', await tether.locator('[data-select-pane="%3"] .context-mark').count() === 0)
     check('the stack row says it to a screen reader', (await tether.locator('.pane-stack-head', { hasText: 'Release' }).getAttribute('aria-label')).includes('2 need you'))
     const releaseStack = tether.locator('.pane-stack', { has: page.locator('.pane-stack-head', { hasText: 'Release' }) })
     await releaseStack.locator('.pane-stack-fold').click()
@@ -307,11 +310,13 @@ async function main() {
     await open('%3', 320, 700, { sideMode: 'catchup' })
     await page.locator('.mobile-menu').locator('visible=true').first().click()
     await page.locator('.drawer .catchup').waitFor()
+    check('320 px: Catch up shows the context warning', await page.locator('.drawer').getByRole('button', { name: /Deploy check.*80% of context used/ }).locator('.context-mark').isVisible())
     const fits = () => page.evaluate(() => { const box = document.querySelector('.drawer .sidebar-inner'); return box.scrollWidth <= box.clientWidth + 1 && document.documentElement.scrollWidth <= innerWidth })
     check('320 px: Catch up fits', await fits())
     await page.screenshot({ path: path.join(SHOTS, '320-catch-up.png') })
     await page.locator('.drawer .side-mode-switch button', { hasText: 'Sessions' }).click()
     await page.locator('.drawer .side-active').click()
+    check('320 px: Sessions shows the context warning on a single-tab session', await page.locator('.drawer').getByRole('button', { name: /briskbot.*93% of context used/i }).locator('.context-mark').isVisible())
     check('320 px: Sessions with Active only fits', await fits())
     await page.screenshot({ path: path.join(SHOTS, '320-sessions.png') })
 

@@ -15,6 +15,8 @@ import type { Goal } from './catchUp'
 import { RunningList, chatTitle, runningPanes } from './Sidebar'
 import './CatchUp.css'
 import type { Session } from './Sidebar'
+import { ContextMark } from './ContextMark'
+import { contextWarning } from './usage'
 
 const FINISHED_SHOWN = 5
 
@@ -76,7 +78,7 @@ export function CatchUp({ sessions, prefs, update, selected, loaded, error, now,
       </h2>
       <ul className="catchup-rows">{shownFinished.map(pane => <li key={pane.id}><button type="button" className="catchup-row" aria-current={pane.id === selected ? 'page' : undefined} onClick={() => { setKept({ id: pane.id, finished: pane.finished ?? 0 }); onOpen(pane) }}>
         <span className="catchup-dot done" aria-hidden="true" />
-        <span className="catchup-name">{nameOf(pane)}</span>
+        <span className="catchup-tab"><span className="catchup-name">{nameOf(pane)}</span><ContextMark warning={contextWarning(pane)} /></span>
         <span className="catchup-age"><span className="visually-hidden">finished </span>{age(pane.finished ?? now, now)}</span>
         <span className="catchup-next">{sessions.find(session => session.id === pane.tmux_session)?.name}</span>
       </button></li>)}</ul>
@@ -100,10 +102,11 @@ function GoalBlock({ goal, now, selected, nameOf, onOpen }: { goal: Goal; now: n
     <ul className="catchup-rows">{goal.panes.map(pane => {
       const since = waitedSince(pane), waited = age(since, now), name = nameOf(pane), urgent = !!pane.ask?.urgent
       const next = pane.ask?.next || (pane.state === 'Approval' ? 'Approval' : 'Question')
+      const context = contextWarning(pane)
       return <li key={pane.id}><button type="button" className="catchup-row" aria-current={pane.id === selected ? 'page' : undefined}
-        aria-label={`${urgent ? 'Urgent: ' : ''}${name}, waited ${waited}. ${next}`} onClick={() => onOpen(pane)}>
+        aria-label={`${urgent ? 'Urgent: ' : ''}${name}${context ? `, ${context.label}` : ''}, waited ${waited}. ${next}`} onClick={() => onOpen(pane)}>
         <span className={`catchup-dot need${pane.ask?.opened ? ' opened' : ''}${urgent ? ' urgent' : ''}`} aria-hidden="true" />
-        <span className="catchup-name">{name}</span>
+        <span className="catchup-tab"><span className="catchup-name">{name}</span><ContextMark warning={context} /></span>
         <span className={since && now - since >= LATE ? 'catchup-age late' : 'catchup-age'}>{waited}</span>
         <span className="catchup-next" title={next}>{next}</span>
       </button></li>

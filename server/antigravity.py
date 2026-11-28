@@ -28,7 +28,7 @@ def current_report(entry, *, metrics=None):
             return {}
         began = procinfo.start_ms(entry['process_start']) / 1000
         return metrics if metrics['reported_at'] >= began else {}
-    except (OSError, ValueError, TypeError, KeyError, OverflowError):
+    except (OSError, ValueError, TypeError, KeyError, OverflowError, RecursionError):
         return {}
 
 

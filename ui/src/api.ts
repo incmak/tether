@@ -93,6 +93,7 @@ export interface Pane {
   codex_profile?: string | null  // a Codex pane started with `codex -p foundry`: 'foundry'. null = the ChatGPT plan
   since?: number | null
   finished?: number | null
+  context_percent?: number | null
   tasks?: string[]  // background work from Claude's footer: "1 shell", "1 monitor"
   crons?: PaneCron[]  // Claude's session cron jobs (CronCreate), from its last Stop hook (server/claude_hooks.crons)
   attention?: Attention | null

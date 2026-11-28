@@ -53,7 +53,7 @@ import saved_accounts
 import history
 import chat_hidden
 import live as live_state
-from terminal_input import resume_command, resume_session, rename_agent
+from terminal_input import resume_command, resume_session, rename_agent, codex_rollout_state, fresh_codex_screen
 from terminal_input import stash_quiet_draft, restore_check, clear_unsent, prompt_draft
 import model_picker
 import prompt_actions
@@ -929,12 +929,35 @@ def etag_matches(header, tag):
 SESSION_ROW_POOL = ThreadPoolExecutor(max_workers=6, thread_name_prefix='session-row')
 
 
+def session_context_percent(entry):
+    """Current context for a bound conversation, without a chat snapshot or a quota lookup."""
+    thread = entry.get('thread')
+    if not thread or entry.get('pending_conversation') or entry.get('ambiguous'):
+        return None
+    agent = entry.get('agent')
+    if agent == 'codex':
+        if entry.get('codex_binding') not in agents.BOUND:
+            return None
+        _, info = codex_rollout_state(entry.get('transcript'))
+        return codex_context(info)['percent'] if info else None
+    if agent == 'claude':
+        report = agents.claude_report(thread)
+    elif agent == 'antigravity':
+        report = antigravity.current_report(entry)
+    else:
+        return None
+    context = report.get('context_window')
+    percent = context.get('used_percentage') if isinstance(context, dict) else None
+    return min(100, percent) if type(percent) in (int, float) and 0 <= percent < math.inf else None
+
+
 def session_row(entry):
     """One pane in the session list. `needs` is a one-line summary when the pane waits on the user (the desktop "Needs you" list)."""
-    status = shared_status(entry)
+    status = dict(shared_status(entry))
+    context = None if status.pop('_codex_fresh', False) else session_context_percent(entry)
     return dict({key: entry.get(key) for key in ('id', 'tmux_session', 'label', 'agent', 'thread', 'writable', 'pane_name', 'tmux_pane_name', 'pane_icon', 'agent_name', 'codex_profile', 'worktree', 'group', 'role')},
                 **({'coordinator': entry['coordinator']} if entry.get('coordinator') in coordinator.MODES else {}),
-                dir=home_path(tab_folder(entry)), **status, **timeline(entry['id']), needs=needs.summary(status),
+                dir=home_path(tab_folder(entry)), **status, **timeline(entry['id']), needs=needs.summary(status), context_percent=context,
                 ask=attention.STORE.ask(entry['id'], entry.get('thread')),
                 brief=tab_brief.public(tab_brief.STORE.get(entry.get('thread'))) if entry.get('thread') else None)
 
@@ -1086,6 +1109,14 @@ def codex_state():
             'usage': None, 'model': '', 'effort': '', 'tier': '', 'credits': None}
 
 
+def codex_context(info):
+    last = info.get('last_token_usage')
+    tokens = last.get('total_tokens') if isinstance(last, dict) else None
+    limit = info.get('model_context_window')
+    percent = min(tokens, limit) / limit * 100 if type(tokens) is int and tokens >= 0 and type(limit) is int and limit > 0 else None
+    return {'percent': percent, 'tokens': tokens, 'limit': limit, 'total_token_usage': info.get('total_token_usage')}
+
+
 def transcript_time(stamp, *, require_timezone=False):
     """Epoch seconds for an ISO transcript timestamp, or None when it does not parse."""
     if not isinstance(stamp, str):
@@ -1151,18 +1182,15 @@ def codex_consume(state, index, entry, *, offset=None):
                 messages.append({'id': str(index), 'role': 'assistant', 'kind': 'notice',
                                  'text': text, 'time': entry.get('timestamp')})
         if kind == 'token_count':
-            info = payload.get('info') or {}
-            tokens = (info.get('last_token_usage') or {}).get('total_tokens')
-            limit = info.get('model_context_window')
+            info = payload.get('info')
             rates = payload.get('rate_limits') or {}
             windows = [{'label': f"{value['window_minutes'] / 60:g}h", 'percent': value.get('used_percent'),
                         'resets_at': value.get('resets_at')}
                        for key in ('primary', 'secondary') if isinstance((value := rates.get(key)), dict)
                        and isinstance(value.get('window_minutes'), (int, float)) and value.get('used_percent') is not None]
             previous = state['usage'] or ({}, [], None)
-            context = {'percent': tokens / limit * 100 if tokens is not None and limit else None,
-                       'tokens': tokens, 'limit': limit, 'total_token_usage': info.get('total_token_usage')}
-            state['usage'] = (context if info else previous[0], windows if rates else previous[1], entry.get('timestamp'))
+            context = codex_context(info) if isinstance(info, dict) and info else previous[0]
+            state['usage'] = (context, windows if rates else previous[1], entry.get('timestamp'))
             if rates:
                 state['credits'] = rates.get('credits')
         if kind == 'task_started':
@@ -1410,14 +1438,6 @@ def epoch_of(value):
         return datetime.fromisoformat(str(value).replace('Z', '+00:00')).timestamp()
     except ValueError:
         return None
-
-
-def fresh_codex_screen(screen):
-    """True when the pane shows Codex's start banner and nothing said yet (a new session, or one just cleared with /clear)."""
-    lines = [line.strip() for line in screen.splitlines()]
-    if not any('OpenAI Codex' in line for line in lines):
-        return False
-    return not any(line.startswith('•') for line in lines) and sum(line.startswith('›') for line in lines) <= 1
 
 
 def codex_metrics(config, reported_usage, model='', effort='', credits=None, *, tier=''):

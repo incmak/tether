@@ -13,14 +13,17 @@ const load = (file, require) => {
 }
 const tones = load('src/tones.ts')
 const schemes = load('src/schemes.ts', name => { assert.equal(name, './tones'); return tones })
-const { contrast, mix, accentFill, accentInk, HOVER_SHARE, TINT_SHARE } = tones
+const { contrast, mix, luminance, accentFill, accentInk, HOVER_SHARE, TINT_SHARE } = tones
 const SURFACES = ['bg', 'sidebar', 'surface', 'bubble', 'hover']
+const warningShare = Number(readFileSync('src/App.css', 'utf8').match(/\.context-mark \{[^}]+var\(--error\) (\d+)%/)[1]) / 100
 
 // One palette: { bg, sidebar, surface, bubble, hover, muted, accent, accentText, fill, ink }.
 function check(name, p) {
   const at = (what, a, b, low) => assert.ok(contrast(a, b) >= low, `${name}: ${what} is ${contrast(a, b).toFixed(2)}:1 (${a} on ${b}), needs ${low}:1`)
   at('text on a filled control', p.accentText, p.fill, 4.5)
   at('text on a hovered filled control', p.accentText, mix(p.fill, '#000000', HOVER_SHARE), 4.5)
+  const warning = mix(p.error ?? (luminance(p.bg) < 0.2 ? darkSet.error : light.error), p.text, warningShare)
+  for (const key of ['sidebar', 'hover']) at(`context warning on ${key}`, warning, p[key], 4.5)
   for (const key of SURFACES) {
     at(`accent text on ${key}`, p.ink, p[key], 4.5)
     at(`accent text on an accent tint of ${key}`, p.ink, mix(p.accent, p[key], TINT_SHARE), 4.5)
@@ -30,7 +33,7 @@ function check(name, p) {
   }
 }
 const vars = text => Object.fromEntries([...text.matchAll(/--([a-z-]+):\s*(#[0-9a-f]{6})\b/g)].map(m => [m[1], m[2]]))
-const palette = v => ({ bg: v.bg, sidebar: v.sidebar, surface: v.surface, bubble: v.bubble, hover: v.hover, muted: v.muted, accent: v.accent, accentText: v['accent-text'], fill: v['accent-fill'], ink: v['accent-ink'] })
+const palette = v => ({ bg: v.bg, sidebar: v.sidebar, surface: v.surface, bubble: v.bubble, hover: v.hover, muted: v.muted, text: v.text, accent: v.accent, accentText: v['accent-text'], fill: v['accent-fill'], ink: v['accent-ink'] })
 let checked = 0
 
 // 1. The built-in palette, as index.css states it.
@@ -48,7 +51,7 @@ for (const scheme of schemes.SCHEMES) for (const mode of ['light', 'dark']) {
   // "claude" adds no style: index.css must hold the same values.
   if (scheme.id === 'claude') {
     const own = palette(mode === 'light' ? light : { ...light, ...darkSet })
-    assert.deepEqual(own, { ...Object.fromEntries(SURFACES.map(key => [key, t[key]])), muted: t.muted, accent: t.accent, accentText: t.accentText, fill: made['accent-fill'], ink: made['accent-ink'] }, `index.css and schemes.ts differ for claude ${mode}`)
+    assert.deepEqual(own, { ...Object.fromEntries(SURFACES.map(key => [key, t[key]])), muted: t.muted, text: t.text, accent: t.accent, accentText: t.accentText, fill: made['accent-fill'], ink: made['accent-ink'] }, `index.css and schemes.ts differ for claude ${mode}`)
   }
 }
 

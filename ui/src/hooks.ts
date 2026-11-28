@@ -361,6 +361,7 @@ export function usePopover(ref: RefObject<HTMLDialogElement | null>, at: Anchor 
 
 /** A row shows its full name as a tooltip only when the name is cut off. */
 export const clipTitle = (event: React.MouseEvent<HTMLElement>) => {
-  const name = event.currentTarget.querySelector<HTMLElement>('.session-title, .pane-child-name, .pane-tab-name')
+  const node = event.currentTarget
+  const name = node.querySelector<HTMLElement>('.session-title-name') ?? node.querySelector<HTMLElement>('.session-title, .pane-child-name, .pane-tab-name')
   event.currentTarget.title = name && name.scrollWidth > name.clientWidth ? name.textContent ?? '' : ''
 }

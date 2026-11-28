@@ -80,6 +80,16 @@ class CodexWorkingStatusTests(unittest.TestCase):
                 patch.object(terminal.prompt_actions, 'panel', return_value=None), hook:
             return terminal._live_status(self.entry(), run, screen)
 
+    def test_live_status_identifies_the_fresh_codex_banner_for_context(self):
+        entry = dict(self.entry(), owner_pid=1, writable=True)
+        restart = FIXTURES.with_name('codex_0.170.0_restart')
+        for screen, expected in ((restart / 'idle.ansi', True), (restart / 'idle_narrow.ansi', True),
+                                 (FIXTURES / 'idle_reply_is_status_line.ansi', False)):
+            with self.subTest(screen=screen.name), patch.object(terminal, 'capture', return_value=screen.read_text()), \
+                    patch.object(terminal, 'login_capture', return_value=''), \
+                    patch.object(terminal, '_live_status', return_value={'state': 'Idle'}):
+                self.assertIs(terminal.live_status(entry).get('_codex_fresh', False), expected)
+
     def waiting_hook(self):
         reported = 100
         self.enterContext(own_time(hooks, time=Mock(return_value=110)))

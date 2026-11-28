@@ -1168,6 +1168,17 @@ def claude_queue(state, index, record):
                 break
 
 
+def claude_report(thread):
+    """Claude's saved status-line report for this conversation (claude_usage.py)."""
+    if not isinstance(thread, str) or not re.fullmatch(r'[a-zA-Z0-9-]+', thread):
+        return {}
+    try:
+        report = json.loads((METRICS / (thread + '.json')).read_text())
+    except (OSError, ValueError, RecursionError):
+        return {}
+    return report if isinstance(report, dict) else {}
+
+
 def claude_snapshot(entry, clean):
     def consume(state, index, record):
         claude_queue(state, index, record)
@@ -1199,11 +1210,7 @@ def claude_snapshot(entry, clean):
             display = tidy_user_text(clean(item['text']))
             if display.strip():
                 queued.append({'id': item['id'], 'text': display, 'time': item['time']})
-    metrics = {}
-    try:
-        metrics = json.loads((METRICS / (entry['thread'] + '.json')).read_text())
-    except (OSError, ValueError):
-        pass
+    metrics = claude_report(entry['thread'])
     context = metrics.get('context_window', {})
     rate_metrics = metrics
     inherited = False

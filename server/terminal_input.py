@@ -7,6 +7,7 @@ import re
 from urllib.parse import urlsplit
 import shlex
 import sqlite3
+import stat
 import subprocess
 import threading
 import time
@@ -1124,8 +1125,9 @@ def attention(entry, screen, working, now=None, login_screen=None, styled_screen
     return found
 
 
-_busy = {}  # transcript path -> inode, offset, last, partial
+_rollout_cache = {}  # transcript path -> file identity, read position and latest events
 _busy_lock = threading.Lock()
+_TURN_EVENTS = ('task_started', 'task_complete', 'turn_aborted')
 
 
 def _rollout_read(stream, size):
@@ -1151,59 +1153,78 @@ def _rollout_lines_backward(stream, size, window):
     yield b''.join(reversed(fragments))
 
 
-def _rollout_lifecycle(line):
+def _rollout_event(line):
     if b'"event_msg"' not in line:  # fast skip; JSON escapes any quote inside a string value
-        return None
+        return None, None
     try:
         record = json.loads(line)
     except (ValueError, RecursionError):
-        return None
+        return None, None
     if isinstance(record, dict) and record.get('type') == 'event_msg':
         payload = record.get('payload')
-        if isinstance(payload, dict) and payload.get('type') in ('task_started', 'task_complete', 'turn_aborted'):
-            return payload['type']
-    return None
+        if isinstance(payload, dict):
+            info = payload.get('info')
+            return payload.get('type'), info if isinstance(info, dict) and info else None
+    return None, None
 
 
-def transcript_busy(path, window=262144):
-    """True when the last lifecycle event in a Codex rollout file is a started turn."""
+def codex_rollout_state(path, window=262144):
+    """Return the last turn event and token usage info without parsing chat messages."""
+    window = max(1, window)
     try:
         with _busy_lock:
-            cached = _busy.get(path)
-        with open(path, 'rb', buffering=0) as stream:
+            cached = _rollout_cache.get(path)
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK), 'rb', buffering=0) as stream:
             info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                return None, None
+            identity = (info.st_dev, info.st_ino)
             # The cached offset ends at the last newline. The saved tail has already been read.
             offset = cached['offset'] + len(cached['partial']) if cached else 0
-            if cached and info.st_ino == cached['inode'] and info.st_size >= offset:
-                last = cached['last']
-                if info.st_size == offset:
-                    return last == 'task_started'
+            if cached and identity == cached['identity'] and info.st_size == offset and info.st_mtime_ns == cached['modified']:
+                return cached['last'], cached['usage_info']
+            if cached and identity == cached['identity'] and info.st_size > offset:
+                last, usage_info = cached['last'], cached['usage_info']
                 stream.seek(offset)
                 partial, remaining = cached['partial'], info.st_size - offset
                 while remaining:  # bounded blocks: a large append must not be loaded at once
-                    block = _rollout_read(stream, min(max(1, window), remaining))
+                    block = _rollout_read(stream, min(window, remaining))
                     remaining -= len(block)
                     lines = (partial + block).split(b'\n')
                     partial = lines.pop()
                     for line in lines:
-                        if (kind := _rollout_lifecycle(line)) is not None:
+                        kind, usage = _rollout_event(line)
+                        if kind in _TURN_EVENTS:
                             last = kind
+                        elif kind == 'token_count' and usage is not None:
+                            usage_info = usage
             else:
-                backward = _rollout_lines_backward(stream, info.st_size, max(1, window))
+                backward = _rollout_lines_backward(stream, info.st_size, window)
                 partial = next(backward)
-                last = None
+                last = usage_info = None
                 for line in backward:
-                    if (last := _rollout_lifecycle(line)) is not None:
+                    kind, usage = _rollout_event(line)
+                    if last is None and kind in _TURN_EVENTS:
+                        last = kind
+                    elif usage_info is None and kind == 'token_count':
+                        usage_info = usage
+                    if last is not None and usage_info is not None:
                         break
-    except (OSError, TypeError):
-        return False
+    except (OSError, TypeError, ValueError):
+        return None, None
     with _busy_lock:
         # Another poll may have updated this path while the file was being read.
-        if _busy.get(path) is cached:
-            if cached is None and len(_busy) >= 64:
-                _busy.pop(next(iter(_busy)))
-            _busy[path] = dict(inode=info.st_ino, offset=info.st_size - len(partial), last=last, partial=partial)
-    return last == 'task_started'
+        if _rollout_cache.get(path) is cached:
+            if cached is None and len(_rollout_cache) >= 64:
+                _rollout_cache.pop(next(iter(_rollout_cache)))
+            _rollout_cache[path] = dict(identity=identity, modified=info.st_mtime_ns, offset=info.st_size - len(partial),
+                                        last=last, usage_info=usage_info, partial=partial)
+    return last, usage_info
+
+
+def transcript_busy(path, window=262144):
+    """True when the last lifecycle event in a Codex rollout file is a started turn."""
+    return codex_rollout_state(path, window)[0] == 'task_started'
 
 
 def reflow_prompt(text):
@@ -1240,6 +1261,14 @@ def waiting_approval(registry, now=None):
     return isinstance(changed, (int, float)) and now - changed / 1000 >= REGISTRY_SETTLE
 
 
+def fresh_codex_screen(screen):
+    """True on the start banner, including after /clear when Codex can still hold the old rollout."""
+    lines = [line.strip() for line in screen.splitlines()]
+    if not any('OpenAI Codex' in line for line in lines):
+        return False
+    return not any(line.startswith('•') for line in lines) and sum(line.startswith('›') for line in lines) <= 1
+
+
 def live_status(entry, run=subprocess.run):
     if not entry.get('owner_pid') or not entry.get('writable'):
         return {'state': 'Unavailable', 'approval': None}
@@ -1249,6 +1278,8 @@ def live_status(entry, run=subprocess.run):
     screen = prompt_actions.plain(styled_screen)
     login_screen = login_capture(entry, screen, run)
     status = _live_status(entry, run, screen, login_screen=login_screen, styled_screen=styled_screen)
+    if entry['agent'] == 'codex' and fresh_codex_screen(screen):
+        status['_codex_fresh'] = True
     if entry['agent'] == 'claude':
         import ask_bridge
         status = ask_bridge.overlay(entry, status)

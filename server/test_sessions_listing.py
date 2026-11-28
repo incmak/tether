@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 
 import paths
 import server
+import terminal_input
 from own_time import own_time
 
 
@@ -173,6 +174,94 @@ class ListingParentsTests(unittest.TestCase):
                 self.assertEqual(list(rows), ['%1', '%2', '%3', '%4', '%5'])
                 self.assertEqual(rows['%1']['reviewers'], ['%5'])
                 self.assertNotIn('parent', rows['%2'])
+
+
+class SessionContextTests(unittest.TestCase):
+    def setUp(self):
+        self.folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(patch.object(server.agents, 'METRICS', self.folder))
+        self.enterContext(patch.object(server.antigravity, 'CACHE', self.folder))
+        self.enterContext(patch.object(server.antigravity.procinfo, 'start_ms', return_value=1000))
+        self.status = self.enterContext(patch.object(server, 'shared_status', return_value={'state': 'Idle'}))
+        self.enterContext(patch.object(server, 'tab_folder', return_value=''))
+        self.enterContext(patch.object(server.tab_brief.STORE, 'get', return_value=None))
+        self.enterContext(patch.object(server.attention.STORE, 'ask', return_value=None))
+        self.claude = {'id': '%1', 'agent': 'claude', 'thread': 'claude-thread'}
+        self.agy = {'id': '%2', 'agent': 'antigravity', 'thread': 'agy-thread', 'process_start': '100'}
+        self.rollout = self.folder / 'codex.jsonl'
+        self.codex = {'id': '%3', 'agent': 'codex', 'thread': 'codex-thread',
+                      'codex_binding': 'open', 'transcript': str(self.rollout)}
+
+    def report(self, entry, percent, **changes):
+        thread = entry['thread']
+        report = {'conversation_id': thread, 'reported_at': 2,
+                  'context_window': {'used_percentage': percent}, **changes}
+        (self.folder / (thread + '.json')).write_text(json.dumps(report))
+
+    def append_event(self, kind='token_count', **payload):
+        with self.rollout.open('a') as stream:
+            stream.write(json.dumps({'type': 'event_msg', 'payload': {'type': kind, **payload}}) + '\n')
+
+    def append_context(self, tokens, limit=10000):
+        self.append_event(info={'last_token_usage': {'total_tokens': tokens},
+                                'total_token_usage': {'total_tokens': 1000000}, 'model_context_window': limit})
+
+    def context(self, entry):
+        return server.session_row(entry)['context_percent']
+
+    def test_session_rows_report_each_agents_own_unrounded_percent(self):
+        self.report(self.claude, 79.99)
+        self.report(self.agy, 82.5)
+        self.append_context(8000)
+        rows = server.session_rows([self.claude, self.agy, self.codex])
+        self.assertEqual([row['context_percent'] for row in rows], [79.99, 82.5, 80])
+
+    def test_missing_stale_and_invalid_reports_do_not_warn(self):
+        self.report(self.claude, 95)
+        for changes in ({'thread': 'other-claude'}, {'pending_conversation': True}, {'agent': 'shell'}):
+            with self.subTest(changes=changes):
+                self.assertIsNone(self.context(dict(self.claude, **changes)))
+        for changes in ({'conversation_id': 'other-agy'}, {'reported_at': 0.5}, {'context_window': None}):
+            with self.subTest(changes=changes):
+                self.report(self.agy, 95, **changes)
+                self.assertIsNone(self.context(self.agy))
+        for percent in (None, True, float('nan'), float('inf'), '90'):
+            with self.subTest(percent=percent):
+                self.report(self.claude, percent)
+                self.assertIsNone(self.context(self.claude))
+
+    def test_codex_context_follows_the_rollout_and_reuses_the_cached_position(self):
+        self.append_context(9000)
+        self.append_event('task_complete')
+        with self.rollout.open('a') as stream:
+            stream.write(json.dumps({'type': 'response_item', 'payload': {'output': 'x' * (300 * 1024)}}) + '\n')
+        self.assertEqual(self.context(self.codex), 90)
+        self.append_event(info=None)  # An account-only update keeps the preceding conversation usage.
+        self.append_event(info={})
+        with patch.object(terminal_input, '_rollout_read', wraps=terminal_input._rollout_read) as read:
+            self.assertEqual(self.context(self.codex), 90)
+            self.assertLess(sum(call.args[1] for call in read.call_args_list), 1024)
+            read.reset_mock()
+            self.assertEqual(self.context(self.codex), 90)
+            read.assert_not_called()
+        self.append_context(7999)
+        self.assertAlmostEqual(self.context(self.codex), 79.99)
+        self.append_context(9000, None)
+        self.assertIsNone(self.context(self.codex))
+        replacement = self.rollout.with_suffix('.new')
+        replacement.write_text('')
+        replacement.replace(self.rollout)
+        self.assertIsNone(self.context(self.codex))
+
+    def test_codex_suppresses_context_while_the_conversation_is_unconfirmed(self):
+        self.append_context(9500)
+        for changes in ({'codex_binding': 'guess'}, {'pending_conversation': True}, {'ambiguous': True}):
+            with self.subTest(changes=changes):
+                self.assertIsNone(self.context(dict(self.codex, **changes)))
+        self.status.return_value = {'state': 'Idle', '_codex_fresh': True}
+        row = server.session_row(self.codex)
+        self.assertIsNone(row['context_percent'])
+        self.assertNotIn('_codex_fresh', row)
 
 
 class SessionsListingTests(unittest.TestCase):

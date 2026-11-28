@@ -45,6 +45,7 @@
 .catchup-dot.need.urgent { background: var(--error); box-shadow: 0 0 0 2px color-mix(in srgb, var(--error) 25%, transparent); }
 .catchup-dot.done { background: var(--done); }
 .catchup-icon { color: var(--muted); }
+.catchup-tab { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .catchup-name { overflow: hidden; font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .catchup-age { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 .catchup-age.late { color: var(--attention); font-weight: 700; }
