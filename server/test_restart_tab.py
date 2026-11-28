@@ -444,6 +444,33 @@ class RestartRouteTests(unittest.TestCase):
             self.assertNotIn('restart', self.post(self.headers, body, '/mobile/api/merge')[1])
             listed.assert_not_called()
 
+    def test_quick_move_reply_binds_the_restart_offer_to_the_tab_chat(self):
+        body = {'pane': '%7', 'session': '$2', 'group': ''}
+        place = {'session': '$2', 'group': '', 'sessionName': 'Beta', 'groupName': ''}
+        offer = {'project': PROJECT, 'name': 'Beta site', 'session': 'Beta'}
+        before = [{'id': '%7', 'thread': 'old'}]
+
+        def move(request, entries, _groups):
+            self.assertTrue(server.SEND_LOCK.locked())
+            self.assertEqual((request, entries), (body, before))
+            return {'pane': '%7', 'place': place, 'restart': dict(offer)}
+
+        def forget():
+            self.assertTrue(server.SEND_LOCK.locked())
+
+        for pending, thread in [(False, THREAD), (True, None)]:
+            entry = {'id': '%7', 'thread': THREAD, 'pending_conversation': pending}
+            cache = Mock()
+            cache.sessions.side_effect = [before, [{'id': '%8', 'thread': 'other'}, entry]]
+            cache.forget.side_effect = forget
+            with self.subTest(pending=pending), patch.object(server.QUICK_STARTER, 'move', side_effect=move), \
+                    patch.object(server, 'quick_groups', return_value={}), \
+                    patch.object(server, 'forget_sessions', cache.forget), patch.object(server, 'sessions', cache.sessions):
+                status, reply = self.post(self.headers, body, '/mobile/api/quick-tab/move')[:2]
+                self.assertEqual(status, 200)
+                self.assertEqual(reply, {'pane': '%7', 'place': place, 'restart': dict(offer, pane='%7', thread=thread)})
+                self.assertEqual(cache.mock_calls, [call.sessions(), call.forget(), call.sessions()])
+
 
 @unittest.skipUnless(shutil.which('tmux'), 'tmux is required')
 class RealTmuxRestartTests(unittest.TestCase):

@@ -339,7 +339,7 @@ def restart_info(run, pane, session_id):
     fields = shown.stdout.rstrip('\n').split('\t') if shown is not None and not shown.returncode else []
     if len(fields) != 4 or fields[0] != session_id:
         return None
-    started = fields[1].partition('+')[0].rpartition(':')[0]
+    started = projects.started_project(fields[1])
     if not projects.ID.fullmatch(started) or started == fields[2]:
         return None
     pid = fields[2] if projects.ID.fullmatch(fields[2]) else ''

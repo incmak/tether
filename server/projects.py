@@ -509,10 +509,16 @@ def has_context(pid, home=None):
     return bundle(pid).is_dir() and bool(instructions(pid).strip() or pins(pid, home) or notes(pid))
 
 
+def started_project(started):
+    """The session project id from a pane's @project_rev."""
+    return started.partition('+')[0].rpartition(':')[0]
+
+
 def marks(run=subprocess.run, home=None):
-    """For the sidebar: {session id: {project, context, revision, stale: [pane ids]}}. Read only: a session with no
-    @project yet is left out. A pane is stale when its agent started with an older revision or another project
-    (@project_rev, set by project_launch.py). A pane with no @project_rev did not start through Tether.
+    """For the sidebar: each session has project, context, revision, stale and moved. Read only: a session with
+    no @project yet is left out. A pane is stale when its agent started with an older revision or another project
+    (@project_rev, set by project_launch.py). The moved list has only the panes that started in another project.
+    A pane with no @project_rev did not start through Tether.
     A pane in a group (groups.py) started with "pid:rev+gpid:grev"; it is stale when either part changed."""
     import groups  # groups imports this module
     shown = run([paths.TMUX, 'list-panes', '-a', '-f', '#{==:#{@zoom_for},}', '-F',
@@ -529,7 +535,8 @@ def marks(run=subprocess.run, home=None):
         label, raw = fields[4:] if len(fields) == 6 else ('', '')
         if session_id not in out:
             data = meta(pid)
-            out[session_id] = {'project': pid, 'revision': data['revision'], 'stale': [], 'context': has_context(pid, home)}
+            out[session_id] = {'project': pid, 'revision': data['revision'], 'stale': [], 'moved': [],
+                               'context': has_context(pid, home)}
         mark = out[session_id]
         expected = f'{pid}:{mark["revision"]}'
         gpid = next((g['project'] for g in groups.parse(raw) if g['id'] == label), '') if label else ''
@@ -539,6 +546,9 @@ def marks(run=subprocess.run, home=None):
             expected += f'+{gpid}:{revisions[gpid]}'
         if started and started != expected:
             mark['stale'].append(pane)
+            start_pid = started_project(started)
+            if ID.fullmatch(start_pid) and start_pid != pid:
+                mark['moved'].append(pane)
     return out
 
 

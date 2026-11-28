@@ -311,6 +311,8 @@ class StarterTest(unittest.TestCase):
         self.assertEqual(answer['place']['session'], '$7')
 
     def test_move_only_works_for_recent_tabs_it_started(self):
+        restart = {'project': '123456789abc', 'name': 'Site project', 'session': 'site'}
+        self.mocks[4].return_value = {'pane': '%50', 'session': '$2', 'name': 'site', 'restart': restart}
         with self.assertRaises(ValueError):
             self.starter.move({'pane': '%1', 'session': '$2', 'group': ''}, ENTRIES, GROUPS)
         self.starter.start({'request': 'req-00008', 'message': 'x', 'session': '$1', 'group': ''},
@@ -319,6 +321,7 @@ class StarterTest(unittest.TestCase):
         self.mocks[4].assert_called_once_with('%50', '$2', self.tmux)
         self.mocks[3].assert_called_once_with('$2', '%50', '', self.tmux, by_user=True)
         self.assertEqual(answer['place']['sessionName'], 'site')
+        self.assertEqual(answer['restart'], restart)
         self.now += quick_tab.MOVE_WINDOW
         with self.assertRaises(ValueError):
             self.starter.move({'pane': '%50', 'session': '$1', 'group': 'g1'}, ENTRIES, GROUPS)
@@ -326,7 +329,8 @@ class StarterTest(unittest.TestCase):
     def test_move_in_the_same_session_only_changes_the_stack(self):
         self.starter.start({'request': 'req-00009', 'message': 'x', 'session': '$1', 'group': ''},
                            ENTRIES, GROUPS, folder_of)
-        self.starter.move({'pane': '%50', 'session': '$1', 'group': 'g1'}, ENTRIES, GROUPS)
+        answer = self.starter.move({'pane': '%50', 'session': '$1', 'group': 'g1'}, ENTRIES, GROUPS)
+        self.assertNotIn('restart', answer)
         self.mocks[4].assert_not_called()
         self.mocks[3].assert_called_once_with('$1', '%50', 'g1', self.tmux, by_user=True)
 

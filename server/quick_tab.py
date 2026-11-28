@@ -310,9 +310,13 @@ class Starter:
         if at is None or self.clock() - at >= MOVE_WINDOW:
             raise ValueError('Move works only on a tab the search menu started in the last 10 minutes.')
         sid, gid, sname, gname = self._place(body, entries, all_groups)
+        answer = {'pane': pane, 'place': {'session': sid, 'group': gid, 'sessionName': sname, 'groupName': gname}}
         undo = _undo()
         if self._session_of(pane) != sid:
             noted = undo.record_merge('pane', pane, sid, self.run)
-            noted(tmux_merge.move_pane(pane, sid, self.run))
+            moved = tmux_merge.move_pane(pane, sid, self.run)
+            noted(moved)
+            if 'restart' in moved:
+                answer['restart'] = moved['restart']
         undo.group_move(sid, pane, gid, self.run, by_user=True)
-        return {'pane': pane, 'place': {'session': sid, 'group': gid, 'sessionName': sname, 'groupName': gname}}
+        return answer

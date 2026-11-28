@@ -423,7 +423,7 @@ class ProjectTests(unittest.TestCase):
                  f'$3\t{PID}\t%4\t{other}:1\n$4\t{other}\t%5\t\n$5\t\t%6\t\n')
         run = lambda args, **_: SimpleNamespace(returncode=0, stdout=lines, stderr='')
         found = projects.marks(run, self.home)
-        self.assertEqual(found['$3'], {'project': PID, 'revision': 1, 'stale': ['%2', '%4'], 'context': True})
+        self.assertEqual(found['$3'], {'project': PID, 'revision': 1, 'stale': ['%2', '%4'], 'moved': ['%4'], 'context': True})
         self.assertEqual(found['$4']['context'], False)
         self.assertNotIn('$5', found)
         self.assertFalse(projects.bundle(other).exists())

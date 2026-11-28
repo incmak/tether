@@ -862,6 +862,15 @@ def forget_sessions():
         SESSIONS_GENERATION[0] += 1
 
 
+def add_restart_target(moved):
+    """Bind the restart offer to the moved pane's current chat."""
+    if moved.get('restart'):
+        forget_sessions()
+        entry = next((item for item in sessions() if item['id'] == moved['pane']), None)
+        moved['restart'].update(pane=moved['pane'],
+                                thread=entry.get('thread') if entry and not entry.get('pending_conversation') else None)
+
+
 def build_listing():
     entries = sessions()
     rows = session_rows(entries)
@@ -3399,11 +3408,7 @@ class Handler(BaseHTTPRequestHandler):
                     noted = undo.record_merge(body.get('kind'), body.get('source'), body.get('target'))
                     moved = tmux_merge.merge(body.get('kind'), body.get('source'), body.get('target'), keep=body.get('keep'))
                     noted(moved)
-                    if moved.get('restart'):  # B326: what the toast's Restart button sends to restart-tab
-                        forget_sessions()
-                        entry = next((item for item in sessions() if item['id'] == moved['pane']), None)
-                        moved['restart'].update(pane=moved['pane'],
-                                                thread=entry.get('thread') if entry and not entry.get('pending_conversation') else None)
+                    add_restart_target(moved)
                 self.respond(200, moved)
                 return
             if self.path in ('/mobile/api/session', '/mobile/api/tmux-sessions'):
@@ -3655,7 +3660,9 @@ class Handler(BaseHTTPRequestHandler):
                     if self.path == quick_tab.START_PATH:
                         self.respond(201, QUICK_STARTER.start(body, sessions(), quick_groups(), agent_folder))
                     else:
-                        self.respond(200, QUICK_STARTER.move(body, sessions(), quick_groups()))
+                        moved = QUICK_STARTER.move(body, sessions(), quick_groups())
+                        add_restart_target(moved)
+                        self.respond(200, moved)
                 return
             if self.path == '/mobile/api/delegate':
                 entries = sessions()

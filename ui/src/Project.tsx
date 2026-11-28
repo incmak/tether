@@ -24,8 +24,8 @@ export interface ProjectState {
   id: string; name: string; revision: number; budget: number; budget_min: number; budget_max: number; usable_budget_max: number
   instructions: string; pins: Pinned[]; notes: Note[]; preview: string; chars: number; fixed_chars: number; folder: string; session_name?: string
 }
-/** One session in GET projects/marks: does it give agents context, and which panes started with an older version. */
-export interface ProjectMark { project: string; revision: number; context: boolean; stale: string[] }
+/** One session in GET projects/marks: context, stale panes and which of them started in another project. */
+export interface ProjectMark { project: string; revision: number; context: boolean; stale: string[]; moved?: string[] }
 export type ProjectMarks = Record<string, ProjectMark>
 
 const SIZES = [1000, 2000, 4000, 6000, 8000, 10000]
@@ -122,9 +122,13 @@ export function ProjectSheet({ api, session, group, mark, pin, onChanged, onClos
   const level = project && contentLimit > 0 ? project.chars / contentLimit : 0
   const contentSize = project && `${project.chars.toLocaleString()} / ${contentLimit.toLocaleString()} characters`
   // The session mark lists stale tabs by pane. A group sheet counts only the tabs in its group.
-  const staleCount = !mark || !project ? 0
-    : group ? mark.stale.filter(id => session.panes.some(item => item.id === id && item.group === group.id)).length
-    : mark.project === project.id ? mark.stale.length : 0
+  const countMarked = (ids: string[] = []) => !mark || !project ? 0
+    : group ? ids.filter(id => session.panes.some(item => item.id === id && item.group === group.id)).length
+    : mark.project === project.id ? ids.length : 0
+  const staleCount = countMarked(mark?.stale)
+  const movedCount = countMarked(mark?.moved)
+  const olderCount = staleCount - movedCount
+  const place = group ? 'stack' : 'session'
   const pinName = pinPath?.split('/').pop()
 
   return <dialog {...modal} className="sheet settings-sheet project-sheet" aria-labelledby="project-title">
@@ -155,7 +159,11 @@ export function ProjectSheet({ api, session, group, mark, pin, onChanged, onClos
     : project && decision ? <AdvisorDecision api={api} project={project.id} row={decision} onBack={() => { setDecisionFocus(decision.id); setDecision(null) }} />
 
     : project && <>
-      {staleCount > 0 && <p className="project-stale" role="status">{staleCount === 1 ? '1 agent' : `${staleCount} agents`} in this {group ? 'stack' : 'session'} started with an older version. Restart them to apply the change. In Claude, <code>/clear</code> also applies it.</p>}
+      {(olderCount > 0 || movedCount > 0) && <p className="project-stale" role="status">
+        {olderCount > 0 && <>{olderCount === 1 ? '1 agent' : `${olderCount} agents`} in this {place} started with an older version. Restart {olderCount === 1 ? 'it' : 'them'} to apply the change. In Claude, <code>/clear</code> also applies it.</>}
+        {olderCount > 0 && movedCount > 0 && ' '}
+        {movedCount > 0 && <>{movedCount === 1 ? '1 agent' : `${movedCount} agents`} in this {place} moved here from another project. Restart {movedCount === 1 ? 'it' : 'them'} to get access to this project's folder. <code>/clear</code> does not give that access.</>}
+      </p>}
       {pinPath && <div className="confirm-box project-pin" role="alertdialog" aria-labelledby="project-pin-title">
         <p id="project-pin-title"><strong>Pin {pinName}?</strong> A link always shows the current file. A copy keeps this version (1 MB at most).</p>
         <div className="sheet-buttons"><button type="button" className="secondary" disabled={pending} onClick={() => setPinPath(undefined)}>Cancel</button>
