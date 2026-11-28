@@ -375,7 +375,9 @@ async function main() {
           await renew(true)
           await page.setViewportSize({ width: w, height: h })
           await page.goto(`${origin}/fixture?surface=${surface}`)
-          await page.waitForTimeout(250)
+          const choiceDock = surface === 'choice' || surface === 'picker' ? page.locator('.choice-dock') : null
+          if (choiceDock) await choiceDock.waitFor({ state: 'visible' })
+          else await page.waitForTimeout(250)
           // Surface-specific interactions are below; this catches overflow even within clipped app roots.
           // Check heading text separately: the Close button deliberately expands its44px hit area into the dialog padding.
           await audit(`${w}: ${surface} document fits`, 'html')
@@ -430,10 +432,18 @@ async function main() {
           if (surface === 'organize') { await page.getByRole('button', { name: 'Suggest groups', exact: true }).click(); await page.locator('.suggest-list').waitFor(); await audit(`${w}: suggested group names fit`, '.suggest-list', { bounds: false }); await audit(`${w}: organize dialog stays inside viewport`, 'dialog[open]'); const last = page.locator('.suggest-list li').last(); await last.scrollIntoViewIfNeeded(); check(`${w}: final suggestion is reachable`, await last.evaluate(el => { const r = el.getBoundingClientRect(); return el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)) })) }
           if (surface === 'pane-menu' || surface === 'pane-popover' || surface === 'session-menu') { await audit(`${w}: pane dialog stays inside viewport`, 'dialog[open]'); await audit(`${w}: pane title fits`, '.sheet-heading h2', { bounds: false }); await controls(`${w}: pane menu labels fit`, '.action-list') }
           await shot(`${w}-${surface}`)
-          if (surface === 'choice' || surface === 'picker') {
-            const lastKey = page.locator('.choice-keys button').last()
-            await lastKey.focus()
-            check(`${w}: ${surface} final key remains reachable`, await lastKey.evaluate(el => { const r = el.getBoundingClientRect(); return r.bottom <= innerHeight + 1 && el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)) }))
+          if (choiceDock) {
+            const done = choiceDock.getByRole('button', { name: 'Done (Enter)', exact: true })
+            const cancel = choiceDock.getByRole('button', { name: 'Cancel (Esc)', exact: true })
+            const actionsReady = await done.isVisible() && await done.isEnabled() && await cancel.isVisible() && await cancel.isEnabled()
+            check(`${w}: ${surface} shows enabled Done and Cancel`, actionsReady)
+            if (!actionsReady) continue
+            await cancel.focus()
+            check(`${w}: ${surface} Cancel remains reachable`, await cancel.evaluate(el => {
+              const r = el.getBoundingClientRect()
+              return el === document.activeElement && r.top >= 0 && r.bottom <= innerHeight + 1
+                && el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2))
+            }))
             await shot(`${w}-${surface}-controls`)
           }
           if (surface === 'image') {
