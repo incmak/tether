@@ -6,6 +6,8 @@ import type { Api, GroupInfo, Pane } from './api'
 import { errorText } from './api'
 import { anchorOf, useModal } from './hooks'
 import { NameField } from './CreateFields'
+import { ListSearch } from './ListSearch'
+import { useListSearch } from './listSearch'
 import type { MainModel } from './prefs'
 import type { Anchor } from './hooks'
 import { useActionsDialog } from './Sheets'
@@ -159,28 +161,34 @@ function GroupSwitcher({ api, onUpdate, session, places, current, hooks, onPick,
 }) {
   const modal = useModal(true, onClose)
   const [suggesting, setSuggesting] = useState(false)
+  const search = useListSearch(places, place => [place.name])
+  const { shown, query, setQuery, input, setList, listKeys } = search
   return <dialog {...modal} className="sheet" aria-labelledby="group-switch-title">
     <div className="sheet-heading"><h2 id="group-switch-title">Stacks</h2><button type="button" className="icon-button" aria-label="Close" onClick={onClose}><X /></button></div>
     <p className="sheet-sub">{session.name}</p>
     {suggesting
       ? <SuggestStacks api={api} session={session} mainModel={hooks.mainModel} onBack={() => setSuggesting(false)} onDone={() => { onClose(); onUpdate() }} />
-      : <div className="action-list group-list">
-      {places.map(place => {
-        const state = topState(place.panes, hooks.seen, hooks.selected)
-        const waiting = place.panes.filter(item => needsYou(item.state)).length
-        return <div key={place.id || 'main'} className="group-list-row">
-          <button type="button" aria-current={place.id === current ? 'true' : undefined} onClick={() => onPick(place)}>
-            <span className={`state-dot ${STATE_DOT[state]}`} aria-hidden="true" />
-            <span className="group-name">{place.name}</span>
-            <small>{waiting ? `${waiting} ${waiting === 1 ? 'needs' : 'need'} you` : `${place.panes.length} ${place.panes.length === 1 ? 'tab' : 'tabs'}`}</small>
-          </button>
-          {place.id && <button type="button" className="icon-button" aria-label={`Actions for ${place.name}`} onClick={() => onMenu(place)}><Pencil size={16} /></button>}
+      : <>
+        <ListSearch search={search} label="Find a stack" noun="stacks" pick />
+        {!!places.length && !shown.length && <p className="hint list-search-none">No stack matches “{query.trim()}”. <button type="button" className="link-button" onClick={() => { setQuery(''); input?.focus() }}>Clear search</button></p>}
+        <div ref={setList} className="action-list group-list" onKeyDown={listKeys}>
+          {shown.map(place => {
+            const state = topState(place.panes, hooks.seen, hooks.selected)
+            const waiting = place.panes.filter(item => needsYou(item.state)).length
+            return <div key={place.id || 'main'} className="group-list-row">
+              <button type="button" aria-current={place.id === current ? 'true' : undefined} onClick={() => onPick(place)}>
+                <span className={`state-dot ${STATE_DOT[state]}`} aria-hidden="true" />
+                <span className="group-name">{place.name}</span>
+                <small>{waiting ? `${waiting} ${waiting === 1 ? 'needs' : 'need'} you` : `${place.panes.length} ${place.panes.length === 1 ? 'tab' : 'tabs'}`}</small>
+              </button>
+              {place.id && <button type="button" className="icon-button" data-search-skip aria-label={`Actions for ${place.name}`} onClick={() => onMenu(place)}><Pencil size={16} /></button>}
+            </div>
+          })}
+          <hr />
+          <button type="button" data-search-skip onClick={onNew}><Plus size={18} />New stack</button>
+          {session.panes.length > 1 && <button type="button" data-search-skip onClick={() => setSuggesting(true)}><Sparkles size={18} />Suggest stacks…</button>}
         </div>
-      })}
-      <hr />
-      <button type="button" onClick={onNew}><Plus size={18} />New stack</button>
-      {session.panes.length > 1 && <button type="button" onClick={() => setSuggesting(true)}><Sparkles size={18} />Suggest stacks…</button>}
-    </div>}
+      </>}
   </dialog>
 }
 
@@ -356,6 +364,8 @@ export function TabGroupPicker({ api, session, panes, pending, run, onNew, onBac
   api: Api; session: Session; panes: Pane[]; pending: boolean; run: (action: () => Promise<string | undefined>) => Promise<void>; onNew: () => void; onBack: () => void
 }) {
   const places: { id: string; name: string }[] = [{ id: '', name: 'Unstacked' }, ...(session.groups ?? [])]
+  const search = useListSearch(places, place => [place.name])
+  const { shown, query, setQuery, input, setList, listKeys } = search
   const shared = new Set(panes.map(item => groupOf(item, session.groups)))
   const current = shared.size === 1 ? [...shared][0] : undefined  // the place when all the tabs are in one
   // One move per tab with the single-tab route, so each move can be undone; a tab already there stays.
@@ -363,12 +373,16 @@ export function TabGroupPicker({ api, session, panes, pending, run, onNew, onBac
     for (const item of panes) if (groupOf(item, session.groups) !== group) await api('groups/move', { session: session.id, pane: item.id, group: group || null })
     return undefined
   })
-  return <div className="action-list">
-    {places.map(place => <button key={place.id || 'main'} type="button" disabled={pending || place.id === current} aria-current={place.id === current ? 'true' : undefined} onClick={() => move(place.id)}>
-      <FolderInput size={18} />{place.name}{place.id === current && <small>Here now</small>}
-    </button>)}
-    <hr />
-    <button type="button" disabled={pending} onClick={onNew}><Plus size={18} />{panes.length === 1 ? 'New stack with this tab' : `New stack with these ${panes.length} tabs`}</button>
-    <div className="sheet-buttons"><button type="button" className="secondary" disabled={pending} onClick={onBack}>Back</button></div>
-  </div>
+  return <>
+    <ListSearch search={search} label="Find a stack" noun="stacks" pick />
+    {!shown.length && <p className="hint list-search-none">No stack matches “{query.trim()}”. <button type="button" className="link-button" onClick={() => { setQuery(''); input?.focus() }}>Clear search</button></p>}
+    <div ref={setList} className="action-list" onKeyDown={listKeys}>
+      {shown.map(place => <button key={place.id || 'main'} type="button" disabled={pending || place.id === current} aria-current={place.id === current ? 'true' : undefined} onClick={() => move(place.id)}>
+        <FolderInput size={18} />{place.name}{place.id === current && <small>Here now</small>}
+      </button>)}
+      <hr />
+      <button type="button" data-search-skip disabled={pending} onClick={onNew}><Plus size={18} />{panes.length === 1 ? 'New stack with this tab' : `New stack with these ${panes.length} tabs`}</button>
+      <div className="sheet-buttons"><button type="button" className="secondary" data-search-skip disabled={pending} onClick={onBack}>Back</button></div>
+    </div>
+  </>
 }

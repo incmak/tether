@@ -4,7 +4,9 @@ import { errorText } from './api'
 import type { Api, Pane } from './api'
 import { useModal, usePopover } from './hooks'
 import type { Anchor } from './hooks'
-import { AgentIcon, needsYou, paneTitle } from './Sidebar'
+import { AgentIcon, agentNames, needsYou, paneTitle } from './Sidebar'
+import { ListSearch } from './ListSearch'
+import { useListSearch } from './listSearch'
 import './NewTask.css'
 import './ReviewLinks.css'
 
@@ -99,18 +101,27 @@ const ROLES: [Role, string, string][] = [
 export function ReviewLinkPicker({ pane, panes, pending, onPick, onBack }: { pane: Pane; panes: Pane[]; pending: boolean; onPick: (worker: string, reviewer: string) => void; onBack: () => void }) {
   const [role, setRole] = useState<Role>('reviews')
   // A link in either direction hides the tab: the server refuses a repeat and refuses two tabs that review each other.
+  // This session's tabs come first, then the others; in each, the newest tab first (tmux numbers new panes upwards).
+  const number = (item: Pane) => Number(item.id.slice(1)) || 0
   const open = panes.filter(item => item.id !== pane.id && (item.agent === 'claude' || item.agent === 'codex')
     && !item.reviewers?.includes(pane.id) && !pane.reviewers?.includes(item.id))
+    .sort((a, b) => Number(b.tmux_session === pane.tmux_session) - Number(a.tmux_session === pane.tmux_session) || number(b) - number(a))
+  const search = useListSearch(open, item => [paneTitle(item), item.label, item.tmux_session, item.dir, agentNames[item.agent]])
+  const { shown, query, setQuery, input, setList, listKeys } = search
+  const choose = (item: Pane) => onPick(role === 'reviews' ? item.id : pane.id, role === 'reviews' ? pane.id : item.id)
   return <div className="review-picker">
     <div className="task-agents" role="radiogroup" aria-label="Review direction">
       {ROLES.map(([choice, label]) => <button type="button" key={choice} role="radio" aria-checked={role === choice} disabled={pending} className={role === choice ? 'on' : ''} onClick={() => setRole(choice)}>{label}</button>)}
     </div>
     <p className="hint">{ROLES.find(item => item[0] === role)![2]}</p>
-    {open.length
-      ? <div className="action-list review-picker-list">{open.map(item => <button key={item.id} disabled={pending} onClick={() => onPick(role === 'reviews' ? item.id : pane.id, role === 'reviews' ? pane.id : item.id)}>
+    <ListSearch search={search} label="Find a tab" noun="tabs" pick />
+    {!open.length
+      ? <p className="hint">No other open tab can link with this one.</p>
+      : !shown.length
+      ? <p className="hint list-search-none">No tab matches “{query.trim()}”. <button type="button" className="link-button" onClick={() => { setQuery(''); input?.focus() }}>Clear search</button></p>
+      : <div ref={setList} className="action-list review-picker-list" onKeyDown={listKeys}>{shown.map(item => <button key={item.id} disabled={pending} onClick={() => choose(item)}>
           <AgentIcon agent={item.agent} icon={item.pane_icon} size={18} /><span className="review-name" title={paneTitle(item)}>{paneTitle(item)}</span><small>{item.label}</small>
-        </button>)}</div>
-      : <p className="hint">No other open tab can link with this one.</p>}
+        </button>)}</div>}
     <div className="sheet-buttons"><button type="button" className="secondary" disabled={pending} onClick={onBack}>Back</button></div>
   </div>
 }

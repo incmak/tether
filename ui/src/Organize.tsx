@@ -6,6 +6,8 @@ import { errorText } from './api'
 import type { Anchor } from './hooks'
 import type { Prefs } from './prefs'
 import { Choice } from './SettingsControls'
+import { ListSearch } from './ListSearch'
+import { useListSearch } from './listSearch'
 import { useActionsDialog } from './Sheets'
 import type { Session } from './Sidebar'
 
@@ -55,6 +57,8 @@ export function ColorRow({ value, disabled, onChange }: { value?: string; disabl
 /** Choose the group of one session, or make a new one. */
 export function GroupPicker({ groups, value, onPick, onBack }: { groups: SessionGroup[]; value?: string; onPick: (group: SessionGroup | null, created?: SessionGroup) => void; onBack: () => void }) {
   const [name, setName] = useState('')
+  const search = useListSearch(groups, group => [group.name])
+  const { shown, query, setQuery, input, setList, listKeys } = search
   const add = (event: React.FormEvent) => {
     event.preventDefault()
     const clean = name.trim().slice(0, 40)
@@ -65,15 +69,17 @@ export function GroupPicker({ groups, value, onPick, onBack }: { groups: Session
     onPick(created, created)
   }
   return <div className="group-picker">
-    <div className="action-list" role="radiogroup" aria-label="Group">
-      {groups.map(group => <button key={group.id} type="button" role="radio" aria-checked={value === group.id} onClick={() => onPick(group)}>{value === group.id ? <Check size={18} /> : <span className="picker-space" />}{group.name}</button>)}
-      <button type="button" role="radio" aria-checked={!value} onClick={() => onPick(null)}>{!value ? <Check size={18} /> : <span className="picker-space" />}No group</button>
+    <ListSearch search={search} label="Find a group" noun="groups" pick />
+    {!!groups.length && !shown.length && <p className="hint list-search-none">No group matches “{query.trim()}”. <button type="button" className="link-button" onClick={() => { setQuery(''); input?.focus() }}>Clear search</button></p>}
+    <div ref={setList} className="action-list" role="radiogroup" aria-label="Group" onKeyDown={listKeys}>
+      {shown.map(group => <button key={group.id} type="button" role="radio" aria-checked={value === group.id} onClick={() => onPick(group)}>{value === group.id ? <Check size={18} /> : <span className="picker-space" />}{group.name}</button>)}
+      <button type="button" role="radio" aria-checked={!value} data-search-skip onClick={() => onPick(null)}>{!value ? <Check size={18} /> : <span className="picker-space" />}No group</button>
     </div>
     {groups.length < 20 && <form className="group-new" onSubmit={add}>
       <input aria-label="New group name" placeholder="New group" maxLength={40} value={name} autoComplete="off" onChange={event => setName(event.target.value)} />
       <button type="submit" className="secondary" disabled={!name.trim()}><FolderPlus size={16} />Add</button>
     </form>}
-    <div className="sheet-buttons"><button type="button" className="secondary" onClick={onBack}>Back</button></div>
+    <div className="sheet-buttons"><button type="button" className="secondary" data-search-skip onClick={onBack}>Back</button></div>
   </div>
 }
 
