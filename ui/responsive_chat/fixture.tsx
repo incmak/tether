@@ -52,7 +52,7 @@ function Choices() {
 function Picker() {
   const picker: Attention = { id: 'fixture-picker', reason: 'picker', text: '', title: long, subtitle: `Choose ${long}`, choice,
     items: choice.items, more_above: 123, more_below: 123 }
-  return <ChoiceDock approval={null} attention={picker} agent="Claude" disabled={state === 'loading'} onChoose={done} onKey={noop} />
+  return <ChoiceDock approval={null} attention={picker} agent="Claude" disabled={state === 'loading'} onChoose={done} onKey={noop} onPick={done} />
 }
 
 function Waiting() {
